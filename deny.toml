@@ -1,0 +1,27 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# Run locally with: cargo deny check
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# Keep this list to the licenses actually present in the dependency tree. New
+# permissive licenses introduced by future dependencies should be reviewed and
+# added deliberately (that is the point of the gate).
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

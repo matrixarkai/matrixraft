@@ -1,0 +1,32 @@
+[package]
+name = "matrixraft"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+description = "MatrixRaft readiness and parity contract library for TemporalStore and Matrix services."
+repository = "https://github.com/bjmeetsfo/MatrixRaft"
+readme = "README.md"
+keywords = ["raft", "temporalstore", "distributed-systems", "readiness"]
+categories = ["data-structures", "development-tools::testing"]
+homepage = "https://github.com/bjmeetsfo/MatrixRaft"
+documentation = "https://docs.rs/matrixraft"
+exclude = ["/scripts", "/.github"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints.clippy]
+# These fire pervasively on the contract surface (many-field readiness/summary
+# tuples returned by the route-key accessors, and builder-style report
+# constructors). They are intentional and suppressed package-wide.
+type_complexity = "allow"
+too_many_arguments = "allow"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"

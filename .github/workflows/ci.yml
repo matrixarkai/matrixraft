@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "-D warnings"
+
+jobs:
+  build-test:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Build
+        run: cargo build --all-targets --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Doc
+        run: cargo doc --no-deps --locked
+
+  msrv:
+    name: msrv (1.82)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@1.82.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check on MSRV
+        run: cargo check --all-targets --locked
+
+  deny:
+    name: cargo-deny (licenses & advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources advisories
+
+  coverage:
+    name: coverage (informational)
+    runs-on: ubuntu-latest
+    # Informational: reports line/region coverage but does not gate merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      - name: Coverage summary
+        run: cargo llvm-cov --locked --summary-only
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  license-headers:
+    name: license headers (SPDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify SPDX Apache-2.0 header on all Rust sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=$(git ls-files '*.rs')
+          if [ -z "$files" ]; then
+            echo "No Rust sources found."; exit 0
+          fi
+          missing=$(grep -L 'SPDX-License-Identifier: Apache-2.0' $files || true)
+          if [ -n "$missing" ]; then
+            echo "The following Rust sources are missing the SPDX Apache-2.0 header:"
+            echo "$missing"
+            exit 1
+          fi
+          echo "OK: all $(echo "$files" | wc -l) Rust sources carry the SPDX Apache-2.0 header."
