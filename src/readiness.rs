@@ -8,9 +8,9 @@ use thiserror::Error;
 
 use crate::rustraft_metric_names;
 use crate::{
-    fault, RustRaftAdminStatusSurfaceEvidence, RustRaftDataNodeProcessRolloutReport,
-    RustRaftMembershipTransitionEvidence, RustRaftMetaProcessRolloutReport, RustRaftMetricNames,
-    RustRaftPipelineEvidence, RustRaftBaselineRaftBenchmarkEvidence,
+    fault, RustRaftAdminStatusSurfaceEvidence, RustRaftBaselineRaftBenchmarkEvidence,
+    RustRaftDataNodeProcessRolloutReport, RustRaftMembershipTransitionEvidence,
+    RustRaftMetaProcessRolloutReport, RustRaftMetricNames, RustRaftPipelineEvidence,
     RustRaftSnapshotLifecycleEvidence, RustRaftWalLifecycleEvidence,
 };
 
@@ -775,6 +775,7 @@ pub fn rustraft_embedding_examples() -> Vec<String> {
     [
         "examples/readiness_report.rs",
         "examples/read_safety.rs",
+        "examples/debug_artifacts.rs",
         "examples/baseline_raft_parity_benchmark.rs",
         "examples/open_source_surface.rs",
     ]

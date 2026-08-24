@@ -506,6 +506,22 @@ pub struct RustRaftFatalBlockerReport {
     pub fatal_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RustRaftDiagnosticSeverity {
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RustRaftDiagnosticLogEntry {
+    pub target: String,
+    pub severity: RustRaftDiagnosticSeverity,
+    pub message: String,
+    pub fields: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RustRaftAdminStatusSurfaceInput {
     pub commit_index: RustRaftLogIndex,
@@ -531,6 +547,33 @@ pub struct RustRaftAdminStatusSurfaceEvidence {
     pub majority_configured: bool,
     pub cluster_commit_index_consistent: bool,
     pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum RustRaftOptimizationHintSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RustRaftOptimizationHint {
+    pub id: String,
+    pub severity: RustRaftOptimizationHintSeverity,
+    pub component: String,
+    pub recommendation: String,
+    pub observed_value: u64,
+    pub threshold: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RustRaftOptimizationReport {
+    pub ready: bool,
+    pub hint_count: u64,
+    pub critical_count: u64,
+    pub warning_count: u64,
+    pub hints: Vec<RustRaftOptimizationHint>,
 }
 
 pub fn rustraft_fatal_blocker_report(
@@ -578,6 +621,121 @@ pub fn rustraft_admin_fatal_blocker_report(
         report.blockers.clone(),
         fatal_blockers,
     )
+}
+
+pub fn rustraft_admin_diagnostic_log_entries(
+    report: &RaftRuntimeAdminReport,
+) -> Vec<RustRaftDiagnosticLogEntry> {
+    let cluster = &report.cluster_status;
+    let mut entries = Vec::new();
+    entries.push(RustRaftDiagnosticLogEntry {
+        target: "rustraft.admin".to_string(),
+        severity: if report.ready {
+            RustRaftDiagnosticSeverity::Info
+        } else {
+            RustRaftDiagnosticSeverity::Warn
+        },
+        message: if report.ready {
+            "rustraft admin report ready".to_string()
+        } else {
+            "rustraft admin report blocked".to_string()
+        },
+        fields: vec![
+            ("group_id".to_string(), cluster.group_id.to_string()),
+            ("health".to_string(), format!("{:?}", report.health)),
+            ("ready".to_string(), report.ready.to_string()),
+            (
+                "production_status".to_string(),
+                format!("{:?}", report.parity.production_status),
+            ),
+            (
+                "blocker_count".to_string(),
+                report.blockers.len().to_string(),
+            ),
+        ],
+    });
+    entries.push(RustRaftDiagnosticLogEntry {
+        target: "rustraft.replication".to_string(),
+        severity: health_severity(cluster.replication_health.status),
+        message: cluster.replication_health.reason.clone(),
+        fields: vec![
+            ("group_id".to_string(), cluster.group_id.to_string()),
+            (
+                "leader_id".to_string(),
+                cluster
+                    .replication_health
+                    .leader_id
+                    .map(|leader_id| leader_id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+            ),
+            (
+                "commit_index".to_string(),
+                cluster.replication_health.commit_index.to_string(),
+            ),
+            (
+                "replicated_peer_count".to_string(),
+                cluster.replication_health.replicated_peer_count.to_string(),
+            ),
+            (
+                "lagging_peer_count".to_string(),
+                cluster.replication_health.lagging_peer_count.to_string(),
+            ),
+            (
+                "max_peer_lag".to_string(),
+                cluster.replication_health.max_peer_lag.to_string(),
+            ),
+        ],
+    });
+    entries.push(RustRaftDiagnosticLogEntry {
+        target: "rustraft.apply".to_string(),
+        severity: health_severity(cluster.apply_health.status),
+        message: cluster.apply_health.reason.clone(),
+        fields: vec![
+            ("group_id".to_string(), cluster.group_id.to_string()),
+            (
+                "commit_index".to_string(),
+                cluster.apply_health.commit_index.to_string(),
+            ),
+            (
+                "applied_index".to_string(),
+                cluster.apply_health.applied_index.to_string(),
+            ),
+            (
+                "apply_lag".to_string(),
+                cluster.apply_health.apply_lag.to_string(),
+            ),
+        ],
+    });
+    entries.extend(
+        report
+            .blockers
+            .iter()
+            .map(|blocker| RustRaftDiagnosticLogEntry {
+                target: "rustraft.blocker".to_string(),
+                severity: RustRaftDiagnosticSeverity::Error,
+                message: blocker.clone(),
+                fields: vec![("group_id".to_string(), cluster.group_id.to_string())],
+            }),
+    );
+    entries
+}
+
+pub fn rustraft_admin_diagnostic_json_lines(report: &RaftRuntimeAdminReport) -> String {
+    rustraft_admin_diagnostic_log_entries(report)
+        .into_iter()
+        .map(|entry| {
+            serde_json::to_string(&entry).expect("RustRaft diagnostic entry must serialize")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn health_severity(status: RaftHealthStatus) -> RustRaftDiagnosticSeverity {
+    match status {
+        RaftHealthStatus::Healthy => RustRaftDiagnosticSeverity::Info,
+        RaftHealthStatus::Degraded => RustRaftDiagnosticSeverity::Warn,
+        RaftHealthStatus::Unavailable => RustRaftDiagnosticSeverity::Error,
+    }
 }
 
 pub fn rustraft_replication_health(
@@ -770,6 +928,172 @@ pub fn rustraft_admin_status_surface_evidence(
         majority_configured,
         cluster_commit_index_consistent,
         blockers,
+    }
+}
+
+pub fn rustraft_optimization_report(
+    input: &RustRaftAdminStatusSurfaceInput,
+) -> RustRaftOptimizationReport {
+    let mut hints = Vec::new();
+    if input.peer_pipeline.is_empty() {
+        hints.push(optimization_hint(
+            "peer_pipeline_missing",
+            RustRaftOptimizationHintSeverity::Critical,
+            "replication_pipeline",
+            "export peer pipeline rows before tuning queue or inflight limits",
+            0,
+            1,
+        ));
+    }
+    if input.quorum_size == 0 {
+        hints.push(optimization_hint(
+            "quorum_size_missing",
+            RustRaftOptimizationHintSeverity::Critical,
+            "membership",
+            "configure a nonzero quorum size before evaluating replication health",
+            0,
+            1,
+        ));
+    }
+    if input.max_observed_node_commit_index > input.commit_index {
+        hints.push(optimization_hint(
+            "cluster_commit_index_inconsistent",
+            RustRaftOptimizationHintSeverity::Critical,
+            "replication",
+            "investigate nodes reporting commit indexes beyond the cluster commit index",
+            input.max_observed_node_commit_index,
+            input.commit_index,
+        ));
+    }
+    if input.wal_last_log_index < input.commit_index {
+        hints.push(optimization_hint(
+            "wal_commit_range_missing",
+            RustRaftOptimizationHintSeverity::Critical,
+            "wal",
+            "hold or recover WAL segments until the WAL range covers the committed index",
+            input.wal_last_log_index,
+            input.commit_index,
+        ));
+    }
+    if !input.wal_segment_lifecycle_present {
+        hints.push(optimization_hint(
+            "wal_segment_lifecycle_missing",
+            RustRaftOptimizationHintSeverity::Warning,
+            "wal",
+            "enable WAL segment lifecycle evidence before tuning compaction thresholds",
+            0,
+            1,
+        ));
+    }
+
+    let saturated_append_peers = input
+        .peer_pipeline
+        .iter()
+        .filter(|peer| {
+            peer.append_queue_limit > 0 && peer.append_queue_depth >= peer.append_queue_limit
+        })
+        .count() as u64;
+    if saturated_append_peers > 0 {
+        hints.push(optimization_hint(
+            "append_queue_saturated",
+            RustRaftOptimizationHintSeverity::Warning,
+            "replication_pipeline",
+            "increase append queue capacity or reduce per-peer append burst size",
+            saturated_append_peers,
+            1,
+        ));
+    }
+
+    let saturated_apply_peers = input
+        .peer_pipeline
+        .iter()
+        .filter(|peer| {
+            peer.apply_inflight_limit > 0 && peer.apply_inflight_tasks >= peer.apply_inflight_limit
+        })
+        .count() as u64;
+    if saturated_apply_peers > 0 {
+        hints.push(optimization_hint(
+            "apply_inflight_saturated",
+            RustRaftOptimizationHintSeverity::Warning,
+            "apply_pipeline",
+            "raise apply inflight limits or lower apply batch cost",
+            saturated_apply_peers,
+            1,
+        ));
+    }
+
+    let memory_pressure_peers = input
+        .peer_pipeline
+        .iter()
+        .filter(|peer| {
+            peer.inflight_bytes_limit > 0 && peer.inflight_bytes >= peer.inflight_bytes_limit
+        })
+        .count() as u64;
+    if memory_pressure_peers > 0 {
+        hints.push(optimization_hint(
+            "inflight_bytes_saturated",
+            RustRaftOptimizationHintSeverity::Warning,
+            "replication_pipeline",
+            "raise inflight byte limits or reduce append batch bytes",
+            memory_pressure_peers,
+            1,
+        ));
+    }
+
+    let reorder_pressure_peers = input
+        .peer_pipeline
+        .iter()
+        .filter(|peer| peer.reorder_queue_depth > 0 || peer.reorder_dropped_packages > 0)
+        .count() as u64;
+    if reorder_pressure_peers > 0 {
+        hints.push(optimization_hint(
+            "reorder_queue_pressure",
+            RustRaftOptimizationHintSeverity::Info,
+            "transport",
+            "inspect transport ordering and reorder queue timeout settings",
+            reorder_pressure_peers,
+            1,
+        ));
+    }
+
+    hints.sort_by(|left, right| {
+        right
+            .severity
+            .cmp(&left.severity)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let critical_count = hints
+        .iter()
+        .filter(|hint| hint.severity == RustRaftOptimizationHintSeverity::Critical)
+        .count() as u64;
+    let warning_count = hints
+        .iter()
+        .filter(|hint| hint.severity == RustRaftOptimizationHintSeverity::Warning)
+        .count() as u64;
+    RustRaftOptimizationReport {
+        ready: critical_count == 0,
+        hint_count: hints.len() as u64,
+        critical_count,
+        warning_count,
+        hints,
+    }
+}
+
+fn optimization_hint(
+    id: &str,
+    severity: RustRaftOptimizationHintSeverity,
+    component: &str,
+    recommendation: &str,
+    observed_value: u64,
+    threshold: u64,
+) -> RustRaftOptimizationHint {
+    RustRaftOptimizationHint {
+        id: id.to_string(),
+        severity,
+        component: component.to_string(),
+        recommendation: recommendation.to_string(),
+        observed_value,
+        threshold,
     }
 }
 

@@ -53,6 +53,36 @@ License: Apache-2.0.
 - `rustraft_temporalstore_adapter_shape`
 - `rustraft_temporalstore_extraction_plan`
 - `rustraft_metric_names`
+- `rustraft_grafana_dashboard`
+- `rustraft_grafana_dashboard_json`
+- `rustraft_alert_rules`
+- `rustraft_alert_rules_json`
+- `rustraft_diagnostic_log_prometheus`
+- `rustraft_observability_provisioning`
+- `rustraft_observability_provisioning_json`
+- `rustraft_observability_provisioning_runbook_steps`
+- `rustraft_observability_provisioning_validation_prometheus`
+- `rustraft_validate_observability_provisioning`
+- `rustraft_validate_observability_provisioning_json`
+- `rustraft_operator_triage_summary`
+- `rustraft_operator_triage_prometheus`
+- `rustraft_operator_runbook_steps`
+- `rustraft_operator_runbook_prometheus`
+- `rustraft_debug_bundle_contract`
+- `rustraft_validate_debug_snapshot`
+- `rustraft_validate_debug_snapshot_json`
+- `rustraft_debug_bundle_validation_prometheus`
+- `rustraft_admin_diagnostic_log_entries`
+- `rustraft_admin_diagnostic_json_lines`
+- `rustraft_optimization_report`
+- `rustraft_optimization_report_prometheus`
+- `rustraft_debug_snapshot_json`
+- `rustraft_debug_snapshot_metadata_prometheus`
+
+Run `cargo run --example debug_artifacts` to print a complete sample support
+artifact with the debug snapshot, JSON log lines, diagnostic and optimization
+Prometheus text, runbook Prometheus text, Grafana dashboard JSON, alert-rule
+JSON, validation report, and validation Prometheus series in one envelope.
 
 The crate is OpenRaft-free and independent of OpenRaft types. TemporalStore
 converts its internal readiness evidence into `RustRaftReadinessSnapshot` or
@@ -104,6 +134,46 @@ not only slow-fsync and released-segment counters observed independently.
 `rustraft_baseline_raft_*` Prometheus text metrics. Product runtimes such as
 TemporalStore can attach their own service labels without duplicating the
 capability-matrix logic.
+`rustraft_grafana_dashboard_json` renders a deterministic Grafana dashboard
+contract for the canonical `rustraft_*` readiness, latency, queue, WAL, snapshot,
+blocker, and fatal-event metrics.
+`rustraft_admin_diagnostic_json_lines` renders the admin report as structured
+JSON log lines for embedders that want RustRaft-owned debugging context without
+adopting a specific logging crate.
+`rustraft_diagnostic_log_prometheus` exports those structured diagnostics as
+severity and per-entry Prometheus counters for dashboards and alert triage.
+`rustraft_optimization_report` converts admin status evidence into deterministic
+pipeline, WAL, quorum, and reorder-queue tuning hints for operators and CI.
+`rustraft_optimization_report_prometheus` renders those hints as Prometheus text
+metrics, including readiness, per-hint, and component-level optimization series,
+for Grafana dashboards and alerting rules.
+`rustraft_alert_rules_json` emits deterministic alert-rule metadata for
+optimization readiness, critical optimization hints, fatal events, diagnostic
+errors, and blocker presence, operator triage watch/attention states, critical
+runbook steps, stale debug snapshots, debug-bundle validation failures, and
+provisioning validation failures, so operators can wire the same metric contract
+into monitoring.
+`rustraft_observability_provisioning_json` emits the required metrics, Grafana
+dashboard, alert rules, debug-bundle contract, and default operator runbook
+steps needed to install the same monitoring contract in downstream runtimes.
+`rustraft_debug_snapshot_json` emits a single timestamped support bundle
+containing the admin report, diagnostic log entries, optimization hints,
+optimization Prometheus text, runbook Prometheus text, Grafana dashboard
+metadata, alert-rule metadata, and an operator triage summary with first action,
+top diagnostic, top alert, top optimization hint, and runbook steps. The bundle includes a
+versioned `rustraft_debug_bundle_contract` marker and
+`rustraft_validate_debug_snapshot` or `rustraft_validate_debug_snapshot_json`
+for downstream tooling, including timestamp, diagnostic-log, optimization,
+pointer, triage, Prometheus, Grafana, alert-rule, derived-field, and runbook consistency checks.
+`rustraft_debug_snapshot_metadata_prometheus` exports the debug snapshot
+generation timestamp and age as Prometheus gauges for Grafana freshness triage.
+`rustraft_debug_bundle_validation_prometheus` turns that validation report into
+Prometheus readiness, issue-count, first-issue, and per-issue series for
+dashboards and alerting.
+`rustraft_operator_runbook_prometheus` exports grouped remediation counts,
+per-step presence, and the first active runbook step for Grafana triage.
+`rustraft_observability_provisioning_validation_prometheus` exposes the same
+readiness, issue-count, first-issue, and per-issue shape for provisioning drift.
 
 Production readiness also requires real BaselineRaft benchmark evidence. Model
 benchmark runners remain available for unit tests, but
