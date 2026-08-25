@@ -354,7 +354,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("DEBUG_SNAPSHOT_LOW_FRESH_MS"));
     assert!(example.contains("\"debug_snapshot_low_fresh_ms\""));
     assert!(example.contains("\"debug_snapshot_low_fresh_after_unix_ms\""));
-    assert!(example.contains("DEBUG_SNAPSHOT_MAX_AGE_MS.saturating_sub(DEBUG_SNAPSHOT_LOW_FRESH_MS)"));
+    assert!(
+        example.contains("DEBUG_SNAPSHOT_MAX_AGE_MS.saturating_sub(DEBUG_SNAPSHOT_LOW_FRESH_MS)")
+    );
     assert!(example.contains("\"debug_snapshot_stale_after_unix_ms\""));
     assert!(example.contains("saturating_add(DEBUG_SNAPSHOT_MAX_AGE_MS)"));
     assert!(example.contains("\"debug_snapshot_freshness_status\""));
@@ -373,7 +375,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("let support_envelope_status = if support_envelope_issues.is_empty()"));
     assert!(example.contains("\"support_envelope_status\""));
     assert!(example.contains("\"needs_attention\""));
-    assert!(example.contains("let support_envelope_severity = if support_envelope_issues.is_empty()"));
+    assert!(
+        example.contains("let support_envelope_severity = if support_envelope_issues.is_empty()")
+    );
     assert!(example.contains("\"support_envelope_severity\""));
     assert!(example.contains("\"critical\""));
     assert!(example.contains("\"ready_metric\""));
@@ -405,7 +409,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"critical_alert_links\""));
     assert!(example.contains("RustRaftSupportEnvelopeCritical"));
     assert!(example.contains("\"alert_runbook_map\""));
-    assert!(example.contains("\"RustRaftSupportEnvelopeValidationFailed\": \"validate_support_envelope\""));
+    assert!(example
+        .contains("\"RustRaftSupportEnvelopeValidationFailed\": \"validate_support_envelope\""));
     assert!(example.contains("\"RustRaftSupportEnvelopeCritical\": \"wire_critical_alerts\""));
     assert!(example.contains("\"RustRaftDiagnosticErrors\": \"inspect_error_diagnostics\""));
     assert!(example.contains(
@@ -414,7 +419,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"RustRaftDebugSnapshotFreshnessLost\": \"refresh_debug_snapshot\""));
     assert!(example.contains("\"runbook_evidence_map\""));
     assert!(example.contains("\"validate_support_envelope\""));
-    assert!(example.contains("rustraft_debug_bundle_validation_ready{artifact=\\\"support_envelope\\\"}"));
+    assert!(example
+        .contains("rustraft_debug_bundle_validation_ready{artifact=\\\"support_envelope\\\"}"));
     assert!(example.contains("\"wire_critical_alerts\""));
     assert!(example.contains("alert_rules_json"));
     assert!(example.contains("\"inspect_error_diagnostics\""));
@@ -424,9 +430,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"refresh_debug_snapshot\""));
     assert!(example.contains("rustraft_debug_snapshot_fresh"));
     assert!(example.contains("\"operator_handoff_sequence\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\",\n            \"wire_critical_alerts\""
-    ));
+    assert!(
+        example.contains("\"validate_support_envelope\",\n            \"wire_critical_alerts\"")
+    );
     assert!(example.contains(
         "\"inspect_error_diagnostics\",\n            \"resolve_critical_optimization_hints\""
     ));
@@ -470,9 +476,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"validate_support_envelope\": [\n                \"Support Envelope Validation Ready\""
     ));
     assert!(example.contains("\"Support Envelope First Issue\""));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": [\n                \"Support Envelope Severity\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": [\n                \"Support Envelope Severity\""));
     assert!(example.contains("\"Support Envelope Issue Breakdown\""));
     assert!(example.contains("\"Diagnostic Errors\""));
     assert!(example.contains("\"Diagnostic Log Rate\""));
@@ -495,9 +500,7 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"validate_support_envelope\": \"raft-observability-oncall\""));
     assert!(example.contains("\"wire_critical_alerts\": \"raft-runtime-incident-commander\""));
     assert!(example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-owner\""));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"raft-performance-owner\""
-    ));
+    assert!(example.contains("\"resolve_critical_optimization_hints\": \"raft-performance-owner\""));
     assert!(example.contains("\"refresh_debug_snapshot\": \"raft-runtime-owner\""));
     assert!(example.contains("\"handoff_priority_map\""));
     assert!(example.contains("\"validate_support_envelope\": \"P0\""));
@@ -509,9 +512,7 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"validate_support_envelope\": \"immediate\""));
     assert!(example.contains("\"wire_critical_alerts\": \"immediate\""));
     assert!(example.contains("\"inspect_error_diagnostics\": \"within 5 minutes\""));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"within 15 minutes\""
-    ));
+    assert!(example.contains("\"resolve_critical_optimization_hints\": \"within 15 minutes\""));
     assert!(example.contains("\"refresh_debug_snapshot\": \"within 30 minutes\""));
     assert!(example.contains("\"handoff_escalation_trigger_map\""));
     assert!(example.contains(
@@ -565,9 +566,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"validate_support_envelope\": \"support_envelope_validation\""));
     assert!(example.contains("\"wire_critical_alerts\": \"alert_rules_json\""));
     assert!(example.contains("\"inspect_error_diagnostics\": \"diagnostic_json_lines\""));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"optimization_prometheus\""
-    ));
+    assert!(
+        example.contains("\"resolve_critical_optimization_hints\": \"optimization_prometheus\"")
+    );
     assert!(example.contains("\"refresh_debug_snapshot\": \"debug_snapshot_json\""));
     assert!(example.contains("\"handoff_audit_note_map\""));
     assert!(example.contains(
@@ -602,53 +603,39 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"refresh_debug_snapshot\": \"which refreshed snapshot proved current debug evidence\""
     ));
     assert!(example.contains("\"handoff_metric_probe_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"rustraft_support_envelope_ready\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"rustraft_support_envelope_critical_alert_total\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"rustraft_diagnostic_log_errors\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"rustraft_support_envelope_ready\""));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"rustraft_support_envelope_critical_alert_total\""));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"rustraft_diagnostic_log_errors\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"rustraft_optimization_critical_total\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"rustraft_debug_snapshot_fresh\""
-    ));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"rustraft_debug_snapshot_fresh\""));
     assert!(example.contains("\"handoff_triage_signal_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"rustraft_operator_triage_status\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"rustraft_operator_triage_top_alert\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"rustraft_operator_triage_top_diagnostic\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"rustraft_operator_triage_status\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"rustraft_operator_triage_top_alert\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"rustraft_operator_triage_top_diagnostic\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"rustraft_operator_triage_top_optimization_hint\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"rustraft_operator_triage_first_action\""
-    ));
+    assert!(
+        example.contains("\"refresh_debug_snapshot\": \"rustraft_operator_triage_first_action\"")
+    );
     assert!(example.contains("\"handoff_validation_gate_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"support_envelope_validation.ready\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"support_envelope_validation.alert_links_present\""
-    ));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"support_envelope_validation.ready\"")
+    );
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"support_envelope_validation.alert_links_present\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"debug_snapshot_validation.diagnostic_log_contract\""
     ));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"debug_snapshot_validation.optimization_prometheus_contract\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"debug_snapshot_validation.freshness_contract\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"debug_snapshot_validation.freshness_contract\""));
     assert!(example.contains("\"handoff_promql_query_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"rustraft_debug_bundle_validation_ready{artifact=\\\"support_envelope\\\"} == 1\""
@@ -656,15 +643,13 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"wire_critical_alerts\": \"rustraft_support_envelope_critical_alert_total > 0\""
     ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"rustraft_diagnostic_log_errors == 0\""
-    ));
+    assert!(
+        example.contains("\"inspect_error_diagnostics\": \"rustraft_diagnostic_log_errors == 0\"")
+    );
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"rustraft_optimization_critical_total == 0\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"rustraft_debug_snapshot_fresh == 1\""
-    ));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"rustraft_debug_snapshot_fresh == 1\""));
     assert!(example.contains("\"handoff_log_query_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"diagnostic_json_lines | rg support_envelope\""
@@ -678,51 +663,41 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"triage_prometheus | rg rustraft_operator_triage_top_optimization_hint\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"debug_snapshot_json | rg generated_at_unix_ms\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"debug_snapshot_json | rg generated_at_unix_ms\""));
     assert!(example.contains("\"handoff_annotation_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"RustRaft support envelope validated\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"RustRaft critical alert route verified\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"RustRaft diagnostic evidence inspected\""
-    ));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"RustRaft support envelope validated\"")
+    );
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"RustRaft critical alert route verified\"")
+    );
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"RustRaft diagnostic evidence inspected\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"RustRaft optimization critical total cleared\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"RustRaft debug snapshot refreshed\""
-    ));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"RustRaft debug snapshot refreshed\""));
     assert!(example.contains("\"handoff_correlation_key_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"rustraft.support_envelope.validation\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"rustraft.support_envelope.alert_route\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"rustraft.diagnostics.error_target\""
-    ));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"rustraft.support_envelope.validation\"")
+    );
+    assert!(example.contains("\"wire_critical_alerts\": \"rustraft.support_envelope.alert_route\""));
+    assert!(
+        example.contains("\"inspect_error_diagnostics\": \"rustraft.diagnostics.error_target\"")
+    );
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"rustraft.optimization.critical_hint\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"rustraft.debug_snapshot.refresh\""
-    ));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"rustraft.debug_snapshot.refresh\""));
     assert!(example.contains("\"handoff_retention_window_map\""));
     assert!(example.contains("\"validate_support_envelope\": \"retain for 30 days\""));
     assert!(example.contains("\"wire_critical_alerts\": \"retain for 30 days\""));
     assert!(example.contains("\"inspect_error_diagnostics\": \"retain for 14 days\""));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"retain for 14 days\""
-    ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"retain until next successful refresh\""
-    ));
+    assert!(example.contains("\"resolve_critical_optimization_hints\": \"retain for 14 days\""));
+    assert!(
+        example.contains("\"refresh_debug_snapshot\": \"retain until next successful refresh\"")
+    );
     assert!(example.contains("\"handoff_cleanup_guard_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"do not clean until support envelope validation is archived\""
@@ -789,13 +764,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     ));
     assert!(example.contains("\"handoff_verification_owner_map\""));
     assert!(example.contains("\"validate_support_envelope\": \"raft-observability-oncall\""));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-runtime-incident-commander\""
-    ));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-runtime-incident-commander\""));
     assert!(example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-owner\""));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"raft-performance-owner\""
-    ));
+    assert!(example.contains("\"resolve_critical_optimization_hints\": \"raft-performance-owner\""));
     assert!(example.contains("\"refresh_debug_snapshot\": \"raft-runtime-owner\""));
     assert!(example.contains("\"handoff_verification_evidence_map\""));
     assert!(example.contains(
@@ -804,29 +775,28 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"wire_critical_alerts\": \"alert_rules_json includes RustRaftSupportEnvelopeCritical owner\""
     ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"rustraft_diagnostic_log_errors == 0\""
-    ));
+    assert!(
+        example.contains("\"inspect_error_diagnostics\": \"rustraft_diagnostic_log_errors == 0\"")
+    );
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"rustraft_optimization_critical_total == 0\""
     ));
     assert!(example.contains("\"refresh_debug_snapshot\": \"rustraft_debug_snapshot_fresh == 1\""));
     assert!(example.contains("\"handoff_verification_cadence_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"verify on the next Prometheus scrape\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"verify before leaving the incident bridge\""
-    ));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"verify on the next Prometheus scrape\"")
+    );
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"verify before leaving the incident bridge\"")
+    );
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"verify after 5 minutes without repeated errors\""
     ));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"verify across two consecutive optimization scrapes\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"verify before the next low-freshness window\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"verify before the next low-freshness window\""));
     assert!(example.contains("\"handoff_verification_failure_action_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"reopen validate_support_envelope and capture the first support issue\""
@@ -860,37 +830,29 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"refresh_debug_snapshot\": \"append debug_snapshot_json generated timestamp and freshness status\""
     ));
     assert!(example.contains("\"handoff_verification_output_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"support envelope verification note\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"critical alert route verification note\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"diagnostic error verification note\""
-    ));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"support envelope verification note\"")
+    );
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"critical alert route verification note\"")
+    );
+    assert!(
+        example.contains("\"inspect_error_diagnostics\": \"diagnostic error verification note\"")
+    );
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"optimization recovery verification note\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"debug snapshot freshness verification note\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"debug snapshot freshness verification note\""));
     assert!(example.contains("\"handoff_verification_delivery_channel_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"support envelope incident timeline\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"critical alert routing review\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"diagnostic investigation log\""
-    ));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"optimization follow-up report\""
-    ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"debug snapshot refresh record\""
-    ));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"support envelope incident timeline\"")
+    );
+    assert!(example.contains("\"wire_critical_alerts\": \"critical alert routing review\""));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"diagnostic investigation log\""));
+    assert!(example
+        .contains("\"resolve_critical_optimization_hints\": \"optimization follow-up report\""));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"debug snapshot refresh record\""));
     assert!(example.contains("\"handoff_verification_acknowledgement_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"timeline entry acknowledged by raft-observability-oncall\""
@@ -959,9 +921,7 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"validate_support_envelope\": \"raft-observability-oncall\""));
     assert!(example.contains("\"wire_critical_alerts\": \"raft-runtime-incident-commander\""));
     assert!(example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-owner\""));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"raft-performance-owner\""
-    ));
+    assert!(example.contains("\"resolve_critical_optimization_hints\": \"raft-performance-owner\""));
     assert!(example.contains("\"refresh_debug_snapshot\": \"raft-runtime-owner\""));
     assert!(example.contains("\"handoff_verification_reopen_notification_map\""));
     assert!(example.contains(
@@ -970,15 +930,13 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"wire_critical_alerts\": \"raft-runtime-incident-commander/reopen-alert-routing\""
     ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-owner/reopen-diagnostics\""
-    ));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostics-owner/reopen-diagnostics\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-performance-owner/reopen-optimization\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-runtime-owner/reopen-debug-snapshot\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-runtime-owner/reopen-debug-snapshot\""));
     assert!(example.contains("\"handoff_verification_reopen_sla_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"reopened support envelope must be reviewed within 15m\""
@@ -1047,34 +1005,30 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"RustRaft Support Envelope Reopen Resolution\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"RustRaft Alert Route Reopen Resolution\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"RustRaft Diagnostics Reopen Resolution\""
-    ));
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"RustRaft Alert Route Reopen Resolution\"")
+    );
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"RustRaft Diagnostics Reopen Resolution\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"RustRaft Optimization Reopen Resolution\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"RustRaft Debug Snapshot Reopen Resolution\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"RustRaft Debug Snapshot Reopen Resolution\""));
     assert!(example.contains("\"handoff_verification_reopen_metric_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"rustraft_handoff_reopen_support_envelope_total\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"rustraft_handoff_reopen_alert_route_total\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"rustraft_handoff_reopen_diagnostics_total\""
-    ));
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"rustraft_handoff_reopen_alert_route_total\"")
+    );
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"rustraft_handoff_reopen_diagnostics_total\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"rustraft_handoff_reopen_optimization_total\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"rustraft_handoff_reopen_debug_snapshot_total\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"rustraft_handoff_reopen_debug_snapshot_total\""));
     assert!(example.contains("\"handoff_verification_reopen_promql_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"sum(rate(rustraft_handoff_reopen_support_envelope_total[5m]))\""
@@ -1091,9 +1045,7 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"sum(rate(rustraft_handoff_reopen_debug_snapshot_total[5m]))\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_alert_threshold_map\""
-    ));
+    assert!(example.contains("\"handoff_verification_reopen_alert_threshold_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"page when support envelope reopens exceed zero for 10m\""
     ));
@@ -1109,49 +1061,34 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"review when debug snapshot reopens exceed one for 30m\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_notification_route_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-page\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-page\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-review\""
-    ));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"raft-optimization-review\""
-    ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-review\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_escalation_policy_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-incident-lead-immediate-escalation\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-incident-lead-immediate-escalation\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-owner-next-business-cycle\""
-    ));
+    assert!(example.contains("\"handoff_verification_reopen_notification_route_map\""));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-support-envelope-page\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-page\""));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-review\""));
+    assert!(
+        example.contains("\"resolve_critical_optimization_hints\": \"raft-optimization-review\"")
+    );
+    assert!(example.contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-review\""));
+    assert!(example.contains("\"handoff_verification_reopen_escalation_policy_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-incident-lead-immediate-escalation\""));
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"raft-incident-lead-immediate-escalation\"")
+    );
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostics-owner-next-business-cycle\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-owner-next-business-cycle\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-owner-next-business-cycle\""
-    ));
+    assert!(
+        example.contains("\"refresh_debug_snapshot\": \"raft-debug-owner-next-business-cycle\"")
+    );
     assert!(example.contains("\"handoff_verification_reopen_log_query_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft_logs{event=\\\"support_envelope_reopened\\\"}\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft_logs{event=\\\"alert_route_reopened\\\"}\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft_logs{event=\\\"alert_route_reopened\\\"}\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft_logs{event=\\\"diagnostic_reopened\\\"}\""
     ));
@@ -1161,45 +1098,27 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft_logs{event=\\\"debug_snapshot_reopened\\\"}\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_correlation_key_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft.support_envelope.reopen_id\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft.alert_route.reopen_id\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft.diagnostics.reopen_id\""
-    ));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"raft.optimization.reopen_id\""
-    ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft.debug_snapshot.reopen_id\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_retention_window_map\""
-    ));
+    assert!(example.contains("\"handoff_verification_reopen_correlation_key_map\""));
+    assert!(example.contains("\"validate_support_envelope\": \"raft.support_envelope.reopen_id\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft.alert_route.reopen_id\""));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"raft.diagnostics.reopen_id\""));
+    assert!(example
+        .contains("\"resolve_critical_optimization_hints\": \"raft.optimization.reopen_id\""));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"raft.debug_snapshot.reopen_id\""));
+    assert!(example.contains("\"handoff_verification_reopen_retention_window_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"retain reopen metric, log, and evidence for 30d\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"retain reopen metric, log, and evidence for 30d\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"retain diagnostic reopen context for 14d\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"retain reopen metric, log, and evidence for 30d\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"retain diagnostic reopen context for 14d\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"retain optimization reopen context for 14d\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"retain debug snapshot reopen context for 7d\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_cleanup_guard_map\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"retain debug snapshot reopen context for 7d\""));
+    assert!(example.contains("\"handoff_verification_reopen_cleanup_guard_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"cleanup only after support envelope reopen evidence is archived\""
     ));
@@ -1215,79 +1134,41 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"cleanup only after debug snapshot reopen bundle is archived\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_final_summary_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-reopen-closeout\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-reopen-closeout\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-reopen-closeout\""
-    ));
+    assert!(example.contains("\"handoff_verification_reopen_final_summary_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-envelope-reopen-closeout\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-reopen-closeout\""));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-reopen-closeout\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-reopen-closeout\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-reopen-closeout\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_acknowledgement_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-reopen-ack\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-reopen-ack\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-reopen-ack\""
-    ));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"raft-optimization-reopen-ack\""
-    ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-reopen-ack\""
-    ));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-reopen-closeout\""));
+    assert!(example.contains("\"handoff_verification_reopen_acknowledgement_map\""));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-support-envelope-reopen-ack\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-reopen-ack\""));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-reopen-ack\""));
+    assert!(example
+        .contains("\"resolve_critical_optimization_hints\": \"raft-optimization-reopen-ack\""));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-reopen-ack\""));
     assert!(example.contains("\"handoff_verification_reopen_delivery_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-closeout-feed\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-closeout-feed\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-closeout-feed\""
-    ));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"raft-optimization-closeout-feed\""
-    ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-closeout-feed\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_source_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-reopen-replay\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-reopen-replay\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-reopen-replay\""
-    ));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"raft-optimization-reopen-replay\""
-    ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-reopen-replay\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_check_map\""
-    ));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"raft-support-envelope-closeout-feed\"")
+    );
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-closeout-feed\""));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-closeout-feed\""));
+    assert!(example
+        .contains("\"resolve_critical_optimization_hints\": \"raft-optimization-closeout-feed\""));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-closeout-feed\""));
+    assert!(example.contains("\"handoff_verification_reopen_replay_source_map\""));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"raft-support-envelope-reopen-replay\"")
+    );
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-reopen-replay\""));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-reopen-replay\""));
+    assert!(example
+        .contains("\"resolve_critical_optimization_hints\": \"raft-optimization-reopen-replay\""));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-reopen-replay\""));
+    assert!(example.contains("\"handoff_verification_reopen_replay_check_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"replay support envelope readiness, first issue, and retained validation metrics\""
     ));
@@ -1303,9 +1184,7 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"replay debug snapshot timestamp, freshness metric, and archived bundle\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_result_map\""
-    ));
+    assert!(example.contains("\"handoff_verification_reopen_replay_result_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"replay passes when support envelope ready stays true and first issue is absent\""
     ));
@@ -1321,9 +1200,7 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"replay passes when refreshed snapshot remains fresh and archived bundle matches\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_failure_action_map\""
-    ));
+    assert!(example.contains("\"handoff_verification_reopen_replay_failure_action_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"reopen support envelope validation and attach failed replay metrics\""
     ));
@@ -1339,87 +1216,64 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"reopen debug snapshot refresh with stale replay bundle evidence\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_escalation_evidence_map\""
-    ));
+    assert!(example.contains("\"handoff_verification_reopen_replay_escalation_evidence_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-envelope-replay-escalation-note\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-replay-page-record\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-replay-escalation-log\""
-    ));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-replay-page-record\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostics-replay-escalation-log\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-replay-owner-ticket\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-replay-refresh-ticket\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_escalation_acknowledgement_map\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-replay-refresh-ticket\""));
+    assert!(
+        example.contains("\"handoff_verification_reopen_replay_escalation_acknowledgement_map\"")
+    );
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-envelope-replay-escalation-ack\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-replay-page-ack\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-replay-escalation-ack\""
-    ));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-replay-page-ack\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostics-replay-escalation-ack\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-replay-owner-ack\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-replay-refresh-ack\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_escalation_closeout_map\""
-    ));
+    assert!(
+        example.contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-replay-refresh-ack\"")
+    );
+    assert!(example.contains("\"handoff_verification_reopen_replay_escalation_closeout_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-envelope-replay-escalation-closeout\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-replay-page-closeout\""
-    ));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-replay-page-closeout\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-replay-escalation-closeout\""
     ));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-replay-owner-closeout\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-replay-refresh-closeout\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_escalation_delivery_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-replay-closeout-feed\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-replay-closeout-feed\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-replay-closeout-feed\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-replay-refresh-closeout\""));
+    assert!(example.contains("\"handoff_verification_reopen_replay_escalation_delivery_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-envelope-replay-closeout-feed\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-replay-closeout-feed\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostics-replay-closeout-feed\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-replay-closeout-feed\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-replay-closeout-feed\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_escalation_retention_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"retain replay closeout feed for 30d\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"retain replay alert closeout feed for 30d\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-replay-closeout-feed\""));
+    assert!(example.contains("\"handoff_verification_reopen_replay_escalation_retention_map\""));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"retain replay closeout feed for 30d\"")
+    );
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"retain replay alert closeout feed for 30d\"")
+    );
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"retain replay diagnostics closeout feed for 14d\""
     ));
@@ -1429,15 +1283,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"retain replay debug snapshot closeout feed for 7d\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_escalation_expiry_review_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"review replay closeout feed on day 25\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"review replay alert closeout feed on day 25\""
-    ));
+    assert!(example.contains("\"handoff_verification_reopen_replay_escalation_expiry_review_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"review replay closeout feed on day 25\""));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"review replay alert closeout feed on day 25\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"review replay diagnostics closeout feed on day 10\""
     ));
@@ -1447,9 +1297,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"review replay debug snapshot closeout feed on day 5\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_escalation_expiry_disposition_map\""
-    ));
+    assert!(example
+        .contains("\"handoff_verification_reopen_replay_escalation_expiry_disposition_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"archive replay support closeout after clean review\""
     ));
@@ -1465,15 +1314,10 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"replace replay debug snapshot with latest bundle after review\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_escalation_expiry_audit_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-replay-support-expiry-audit-record\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-replay-alert-expiry-audit-record\""
-    ));
+    assert!(example.contains("\"handoff_verification_reopen_replay_escalation_expiry_audit_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-replay-support-expiry-audit-record\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-replay-alert-expiry-audit-record\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-replay-diagnostics-expiry-audit-record\""
     ));
@@ -1483,120 +1327,92 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-replay-debug-snapshot-expiry-audit-record\""
     ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_escalation_expiry_audit_owner_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-audit-owner\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-audit-owner\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-audit-owner\""
-    ));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"raft-optimization-audit-owner\""
-    ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-audit-owner\""
-    ));
-    assert!(example.contains(
-        "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-expiry-audit-signoff\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-expiry-audit-signoff\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-audit-signoff\""
-    ));
+    assert!(example
+        .contains("\"handoff_verification_reopen_replay_escalation_expiry_audit_owner_map\""));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"raft-support-envelope-audit-owner\"")
+    );
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-audit-owner\""));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-audit-owner\""));
+    assert!(example
+        .contains("\"resolve_critical_optimization_hints\": \"raft-optimization-audit-owner\""));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-audit-owner\""));
+    assert!(example
+        .contains("\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-envelope-expiry-audit-signoff\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-expiry-audit-signoff\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-audit-signoff\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-expiry-audit-signoff\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-audit-signoff\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-audit-signoff\""));
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_delivery_map\""
     ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-expiry-signoff-feed\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-expiry-signoff-feed\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-signoff-feed\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-envelope-expiry-signoff-feed\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-expiry-signoff-feed\""));
+    assert!(
+        example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-signoff-feed\"")
+    );
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-expiry-signoff-feed\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-signoff-feed\""
-    ));
+    assert!(
+        example.contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-signoff-feed\"")
+    );
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_acknowledgement_map\""
     ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-expiry-signoff-ack\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-expiry-signoff-ack\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-signoff-ack\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-envelope-expiry-signoff-ack\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-expiry-signoff-ack\""));
+    assert!(
+        example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-signoff-ack\"")
+    );
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-expiry-signoff-ack\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-signoff-ack\""
-    ));
+    assert!(
+        example.contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-signoff-ack\"")
+    );
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_closeout_map\""
     ));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-envelope-expiry-signoff-closeout\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-expiry-signoff-closeout\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-signoff-closeout\""
-    ));
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"raft-alert-route-expiry-signoff-closeout\"")
+    );
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-signoff-closeout\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-expiry-signoff-closeout\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-signoff-closeout\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-signoff-closeout\""));
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_closeout_delivery_map\""
     ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-envelope-expiry-closeout-feed\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-expiry-closeout-feed\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-closeout-feed\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-envelope-expiry-closeout-feed\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-expiry-closeout-feed\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-closeout-feed\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-expiry-closeout-feed\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-closeout-feed\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-closeout-feed\""));
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_closeout_retention_map\""
     ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"retain replay expiry closeout feed for 30d\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"retain replay expiry closeout feed for 30d\""));
     assert!(example.contains(
         "\"wire_critical_alerts\": \"retain replay alert expiry closeout feed for 30d\""
     ));
@@ -1630,15 +1446,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_closeout_cleanup_evidence_map\""
     ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-expiry-closeout-archive-proof\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-expiry-closeout-page-proof\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-closeout-log-proof\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-expiry-closeout-archive-proof\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-expiry-closeout-page-proof\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-closeout-log-proof\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-expiry-closeout-report-proof\""
     ));
@@ -1651,9 +1463,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-expiry-closeout-cleanup-approved\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-expiry-closeout-cleanup-approved\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-expiry-closeout-cleanup-approved\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-closeout-cleanup-approved\""
     ));
@@ -1669,9 +1480,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-expiry-closeout-cleanup-executed\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-expiry-closeout-cleanup-executed\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-expiry-closeout-cleanup-executed\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-closeout-cleanup-executed\""
     ));
@@ -1702,30 +1512,25 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_closeout_cleanup_notification_map\""
     ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-expiry-cleanup-notified\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-notified\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-cleanup-notified\""
-    ));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"raft-support-expiry-cleanup-notified\"")
+    );
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-notified\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-cleanup-notified\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-expiry-cleanup-notified\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-cleanup-notified\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-debug-snapshot-expiry-cleanup-notified\""));
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_closeout_cleanup_acknowledgement_map\""
     ));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-expiry-cleanup-notification-ack\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-notification-ack\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-notification-ack\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-cleanup-notification-ack\""
     ));
@@ -1738,12 +1543,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_closeout_cleanup_closure_map\""
     ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-expiry-cleanup-loop-closed\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-loop-closed\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-expiry-cleanup-loop-closed\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-loop-closed\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-cleanup-loop-closed\""
     ));
@@ -1756,12 +1558,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_closeout_cleanup_final_summary_map\""
     ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-expiry-cleanup-final-summary\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-final-summary\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-expiry-cleanup-final-summary\""));
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-final-summary\"")
+    );
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-cleanup-final-summary\""
     ));
@@ -1774,12 +1575,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_closeout_cleanup_archive_index_map\""
     ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-expiry-cleanup-archive-index\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-archive-index\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-expiry-cleanup-archive-index\""));
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-archive-index\"")
+    );
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-cleanup-archive-index\""
     ));
@@ -1810,12 +1610,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"handoff_verification_reopen_replay_escalation_expiry_audit_signoff_closeout_cleanup_archive_owner_map\""
     ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-support-expiry-cleanup-archive-owner\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-archive-owner\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-support-expiry-cleanup-archive-owner\""));
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"raft-alert-expiry-cleanup-archive-owner\"")
+    );
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-expiry-cleanup-archive-owner\""
     ));
@@ -1831,9 +1630,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"retain raft support cleanup archive for 30d\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"retain raft alert cleanup archive for 30d\""
-    ));
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"retain raft alert cleanup archive for 30d\"")
+    );
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"retain raft diagnostics cleanup archive for 14d\""
     ));
@@ -1867,9 +1666,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-cleanup-archive-review-signed-off\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-cleanup-archive-review-signed-off\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-cleanup-archive-review-signed-off\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-cleanup-archive-review-signed-off\""
     ));
@@ -1903,9 +1701,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-cleanup-archive-premerge-evidence\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-cleanup-archive-premerge-evidence\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-cleanup-archive-premerge-evidence\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-cleanup-archive-premerge-evidence\""
     ));
@@ -1921,9 +1718,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-cleanup-archive-premerge-verified\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-cleanup-archive-premerge-verified\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-cleanup-archive-premerge-verified\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-cleanup-archive-premerge-verified\""
     ));
@@ -1957,9 +1753,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-cleanup-archive-publication-audited\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-cleanup-archive-publication-audited\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-cleanup-archive-publication-audited\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-cleanup-archive-publication-audited\""
     ));
@@ -1975,9 +1770,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-cleanup-archive-publication-summary\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-cleanup-archive-publication-summary\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-cleanup-archive-publication-summary\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-cleanup-archive-publication-summary\""
     ));
@@ -1993,9 +1787,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-cleanup-archive-publication-handoff\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-cleanup-archive-publication-handoff\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-cleanup-archive-publication-handoff\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-cleanup-archive-publication-handoff\""
     ));
@@ -2011,9 +1804,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-cleanup-archive-publication-followup\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-cleanup-archive-publication-followup\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-cleanup-archive-publication-followup\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-cleanup-archive-publication-followup\""
     ));
@@ -2029,9 +1821,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-support-cleanup-archive-publication-closed\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-cleanup-archive-publication-closed\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-cleanup-archive-publication-closed\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostics-cleanup-archive-publication-closed\""
     ));
@@ -3518,55 +3309,33 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"refresh_debug_snapshot\": \"raft-debug-snapshot-cleanup-archive-publication-postclosure-integrated\""
     ));
     assert!(example.contains("\"support_envelope_operator_handoff_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"support_envelope_validation\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"support_envelope_validation\""));
     assert!(example.contains("\"wire_critical_alerts\": \"critical_alert_handoff\""));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"diagnostic_log_prometheus\""
-    ));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"optimization_handoff\""
-    ));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"diagnostic_log_prometheus\""));
+    assert!(example.contains("\"resolve_critical_optimization_hints\": \"optimization_handoff\""));
     assert!(example.contains("\"refresh_debug_snapshot\": \"debug_snapshot_json\""));
     assert!(example.contains("\"support_envelope_operator_verification_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"support_envelope_validation_prometheus\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"support_envelope_validation_prometheus\""));
     assert!(example.contains("\"wire_critical_alerts\": \"alert_rules_json\""));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"diagnostic_json_lines\""
-    ));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"optimization_prometheus\""
-    ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"validation_prometheus\""
-    ));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"diagnostic_json_lines\""));
+    assert!(
+        example.contains("\"resolve_critical_optimization_hints\": \"optimization_prometheus\"")
+    );
+    assert!(example.contains("\"refresh_debug_snapshot\": \"validation_prometheus\""));
     assert!(example.contains("\"support_envelope_operator_dashboard_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"Support Envelope Validation Ready\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"Support Envelope Severity\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"Support Envelope First Issue\""
-    ));
-    assert!(example.contains(
-        "\"resolve_critical_optimization_hints\": \"Triage Top Optimization Hint\""
-    ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"Support Envelope Freshness Status\""
-    ));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"Support Envelope Validation Ready\"")
+    );
+    assert!(example.contains("\"wire_critical_alerts\": \"Support Envelope Severity\""));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"Support Envelope First Issue\""));
+    assert!(example
+        .contains("\"resolve_critical_optimization_hints\": \"Triage Top Optimization Hint\""));
+    assert!(example.contains("\"refresh_debug_snapshot\": \"Support Envelope Freshness Status\""));
     assert!(example.contains("\"support_envelope_operator_runbook_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"validate_support_envelope\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"validate_support_envelope\""));
     assert!(example.contains("\"wire_critical_alerts\": \"wire_critical_alerts\""));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"inspect_error_diagnostics\""
-    ));
+    assert!(example.contains("\"inspect_error_diagnostics\": \"inspect_error_diagnostics\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"resolve_critical_optimization_hints\""
     ));
@@ -3588,37 +3357,31 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"refresh_debug_snapshot\": \"cargo run --example debug_artifacts --quiet | rg rustraft_debug_snapshot_fresh\""
     ));
     assert!(example.contains("\"support_envelope_operator_execution_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"run contract validation before handoff\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"confirm critical alert routing evidence\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"inspect diagnostic log error totals\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"run contract validation before handoff\""));
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"confirm critical alert routing evidence\"")
+    );
+    assert!(
+        example.contains("\"inspect_error_diagnostics\": \"inspect diagnostic log error totals\"")
+    );
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"triage critical optimization hint totals\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"confirm debug snapshot freshness evidence\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"confirm debug snapshot freshness evidence\""));
     assert!(example.contains("\"support_envelope_operator_acceptance_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"support envelope contract test passes\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"critical alert is present and routed\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"diagnostic error totals are inspectable\""
-    ));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"support envelope contract test passes\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"critical alert is present and routed\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"diagnostic error totals are inspectable\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"critical optimization total is visible\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"fresh debug snapshot signal is present\""
-    ));
+    assert!(
+        example.contains("\"refresh_debug_snapshot\": \"fresh debug snapshot signal is present\"")
+    );
     assert!(example.contains("\"support_envelope_operator_escalation_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"escalate failed validation to raft-observability-oncall\""
@@ -3651,9 +3414,7 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"notify raft-observability-oncall with snapshot freshness evidence\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_acknowledgement_map\""
-    ));
+    assert!(example.contains("\"support_envelope_operator_acknowledgement_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-observability-oncall acknowledges validation evidence\""
     ));
@@ -3734,176 +3495,116 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"refresh_debug_snapshot\": \"block cleanup until raft snapshot freshness retention proof exists\""
     ));
     assert!(example.contains("\"support_envelope_operator_cleanup_evidence_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-retention-proof\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-retention-proof\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-retention-proof\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-validation-retention-proof\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-retention-proof\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostic-totals-retention-proof\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-totals-retention-proof\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-retention-proof\""
-    ));
+    assert!(
+        example.contains("\"refresh_debug_snapshot\": \"raft-snapshot-freshness-retention-proof\"")
+    );
     assert!(example.contains("\"support_envelope_operator_cleanup_approval_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-approved\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-approved\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-approved\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-validation-cleanup-approved\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-approved\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-approved\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-totals-cleanup-approved\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-approved\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-approved\""));
     assert!(example.contains("\"support_envelope_operator_cleanup_execution_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-executed\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-executed\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-executed\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-validation-cleanup-executed\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-executed\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-executed\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-totals-cleanup-executed\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-executed\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-executed\""));
     assert!(example.contains("\"support_envelope_operator_cleanup_verification_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-verified\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-verified\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-verified\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-validation-cleanup-verified\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-verified\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-verified\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-totals-cleanup-verified\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-verified\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-verified\""));
     assert!(example.contains("\"support_envelope_operator_cleanup_notification_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-notified\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-notified\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-notified\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-validation-cleanup-notified\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-notified\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-notified\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-totals-cleanup-notified\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-notified\""
-    ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_acknowledgement_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-acknowledged\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-acknowledged\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-notified\""));
+    assert!(example.contains("\"support_envelope_operator_cleanup_acknowledgement_map\""));
+    assert!(
+        example.contains("\"validate_support_envelope\": \"raft-validation-cleanup-acknowledged\"")
+    );
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-acknowledged\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-acknowledged\""
     ));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-totals-cleanup-acknowledged\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-acknowledged\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-acknowledged\""));
     assert!(example.contains("\"support_envelope_operator_cleanup_closure_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-closed\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-closed\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-closed\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-validation-cleanup-closed\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-closed\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-closed\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-totals-cleanup-closed\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-closed\""
-    ));
+    assert!(
+        example.contains("\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-closed\"")
+    );
     assert!(example.contains("\"support_envelope_operator_cleanup_summary_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-summary\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-summary\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-summary\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-validation-cleanup-summary\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-summary\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-summary\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-totals-cleanup-summary\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-summary\""
-    ));
+    assert!(
+        example.contains("\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-summary\"")
+    );
     assert!(example.contains("\"support_envelope_operator_cleanup_archive_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-archived\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-archived\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-archived\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-validation-cleanup-archived\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-archived\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-archived\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-totals-cleanup-archived\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-archived\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-archived\""));
     assert!(example.contains("\"support_envelope_operator_cleanup_retention_map\""));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-retained\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retained\""
-    ));
-    assert!(example.contains(
-        "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retained\""
-    ));
+    assert!(example.contains("\"validate_support_envelope\": \"raft-validation-cleanup-retained\""));
+    assert!(example.contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retained\""));
+    assert!(example
+        .contains("\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retained\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"raft-optimization-totals-cleanup-retained\""
     ));
-    assert!(example.contains(
-        "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retained\""
-    ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_review_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-retention-reviewed\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-reviewed\""
-    ));
+    assert!(example
+        .contains("\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retained\""));
+    assert!(example.contains("\"support_envelope_operator_cleanup_retention_review_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-validation-cleanup-retention-reviewed\""));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-reviewed\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retention-reviewed\""
     ));
@@ -3913,15 +3614,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-reviewed\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_approval_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-retention-approved\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-approved\""
-    ));
+    assert!(example.contains("\"support_envelope_operator_cleanup_retention_approval_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-validation-cleanup-retention-approved\""));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-approved\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retention-approved\""
     ));
@@ -3931,15 +3628,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-approved\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_execution_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-retention-executed\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-executed\""
-    ));
+    assert!(example.contains("\"support_envelope_operator_cleanup_retention_execution_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-validation-cleanup-retention-executed\""));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-executed\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retention-executed\""
     ));
@@ -3949,15 +3642,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-executed\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_verification_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-retention-verified\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-verified\""
-    ));
+    assert!(example.contains("\"support_envelope_operator_cleanup_retention_verification_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-validation-cleanup-retention-verified\""));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-verified\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retention-verified\""
     ));
@@ -3967,15 +3656,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-verified\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_notification_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-retention-notified\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-notified\""
-    ));
+    assert!(example.contains("\"support_envelope_operator_cleanup_retention_notification_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-validation-cleanup-retention-notified\""));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-notified\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retention-notified\""
     ));
@@ -3985,15 +3670,12 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-notified\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_acknowledgement_map\""
-    ));
+    assert!(example.contains("\"support_envelope_operator_cleanup_retention_acknowledgement_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-acknowledged\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-acknowledged\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-acknowledged\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retention-acknowledged\""
     ));
@@ -4003,15 +3685,12 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-acknowledged\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_closure_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-retention-closed\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-closed\""
-    ));
+    assert!(example.contains("\"support_envelope_operator_cleanup_retention_closure_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-validation-cleanup-retention-closed\""));
+    assert!(
+        example.contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-closed\"")
+    );
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retention-closed\""
     ));
@@ -4021,15 +3700,12 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-closed\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_summary_map\""
-    ));
+    assert!(example.contains("\"support_envelope_operator_cleanup_retention_summary_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-summarized\""
     ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-summarized\""
-    ));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-summarized\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retention-summarized\""
     ));
@@ -4039,15 +3715,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-summarized\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_archive_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-retention-archived\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-archived\""
-    ));
+    assert!(example.contains("\"support_envelope_operator_cleanup_retention_archive_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-validation-cleanup-retention-archived\""));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-archived\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retention-archived\""
     ));
@@ -4057,15 +3729,11 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-archived\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_map\""
-    ));
-    assert!(example.contains(
-        "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained\""
-    ));
-    assert!(example.contains(
-        "\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-retained\""
-    ));
+    assert!(example.contains("\"support_envelope_operator_cleanup_retention_retention_map\""));
+    assert!(example
+        .contains("\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained\""));
+    assert!(example
+        .contains("\"wire_critical_alerts\": \"raft-alert-route-cleanup-retention-retained\""));
     assert!(example.contains(
         "\"inspect_error_diagnostics\": \"raft-diagnostic-totals-cleanup-retention-retained\""
     ));
@@ -4075,9 +3743,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-retained\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_review_map\""
-    ));
+    assert!(
+        example.contains("\"support_envelope_operator_cleanup_retention_retention_review_map\"")
+    );
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained-reviewed\""
     ));
@@ -4093,9 +3761,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-retained-reviewed\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_approval_map\""
-    ));
+    assert!(
+        example.contains("\"support_envelope_operator_cleanup_retention_retention_approval_map\"")
+    );
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained-approved\""
     ));
@@ -4111,9 +3779,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-retained-approved\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_execution_map\""
-    ));
+    assert!(
+        example.contains("\"support_envelope_operator_cleanup_retention_retention_execution_map\"")
+    );
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained-executed\""
     ));
@@ -4129,9 +3797,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-retained-executed\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_verification_map\""
-    ));
+    assert!(example
+        .contains("\"support_envelope_operator_cleanup_retention_retention_verification_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained-verified\""
     ));
@@ -4147,9 +3814,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-retained-verified\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_notification_map\""
-    ));
+    assert!(example
+        .contains("\"support_envelope_operator_cleanup_retention_retention_notification_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained-notified\""
     ));
@@ -4165,9 +3831,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-retained-notified\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_acknowledgement_map\""
-    ));
+    assert!(example
+        .contains("\"support_envelope_operator_cleanup_retention_retention_acknowledgement_map\""));
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained-acknowledged\""
     ));
@@ -4183,9 +3848,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-retained-acknowledged\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_closure_map\""
-    ));
+    assert!(
+        example.contains("\"support_envelope_operator_cleanup_retention_retention_closure_map\"")
+    );
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained-closed\""
     ));
@@ -4201,9 +3866,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-retained-closed\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_summary_map\""
-    ));
+    assert!(
+        example.contains("\"support_envelope_operator_cleanup_retention_retention_summary_map\"")
+    );
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained-summarized\""
     ));
@@ -4219,9 +3884,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-retained-summarized\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_archive_map\""
-    ));
+    assert!(
+        example.contains("\"support_envelope_operator_cleanup_retention_retention_archive_map\"")
+    );
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained-archived\""
     ));
@@ -4237,9 +3902,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"raft-snapshot-freshness-cleanup-retention-retained-archived\""
     ));
-    assert!(example.contains(
-        "\"support_envelope_operator_cleanup_retention_retention_retention_map\""
-    ));
+    assert!(
+        example.contains("\"support_envelope_operator_cleanup_retention_retention_retention_map\"")
+    );
     assert!(example.contains(
         "\"validate_support_envelope\": \"raft-validation-cleanup-retention-retained-retained\""
     ));

@@ -9,12 +9,11 @@ use matrixraft::{
     rustraft_diagnostic_log_prometheus, rustraft_operator_runbook_prometheus,
     rustraft_optimization_report, rustraft_optimization_report_prometheus,
     rustraft_runtime_admin_report, rustraft_runtime_local_status_report,
-    rustraft_validate_debug_snapshot,
-    rustraft_validate_debug_snapshot_json, RaftCluster, RaftHealthStatus, RaftPeerPipelineState,
-    RustRaftAdminStatusSurfaceInput, RustRaftDiagnosticLogEntry, RustRaftDiagnosticSeverity,
-    RustRaftOperatorRunbookStep, RustRaftOptimizationHint, RustRaftOptimizationHintSeverity,
-    RustRaftPeer, RustRaftPeerProgressState, RustRaftReplicaRole, RustRaftRole,
-    RustRaftStatusSnapshot,
+    rustraft_validate_debug_snapshot, rustraft_validate_debug_snapshot_json, RaftCluster,
+    RaftHealthStatus, RaftPeerPipelineState, RustRaftAdminStatusSurfaceInput,
+    RustRaftDiagnosticLogEntry, RustRaftDiagnosticSeverity, RustRaftOperatorRunbookStep,
+    RustRaftOptimizationHint, RustRaftOptimizationHintSeverity, RustRaftPeer,
+    RustRaftPeerProgressState, RustRaftReplicaRole, RustRaftRole, RustRaftStatusSnapshot,
 };
 use serde_json::Value;
 
@@ -433,9 +432,9 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let metadata_prometheus =
         rustraft_debug_snapshot_metadata_prometheus(&snapshot, &[("service", "raft\"a")]);
     assert_eq!(metadata_prometheus.metric_count, 8);
-    assert!(metadata_prometheus.text.contains(
-        "rustraft_debug_snapshot_generated_at_unix_ms{service=\"raft\\\"a\"}"
-    ));
+    assert!(metadata_prometheus
+        .text
+        .contains("rustraft_debug_snapshot_generated_at_unix_ms{service=\"raft\\\"a\"}"));
     assert!(metadata_prometheus
         .text
         .contains(&snapshot.generated_at_unix_ms.to_string()));
@@ -596,7 +595,10 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
             target: "rustraft.target\"with\\escape".to_string(),
             severity: RustRaftDiagnosticSeverity::Warn,
             message: "diagnostic\"message\\escaped".to_string(),
-            fields: vec![("detail".to_string(), "escaped labels stay valid".to_string())],
+            fields: vec![(
+                "detail".to_string(),
+                "escaped labels stay valid".to_string(),
+            )],
         });
     escaped_diagnostic_snapshot.diagnostic_prometheus =
         rustraft_diagnostic_log_prometheus(&escaped_diagnostic_snapshot.diagnostics, &[]);
@@ -708,14 +710,17 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .contains(&"prometheus_component_hint_metric_missing".to_string()));
 
     let mut escaped_hint_snapshot = snapshot.clone();
-    escaped_hint_snapshot.optimization.hints.push(RustRaftOptimizationHint {
-        id: "hint\"with\\escape".to_string(),
-        severity: RustRaftOptimizationHintSeverity::Warning,
-        component: "observability".to_string(),
-        recommendation: "keep escaped labels valid".to_string(),
-        observed_value: 1,
-        threshold: 0,
-    });
+    escaped_hint_snapshot
+        .optimization
+        .hints
+        .push(RustRaftOptimizationHint {
+            id: "hint\"with\\escape".to_string(),
+            severity: RustRaftOptimizationHintSeverity::Warning,
+            component: "observability".to_string(),
+            recommendation: "keep escaped labels valid".to_string(),
+            observed_value: 1,
+            threshold: 0,
+        });
     escaped_hint_snapshot.optimization.hint_count += 1;
     escaped_hint_snapshot.optimization.warning_count += 1;
     escaped_hint_snapshot.optimization_prometheus =

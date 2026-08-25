@@ -9,13 +9,12 @@
 use matrixraft::{
     rustraft_capability_evidence, rustraft_debug_bundle_validation_prometheus,
     rustraft_debug_snapshot, rustraft_debug_snapshot_metadata_prometheus,
-    rustraft_observability_provisioning,
-    rustraft_observability_provisioning_validation_prometheus,
+    rustraft_observability_provisioning, rustraft_observability_provisioning_validation_prometheus,
     rustraft_operator_runbook_prometheus, rustraft_operator_triage_prometheus,
     rustraft_runtime_admin_report, rustraft_validate_debug_snapshot,
-    rustraft_validate_observability_provisioning, RaftCluster, RaftPeerPipelineState, RustRaftPeer,
-    RustRaftDebugBundleValidationReport, RustRaftPeerProgressState, RustRaftReadinessSnapshot,
-    RustRaftReplicaRole,
+    rustraft_validate_observability_provisioning, RaftCluster, RaftPeerPipelineState,
+    RustRaftDebugBundleValidationReport, RustRaftPeer, RustRaftPeerProgressState,
+    RustRaftReadinessSnapshot, RustRaftReplicaRole,
 };
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -156,8 +155,7 @@ fn main() {
     };
     let labels = [("service", "rustraft-example")];
     let snapshot = rustraft_debug_snapshot(&report, &status_surface, &labels);
-    let snapshot_json =
-        serde_json::to_string_pretty(&snapshot).expect("debug snapshot serializes");
+    let snapshot_json = serde_json::to_string_pretty(&snapshot).expect("debug snapshot serializes");
     let diagnostic_json_lines = snapshot
         .diagnostics
         .iter()
@@ -219,7 +217,12 @@ fn main() {
         .collect::<Vec<_>>();
     let extra_debug_artifacts = envelope_artifact_names
         .iter()
-        .filter(|name| !provisioning.debug_artifact_names.iter().any(|artifact| artifact == **name))
+        .filter(|name| {
+            !provisioning
+                .debug_artifact_names
+                .iter()
+                .any(|artifact| artifact == **name)
+        })
         .copied()
         .collect::<Vec<_>>();
     let extra_prometheus_artifacts = envelope_artifact_names
@@ -239,8 +242,7 @@ fn main() {
     let debug_snapshot_remaining_fresh_ms =
         DEBUG_SNAPSHOT_MAX_AGE_MS.saturating_sub(debug_snapshot_age_ms);
     let debug_snapshot_fresh = debug_snapshot_age_ms <= DEBUG_SNAPSHOT_MAX_AGE_MS;
-    let debug_snapshot_low_fresh =
-        debug_snapshot_remaining_fresh_ms >= DEBUG_SNAPSHOT_LOW_FRESH_MS;
+    let debug_snapshot_low_fresh = debug_snapshot_remaining_fresh_ms >= DEBUG_SNAPSHOT_LOW_FRESH_MS;
     let debug_snapshot_low_fresh_after_unix_ms = snapshot
         .generated_at_unix_ms
         .saturating_add(DEBUG_SNAPSHOT_MAX_AGE_MS.saturating_sub(DEBUG_SNAPSHOT_LOW_FRESH_MS));
@@ -2804,11 +2806,10 @@ fn main() {
         ("support_envelope_status", support_envelope_status),
         ("support_envelope_severity", support_envelope_severity),
     ];
-    let support_envelope_validation_prometheus =
-        rustraft_debug_bundle_validation_prometheus(
-            &support_envelope_report,
-            &support_envelope_labels,
-        );
+    let support_envelope_validation_prometheus = rustraft_debug_bundle_validation_prometheus(
+        &support_envelope_report,
+        &support_envelope_labels,
+    );
 
     println!(
         "{}",

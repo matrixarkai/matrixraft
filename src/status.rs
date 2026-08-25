@@ -15,6 +15,8 @@ use crate::{
 };
 
 pub use crate::{
+    rustraft_baseline_raft_operational_evidence_bundle,
+    rustraft_baseline_raft_runtime_capability_report,
     rustraft_cross_plane_process_evidence_artifact,
     rustraft_cross_plane_process_evidence_prometheus,
     rustraft_cross_plane_process_evidence_summary,
@@ -23,16 +25,17 @@ pub use crate::{
     rustraft_data_node_strict_process_rollout_validated, rustraft_meta_process_rollout_blockers,
     rustraft_meta_strict_process_rollout_validated, rustraft_named_readiness_blockers,
     rustraft_pipeline_evidence, rustraft_process_readiness_blocker,
-    rustraft_process_readiness_field_detail, rustraft_baseline_raft_operational_evidence_bundle,
-    rustraft_baseline_raft_runtime_capability_report, rustraft_require_production_ready,
+    rustraft_process_readiness_field_detail, rustraft_require_production_ready,
+    rustraft_validate_baseline_raft_operational_evidence_bundle,
     rustraft_validate_cross_plane_process_evidence_artifact, rustraft_validate_deployment_mode,
     rustraft_validate_deployment_readiness,
     rustraft_validate_membership_semantics_evidence_artifact,
     rustraft_validate_read_safety_evidence_artifact,
-    rustraft_validate_baseline_raft_operational_evidence_bundle,
     rustraft_validate_replication_pipeline_evidence_artifact,
     rustraft_validate_snapshot_lifecycle_evidence_artifact,
     rustraft_validate_wal_lifecycle_evidence_artifact, rustraft_wal_lifecycle_evidence_artifact,
+    RustRaftBaselineRaftOperationalEvidenceBundle,
+    RustRaftBaselineRaftOperationalEvidenceBundleValidationReport,
     RustRaftCrossPlaneProcessEvidenceArtifact,
     RustRaftCrossPlaneProcessEvidenceArtifactValidationReport,
     RustRaftCrossPlaneProcessEvidenceSummary, RustRaftCrossPlaneProcessReadinessBlockerReport,
@@ -41,8 +44,6 @@ pub use crate::{
     RustRaftMembershipSemanticsEvidenceValidationReport, RustRaftPipelineEvidence,
     RustRaftPipelineLimits, RustRaftProductionReadinessError, RustRaftProductionReadinessReport,
     RustRaftReadSafetyEvidenceArtifact, RustRaftReadSafetyEvidenceValidationReport,
-    RustRaftBaselineRaftOperationalEvidenceBundle,
-    RustRaftBaselineRaftOperationalEvidenceBundleValidationReport,
     RustRaftReplicationPipelineEvidenceArtifact,
     RustRaftReplicationPipelineEvidenceValidationReport, RustRaftSnapshotLifecycleEvidenceArtifact,
     RustRaftSnapshotLifecycleEvidenceValidationReport, RustRaftWalLifecycleEvidenceArtifact,
@@ -50,7 +51,7 @@ pub use crate::{
 };
 
 pub use crate::fault::{
-    rustraft_fault_harness_readiness_report, rustraft_baseline_raft_fault_scenarios,
+    rustraft_baseline_raft_fault_scenarios, rustraft_fault_harness_readiness_report,
     RustRaftFaultHarnessReadinessReport, RustRaftFaultScenario, RustRaftFaultScenarioEvidence,
     RustRaftFaultScenarioRequirement, RustRaftFaultScenarioResult,
 };

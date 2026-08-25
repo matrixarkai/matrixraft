@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::fault::{
-    rustraft_fault_harness_readiness_report, rustraft_baseline_raft_fault_scenarios,
+    rustraft_baseline_raft_fault_scenarios, rustraft_fault_harness_readiness_report,
     RustRaftFaultScenario, RustRaftFaultScenarioEvidence,
 };
 
