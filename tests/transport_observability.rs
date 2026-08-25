@@ -203,7 +203,10 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
         metrics.debug_snapshot_generated_at_unix_ms,
         "rustraft_debug_snapshot_generated_at_unix_ms"
     );
-    assert_eq!(metrics.debug_snapshot_age_ms, "rustraft_debug_snapshot_age_ms");
+    assert_eq!(
+        metrics.debug_snapshot_age_ms,
+        "rustraft_debug_snapshot_age_ms"
+    );
     assert_eq!(
         metrics.debug_snapshot_max_age_ms,
         "rustraft_debug_snapshot_max_age_ms"
@@ -224,7 +227,10 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
         metrics.debug_snapshot_low_fresh,
         "rustraft_debug_snapshot_low_fresh"
     );
-    assert_eq!(metrics.debug_snapshot_fresh, "rustraft_debug_snapshot_fresh");
+    assert_eq!(
+        metrics.debug_snapshot_fresh,
+        "rustraft_debug_snapshot_fresh"
+    );
 
     let api = rustraft_public_api_contract();
     assert!(api.rpc_messages.contains(&"PreVoteRequest".to_string()));
@@ -364,27 +370,21 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
             "dashboard missing metric {metric}"
         );
     }
-    assert!(expressions.contains(
-        &"sum by (issue) (rustraft_debug_bundle_validation_issue)"
-    ));
+    assert!(expressions.contains(&"sum by (issue) (rustraft_debug_bundle_validation_issue)"));
     assert!(expressions.contains(
         &"sum by (issue) (rustraft_debug_bundle_validation_issue{artifact=\"support_envelope\"})"
     ));
     assert!(expressions.contains(
         &"sum by (freshness_status) (rustraft_debug_bundle_validation_ready{artifact=\"support_envelope\"})"
     ));
-    assert!(expressions.contains(
-        &"sum by (target, severity, message) (rustraft_diagnostic_log_entry_total)"
-    ));
-    assert!(expressions.contains(
-        &"sum by (hint, component, severity) (rustraft_optimization_hint_total)"
-    ));
-    assert!(expressions.contains(
-        &"sum by (step, severity, target) (rustraft_operator_runbook_step_present)"
-    ));
-    assert!(expressions.contains(
-        &"sum by (issue) (rustraft_observability_provisioning_validation_issue)"
-    ));
+    assert!(expressions
+        .contains(&"sum by (target, severity, message) (rustraft_diagnostic_log_entry_total)"));
+    assert!(expressions
+        .contains(&"sum by (hint, component, severity) (rustraft_optimization_hint_total)"));
+    assert!(expressions
+        .contains(&"sum by (step, severity, target) (rustraft_operator_runbook_step_present)"));
+    assert!(expressions
+        .contains(&"sum by (issue) (rustraft_observability_provisioning_validation_issue)"));
 
     let json = rustraft_grafana_dashboard_json();
     let parsed: Value = serde_json::from_str(&json).expect("dashboard json");
@@ -444,9 +444,9 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     assert!(json.contains(
         "rustraft_debug_bundle_validation_issue_total{artifact=\\\"support_envelope\\\"}"
     ));
-    assert!(json.contains(
-        "rustraft_debug_bundle_validation_issue{artifact=\\\"support_envelope\\\"}"
-    ));
+    assert!(
+        json.contains("rustraft_debug_bundle_validation_issue{artifact=\\\"support_envelope\\\"}")
+    );
     assert!(json.contains(
         "rustraft_debug_bundle_validation_first_issue{artifact=\\\"support_envelope\\\"}"
     ));
@@ -679,9 +679,7 @@ fn alert_rules_export_operator_contract_for_readiness_and_blockers() {
         "rustraft_debug_bundle_validation_ready{artifact=\\\"support_envelope\\\",support_envelope_severity=\\\"critical\\\"} == 0"
     ));
     assert!(json.contains("RustRaftDebugSnapshotStale"));
-    assert!(json.contains(
-        "rustraft_debug_snapshot_age_ms > rustraft_debug_snapshot_max_age_ms"
-    ));
+    assert!(json.contains("rustraft_debug_snapshot_age_ms > rustraft_debug_snapshot_max_age_ms"));
     assert!(json.contains("RustRaftDebugSnapshotFreshnessLow"));
     assert!(json.contains("rustraft_debug_snapshot_low_fresh == 0"));
     assert!(json.contains("RustRaftDebugSnapshotFreshnessLost"));
@@ -747,9 +745,9 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     assert!(refresh_debug_snapshot
         .validation
         .contains("rustraft_debug_snapshot_age_ms is below rustraft_debug_snapshot_max_age_ms"));
-    assert!(refresh_debug_snapshot
-        .validation
-        .contains("rustraft_debug_snapshot_remaining_fresh_ms is above rustraft_debug_snapshot_low_fresh_ms"));
+    assert!(refresh_debug_snapshot.validation.contains(
+        "rustraft_debug_snapshot_remaining_fresh_ms is above rustraft_debug_snapshot_low_fresh_ms"
+    ));
     assert!(refresh_debug_snapshot
         .validation
         .contains("rustraft_debug_snapshot_low_fresh is 1"));
@@ -931,15 +929,13 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     assert!(dashboard_json.contains("Support Envelope Validation Issues"));
     assert!(dashboard_json.contains("Support Envelope Issue Breakdown"));
     assert!(dashboard_json.contains("Support Envelope First Issue"));
-    assert!(dashboard_json.contains(
-        "rustraft_debug_bundle_validation_ready{artifact=\\\"support_envelope\\\"}"
-    ));
+    assert!(dashboard_json
+        .contains("rustraft_debug_bundle_validation_ready{artifact=\\\"support_envelope\\\"}"));
     assert!(dashboard_json.contains(
         "rustraft_debug_bundle_validation_issue_total{artifact=\\\"support_envelope\\\"}"
     ));
-    assert!(dashboard_json.contains(
-        "rustraft_debug_bundle_validation_issue{artifact=\\\"support_envelope\\\"}"
-    ));
+    assert!(dashboard_json
+        .contains("rustraft_debug_bundle_validation_issue{artifact=\\\"support_envelope\\\"}"));
     assert!(dashboard_json.contains(
         "rustraft_debug_bundle_validation_first_issue{artifact=\\\"support_envelope\\\"}"
     ));
@@ -947,22 +943,16 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     assert!(dashboard_json.contains("sum by (support_envelope_status)"));
     assert!(dashboard_json.contains("Support Envelope Severity"));
     assert!(dashboard_json.contains("sum by (support_envelope_severity)"));
-    assert!(dashboard_json.contains(
-        "follow inspect_error_diagnostics when errors appear"
-    ));
-    assert!(dashboard_json.contains(
-        "target, severity, and message for inspect_error_diagnostics"
-    ));
-    assert!(dashboard_json.contains(
-        "operator triage summary for inspect_error_diagnostics"
-    ));
-    assert!(dashboard_json.contains("When it drops to 0, follow resolve_critical_optimization_hints"));
-    assert!(dashboard_json.contains(
-        "drive resolve_critical_optimization_hints before rollout"
-    ));
-    assert!(dashboard_json.contains(
-        "operator triage summary for resolve_critical_optimization_hints"
-    ));
+    assert!(dashboard_json.contains("follow inspect_error_diagnostics when errors appear"));
+    assert!(dashboard_json.contains("target, severity, and message for inspect_error_diagnostics"));
+    assert!(dashboard_json.contains("operator triage summary for inspect_error_diagnostics"));
+    assert!(
+        dashboard_json.contains("When it drops to 0, follow resolve_critical_optimization_hints")
+    );
+    assert!(dashboard_json.contains("drive resolve_critical_optimization_hints before rollout"));
+    assert!(
+        dashboard_json.contains("operator triage summary for resolve_critical_optimization_hints")
+    );
     assert_eq!(
         provisioning.sample_artifact_command,
         "cargo run --example debug_artifacts"
@@ -980,12 +970,10 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     assert!(json.contains("RustRaftDebugSnapshotFreshnessLost"));
     assert!(json.contains("configured freshness window"));
     assert!(json.contains("rustraft_debug_snapshot_fresh is 1"));
-    assert!(json.contains(
-        "rustraft_debug_snapshot_age_ms is below rustraft_debug_snapshot_max_age_ms"
-    ));
-    assert!(json.contains(
-        "rustraft_debug_snapshot_stale_after_unix_ms is in the future"
-    ));
+    assert!(
+        json.contains("rustraft_debug_snapshot_age_ms is below rustraft_debug_snapshot_max_age_ms")
+    );
+    assert!(json.contains("rustraft_debug_snapshot_stale_after_unix_ms is in the future"));
     assert!(json.contains(
         "rustraft_debug_snapshot_remaining_fresh_ms is above rustraft_debug_snapshot_low_fresh_ms"
     ));
@@ -1006,9 +994,9 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     assert!(json.contains("provisioning_runbook_prometheus"));
     assert!(json.contains("support_envelope_validation"));
     assert!(json.contains("support_envelope_validation_prometheus"));
-    assert!(json.contains(
-        "rustraft_debug_bundle_validation_ready{artifact=\\\"support_envelope\\\"}"
-    ));
+    assert!(
+        json.contains("rustraft_debug_bundle_validation_ready{artifact=\\\"support_envelope\\\"}")
+    );
     assert!(json.contains("debug_snapshot_low_fresh is true"));
     assert!(json.contains("debug_snapshot_fresh is true"));
 
@@ -1074,9 +1062,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         &escaped_issue_validation,
         &[("service", "raft\\b")],
     );
-    assert!(escaped_issue_metrics
-        .text
-        .contains("service=\"raft\\\\b\""));
+    assert!(escaped_issue_metrics.text.contains("service=\"raft\\\\b\""));
     assert!(escaped_issue_metrics
         .text
         .contains("issue=\"issue\\\"with\\\\escape\""));
@@ -1118,8 +1104,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     stale_artifacts
         .prometheus_artifact_names
         .retain(|name| name != "provisioning_runbook_prometheus");
-    let stale_artifacts_validation =
-        rustraft_validate_observability_provisioning(&stale_artifacts);
+    let stale_artifacts_validation = rustraft_validate_observability_provisioning(&stale_artifacts);
     assert!(!stale_artifacts_validation.ready);
     assert!(stale_artifacts_validation
         .issues

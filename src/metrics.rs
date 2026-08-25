@@ -221,8 +221,7 @@ pub fn rustraft_metric_names() -> RustRaftMetricNames {
         debug_snapshot_max_age_ms: "rustraft_debug_snapshot_max_age_ms".to_string(),
         debug_snapshot_stale_after_unix_ms: "rustraft_debug_snapshot_stale_after_unix_ms"
             .to_string(),
-        debug_snapshot_remaining_fresh_ms: "rustraft_debug_snapshot_remaining_fresh_ms"
-            .to_string(),
+        debug_snapshot_remaining_fresh_ms: "rustraft_debug_snapshot_remaining_fresh_ms".to_string(),
         debug_snapshot_low_fresh_ms: "rustraft_debug_snapshot_low_fresh_ms".to_string(),
         debug_snapshot_low_fresh: "rustraft_debug_snapshot_low_fresh".to_string(),
         debug_snapshot_fresh: "rustraft_debug_snapshot_fresh".to_string(),
@@ -521,7 +520,8 @@ pub fn rustraft_observability_provisioning_runbook_steps() -> Vec<RustRaftOperat
         hint_count: 2,
         hints: vec![],
     };
-    let mut steps = rustraft_operator_runbook_steps(&triage, &optimization, &rustraft_alert_rules());
+    let mut steps =
+        rustraft_operator_runbook_steps(&triage, &optimization, &rustraft_alert_rules());
     steps.push(rustraft_runbook_step(
         "refresh_debug_snapshot",
         "warning",
@@ -778,14 +778,10 @@ pub fn rustraft_validate_debug_snapshot(
         }
     }
     for hint in &snapshot.optimization.hints {
-        if !snapshot
-            .optimization_prometheus
-            .text
-            .contains(&format!(
-                "hint=\"{}\"",
-                escape_prometheus_label_value(hint.id.as_str())
-            ))
-        {
+        if !snapshot.optimization_prometheus.text.contains(&format!(
+            "hint=\"{}\"",
+            escape_prometheus_label_value(hint.id.as_str())
+        )) {
             issues.push("prometheus_hint_metric_missing".to_string());
         }
     }
@@ -1719,12 +1715,7 @@ pub fn rustraft_debug_snapshot_metadata_prometheus(
         labels,
         generated_at_unix_ms,
     );
-    push_metric(
-        &mut text,
-        &metrics.debug_snapshot_age_ms,
-        labels,
-        age_ms,
-    );
+    push_metric(&mut text, &metrics.debug_snapshot_age_ms, labels, age_ms);
     push_metric(
         &mut text,
         &metrics.debug_snapshot_max_age_ms,

@@ -3,10 +3,9 @@
 
 use matrixraft::benchmark::{
     rustraft_assert_production_baseline_raft_parity,
-    rustraft_assert_production_baseline_raft_summary,
-    rustraft_find_or_build_baseline_raft_harness, rustraft_find_baseline_raft_harness,
-    rustraft_probe_baseline_raft_native_benchmark, rustraft_baseline_raft_benchmark_evidence,
-    rustraft_baseline_raft_benchmark_failure_summary,
+    rustraft_assert_production_baseline_raft_summary, rustraft_baseline_raft_benchmark_evidence,
+    rustraft_baseline_raft_benchmark_failure_summary, rustraft_find_baseline_raft_harness,
+    rustraft_find_or_build_baseline_raft_harness, rustraft_probe_baseline_raft_native_benchmark,
     rustraft_run_baseline_raft_parity_benchmark,
     rustraft_validate_production_baseline_raft_benchmark_options, RustRaftBenchmarkEngine,
     RustRaftBenchmarkEngineSource, RustRaftBenchmarkHarnessKind, RustRaftBenchmarkOptions,
@@ -1460,8 +1459,7 @@ fn production_benchmark_rejects_stale_report_and_summary_timestamps() {
         rustraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.generated_at_unix_ms = 1;
 
-    let error =
-        rustraft_assert_production_baseline_raft_parity(&report).expect_err("stale report");
+    let error = rustraft_assert_production_baseline_raft_parity(&report).expect_err("stale report");
     assert!(error.contains("benchmark:report_generated_at_stale"));
 
     let summary = rustraft_baseline_raft_benchmark_failure_summary(&report);
@@ -2704,9 +2702,8 @@ JSON
     assert_eq!(sample.build_profile, "debug");
     assert!(!sample.correctness_passed);
     assert!(sample.blockers.iter().any(|blocker| {
-        blocker.contains(
-            "benchmark:real_baseline_raft_harness_binary_path_mismatch:single_key_writes",
-        )
+        blocker
+            .contains("benchmark:real_baseline_raft_harness_binary_path_mismatch:single_key_writes")
     }));
     assert!(sample.blockers.iter().any(|blocker| {
         blocker.contains(
@@ -2840,9 +2837,8 @@ JSON
         )
     }));
     assert!(sample.blockers.iter().any(|blocker| {
-        blocker.contains(
-            "benchmark:real_baseline_raft_harness_node_count_mismatch:batched_writes:1:5",
-        )
+        blocker
+            .contains("benchmark:real_baseline_raft_harness_node_count_mismatch:batched_writes:1:5")
     }));
     assert!(sample.blockers.iter().any(|blocker| {
         blocker.contains(
@@ -2853,9 +2849,13 @@ JSON
         .blockers
         .iter()
         .any(|blocker| blocker.contains("benchmark:real_baseline_raft_harness_p50_latency_zero")));
-    assert!(sample.blockers.iter().any(
-        |blocker| blocker.contains("benchmark:real_baseline_raft_harness_throughput_invalid")
-    ));
+    assert!(
+        sample
+            .blockers
+            .iter()
+            .any(|blocker| blocker
+                .contains("benchmark:real_baseline_raft_harness_throughput_invalid"))
+    );
 
     let _ = fs::remove_dir_all(root);
 }

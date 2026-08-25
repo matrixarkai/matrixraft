@@ -2,8 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::benchmark::{
-    rustraft_assert_production_baseline_raft_parity, rustraft_find_baseline_raft_harness,
-    rustraft_baseline_raft_benchmark_failure_summary,
+    rustraft_assert_production_baseline_raft_parity,
+    rustraft_baseline_raft_benchmark_failure_summary, rustraft_find_baseline_raft_harness,
     rustraft_run_baseline_raft_parity_benchmark,
     rustraft_validate_production_baseline_raft_benchmark_options, RustRaftBenchmarkFailureSummary,
     RustRaftBenchmarkOptions, RustRaftExternalBaselineRaftRunner, RustRaftRuntimeBenchmarkRunner,

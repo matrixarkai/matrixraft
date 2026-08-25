@@ -171,9 +171,9 @@ pub fn rustraft_production_readiness_input_with_benchmark_artifacts(
     report: &RustRaftBenchmarkReport,
     summary: &RustRaftBenchmarkFailureSummary,
 ) -> Result<RustRaftProductionReadinessInput, String> {
-    input.baseline_raft_benchmark = Some(
-        rustraft_baseline_raft_benchmark_evidence_from_artifacts(report, summary)?,
-    );
+    input.baseline_raft_benchmark = Some(rustraft_baseline_raft_benchmark_evidence_from_artifacts(
+        report, summary,
+    )?);
     Ok(input)
 }
 
@@ -1638,8 +1638,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 workload.workload.id()
             ));
         }
-        if workload.baseline_raft_engine_source != RustRaftBenchmarkEngineSource::RealBaselineRaft
-        {
+        if workload.baseline_raft_engine_source != RustRaftBenchmarkEngineSource::RealBaselineRaft {
             blockers.push(format!(
                 "benchmark:summary_real_baseline_raft_missing:{}",
                 workload.workload.id()
@@ -1688,9 +1687,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 workload.rustraft_benchmark_run_id
             ));
         }
-        if workload.baseline_raft_implementation
-            != RustRaftBenchmarkImplementation::BaselineRaft
-        {
+        if workload.baseline_raft_implementation != RustRaftBenchmarkImplementation::BaselineRaft {
             blockers.push(format!(
                 "benchmark:summary_baseline_raft_implementation_mismatch:{}:{}:baseline_raft",
                 workload.workload.id(),
@@ -1819,8 +1816,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 summary.options.node_count
             ));
         }
-        if workload.baseline_raft_iterations_per_workload
-            != summary.options.iterations_per_workload
+        if workload.baseline_raft_iterations_per_workload != summary.options.iterations_per_workload
         {
             blockers.push(format!(
                 "benchmark:summary_baseline_raft_iterations_mismatch:{}:{}:{}",
@@ -1869,8 +1865,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 summary.options.payload_size_bytes
             ));
         }
-        if workload.baseline_raft_timed_iteration_count != summary.options.iterations_per_workload
-        {
+        if workload.baseline_raft_timed_iteration_count != summary.options.iterations_per_workload {
             blockers.push(format!(
                 "benchmark:summary_baseline_raft_timed_iteration_count_mismatch:{}:{}:{}",
                 workload.workload.id(),
@@ -2309,8 +2304,7 @@ pub fn rustraft_baseline_raft_benchmark_evidence(
         });
     let baseline_raft_reference = has_required_workloads
         && report.comparisons.iter().all(|comparison| {
-            comparison.baseline_raft.implementation
-                == RustRaftBenchmarkImplementation::BaselineRaft
+            comparison.baseline_raft.implementation == RustRaftBenchmarkImplementation::BaselineRaft
         });
     let rustraft_rust_candidate = has_required_workloads
         && report.comparisons.iter().all(|comparison| {
@@ -2351,8 +2345,7 @@ pub fn rustraft_baseline_raft_benchmark_evidence(
                 comparison.workload.id()
             ));
         }
-        if comparison.baseline_raft.implementation
-            != RustRaftBenchmarkImplementation::BaselineRaft
+        if comparison.baseline_raft.implementation != RustRaftBenchmarkImplementation::BaselineRaft
         {
             let blocker = format!(
                 "{}:benchmark:baseline_raft_implementation_mismatch:{}:baseline_raft",
@@ -3527,8 +3520,7 @@ fn classify_benchmark_blocker(
         || blocker.contains("benchmark:summary_rustraft_operations_per_timed_iteration_mismatch")
         || blocker.contains("benchmark:summary_baseline_raft_total_duration_zero")
         || blocker.contains("benchmark:summary_rustraft_total_duration_zero")
-        || blocker
-            .contains("benchmark:summary_baseline_raft_total_duration_below_timed_iterations")
+        || blocker.contains("benchmark:summary_baseline_raft_total_duration_below_timed_iterations")
         || blocker.contains("benchmark:summary_rustraft_total_duration_below_timed_iterations")
         || blocker.contains("benchmark:summary_baseline_raft_throughput_duration_mismatch")
         || blocker.contains("benchmark:summary_rustraft_throughput_duration_mismatch")

@@ -2,7 +2,10 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    fault, rustraft_admin_status_surface_evidence, rustraft_capability_evidence_from_fields,
+    fault, rustraft_admin_status_surface_evidence,
+    rustraft_baseline_raft_operational_evidence_bundle,
+    rustraft_baseline_raft_runtime_capability_prometheus,
+    rustraft_baseline_raft_runtime_capability_report, rustraft_capability_evidence_from_fields,
     rustraft_cross_plane_process_evidence_artifact,
     rustraft_cross_plane_process_evidence_prometheus,
     rustraft_cross_plane_process_evidence_summary,
@@ -12,17 +15,14 @@ use matrixraft::{
     rustraft_membership_semantics_evidence_artifact, rustraft_meta_process_rollout_blockers,
     rustraft_meta_strict_process_rollout_validated, rustraft_named_readiness_blockers,
     rustraft_process_readiness_blocker, rustraft_production_readiness_report,
-    rustraft_read_safety_evidence_artifact, rustraft_baseline_raft_operational_evidence_bundle,
-    rustraft_baseline_raft_runtime_capability_prometheus,
-    rustraft_baseline_raft_runtime_capability_report,
-    rustraft_replication_pipeline_evidence_artifact, rustraft_require_production_ready,
-    rustraft_runtime_capability_report_from_evidence,
+    rustraft_read_safety_evidence_artifact, rustraft_replication_pipeline_evidence_artifact,
+    rustraft_require_production_ready, rustraft_runtime_capability_report_from_evidence,
     rustraft_snapshot_lifecycle_evidence_artifact,
+    rustraft_validate_baseline_raft_operational_evidence_bundle,
     rustraft_validate_cross_plane_process_evidence_artifact, rustraft_validate_deployment_mode,
     rustraft_validate_deployment_readiness,
     rustraft_validate_membership_semantics_evidence_artifact,
     rustraft_validate_read_safety_evidence_artifact,
-    rustraft_validate_baseline_raft_operational_evidence_bundle,
     rustraft_validate_replication_pipeline_evidence_artifact,
     rustraft_validate_snapshot_lifecycle_evidence_artifact,
     rustraft_validate_wal_lifecycle_evidence_artifact, rustraft_wal_lifecycle_evidence_artifact,
@@ -1491,9 +1491,7 @@ fn baseline_raft_runtime_capability_prometheus_exports_generic_metrics() {
 
     assert_eq!(metrics.format, "prometheus_text_v0.0.4");
     assert!(metrics.metric_count > report.capability_evidence.len() as u64);
-    assert!(metrics
-        .text
-        .contains("# HELP rustraft_baseline_raft_ready"));
+    assert!(metrics.text.contains("# HELP rustraft_baseline_raft_ready"));
     assert!(metrics.text.contains(
         "rustraft_baseline_raft_ready{plane=\"data_node\",cluster=\"a\\\"b\\\\c\\n\"} 0"
     ));

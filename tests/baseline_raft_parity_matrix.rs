@@ -2,9 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_parity_report, rustraft_baseline_raft_parity_matrix,
-    rustraft_baseline_raft_reference_policy, RustRaftReadinessSnapshot,
-    RustRaftBaselineRaftParityStatus,
+    rustraft_baseline_raft_parity_matrix, rustraft_baseline_raft_reference_policy,
+    rustraft_parity_report, RustRaftBaselineRaftParityStatus, RustRaftReadinessSnapshot,
 };
 
 fn ready_snapshot() -> RustRaftReadinessSnapshot {
