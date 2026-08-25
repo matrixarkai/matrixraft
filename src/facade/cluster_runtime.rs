@@ -2551,7 +2551,7 @@ impl RaftCluster {
                 continue;
             }
             let response = if let Some(pipeline) = self.peer_pipelines.get_mut(&node_id) {
-                pipeline.queue_append(entry.clone())?;
+                pipeline.queue_append(&entry)?;
                 let _ = pipeline.flush_append_batch(64, self.config.max_payload_bytes.max(1));
                 if node.healthy {
                     let match_index = node.match_index();
@@ -5025,7 +5025,7 @@ impl RaftCluster {
         self.peer_pipelines
             .get_mut(&peer_id)
             .ok_or(RaftError::NodeNotFound(peer_id))?
-            .receive_out_of_order(entry)
+            .receive_out_of_order(&entry)
     }
 
     pub fn expire_peer_reorder_queue(&mut self, peer_id: RustRaftNodeId) -> Result<u64, RaftError> {

@@ -196,10 +196,10 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
     );
     pipeline.set_progress_state(RustRaftPeerProgressState::Replicate);
 
-    pipeline.queue_append(entry(1, b"one")).expect("queue one");
-    pipeline.queue_append(entry(2, b"two")).expect("queue two");
+    pipeline.queue_append(&entry(1, b"one")).expect("queue one");
+    pipeline.queue_append(&entry(2, b"two")).expect("queue two");
     pipeline
-        .queue_append(entry(3, b"three"))
+        .queue_append(&entry(3, b"three"))
         .expect("queue three");
 
     let flushed = pipeline.flush_append_batch(3, 1024);
@@ -266,7 +266,7 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
     assert_eq!(pipeline.status().retry_attempts, 0);
 
     pipeline
-        .queue_append(entry(4, b"four"))
+        .queue_append(&entry(4, b"four"))
         .expect("queue four");
     assert_eq!(pipeline.flush_append_window().len(), 1);
     assert_eq!(pipeline.status().inflight_entries, 1);
@@ -279,10 +279,10 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
 
     let mut probing = RaftReplicationPipeline::new(4, 7, RustRaftPipelineLimits::default());
     probing
-        .queue_append(entry(7, b"seven"))
+        .queue_append(&entry(7, b"seven"))
         .expect("queue probe");
     probing
-        .queue_append(entry(8, b"eight"))
+        .queue_append(&entry(8, b"eight"))
         .expect("queue second probe");
     let probe_flush = probing.flush_append_batch(4, 1024);
     assert_eq!(probe_flush.len(), 1);
@@ -318,8 +318,8 @@ fn replication_pipeline_pauses_and_resumes_progress_like_matrixraft() {
             reorder_timeout_us: 10,
         },
     );
-    probe.queue_append(entry(1, b"a")).expect("queue 1");
-    probe.queue_append(entry(2, b"b")).expect("queue 2");
+    probe.queue_append(&entry(1, b"a")).expect("queue 1");
+    probe.queue_append(&entry(2, b"b")).expect("queue 2");
     assert_eq!(probe.progress_state(), RustRaftPeerProgressState::Probe);
     assert_eq!(probe.flush_append_batch(1, 256).len(), 1);
     assert!(probe.is_paused());
@@ -343,7 +343,7 @@ fn replication_pipeline_pauses_and_resumes_progress_like_matrixraft() {
     assert_eq!(probe.progress_state(), RustRaftPeerProgressState::Replicate);
     assert!(probe.no_inflights());
 
-    probe.queue_append(entry(3, b"c")).expect("queue 3");
+    probe.queue_append(&entry(3, b"c")).expect("queue 3");
     assert_eq!(probe.flush_append_window().len(), 1);
     assert!(probe
         .handle_append_response(&RustRaftAppendEntriesResponse {
@@ -362,7 +362,7 @@ fn replication_pipeline_pauses_and_resumes_progress_like_matrixraft() {
 
     let mut replicate = RaftReplicationPipeline::new(3, 1, small_limits());
     replicate.set_progress_state(RustRaftPeerProgressState::Replicate);
-    replicate.queue_append(entry(1, b"a")).expect("queue");
+    replicate.queue_append(&entry(1, b"a")).expect("queue");
     assert_eq!(replicate.flush_append_window().len(), 1);
     assert!(replicate.is_paused());
     assert!(!replicate.no_inflights());
@@ -378,7 +378,7 @@ fn replication_pipeline_pauses_and_resumes_progress_like_matrixraft() {
 #[test]
 fn heartbeat_response_resumes_paused_peer_like_matrixraft() {
     let mut probe = RaftReplicationPipeline::new(2, 1, small_limits());
-    probe.queue_append(entry(1, b"a")).expect("queue append");
+    probe.queue_append(&entry(1, b"a")).expect("queue append");
     assert_eq!(probe.flush_append_batch(1, 1024).len(), 1);
     assert!(probe.is_paused());
 
@@ -392,7 +392,7 @@ fn heartbeat_response_resumes_paused_peer_like_matrixraft() {
 #[test]
 fn stale_success_does_not_unpause_or_free_inflight_like_matrixraft() {
     let mut probe = RaftReplicationPipeline::new(2, 5, RustRaftPipelineLimits::default());
-    probe.queue_append(entry(5, b"five")).expect("queue probe");
+    probe.queue_append(&entry(5, b"five")).expect("queue probe");
     assert_eq!(probe.flush_append_batch(1, 1024).len(), 1);
     assert!(probe.is_paused());
 
@@ -416,7 +416,7 @@ fn stale_success_does_not_unpause_or_free_inflight_like_matrixraft() {
     let mut replicate = RaftReplicationPipeline::new(3, 5, small_limits());
     replicate.set_progress_state(RustRaftPeerProgressState::Replicate);
     replicate
-        .queue_append(entry(5, b"five"))
+        .queue_append(&entry(5, b"five"))
         .expect("queue replicate");
     assert_eq!(replicate.flush_append_window().len(), 1);
     assert!(replicate.is_paused());
@@ -508,7 +508,7 @@ fn replicate_rejection_falls_back_to_matched_boundary_like_matrixraft() {
     assert_eq!(pipeline.status().next_index, 9);
 
     pipeline
-        .queue_append(entry(9, b"next"))
+        .queue_append(&entry(9, b"next"))
         .expect("queue next");
     assert_eq!(pipeline.flush_append_window().len(), 1);
     assert!(pipeline
@@ -574,7 +574,7 @@ fn replication_pipeline_enforces_windows_and_memory_backpressure() {
     let mut pipeline = RaftReplicationPipeline::new(2, 1, small_limits());
 
     pipeline
-        .queue_append(entry(1, b"12345678"))
+        .queue_append(&entry(1, b"12345678"))
         .expect("queue first");
     let flushed = pipeline.flush_append_window();
     assert_eq!(flushed.len(), 1);
@@ -582,9 +582,9 @@ fn replication_pipeline_enforces_windows_and_memory_backpressure() {
     assert_eq!(pipeline.status().inflight_bytes, 8);
 
     pipeline
-        .queue_append(entry(2, b"abcd"))
+        .queue_append(&entry(2, b"abcd"))
         .expect("queue second");
-    assert!(pipeline.queue_append(entry(3, b"efgh")).is_err());
+    assert!(pipeline.queue_append(&entry(3, b"efgh")).is_err());
     assert_eq!(pipeline.status().append_queue_depth, 1);
     assert_eq!(pipeline.status().apply_backpressure_rejections, 1);
 
@@ -618,9 +618,9 @@ fn replication_pipeline_enforces_windows_and_memory_backpressure() {
         },
     );
     memory_limited
-        .queue_append(entry(1, b"12345678"))
+        .queue_append(&entry(1, b"12345678"))
         .expect("queue memory baseline");
-    assert!(memory_limited.queue_append(entry(2, b"abcd")).is_err());
+    assert!(memory_limited.queue_append(&entry(2, b"abcd")).is_err());
     assert_eq!(memory_limited.status().memory_backpressure_rejections, 1);
 }
 
@@ -629,24 +629,24 @@ fn replication_pipeline_drains_and_expires_reorder_queue() {
     let mut pipeline = RaftReplicationPipeline::new(2, 1, small_limits());
 
     pipeline
-        .receive_out_of_order(entry(3, b"three"))
+        .receive_out_of_order(&entry(3, b"three"))
         .expect("queue out of order");
     assert_eq!(pipeline.status().reorder_queue_depth, 1);
 
     pipeline
-        .receive_out_of_order(entry(1, b"one"))
+        .receive_out_of_order(&entry(1, b"one"))
         .expect("accept next index");
     assert_eq!(pipeline.status().match_index, 1);
     assert_eq!(pipeline.status().reorder_queue_depth, 1);
 
     pipeline
-        .receive_out_of_order(entry(2, b"two"))
+        .receive_out_of_order(&entry(2, b"two"))
         .expect("drain through queued three");
     assert_eq!(pipeline.status().match_index, 3);
     assert_eq!(pipeline.status().reorder_queue_depth, 0);
 
     pipeline
-        .receive_out_of_order(entry(5, b"five"))
+        .receive_out_of_order(&entry(5, b"five"))
         .expect("queue gap");
     assert_eq!(pipeline.expire_reorder_queue(), 1);
     assert_eq!(pipeline.status().reorder_entry_timeouts, 1);
