@@ -470,7 +470,10 @@ impl RaftReplicationPipeline {
         while !self.is_paused()
             && self.status.inflight_entries < self.limits.max_inflights_replicate
         {
-            let Some(first_log_id) = self.append_queue.front().map(|queued| queued.log_id.clone())
+            let Some(first_log_id) = self
+                .append_queue
+                .front()
+                .map(|queued| queued.log_id.clone())
             else {
                 break;
             };
