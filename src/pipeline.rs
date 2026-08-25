@@ -3,7 +3,7 @@
 
 //! Replication pipeline evidence and BaselineRaft-style backpressure validation.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -295,16 +295,25 @@ pub fn rustraft_apply_batch_outcome_like_matrixraft(
     }
 }
 
+/// What the pipeline needs to remember about a queued append: where it sits in
+/// the log and how much it weighs. The payload itself stays in the log, so
+/// queueing an entry for N peers no longer copies it N times.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RaftQueuedAppend {
+    log_id: RustRaftLogId,
+    bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RaftReplicationPipeline {
     peer_id: RustRaftNodeId,
     limits: RustRaftPipelineLimits,
     status: RustRaftPeerPipelineStatus,
-    append_queue: VecDeque<RustRaftLogEntry>,
+    append_queue: VecDeque<RaftQueuedAppend>,
     append_queue_bytes: u64,
     inflight: VecDeque<RaftInflightAppend>,
     apply_inflight: VecDeque<RaftApplyInflightTask>,
-    reorder_queue: BTreeMap<RustRaftLogIndex, RustRaftLogEntry>,
+    reorder_queue: BTreeSet<RustRaftLogIndex>,
     snapshot_transfer: Option<RaftSnapshotTransferState>,
 }
 
@@ -322,7 +331,7 @@ impl RaftReplicationPipeline {
             append_queue_bytes: 0,
             inflight: VecDeque::new(),
             apply_inflight: VecDeque::new(),
-            reorder_queue: BTreeMap::new(),
+            reorder_queue: BTreeSet::new(),
             snapshot_transfer: None,
         }
     }
@@ -407,7 +416,7 @@ impl RaftReplicationPipeline {
         }
     }
 
-    pub fn queue_append(&mut self, entry: RustRaftLogEntry) -> Result<(), RaftError> {
+    pub fn queue_append(&mut self, entry: &RustRaftLogEntry) -> Result<(), RaftError> {
         let bytes = entry.payload.len() as u64;
         if bytes > self.limits.max_apply_batch_bytes {
             self.status.oversized_log_rejections += 1;
@@ -429,7 +438,10 @@ impl RaftReplicationPipeline {
                 "replication memory backpressure limit reached".to_string(),
             ));
         }
-        self.append_queue.push_back(entry);
+        self.append_queue.push_back(RaftQueuedAppend {
+            log_id: entry.log_id.clone(),
+            bytes,
+        });
         self.append_queue_bytes = self.append_queue_bytes.saturating_add(bytes);
         self.status.append_queue_depth = self.append_queue.len() as u64;
         self.status.append_queue_max_depth = self
@@ -458,7 +470,10 @@ impl RaftReplicationPipeline {
         while !self.is_paused()
             && self.status.inflight_entries < self.limits.max_inflights_replicate
         {
-            let Some(first_log_id) = self.append_queue.front().map(|entry| entry.log_id.clone())
+            let Some(first_log_id) = self
+                .append_queue
+                .front()
+                .map(|queued| queued.log_id.clone())
             else {
                 break;
             };
@@ -466,10 +481,10 @@ impl RaftReplicationPipeline {
             let mut bytes = 0;
             let mut last_log_id = first_log_id.clone();
             while entry_count < max_entries {
-                let Some(entry) = self.append_queue.front().cloned() else {
+                let Some(queued) = self.append_queue.front() else {
                     break;
                 };
-                let entry_bytes = entry.payload.len() as u64;
+                let entry_bytes = queued.bytes;
                 if entry_count > 0 && bytes + entry_bytes > max_bytes {
                     break;
                 }
@@ -480,7 +495,7 @@ impl RaftReplicationPipeline {
                 }
                 bytes += entry_bytes;
                 entry_count += 1;
-                last_log_id = entry.log_id.clone();
+                last_log_id = queued.log_id.clone();
                 let _ = self.append_queue.pop_front().expect("front exists");
                 self.append_queue_bytes = self.append_queue_bytes.saturating_sub(entry_bytes);
             }
@@ -721,7 +736,7 @@ impl RaftReplicationPipeline {
         self.status.offline_timeout_reached = true;
     }
 
-    pub fn receive_out_of_order(&mut self, entry: RustRaftLogEntry) -> Result<(), RaftError> {
+    pub fn receive_out_of_order(&mut self, entry: &RustRaftLogEntry) -> Result<(), RaftError> {
         if entry.log_id.index < self.status.next_index {
             self.status.out_of_order_append_rejections += 1;
             return Err(RaftError::InvalidRequest(
@@ -746,7 +761,7 @@ impl RaftReplicationPipeline {
                 "reorder queue window is full".to_string(),
             ));
         }
-        self.reorder_queue.insert(entry.log_id.index, entry);
+        self.reorder_queue.insert(entry.log_id.index);
         self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
         Ok(())
     }
@@ -1009,9 +1024,9 @@ impl RaftReplicationPipeline {
     }
 
     fn drain_reorder_queue(&mut self) {
-        while let Some(entry) = self.reorder_queue.remove(&self.status.next_index) {
-            self.status.match_index = entry.log_id.index;
-            self.status.next_index = entry.log_id.index + 1;
+        while self.reorder_queue.remove(&self.status.next_index) {
+            self.status.match_index = self.status.next_index;
+            self.status.next_index = self.status.next_index.saturating_add(1);
         }
         self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
     }
