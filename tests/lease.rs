@@ -24,7 +24,7 @@ fn peers_with_roles(items: &[(u64, RustRaftReplicaRole)]) -> Vec<RustRaftLeasePe
 }
 
 #[test]
-fn leader_lease_renews_from_quorum_confirmations_like_matrixraft() {
+fn leader_lease_renews_from_quorum_confirmations() {
     let mut lease = RustRaftLeaderLease::new(1, 50);
     lease.update_members(voters(&[1, 2, 3]));
     lease.reset(1);

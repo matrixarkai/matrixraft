@@ -88,7 +88,7 @@ pub(crate) fn require_transport_validation(
     }
 }
 
-pub fn rustraft_validate_append_entries_request(
+pub fn matrixraft_validate_append_entries_request(
     request: &AppendEntriesRequest,
 ) -> RustRaftTransportValidationReport {
     let mut blockers = Vec::new();
@@ -114,7 +114,7 @@ pub fn rustraft_validate_append_entries_request(
     RustRaftTransportValidationReport::new("append_entries_request", blockers)
 }
 
-pub fn rustraft_validate_append_entries_response(
+pub fn matrixraft_validate_append_entries_response(
     response: &AppendEntriesResponse,
 ) -> RustRaftTransportValidationReport {
     let mut blockers = Vec::new();
@@ -128,7 +128,9 @@ pub fn rustraft_validate_append_entries_response(
     RustRaftTransportValidationReport::new("append_entries_response", blockers)
 }
 
-pub fn rustraft_validate_vote_request(request: &VoteRequest) -> RustRaftTransportValidationReport {
+pub fn matrixraft_validate_vote_request(
+    request: &VoteRequest,
+) -> RustRaftTransportValidationReport {
     let mut blockers = Vec::new();
     validate_positive_id(&mut blockers, "group_id", request.group_id);
     validate_positive_id(&mut blockers, "candidate_id", request.candidate_id);
@@ -138,7 +140,7 @@ pub fn rustraft_validate_vote_request(request: &VoteRequest) -> RustRaftTranspor
     RustRaftTransportValidationReport::new("vote_request", blockers)
 }
 
-pub fn rustraft_validate_vote_response(
+pub fn matrixraft_validate_vote_response(
     response: &VoteResponse,
 ) -> RustRaftTransportValidationReport {
     let mut blockers = Vec::new();
@@ -146,7 +148,7 @@ pub fn rustraft_validate_vote_response(
     RustRaftTransportValidationReport::new("vote_response", blockers)
 }
 
-pub fn rustraft_validate_install_snapshot_request(
+pub fn matrixraft_validate_install_snapshot_request(
     request: &InstallSnapshotRequest,
 ) -> RustRaftTransportValidationReport {
     let mut blockers = Vec::new();
@@ -166,7 +168,7 @@ pub fn rustraft_validate_install_snapshot_request(
     RustRaftTransportValidationReport::new("install_snapshot_request", blockers)
 }
 
-pub fn rustraft_validate_install_snapshot_response(
+pub fn matrixraft_validate_install_snapshot_response(
     response: &InstallSnapshotResponse,
 ) -> RustRaftTransportValidationReport {
     let mut blockers = Vec::new();
@@ -174,7 +176,7 @@ pub fn rustraft_validate_install_snapshot_response(
     RustRaftTransportValidationReport::new("install_snapshot_response", blockers)
 }
 
-pub fn rustraft_validate_read_index_request(
+pub fn matrixraft_validate_read_index_request(
     request: &ReadIndexRequest,
 ) -> RustRaftTransportValidationReport {
     let mut blockers = Vec::new();
@@ -183,7 +185,7 @@ pub fn rustraft_validate_read_index_request(
     RustRaftTransportValidationReport::new("read_index_request", blockers)
 }
 
-pub fn rustraft_validate_read_index_response(
+pub fn matrixraft_validate_read_index_response(
     response: &ReadIndexResponse,
 ) -> RustRaftTransportValidationReport {
     let mut blockers = Vec::new();
@@ -194,19 +196,19 @@ pub fn rustraft_validate_read_index_response(
     RustRaftTransportValidationReport::new("read_index_response", blockers)
 }
 
-pub fn rustraft_validate_tcp_transport_request(
+pub fn matrixraft_validate_tcp_transport_request(
     request: &TcpRaftTransportRequest,
 ) -> RustRaftTransportValidationReport {
     let mut report = match request {
         TcpRaftTransportRequest::AppendEntries { request, .. } => {
-            rustraft_validate_append_entries_request(request)
+            matrixraft_validate_append_entries_request(request)
         }
-        TcpRaftTransportRequest::Vote { request, .. } => rustraft_validate_vote_request(request),
+        TcpRaftTransportRequest::Vote { request, .. } => matrixraft_validate_vote_request(request),
         TcpRaftTransportRequest::InstallSnapshot { request, .. } => {
-            rustraft_validate_install_snapshot_request(request)
+            matrixraft_validate_install_snapshot_request(request)
         }
         TcpRaftTransportRequest::ReadIndex { request, .. } => {
-            rustraft_validate_read_index_request(request)
+            matrixraft_validate_read_index_request(request)
         }
         TcpRaftTransportRequest::Batch { requests } => {
             let mut blockers = Vec::new();
@@ -218,7 +220,7 @@ pub fn rustraft_validate_tcp_transport_request(
                     blockers.push(format!("batch request {index} must not be nested"));
                     continue;
                 }
-                let report = rustraft_validate_tcp_transport_request(request);
+                let report = matrixraft_validate_tcp_transport_request(request);
                 blockers.extend(
                     report
                         .blockers

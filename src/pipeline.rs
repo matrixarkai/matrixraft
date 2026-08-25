@@ -260,7 +260,7 @@ pub struct RustRaftApplyBatchOutcome {
     pub pending_entries: Vec<RustRaftLogEntry>,
 }
 
-pub fn rustraft_apply_batch_outcome_like_matrixraft(
+pub fn matrixraft_apply_batch_outcome(
     entries: &[RustRaftLogEntry],
     applied_count: usize,
     status: RustRaftApplyBatchStatus,
@@ -1210,7 +1210,7 @@ impl RustRaftPeerPipelineStatus {
     }
 }
 
-pub fn rustraft_peer_pipeline_status_from_observed(
+pub fn matrixraft_peer_pipeline_status_from_observed(
     observed: &RustRaftObservedPeerPipeline,
 ) -> RustRaftPeerPipelineStatus {
     RustRaftPeerPipelineStatus {
@@ -1296,7 +1296,7 @@ pub fn rustraft_peer_pipeline_status_from_observed(
     }
 }
 
-pub fn rustraft_pipeline_evidence(
+pub fn matrixraft_pipeline_evidence(
     peers: &[RustRaftPeerPipelineStatus],
     limits: RustRaftPipelineLimits,
 ) -> RustRaftPipelineEvidence {
@@ -1363,11 +1363,11 @@ pub fn rustraft_pipeline_evidence(
     }
 }
 
-pub fn rustraft_replication_pipeline_evidence_artifact(
+pub fn matrixraft_replication_pipeline_evidence_artifact(
     peers: Vec<RustRaftPeerPipelineStatus>,
     limits: RustRaftPipelineLimits,
 ) -> RustRaftReplicationPipelineEvidenceArtifact {
-    let evidence = rustraft_pipeline_evidence(&peers, limits);
+    let evidence = matrixraft_pipeline_evidence(&peers, limits);
     RustRaftReplicationPipelineEvidenceArtifact {
         schema: "rustraft.replication_pipeline_evidence.v1".to_string(),
         limits,
@@ -1376,11 +1376,11 @@ pub fn rustraft_replication_pipeline_evidence_artifact(
     }
 }
 
-pub fn rustraft_validate_replication_pipeline_evidence_artifact(
+pub fn matrixraft_validate_replication_pipeline_evidence_artifact(
     artifact: &RustRaftReplicationPipelineEvidenceArtifact,
 ) -> RustRaftReplicationPipelineEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.replication_pipeline_evidence.v1";
-    let recomputed = rustraft_pipeline_evidence(&artifact.peers, artifact.limits);
+    let recomputed = matrixraft_pipeline_evidence(&artifact.peers, artifact.limits);
     let peer_state_present =
         !artifact.peers.is_empty() && recomputed.per_peer_pipeline_state_present;
     let append_backpressure_enforced =

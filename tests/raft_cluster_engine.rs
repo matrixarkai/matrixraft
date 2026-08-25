@@ -92,7 +92,7 @@ fn cluster_start_campaigns_and_tracks_leader_term() {
 }
 
 #[test]
-fn initial_campaign_appends_noop_like_matrixraft() {
+fn initial_campaign_appends_noop() {
     let mut cluster = three_node_cluster();
 
     cluster.start().expect("cluster starts");
@@ -114,7 +114,7 @@ fn initial_campaign_appends_noop_like_matrixraft() {
 }
 
 #[test]
-fn campaign_on_current_leader_is_noop_like_matrixraft_admin_election() {
+fn campaign_on_current_leader_is_noop_admin_election() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.propose(b"base".to_vec()).expect("base append");
@@ -167,7 +167,7 @@ fn prohibits_election_blocks_normal_campaign_but_allows_forced_campaign() {
 }
 
 #[test]
-fn prohibits_election_does_not_reject_remote_votes_like_matrixraft() {
+fn prohibits_election_does_not_reject_remote_votes() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.propose(b"base".to_vec()).expect("base append");
@@ -250,7 +250,7 @@ fn timeout_now_campaigns_only_followers_like_baseline_raft() {
 }
 
 #[test]
-fn added_peer_catches_up_immediately_like_matrixraft() {
+fn added_peer_catches_up_immediately() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.propose(b"before-add".to_vec()).expect("propose");
@@ -285,7 +285,7 @@ fn added_peer_catches_up_immediately_like_matrixraft() {
 }
 
 #[test]
-fn commit_quorum_counts_stored_match_from_unhealthy_peer_like_matrixraft() {
+fn commit_quorum_counts_stored_match_from_unhealthy_peer() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     let leader = cluster.leader_id().expect("leader");
@@ -344,7 +344,7 @@ fn propose_replicates_to_quorum_and_advances_commit_and_apply() {
 }
 
 #[test]
-fn propose_preserves_command_entry_flag_like_matrixraft() {
+fn propose_preserves_command_entry_flag() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),
@@ -389,7 +389,7 @@ fn propose_preserves_command_entry_flag_like_matrixraft() {
 }
 
 #[test]
-fn membership_proposal_downgrades_second_unapplied_change_like_matrixraft() {
+fn membership_proposal_downgrades_second_unapplied_change() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),
@@ -510,7 +510,7 @@ fn witness_append_entries_store_command_entries_as_metadata_without_payload() {
 }
 
 #[test]
-fn membership_proposal_ignores_stale_expected_term_like_matrixraft_config_change() {
+fn membership_proposal_ignores_stale_expected_term_config_change() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -547,7 +547,7 @@ fn membership_proposal_ignores_stale_expected_term_like_matrixraft_config_change
 }
 
 #[test]
-fn rejected_apply_result_blocks_apply_until_snapshot_like_matrixraft() {
+fn rejected_apply_result_blocks_apply_until_snapshot() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -784,7 +784,7 @@ fn rejected_apply_result_blocks_apply_until_snapshot_like_matrixraft() {
 }
 
 #[test]
-fn snapshot_install_resets_membership_and_preserves_receiver_like_matrixraft() {
+fn snapshot_install_resets_membership_and_preserves_receiver() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
@@ -843,7 +843,7 @@ fn snapshot_install_resets_membership_and_preserves_receiver_like_matrixraft() {
 }
 
 #[test]
-fn stale_snapshot_rpc_is_acknowledged_without_install_like_matrixraft() {
+fn stale_snapshot_rpc_is_acknowledged_without_install() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.propose(b"committed".to_vec()).expect("propose");
@@ -907,7 +907,7 @@ fn stale_snapshot_rpc_is_acknowledged_without_install_like_matrixraft() {
 }
 
 #[test]
-fn snapshot_rpc_waits_for_apply_drain_like_matrixraft() {
+fn snapshot_rpc_waits_for_apply_drain() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.propose(b"first".to_vec()).expect("first propose");
@@ -963,7 +963,7 @@ fn snapshot_rpc_waits_for_apply_drain_like_matrixraft() {
 }
 
 #[test]
-fn compaction_waits_for_safe_apply_index_like_matrixraft() {
+fn compaction_waits_for_safe_apply_index() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.propose(b"first".to_vec()).expect("first propose");
@@ -1081,7 +1081,7 @@ fn compaction_waits_for_safe_apply_index_like_matrixraft() {
 }
 
 #[test]
-fn busy_propose_releases_safe_memory_like_matrixraft() {
+fn busy_propose_releases_safe_memory() {
     let config = RaftConfig {
         max_log_buffer_bytes: 9,
         ..Default::default()
@@ -1126,7 +1126,7 @@ fn busy_propose_releases_safe_memory_like_matrixraft() {
 }
 
 #[test]
-fn high_watermark_propose_releases_safe_memory_before_hard_busy_like_matrixraft() {
+fn high_watermark_propose_releases_safe_memory_before_hard_busy() {
     let config = RaftConfig {
         max_log_buffer_bytes: 9,
         ..Default::default()
@@ -1168,7 +1168,7 @@ fn high_watermark_propose_releases_safe_memory_before_hard_busy_like_matrixraft(
 }
 
 #[test]
-fn local_stabled_result_does_not_commit_without_quorum_like_matrixraft() {
+fn local_stabled_result_does_not_commit_without_quorum() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.set_node_healthy(2, false).expect("isolate node 2");
@@ -1222,7 +1222,7 @@ fn local_stabled_result_does_not_commit_without_quorum_like_matrixraft() {
 }
 
 #[test]
-fn busy_follower_append_caps_batch_like_matrixraft() {
+fn busy_follower_append_caps_batch() {
     let config = RaftConfig {
         max_log_buffer_bytes: 1,
         ..Default::default()
@@ -1294,7 +1294,7 @@ fn busy_follower_append_caps_batch_like_matrixraft() {
 }
 
 #[test]
-fn leader_apply_rejection_transfers_to_closest_follower_like_matrixraft() {
+fn leader_apply_rejection_transfers_to_closest_follower() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
@@ -1565,7 +1565,7 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
 }
 
 #[test]
-fn append_entries_caps_commit_to_matched_boundary_like_matrixraft() {
+fn append_entries_caps_commit_to_matched_boundary() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -1659,7 +1659,7 @@ fn append_entries_preserves_matching_suffix_like_baseline_raft() {
 }
 
 #[test]
-fn append_entries_reorder_queue_drains_adjacent_batches_like_matrixraft() {
+fn append_entries_reorder_queue_drains_adjacent_batches() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -1729,7 +1729,7 @@ fn append_entries_reorder_queue_drains_adjacent_batches_like_matrixraft() {
 }
 
 #[test]
-fn append_entries_reorder_queue_is_cleared_on_leader_change_like_matrixraft() {
+fn append_entries_reorder_queue_is_cleared_on_leader_change() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -1854,7 +1854,7 @@ fn append_entries_conflict_hint_skips_local_term_run_like_baseline_raft() {
 }
 
 #[test]
-fn duplicate_append_response_reports_packet_match_range_like_matrixraft() {
+fn duplicate_append_response_reports_packet_match_range() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -1914,7 +1914,7 @@ fn duplicate_append_response_reports_packet_match_range_like_matrixraft() {
 }
 
 #[test]
-fn conflict_truncation_clamps_read_index_current_term_floor_like_matrixraft() {
+fn conflict_truncation_clamps_read_index_current_term_floor() {
     let mut cluster = three_node_cluster();
     cluster
         .append_entries_to(
@@ -2059,7 +2059,7 @@ fn append_entries_conflict_truncation_resets_pending_membership_change_like_base
 }
 
 #[test]
-fn append_entries_conflict_truncation_restores_surviving_membership_change_like_matrixraft() {
+fn append_entries_conflict_truncation_restores_surviving_membership_change() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -2140,7 +2140,7 @@ fn append_entries_conflict_truncation_restores_surviving_membership_change_like_
 }
 
 #[test]
-fn append_entries_rejects_second_unapplied_membership_change_like_matrixraft() {
+fn append_entries_rejects_second_unapplied_membership_change() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
@@ -2264,7 +2264,7 @@ fn append_entries_rejects_second_unapplied_membership_change_like_matrixraft() {
 }
 
 #[test]
-fn witness_preserves_membership_change_payload_like_matrixraft() {
+fn witness_preserves_membership_change_payload() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),
@@ -2594,7 +2594,7 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
 }
 
 #[test]
-fn vote_requests_do_not_require_local_live_quorum_like_matrixraft() {
+fn vote_requests_do_not_require_local_live_quorum() {
     let mut cluster = five_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.set_leader_lease_valid(false);
@@ -2639,7 +2639,7 @@ fn vote_requests_do_not_require_local_live_quorum_like_matrixraft() {
 }
 
 #[test]
-fn startup_follower_lease_blocks_pre_vote_until_carried_duration_expires_like_matrixraft() {
+fn startup_follower_lease_blocks_pre_vote_until_carried_duration_expires() {
     let config = RaftConfig {
         last_follower_lease_ms: 25,
         ..Default::default()
@@ -2693,7 +2693,7 @@ fn startup_follower_lease_blocks_pre_vote_until_carried_duration_expires_like_ma
 }
 
 #[test]
-fn learners_do_not_vote_but_witnesses_do_like_matrixraft() {
+fn learners_do_not_vote_but_witnesses_do() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.propose(b"base".to_vec()).expect("base append");
@@ -2755,7 +2755,7 @@ fn learners_do_not_vote_but_witnesses_do_like_matrixraft() {
 }
 
 #[test]
-fn removed_peer_cannot_collect_votes_or_step_down_leader_like_matrixraft() {
+fn removed_peer_cannot_collect_votes_or_step_down_leader() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.propose(b"before-remove".to_vec()).expect("propose");
@@ -2846,7 +2846,7 @@ fn removed_peer_cannot_collect_votes_or_step_down_leader_like_matrixraft() {
 }
 
 #[test]
-fn removing_peer_drops_stale_vote_responses_like_matrixraft() {
+fn removing_peer_drops_stale_vote_responses() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),
@@ -2922,7 +2922,7 @@ fn removing_peer_drops_stale_vote_responses_like_matrixraft() {
 }
 
 #[test]
-fn stopped_leader_cannot_drive_append_or_snapshot_like_matrixraft() {
+fn stopped_leader_cannot_drive_append_or_snapshot() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.propose(b"before-stop".to_vec()).expect("propose");
@@ -2986,7 +2986,7 @@ fn stopped_leader_cannot_drive_append_or_snapshot_like_matrixraft() {
 }
 
 #[test]
-fn remove_and_readd_peer_drops_partial_snapshot_install_state_like_matrixraft() {
+fn remove_and_readd_peer_drops_partial_snapshot_install_state() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
@@ -3061,7 +3061,7 @@ fn remove_and_readd_peer_drops_partial_snapshot_install_state_like_matrixraft() 
 }
 
 #[test]
-fn remove_and_readd_peer_drops_pending_snapshot_install_state_like_matrixraft() {
+fn remove_and_readd_peer_drops_pending_snapshot_install_state() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
@@ -3128,7 +3128,7 @@ fn remove_and_readd_peer_drops_pending_snapshot_install_state_like_matrixraft() 
 }
 
 #[test]
-fn remove_and_readd_peer_drops_reordered_append_state_like_matrixraft() {
+fn remove_and_readd_peer_drops_reordered_append_state() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.propose(b"one".to_vec()).expect("base proposal");
@@ -3199,7 +3199,7 @@ fn remove_and_readd_peer_drops_reordered_append_state_like_matrixraft() {
 }
 
 #[test]
-fn snapshot_install_in_progress_ignores_new_snapshot_like_matrixraft() {
+fn snapshot_install_in_progress_ignores_new_snapshot() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     let first_meta = RustRaftSnapshotMeta {
@@ -3274,7 +3274,7 @@ fn snapshot_install_in_progress_ignores_new_snapshot_like_matrixraft() {
 }
 
 #[test]
-fn high_term_vote_responses_step_down_like_matrixraft() {
+fn high_term_vote_responses_step_down() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(2, true).expect("make node 2 leader");
@@ -3340,7 +3340,7 @@ fn high_term_vote_responses_step_down_like_matrixraft() {
 }
 
 #[test]
-fn vote_response_quorum_promotes_candidate_without_extra_term_like_matrixraft() {
+fn vote_response_quorum_promotes_candidate_without_extra_term() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -3383,7 +3383,7 @@ fn vote_response_quorum_promotes_candidate_without_extra_term_like_matrixraft() 
 }
 
 #[test]
-fn pre_vote_quorum_starts_real_vote_before_leader_like_matrixraft() {
+fn pre_vote_quorum_starts_real_vote_before_leader() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -3428,7 +3428,7 @@ fn pre_vote_quorum_starts_real_vote_before_leader_like_matrixraft() {
 }
 
 #[test]
-fn ignore_witness_drops_stale_witness_vote_responses_like_matrixraft() {
+fn ignore_witness_drops_stale_witness_vote_responses() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),
@@ -3559,7 +3559,7 @@ fn ignore_witness_keeps_matrixraft_rejection_threshold() {
 }
 
 #[test]
-fn high_term_append_entries_responses_step_down_like_matrixraft() {
+fn high_term_append_entries_responses_step_down() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(2, true).expect("make node 2 leader");
@@ -3615,7 +3615,7 @@ fn high_term_append_entries_responses_step_down_like_matrixraft() {
 }
 
 #[test]
-fn heartbeat_append_response_carries_snapshot_progress_like_matrixraft() {
+fn heartbeat_append_response_carries_snapshot_progress() {
     let mut cluster = RaftCluster::new(
         7,
         RustRaftConfig::default(),
@@ -3704,7 +3704,7 @@ fn heartbeat_append_response_carries_snapshot_progress_like_matrixraft() {
 }
 
 #[test]
-fn leader_transition_resets_peer_pipelines_like_matrixraft() {
+fn leader_transition_resets_peer_pipelines() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -3741,7 +3741,7 @@ fn leader_transition_resets_peer_pipelines_like_matrixraft() {
 }
 
 #[test]
-fn high_term_snapshot_request_updates_leader_like_matrixraft() {
+fn high_term_snapshot_request_updates_leader() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(2, true).expect("make node 2 leader");
@@ -3786,7 +3786,7 @@ fn high_term_snapshot_request_updates_leader_like_matrixraft() {
 }
 
 #[test]
-fn stale_term_snapshot_request_is_rejected_like_matrixraft() {
+fn stale_term_snapshot_request_is_rejected() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(2, true).expect("make node 2 leader");
@@ -3830,7 +3830,7 @@ fn stale_term_snapshot_request_is_rejected_like_matrixraft() {
 }
 
 #[test]
-fn high_term_snapshot_responses_step_down_like_matrixraft() {
+fn high_term_snapshot_responses_step_down() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(2, true).expect("make node 2 leader");
@@ -3877,7 +3877,7 @@ fn high_term_snapshot_responses_step_down_like_matrixraft() {
 }
 
 #[test]
-fn rejected_snapshot_response_triggers_fresh_snapshot_like_matrixraft() {
+fn rejected_snapshot_response_triggers_fresh_snapshot() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -3907,7 +3907,7 @@ fn rejected_snapshot_response_triggers_fresh_snapshot_like_matrixraft() {
 }
 
 #[test]
-fn stale_snapshot_ready_does_not_clear_active_trigger_like_matrixraft() {
+fn stale_snapshot_ready_does_not_clear_active_trigger() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -3930,7 +3930,7 @@ fn stale_snapshot_ready_does_not_clear_active_trigger_like_matrixraft() {
 }
 
 #[test]
-fn same_term_snapshot_response_finishes_send_and_resumes_catchup_like_matrixraft() {
+fn same_term_snapshot_response_finishes_send_and_resumes_catchup() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -3964,7 +3964,7 @@ fn same_term_snapshot_response_finishes_send_and_resumes_catchup_like_matrixraft
 }
 
 #[test]
-fn stopped_peer_responses_do_not_step_down_leader_like_matrixraft() {
+fn stopped_peer_responses_do_not_step_down_leader() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     let leader = cluster.leader_id().expect("leader");
@@ -4115,7 +4115,7 @@ fn read_index_and_lease_read_follow_leader_lease_and_apply_floor() {
 }
 
 #[test]
-fn append_entries_piggybacks_lease_epoch_like_matrixraft() {
+fn append_entries_piggybacks_lease_epoch() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -4154,7 +4154,7 @@ fn append_entries_piggybacks_lease_epoch_like_matrixraft() {
 }
 
 #[test]
-fn leader_lease_confirmation_duration_bounds_quorum_like_matrixraft() {
+fn leader_lease_confirmation_duration_bounds_quorum() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -4197,7 +4197,7 @@ fn leader_lease_confirmation_duration_bounds_quorum_like_matrixraft() {
 }
 
 #[test]
-fn reduced_follower_lease_confirmation_does_not_rewind_lease_like_matrixraft() {
+fn reduced_follower_lease_confirmation_does_not_rewind_lease() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -4223,7 +4223,7 @@ fn reduced_follower_lease_confirmation_does_not_rewind_lease_like_matrixraft() {
 }
 
 #[test]
-fn legacy_append_entries_response_renews_leader_lease_like_matrixraft() {
+fn legacy_append_entries_response_renews_leader_lease() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -4257,7 +4257,7 @@ fn legacy_append_entries_response_renews_leader_lease_like_matrixraft() {
 }
 
 #[test]
-fn ignore_witness_preserves_voter_backed_leader_lease_like_matrixraft() {
+fn ignore_witness_preserves_voter_backed_leader_lease() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),
@@ -4288,7 +4288,7 @@ fn ignore_witness_preserves_voter_backed_leader_lease_like_matrixraft() {
 }
 
 #[test]
-fn append_entries_response_marks_peer_healthy_like_matrixraft() {
+fn append_entries_response_marks_peer_healthy() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -4337,7 +4337,7 @@ fn append_entries_response_marks_peer_healthy_like_matrixraft() {
 }
 
 #[test]
-fn added_caught_up_auto_promote_learner_becomes_voter_like_matrixraft() {
+fn added_caught_up_auto_promote_learner_becomes_voter() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -4357,7 +4357,7 @@ fn added_caught_up_auto_promote_learner_becomes_voter_like_matrixraft() {
 }
 
 #[test]
-fn auto_promote_learner_waits_for_pending_membership_change_like_matrixraft() {
+fn auto_promote_learner_waits_for_pending_membership_change() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),
@@ -4402,7 +4402,7 @@ fn auto_promote_learner_waits_for_pending_membership_change_like_matrixraft() {
 }
 
 #[test]
-fn auto_promote_learner_uses_leader_noop_as_first_matched_log_like_matrixraft() {
+fn auto_promote_learner_uses_leader_noop_as_first_matched_log() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),
@@ -4438,7 +4438,7 @@ fn auto_promote_learner_uses_leader_noop_as_first_matched_log_like_matrixraft() 
 }
 
 #[test]
-fn auto_promote_learner_waits_one_check_turn_when_lagging_like_matrixraft() {
+fn auto_promote_learner_waits_one_check_turn_when_lagging() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),
@@ -4661,7 +4661,7 @@ fn read_path_report_tracks_quorum_lease_fence_and_bounded_stale() {
 }
 
 #[test]
-fn lost_quorum_leader_steps_down_after_lease_expires_like_matrixraft() {
+fn lost_quorum_leader_steps_down_after_lease_expires() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
@@ -4704,7 +4704,7 @@ fn lost_quorum_leader_steps_down_after_lease_expires_like_matrixraft() {
 }
 
 #[test]
-fn liveness_timeout_preserves_confirmed_leader_lease_until_duration_like_matrixraft() {
+fn liveness_timeout_preserves_confirmed_leader_lease_until_duration() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
@@ -4867,7 +4867,7 @@ fn ignore_witness_recomputes_quorum_and_commit_index() {
 }
 
 #[test]
-fn removing_down_voter_recomputes_commit_like_matrixraft() {
+fn removing_down_voter_recomputes_commit() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),
@@ -4899,7 +4899,7 @@ fn removing_down_voter_recomputes_commit_like_matrixraft() {
 }
 
 #[test]
-fn removing_current_leader_transfers_to_closest_follower_like_matrixraft() {
+fn removing_current_leader_transfers_to_closest_follower() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
@@ -4979,7 +4979,7 @@ fn leader_transfer_requires_a_caught_up_voter() {
 }
 
 #[test]
-fn promote_rejects_witness_like_matrixraft() {
+fn promote_rejects_witness() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
@@ -5135,7 +5135,7 @@ fn leader_transfer_waits_for_transferee_catchup_before_campaign() {
 }
 
 #[test]
-fn leader_transfer_to_stopped_follower_times_out_like_matrixraft() {
+fn leader_transfer_to_stopped_follower_times_out() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
@@ -5166,7 +5166,7 @@ fn leader_transfer_to_stopped_follower_times_out_like_matrixraft() {
 }
 
 #[test]
-fn append_response_completes_caught_up_leader_transfer_like_matrixraft() {
+fn append_response_completes_caught_up_leader_transfer() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.set_node_healthy(2, false).expect("isolate node 2");
@@ -5210,7 +5210,7 @@ fn append_response_completes_caught_up_leader_transfer_like_matrixraft() {
 }
 
 #[test]
-fn heartbeat_skips_snapshot_transfer_peer_like_matrixraft() {
+fn heartbeat_skips_snapshot_transfer_peer() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -5237,7 +5237,7 @@ fn heartbeat_skips_snapshot_transfer_peer_like_matrixraft() {
 }
 
 #[test]
-fn heartbeat_refreshes_liveness_and_missing_heartbeats_timeout_like_matrixraft() {
+fn heartbeat_refreshes_liveness_and_missing_heartbeats_timeout() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
 
@@ -5292,7 +5292,7 @@ fn heartbeat_refreshes_liveness_and_missing_heartbeats_timeout_like_matrixraft()
 }
 
 #[test]
-fn heartbeat_response_resumes_paused_peer_like_matrixraft() {
+fn heartbeat_response_resumes_paused_peer() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -5337,7 +5337,7 @@ fn heartbeat_response_resumes_paused_peer_like_matrixraft() {
 }
 
 #[test]
-fn append_rejection_retries_catchup_immediately_like_matrixraft() {
+fn append_rejection_retries_catchup_immediately() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster.campaign(1, true).expect("make node 1 leader");
@@ -5385,7 +5385,7 @@ fn append_rejection_retries_catchup_immediately_like_matrixraft() {
 }
 
 #[test]
-fn required_snapshot_above_leader_snapshot_triggers_new_snapshot_like_matrixraft() {
+fn required_snapshot_above_leader_snapshot_triggers_new_snapshot() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster

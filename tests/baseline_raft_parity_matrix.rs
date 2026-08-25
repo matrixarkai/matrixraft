@@ -2,22 +2,22 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_baseline_raft_parity_matrix, rustraft_baseline_raft_reference_policy,
-    rustraft_parity_report, RustRaftBaselineRaftParityStatus, RustRaftReadinessSnapshot,
+    matrixraft_baseline_raft_parity_matrix, matrixraft_baseline_raft_reference_policy,
+    matrixraft_parity_report, RustRaftBaselineRaftParityStatus, RustRaftReadinessSnapshot,
 };
 
 fn ready_snapshot() -> RustRaftReadinessSnapshot {
     RustRaftReadinessSnapshot {
-        rustraft_leader_write_authority_present: true,
-        rustraft_operator_observability_present: true,
-        rustraft_rpc_transport_contract_present: true,
-        rustraft_log_retention_snapshot_trigger_present: true,
-        rustraft_apply_snapshot_fence_present: true,
+        matrixraft_leader_write_authority_present: true,
+        matrixraft_operator_observability_present: true,
+        matrixraft_rpc_transport_contract_present: true,
+        matrixraft_log_retention_snapshot_trigger_present: true,
+        matrixraft_apply_snapshot_fence_present: true,
         raft_storage_apply_fence_present: true,
-        rustraft_snapshot_floor_log_matching_present: true,
-        rustraft_snapshot_tail_catchup_present: true,
-        rustraft_compacted_entry_rejection_present: true,
-        rustraft_metaserver_snapshot_floor_election_present: true,
+        matrixraft_snapshot_floor_log_matching_present: true,
+        matrixraft_snapshot_tail_catchup_present: true,
+        matrixraft_compacted_entry_rejection_present: true,
+        matrixraft_metaserver_snapshot_floor_election_present: true,
         learner_catchup_promotion_present: true,
         metaserver_membership_workflow_present: true,
     }
@@ -25,7 +25,7 @@ fn ready_snapshot() -> RustRaftReadinessSnapshot {
 
 #[test]
 fn baseline_raft_parity_matrix_tracks_all_required_capabilities() {
-    let matrix = rustraft_baseline_raft_parity_matrix(&ready_snapshot());
+    let matrix = matrixraft_baseline_raft_parity_matrix(&ready_snapshot());
     let ids = matrix
         .iter()
         .map(|item| item.id.as_str())
@@ -58,10 +58,10 @@ fn baseline_raft_parity_matrix_tracks_all_required_capabilities() {
 #[test]
 fn baseline_raft_parity_report_tracks_gaps_and_intentional_differences() {
     let mut snapshot = ready_snapshot();
-    snapshot.rustraft_rpc_transport_contract_present = false;
+    snapshot.matrixraft_rpc_transport_contract_present = false;
     snapshot.learner_catchup_promotion_present = false;
 
-    let report = rustraft_parity_report(&snapshot);
+    let report = matrixraft_parity_report(&snapshot);
 
     assert!(report
         .baseline_raft_gaps
@@ -88,7 +88,7 @@ fn baseline_raft_parity_report_tracks_gaps_and_intentional_differences() {
 
 #[test]
 fn ready_baseline_raft_matrix_has_only_declared_runtime_split_difference() {
-    let report = rustraft_parity_report(&ready_snapshot());
+    let report = matrixraft_parity_report(&ready_snapshot());
 
     assert!(report.baseline_raft_gaps.is_empty(), "{report:#?}");
     assert_eq!(
@@ -107,7 +107,7 @@ fn ready_baseline_raft_matrix_has_only_declared_runtime_split_difference() {
 
 #[test]
 fn baseline_raft_is_feature_and_performance_reference_but_rust_api_can_be_idiomatic() {
-    let policy = rustraft_baseline_raft_reference_policy();
+    let policy = matrixraft_baseline_raft_reference_policy();
     assert!(policy.feature_reference.contains("BaselineRaft"));
     assert!(policy.performance_reference.contains("BaselineRaft"));
     assert!(policy.performance_reference.contains("p50/p99"));
@@ -116,6 +116,6 @@ fn baseline_raft_is_feature_and_performance_reference_but_rust_api_can_be_idioma
         .temporalstore_consumption_boundary
         .contains("DataRaftConsensusBackend"));
 
-    let report = rustraft_parity_report(&ready_snapshot());
+    let report = matrixraft_parity_report(&ready_snapshot());
     assert_eq!(report.baseline_raft_reference_policy, policy);
 }

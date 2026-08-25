@@ -3,22 +3,22 @@
 
 use matrixraft::{
     metrics::{
-        rustraft_alert_rules, rustraft_alert_rules_json, rustraft_diagnostic_log_prometheus,
-        rustraft_grafana_dashboard, rustraft_grafana_dashboard_json, rustraft_metric_names,
-        rustraft_observability_provisioning, rustraft_observability_provisioning_json,
-        rustraft_observability_provisioning_runbook_steps,
-        rustraft_observability_provisioning_validation_prometheus,
-        rustraft_operator_runbook_prometheus, rustraft_operator_runbook_steps,
-        rustraft_operator_triage_prometheus, rustraft_operator_triage_summary,
-        rustraft_optimization_report_prometheus, rustraft_validate_observability_provisioning,
-        rustraft_validate_observability_provisioning_json,
+        matrixraft_alert_rules, matrixraft_alert_rules_json, matrixraft_diagnostic_log_prometheus,
+        matrixraft_grafana_dashboard, matrixraft_grafana_dashboard_json, matrixraft_metric_names,
+        matrixraft_observability_provisioning, matrixraft_observability_provisioning_json,
+        matrixraft_observability_provisioning_runbook_steps,
+        matrixraft_observability_provisioning_validation_prometheus,
+        matrixraft_operator_runbook_prometheus, matrixraft_operator_runbook_steps,
+        matrixraft_operator_triage_prometheus, matrixraft_operator_triage_summary,
+        matrixraft_optimization_report_prometheus, matrixraft_validate_observability_provisioning,
+        matrixraft_validate_observability_provisioning_json,
     },
     readiness::{
-        rustraft_baseline_raft_parity_surface, rustraft_parity_report,
-        rustraft_public_api_contract, RustRaftReadinessSnapshot,
+        matrixraft_baseline_raft_parity_surface, matrixraft_parity_report,
+        matrixraft_public_api_contract, RustRaftReadinessSnapshot,
     },
     status::{
-        rustraft_fatal_blocker_report, RustRaftBlockerSeverity, RustRaftDiagnosticLogEntry,
+        matrixraft_fatal_blocker_report, RustRaftBlockerSeverity, RustRaftDiagnosticLogEntry,
         RustRaftDiagnosticSeverity, RustRaftOptimizationHint, RustRaftOptimizationHintSeverity,
         RustRaftOptimizationReport,
     },
@@ -33,16 +33,16 @@ use serde_json::Value;
 
 fn ready_snapshot() -> RustRaftReadinessSnapshot {
     RustRaftReadinessSnapshot {
-        rustraft_leader_write_authority_present: true,
-        rustraft_operator_observability_present: true,
-        rustraft_rpc_transport_contract_present: true,
-        rustraft_log_retention_snapshot_trigger_present: true,
-        rustraft_apply_snapshot_fence_present: true,
+        matrixraft_leader_write_authority_present: true,
+        matrixraft_operator_observability_present: true,
+        matrixraft_rpc_transport_contract_present: true,
+        matrixraft_log_retention_snapshot_trigger_present: true,
+        matrixraft_apply_snapshot_fence_present: true,
         raft_storage_apply_fence_present: true,
-        rustraft_snapshot_floor_log_matching_present: true,
-        rustraft_snapshot_tail_catchup_present: true,
-        rustraft_compacted_entry_rejection_present: true,
-        rustraft_metaserver_snapshot_floor_election_present: true,
+        matrixraft_snapshot_floor_log_matching_present: true,
+        matrixraft_snapshot_tail_catchup_present: true,
+        matrixraft_compacted_entry_rejection_present: true,
+        matrixraft_metaserver_snapshot_floor_election_present: true,
         learner_catchup_promotion_present: true,
         metaserver_membership_workflow_present: true,
     }
@@ -122,7 +122,7 @@ fn transport_contract_names_owned_rpc_types_including_prevote_and_snapshot_chunk
 
 #[test]
 fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports() {
-    let metrics = rustraft_metric_names();
+    let metrics = matrixraft_metric_names();
     assert_eq!(metrics.pre_vote_latency_ms, "rustraft_pre_vote_latency_ms");
     assert_eq!(metrics.blocker_total, "rustraft_blocker_total");
     assert_eq!(metrics.fatal_total, "rustraft_fatal_total");
@@ -232,7 +232,7 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
         "rustraft_debug_snapshot_fresh"
     );
 
-    let api = rustraft_public_api_contract();
+    let api = matrixraft_public_api_contract();
     assert!(api.rpc_messages.contains(&"PreVoteRequest".to_string()));
     assert!(api.rpc_messages.contains(&"PreVoteResponse".to_string()));
     assert!(api
@@ -246,9 +246,9 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
         .contains(&"InMemoryRaftTransport".to_string()));
     assert!(api
         .safety_helpers
-        .contains(&"rustraft_fatal_blocker_report".to_string()));
+        .contains(&"matrixraft_fatal_blocker_report".to_string()));
 
-    let surface = rustraft_baseline_raft_parity_surface();
+    let surface = matrixraft_baseline_raft_parity_surface();
     assert!(surface.transport_api.contains(&"pre_vote_rpc".to_string()));
     assert!(surface
         .transport_api
@@ -269,10 +269,10 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
         .observability_api
         .contains(&"readiness_report".to_string()));
 
-    let readiness = rustraft_parity_report(&ready_snapshot());
+    let readiness = matrixraft_parity_report(&ready_snapshot());
     assert!(readiness.ready);
 
-    let blockers = rustraft_fatal_blocker_report(
+    let blockers = matrixraft_fatal_blocker_report(
         "rustraft_transport_observability",
         vec!["leader_unavailable".to_string(), "wal_corrupt".to_string()],
         vec!["wal_corrupt".to_string()],
@@ -294,8 +294,8 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
 
 #[test]
 fn grafana_dashboard_exports_runtime_metric_panels() {
-    let metrics = rustraft_metric_names();
-    let dashboard = rustraft_grafana_dashboard();
+    let metrics = matrixraft_metric_names();
+    let dashboard = matrixraft_grafana_dashboard();
     assert_eq!(dashboard.uid, "rustraft-runtime-overview");
     assert_eq!(dashboard.refresh, "10s");
     // The count is pinned so a panel cannot appear or vanish unnoticed. It went 53 -> 55 when
@@ -386,7 +386,7 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     assert!(expressions
         .contains(&"sum by (issue) (rustraft_observability_provisioning_validation_issue)"));
 
-    let json = rustraft_grafana_dashboard_json();
+    let json = matrixraft_grafana_dashboard_json();
     let parsed: Value = serde_json::from_str(&json).expect("dashboard json");
     assert_eq!(parsed["title"], "RustRaft Runtime Overview");
     // Same pin, checked through the serialized JSON: the struct and the exported document
@@ -458,7 +458,7 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
 
 #[test]
 fn alert_rules_export_operator_contract_for_readiness_and_blockers() {
-    let rules = rustraft_alert_rules();
+    let rules = matrixraft_alert_rules();
     // Pinned for the same reason as the panel count: 15 -> 16 with the provisioning
     // validation alert.
     assert_eq!(rules.len(), 16);
@@ -657,7 +657,7 @@ fn alert_rules_export_operator_contract_for_readiness_and_blockers() {
     assert_eq!(provisioning_validation.duration, "5m");
     assert_eq!(provisioning_validation.severity, "warning");
 
-    let json = rustraft_alert_rules_json();
+    let json = matrixraft_alert_rules_json();
     let parsed: Value = serde_json::from_str(&json).expect("alert rule json");
     assert_eq!(parsed.as_array().expect("alert rules").len(), 16);
     assert!(json.contains("RustRaftOptimizationWarningHints"));
@@ -696,14 +696,14 @@ fn alert_rules_export_operator_contract_for_readiness_and_blockers() {
 
 #[test]
 fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contract() {
-    let provisioning = rustraft_observability_provisioning();
+    let provisioning = matrixraft_observability_provisioning();
     assert_eq!(provisioning.service, "rustraft");
     assert_eq!(provisioning.prometheus_format, "prometheus_text_v0.0.4");
     assert_eq!(provisioning.dashboard.uid, "rustraft-runtime-overview");
-    assert_eq!(provisioning.alert_rules, rustraft_alert_rules());
+    assert_eq!(provisioning.alert_rules, matrixraft_alert_rules());
     assert_eq!(
         provisioning.runbook_steps,
-        rustraft_observability_provisioning_runbook_steps()
+        matrixraft_observability_provisioning_runbook_steps()
     );
     assert!(provisioning
         .runbook_steps
@@ -781,8 +781,10 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     assert!(validate_support_envelope
         .validation
         .contains("support_envelope_severity is ok"));
-    let provisioning_runbook_metrics =
-        rustraft_operator_runbook_prometheus(&provisioning.runbook_steps, &[("service", "raft-a")]);
+    let provisioning_runbook_metrics = matrixraft_operator_runbook_prometheus(
+        &provisioning.runbook_steps,
+        &[("service", "raft-a")],
+    );
     assert!(provisioning_runbook_metrics.text.contains(
         "rustraft_operator_runbook_step_present{service=\"raft-a\",step=\"refresh_debug_snapshot\",severity=\"warning\",target=\"debug_bundle\"} 1"
     ));
@@ -912,7 +914,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
             "Prometheus artifact {artifact_name} missing from debug artifact envelope list"
         );
     }
-    let dashboard_json = rustraft_grafana_dashboard_json();
+    let dashboard_json = matrixraft_grafana_dashboard_json();
     for metric_name in &provisioning.required_metric_names {
         assert!(
             dashboard_json.contains(metric_name),
@@ -958,7 +960,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         "cargo run --example debug_artifacts"
     );
 
-    let json = rustraft_observability_provisioning_json();
+    let json = matrixraft_observability_provisioning_json();
     assert!(json.contains("rustraft-runtime-overview"));
     assert!(json.contains("RustRaftDebugBundleValidationFailed"));
     assert!(json.contains("RustRaftSupportEnvelopeValidationFailed"));
@@ -1000,10 +1002,10 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     assert!(json.contains("debug_snapshot_low_fresh is true"));
     assert!(json.contains("debug_snapshot_fresh is true"));
 
-    let validation = rustraft_validate_observability_provisioning(&provisioning);
+    let validation = matrixraft_validate_observability_provisioning(&provisioning);
     assert!(validation.ready);
     assert_eq!(validation.issue_count, 0);
-    let validation_metrics = rustraft_observability_provisioning_validation_prometheus(
+    let validation_metrics = matrixraft_observability_provisioning_validation_prometheus(
         &validation,
         &[("service", "raft\"a")],
     );
@@ -1012,13 +1014,13 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     assert!(validation_metrics
         .text
         .contains("rustraft_observability_provisioning_validation_ready{service=\"raft\\\"a\"} 1"));
-    let json_validation = rustraft_validate_observability_provisioning_json(&json);
+    let json_validation = matrixraft_validate_observability_provisioning_json(&json);
     assert!(json_validation.ready);
 
     let mut stale_provisioning = provisioning.clone();
     stale_provisioning.dashboard.uid = "old-runtime-dashboard".to_string();
     let stale_dashboard_validation =
-        rustraft_validate_observability_provisioning(&stale_provisioning);
+        matrixraft_validate_observability_provisioning(&stale_provisioning);
     assert!(!stale_dashboard_validation.ready);
     assert!(stale_dashboard_validation
         .issues
@@ -1029,7 +1031,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     assert!(!stale_dashboard_validation
         .issues
         .contains(&"observability_dashboard_metric_not_advertised".to_string()));
-    let stale_dashboard_metrics = rustraft_observability_provisioning_validation_prometheus(
+    let stale_dashboard_metrics = matrixraft_observability_provisioning_validation_prometheus(
         &stale_dashboard_validation,
         &[("service", "raft\"a")],
     );
@@ -1044,7 +1046,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     stale_dashboard_metric.dashboard.panels[0].expr =
         "rustraft_dashboard_unadvertised_metric".to_string();
     let stale_dashboard_metric_validation =
-        rustraft_validate_observability_provisioning(&stale_dashboard_metric);
+        matrixraft_validate_observability_provisioning(&stale_dashboard_metric);
     assert!(!stale_dashboard_metric_validation.ready);
     assert!(stale_dashboard_metric_validation
         .issues
@@ -1058,7 +1060,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         issue_count: 1,
         issues: vec!["issue\"with\\escape".to_string()],
     };
-    let escaped_issue_metrics = rustraft_observability_provisioning_validation_prometheus(
+    let escaped_issue_metrics = matrixraft_observability_provisioning_validation_prometheus(
         &escaped_issue_validation,
         &[("service", "raft\\b")],
     );
@@ -1071,7 +1073,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     stale_metrics
         .required_metric_names
         .retain(|name| name != "rustraft_optimization_ready");
-    let stale_metrics_validation = rustraft_validate_observability_provisioning(&stale_metrics);
+    let stale_metrics_validation = matrixraft_validate_observability_provisioning(&stale_metrics);
     assert!(!stale_metrics_validation.ready);
     assert!(stale_metrics_validation
         .issues
@@ -1080,7 +1082,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     let mut stale_alert_metric = provisioning.clone();
     stale_alert_metric.alert_rules[0].expr = "rustraft_unadvertised_metric > 0".to_string();
     let stale_alert_metric_validation =
-        rustraft_validate_observability_provisioning(&stale_alert_metric);
+        matrixraft_validate_observability_provisioning(&stale_alert_metric);
     assert!(!stale_alert_metric_validation.ready);
     assert!(stale_alert_metric_validation
         .issues
@@ -1094,7 +1096,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         .debug_artifact_names
         .retain(|name| name != "debug_snapshot_json");
     let stale_debug_artifacts_validation =
-        rustraft_validate_observability_provisioning(&stale_debug_artifacts);
+        matrixraft_validate_observability_provisioning(&stale_debug_artifacts);
     assert!(!stale_debug_artifacts_validation.ready);
     assert!(stale_debug_artifacts_validation
         .issues
@@ -1104,7 +1106,8 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
     stale_artifacts
         .prometheus_artifact_names
         .retain(|name| name != "provisioning_runbook_prometheus");
-    let stale_artifacts_validation = rustraft_validate_observability_provisioning(&stale_artifacts);
+    let stale_artifacts_validation =
+        matrixraft_validate_observability_provisioning(&stale_artifacts);
     assert!(!stale_artifacts_validation.ready);
     assert!(stale_artifacts_validation
         .issues
@@ -1112,13 +1115,13 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
 
     let mut stale_runbook = provisioning.clone();
     stale_runbook.runbook_steps.clear();
-    let stale_runbook_validation = rustraft_validate_observability_provisioning(&stale_runbook);
+    let stale_runbook_validation = matrixraft_validate_observability_provisioning(&stale_runbook);
     assert!(!stale_runbook_validation.ready);
     assert!(stale_runbook_validation
         .issues
         .contains(&"observability_runbook_steps_mismatch".to_string()));
 
-    let invalid_json_validation = rustraft_validate_observability_provisioning_json("{not-json");
+    let invalid_json_validation = matrixraft_validate_observability_provisioning_json("{not-json");
     assert!(!invalid_json_validation.ready);
     assert!(invalid_json_validation
         .issues
@@ -1152,7 +1155,7 @@ fn optimization_report_prometheus_exports_hint_metrics() {
         ],
     };
 
-    let metrics = rustraft_optimization_report_prometheus(&report, &[("service", "raft\"a")]);
+    let metrics = matrixraft_optimization_report_prometheus(&report, &[("service", "raft\"a")]);
     assert_eq!(metrics.format, "prometheus_text_v0.0.4");
     assert_eq!(metrics.metric_count, 7);
     assert!(metrics
@@ -1177,7 +1180,7 @@ fn optimization_report_prometheus_exports_hint_metrics() {
         "rustraft_optimization_component_hint_total{service=\"raft\\\"a\",component=\"replication_pipeline\",severity=\"warning\"} 1"
     ));
 
-    let triage = rustraft_operator_triage_summary(&[], &report, &rustraft_alert_rules());
+    let triage = matrixraft_operator_triage_summary(&[], &report, &matrixraft_alert_rules());
     assert_eq!(triage.status, "needs_attention");
     assert_eq!(triage.severity, "critical");
     assert_eq!(triage.critical_optimization_count, 1);
@@ -1185,7 +1188,7 @@ fn optimization_report_prometheus_exports_hint_metrics() {
         triage.top_optimization_hint,
         Some("wal_commit_range_missing".to_string())
     );
-    let triage_metrics = rustraft_operator_triage_prometheus(&triage, &[("service", "raft\"a")]);
+    let triage_metrics = matrixraft_operator_triage_prometheus(&triage, &[("service", "raft\"a")]);
     assert_eq!(triage_metrics.format, "prometheus_text_v0.0.4");
     assert_eq!(triage_metrics.metric_count, 9);
     assert!(triage_metrics.text.contains(
@@ -1213,7 +1216,7 @@ fn optimization_report_prometheus_exports_hint_metrics() {
     escaped_triage.top_alert = Some("RustRaftAlert\"With\\Escape".to_string());
     escaped_triage.top_optimization_hint = Some("hint\"with\\escape".to_string());
     let escaped_triage_metrics =
-        rustraft_operator_triage_prometheus(&escaped_triage, &[("service", "raft\\b")]);
+        matrixraft_operator_triage_prometheus(&escaped_triage, &[("service", "raft\\b")]);
     assert!(escaped_triage_metrics
         .text
         .contains("service=\"raft\\\\b\""));
@@ -1230,12 +1233,13 @@ fn optimization_report_prometheus_exports_hint_metrics() {
         .text
         .contains("hint=\"hint\\\"with\\\\escape\""));
 
-    let runbook = rustraft_operator_runbook_steps(&triage, &report, &rustraft_alert_rules());
+    let runbook = matrixraft_operator_runbook_steps(&triage, &report, &matrixraft_alert_rules());
     assert!(runbook
         .iter()
         .any(|step| step.id == "resolve_critical_optimization_hints"));
     assert!(runbook.iter().any(|step| step.id == "wire_critical_alerts"));
-    let runbook_metrics = rustraft_operator_runbook_prometheus(&runbook, &[("service", "raft\"a")]);
+    let runbook_metrics =
+        matrixraft_operator_runbook_prometheus(&runbook, &[("service", "raft\"a")]);
     assert_eq!(runbook_metrics.format, "prometheus_text_v0.0.4");
     assert!(runbook_metrics.text.contains(
         "rustraft_operator_runbook_step_total{service=\"raft\\\"a\",severity=\"critical\",target=\"optimization\"}"
@@ -1262,7 +1266,7 @@ fn optimization_report_prometheus_exports_hint_metrics() {
         },
     ];
     let diagnostic_metrics =
-        rustraft_diagnostic_log_prometheus(&diagnostics, &[("service", "raft\"a")]);
+        matrixraft_diagnostic_log_prometheus(&diagnostics, &[("service", "raft\"a")]);
     assert_eq!(diagnostic_metrics.format, "prometheus_text_v0.0.4");
     assert_eq!(diagnostic_metrics.metric_count, 5);
     assert!(diagnostic_metrics
@@ -1272,7 +1276,7 @@ fn optimization_report_prometheus_exports_hint_metrics() {
         "rustraft_diagnostic_log_entry_total{service=\"raft\\\"a\",target=\"rustraft.quorum\",severity=\"error\",message=\"quorum_not_observed\"} 1"
     ));
     let diagnostic_triage =
-        rustraft_operator_triage_summary(&diagnostics, &report, &rustraft_alert_rules());
+        matrixraft_operator_triage_summary(&diagnostics, &report, &matrixraft_alert_rules());
     assert_eq!(
         diagnostic_triage.top_diagnostic_target.as_deref(),
         Some("rustraft.quorum")
@@ -1282,7 +1286,7 @@ fn optimization_report_prometheus_exports_hint_metrics() {
         Some("quorum_not_observed")
     );
     let diagnostic_triage_metrics =
-        rustraft_operator_triage_prometheus(&diagnostic_triage, &[("service", "raft\"a")]);
+        matrixraft_operator_triage_prometheus(&diagnostic_triage, &[("service", "raft\"a")]);
     assert_eq!(diagnostic_triage_metrics.metric_count, 10);
     assert!(diagnostic_triage_metrics.text.contains(
         "rustraft_operator_triage_top_diagnostic{service=\"raft\\\"a\",target=\"rustraft.quorum\",message=\"quorum_not_observed\",severity=\"critical\"} 1"

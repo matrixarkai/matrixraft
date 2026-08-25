@@ -4,7 +4,7 @@
 //! Generic log, state-machine, apply, and storage contracts.
 
 pub use crate::{
-    rustraft_apply_entry, EntryPayload, RaftApply, RaftApplyRequest, RaftApplyResponse,
+    matrixraft_apply_entry, EntryPayload, RaftApply, RaftApplyRequest, RaftApplyResponse,
     RaftFsmAdapter, RaftFsmApplyOutcome, RaftFsmCheckpoint, RaftFsmReplayReport, RaftLogEntry,
     RaftStateMachine, RaftStorageApplyFence, RustRaftApplyRequest, RustRaftApplyResponse,
     RustRaftGenericApplyRequest, RustRaftGenericApplyResponse, RustRaftGenericLogEntry,
@@ -816,7 +816,7 @@ impl MatrixRaftGroupStorage for MatrixRaftMemoryGroupStorage {
     }
 }
 
-pub fn rustraft_validate_storage_apply_fence(
+pub fn matrixraft_validate_storage_apply_fence(
     fence: &RustRaftStorageApplyFence,
 ) -> Result<(), RustRaftError> {
     if fence.applied_index > fence.committed_index {

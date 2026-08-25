@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use matrixraft::{RustRaftMailBox, RustRaftMailBoxFetchPolicy, RustRaftMailPriority};
 
 #[test]
-fn mailbox_try_send_applies_per_priority_high_watermark_like_matrixraft() {
+fn mailbox_try_send_applies_per_priority_high_watermark() {
     let mailbox = RustRaftMailBox::new(2);
 
     assert!(mailbox.try_send(RustRaftMailPriority::Normal, 1));
@@ -21,7 +21,7 @@ fn mailbox_try_send_applies_per_priority_high_watermark_like_matrixraft() {
 }
 
 #[test]
-fn mailbox_fetch_prioritizes_urgent_and_limits_included_lanes_like_matrixraft() {
+fn mailbox_fetch_prioritizes_urgent_and_limits_included_lanes() {
     let mailbox = RustRaftMailBox::new(8);
     mailbox.send(RustRaftMailPriority::Slowly, "slow-1");
     mailbox.send(RustRaftMailPriority::Normal, "normal-1");

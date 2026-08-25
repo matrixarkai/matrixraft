@@ -2,14 +2,14 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_baseline_raft_operational_evidence_bundle,
-    rustraft_validate_baseline_raft_operational_evidence_bundle, RustRaftPeerPipelineStatus,
+    matrixraft_baseline_raft_operational_evidence_bundle,
+    matrixraft_validate_baseline_raft_operational_evidence_bundle, RustRaftPeerPipelineStatus,
     RustRaftPipelineLimits, RustRaftWalLifecycleStatus,
 };
 
 fn main() {
     let pipeline_limits = RustRaftPipelineLimits::production_default();
-    let bundle = rustraft_baseline_raft_operational_evidence_bundle(
+    let bundle = matrixraft_baseline_raft_operational_evidence_bundle(
         replication_pipeline_peers(pipeline_limits),
         pipeline_limits,
         snapshot_lifecycle_peers(pipeline_limits),
@@ -17,7 +17,7 @@ fn main() {
         1,
         wal_lifecycle_status(),
     );
-    let validation = rustraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
+    let validation = matrixraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
     assert!(
         validation.valid,
         "BaselineRaft operational evidence bundle failed validation: {validation:#?}"

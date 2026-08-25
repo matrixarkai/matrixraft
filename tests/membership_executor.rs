@@ -259,7 +259,7 @@ fn pending_membership_change_fence_matches_baseline_raft_config_change_rule() {
 }
 
 #[test]
-fn saving_membership_change_blocks_next_config_until_stabled_like_matrixraft() {
+fn saving_membership_change_blocks_next_config_until_stabled() {
     let mut cluster = RaftCluster::new(
         70,
         Default::default(),
@@ -316,7 +316,7 @@ fn saving_membership_change_blocks_next_config_until_stabled_like_matrixraft() {
 }
 
 #[test]
-fn snapshot_applied_clears_covered_membership_change_like_matrixraft() {
+fn snapshot_applied_clears_covered_membership_change() {
     let mut cluster = RaftCluster::new(
         7,
         RaftConfig::default(),

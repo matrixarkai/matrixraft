@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_snapshot_lifecycle_evidence, PersistentRaftSnapshotStore,
+    matrixraft_snapshot_lifecycle_evidence, PersistentRaftSnapshotStore,
     PersistentRaftSnapshotStoreOptions, RaftAdminCommand, RaftCluster, RaftSnapshot,
     RaftSnapshotLifecycle, RaftSnapshotLifecycleConfig, RustRaftApplySnapshotFence,
     RustRaftByteQuotaLimiter, RustRaftInstallSnapshotResponse, RustRaftLogEntry, RustRaftLogId,
@@ -131,7 +131,7 @@ fn snapshot_lifecycle_uses_baseline_raft_style_transfer_quota_without_advancing_
 }
 
 #[test]
-fn snapshot_lifecycle_splits_chunks_on_partial_rate_quota_like_matrixraft() {
+fn snapshot_lifecycle_splits_chunks_on_partial_rate_quota() {
     let snap = snapshot(12, b"abcdefghijkl");
     let mut lifecycle = RaftSnapshotLifecycle::new(RaftSnapshotLifecycleConfig {
         chunk_size: 6,
@@ -315,14 +315,14 @@ fn cluster_installs_snapshot_with_lifecycle_then_catches_up_tail_after_compactio
     assert_eq!(cluster.status(3).expect("status").last_log_index, 6);
 
     let peer_three = cluster.peer_pipeline_status(3).expect("pipeline");
-    let evidence = rustraft_snapshot_lifecycle_evidence(&[peer_three], 1_000, 1);
+    let evidence = matrixraft_snapshot_lifecycle_evidence(&[peer_three], 1_000, 1);
     assert!(evidence.sender_lifecycle_present || evidence.downloader_lifecycle_present);
     assert!(evidence.install_progress_present);
     assert!(evidence.rejoin_after_compacted_log_present);
 }
 
 #[test]
-fn snapshot_finish_catches_up_tail_like_matrixraft() {
+fn snapshot_finish_catches_up_tail() {
     let mut cluster =
         RaftCluster::new(55, Default::default(), vec![peer(1), peer(2), peer(3)]).expect("cluster");
     cluster.start().expect("start");
@@ -376,7 +376,7 @@ fn snapshot_finish_catches_up_tail_like_matrixraft() {
 }
 
 #[test]
-fn rejected_snapshot_finish_triggers_fresh_snapshot_like_matrixraft() {
+fn rejected_snapshot_finish_triggers_fresh_snapshot() {
     let mut cluster =
         RaftCluster::new(56, Default::default(), vec![peer(1), peer(2), peer(3)]).expect("cluster");
     cluster.start().expect("start");
@@ -408,7 +408,7 @@ fn rejected_snapshot_finish_triggers_fresh_snapshot_like_matrixraft() {
 }
 
 #[test]
-fn failed_replication_task_sends_snapshot_or_triggers_one_like_matrixraft() {
+fn failed_replication_task_sends_snapshot_or_triggers_one() {
     let mut direct =
         RaftCluster::new(57, Default::default(), vec![peer(1), peer(2), peer(3)]).expect("cluster");
     direct.start().expect("start");

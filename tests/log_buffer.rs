@@ -16,7 +16,7 @@ fn range(start: u64, end: u64, term: u64) -> Vec<RustRaftLogEntry> {
 }
 
 #[test]
-fn log_buffer_tracks_range_terms_and_bounded_load_like_matrixraft() {
+fn log_buffer_tracks_range_terms_and_bounded_load() {
     let mut buffer = RustRaftLogBuffer::new(1000, RustRaftLogId { term: 0, index: 0 });
     assert_eq!(buffer.range(), (1, 1));
     assert_eq!(buffer.last_index(), 0);
@@ -56,7 +56,7 @@ fn log_buffer_tracks_range_terms_and_bounded_load_like_matrixraft() {
 }
 
 #[test]
-fn log_buffer_flush_and_apply_append_result_handles_rollback_like_matrixraft() {
+fn log_buffer_flush_and_apply_append_result_handles_rollback() {
     let mut buffer = RustRaftLogBuffer::new(1000, RustRaftLogId { term: 0, index: 0 });
     buffer.append_many(range(1, 6, 1)).expect("append stable");
     buffer.mark_all_stabled();
@@ -84,7 +84,7 @@ fn log_buffer_flush_and_apply_append_result_handles_rollback_like_matrixraft() {
 }
 
 #[test]
-fn log_buffer_apply_append_result_skips_expired_flush_like_matrixraft() {
+fn log_buffer_apply_append_result_skips_expired_flush() {
     let mut buffer = RustRaftLogBuffer::new(1000, RustRaftLogId { term: 0, index: 0 });
     buffer.append_many(range(1, 6, 1)).expect("append stable");
     buffer.mark_all_stabled();
@@ -106,7 +106,7 @@ fn log_buffer_apply_append_result_skips_expired_flush_like_matrixraft() {
 }
 
 #[test]
-fn log_buffer_reset_truncate_and_release_memory_like_matrixraft() {
+fn log_buffer_reset_truncate_and_release_memory() {
     let mut buffer = RustRaftLogBuffer::new(128, RustRaftLogId { term: 0, index: 0 });
     buffer
         .append_many((1..=10).map(|index| entry(index, 1)).collect())

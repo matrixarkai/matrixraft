@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_checksum_file_list, rustraft_crc32c, rustraft_murmur32, RustRaftChecksumContext,
+    matrixraft_checksum_file_list, matrixraft_crc32c, matrixraft_murmur32, RustRaftChecksumContext,
     RustRaftChecksumType, RustRaftFileChecksumContext,
 };
 use std::fs;
@@ -22,8 +22,8 @@ fn temp_dir(name: &str) -> PathBuf {
 
 #[test]
 fn checksum_context_matches_known_crc32c_and_murmur32_vectors() {
-    assert_eq!(rustraft_crc32c(b"123456789"), 0xe306_9283);
-    assert_eq!(rustraft_murmur32(b"hello"), 0x248b_fa47);
+    assert_eq!(matrixraft_crc32c(b"123456789"), 0xe306_9283);
+    assert_eq!(matrixraft_murmur32(b"hello"), 0x248b_fa47);
 
     let mut crc = RustRaftChecksumContext::new(RustRaftChecksumType::Crc32);
     crc.extend(b"123").expect("extend");
@@ -62,7 +62,7 @@ fn checksum_context_rejects_invalid_type_and_extend_after_finalize() {
 }
 
 #[test]
-fn file_checksum_context_reads_file_in_blocks_like_matrixraft() {
+fn file_checksum_context_reads_file_in_blocks() {
     let dir = temp_dir("file");
     fs::create_dir_all(&dir).expect("create dir");
     let file = dir.join("segment.log");
@@ -74,7 +74,7 @@ fn file_checksum_context_reads_file_in_blocks_like_matrixraft() {
 
     assert_eq!(result.files, vec![file.clone()]);
     assert_eq!(result.block_size, 3);
-    assert_eq!(result.checksum.value, rustraft_crc32c(b"abcdefghi"));
+    assert_eq!(result.checksum.value, matrixraft_crc32c(b"abcdefghi"));
     assert_eq!(result.checksum.chunks, 3);
     assert_eq!(result.checksum.bytes, 9);
 
@@ -90,7 +90,7 @@ fn directory_checksum_uses_recursive_sorted_file_order() {
     fs::write(dir.join("a.log"), b"a").expect("write a");
     fs::write(nested.join("c.log"), b"c").expect("write c");
 
-    let files = rustraft_checksum_file_list(&dir).expect("list files");
+    let files = matrixraft_checksum_file_list(&dir).expect("list files");
     assert_eq!(
         files
             .iter()

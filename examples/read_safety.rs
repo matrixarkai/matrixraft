@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_read_safety_decision, RustRaftReadIndexRequest, RustRaftRole, RustRaftStatusSnapshot,
+    matrixraft_read_safety_decision, RustRaftReadIndexRequest, RustRaftRole, RustRaftStatusSnapshot,
 };
 
 fn main() {
@@ -19,7 +19,7 @@ fn main() {
         peers: Vec::new(),
     };
 
-    let decision = rustraft_read_safety_decision(
+    let decision = matrixraft_read_safety_decision(
         &status,
         &RustRaftReadIndexRequest {
             group_id: 7,

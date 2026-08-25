@@ -2,12 +2,12 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    matrixraft_flexible_apply_with_store, matrixraft_flexible_apply_with_store_report,
-    rustraft_apply_entry, EntryPayload, MatrixRaftCheckpoint, MatrixRaftConfigurationApplied,
-    MatrixRaftFsm, MatrixRaftFsmEntry, MatrixRaftFsmEntryKind, MatrixRaftStoreFsm, RaftApply,
-    RaftApplyRequest, RaftApplyResponse, RaftLogEntry, RaftStateMachine, RustRaftApplyRequest,
-    RustRaftApplyResponse, RustRaftLogId, RustRaftNodeId, RustRaftSnapshotChunk,
-    RustRaftSnapshotMeta, RustRaftStateMachine,
+    matrixraft_apply_entry, matrixraft_flexible_apply_with_store,
+    matrixraft_flexible_apply_with_store_report, EntryPayload, MatrixRaftCheckpoint,
+    MatrixRaftConfigurationApplied, MatrixRaftFsm, MatrixRaftFsmEntry, MatrixRaftFsmEntryKind,
+    MatrixRaftStoreFsm, RaftApply, RaftApplyRequest, RaftApplyResponse, RaftLogEntry,
+    RaftStateMachine, RustRaftApplyRequest, RustRaftApplyResponse, RustRaftLogId, RustRaftNodeId,
+    RustRaftSnapshotChunk, RustRaftSnapshotMeta, RustRaftStateMachine,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +222,7 @@ impl RustRaftStateMachine for OpaqueBytesStateMachine {
 #[test]
 fn generic_apply_trait_accepts_temporalstore_data_shard_payloads() {
     let mut state_machine = DataShardStateMachine::default();
-    let response = rustraft_apply_entry(
+    let response = matrixraft_apply_entry(
         &mut state_machine,
         "tenant-a/shard-7".to_string(),
         RaftLogEntry {
@@ -250,7 +250,7 @@ fn generic_apply_trait_accepts_temporalstore_data_shard_payloads() {
 #[test]
 fn generic_apply_trait_accepts_temporalstore_meta_payloads() {
     let mut state_machine = MetaStateMachine::default();
-    let response = rustraft_apply_entry(
+    let response = matrixraft_apply_entry(
         &mut state_machine,
         42,
         RaftLogEntry {
@@ -271,7 +271,7 @@ fn generic_apply_trait_accepts_temporalstore_meta_payloads() {
 #[test]
 fn opaque_bytes_state_machine_still_uses_compatibility_trait() {
     let mut state_machine = OpaqueBytesStateMachine::default();
-    let response = rustraft_apply_entry(
+    let response = matrixraft_apply_entry(
         &mut state_machine,
         7,
         RaftLogEntry {

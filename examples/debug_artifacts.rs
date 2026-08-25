@@ -7,12 +7,13 @@
 #![recursion_limit = "4096"]
 
 use matrixraft::{
-    rustraft_capability_evidence, rustraft_debug_bundle_validation_prometheus,
-    rustraft_debug_snapshot, rustraft_debug_snapshot_metadata_prometheus,
-    rustraft_observability_provisioning, rustraft_observability_provisioning_validation_prometheus,
-    rustraft_operator_runbook_prometheus, rustraft_operator_triage_prometheus,
-    rustraft_runtime_admin_report, rustraft_validate_debug_snapshot,
-    rustraft_validate_observability_provisioning, RaftCluster, RaftPeerPipelineState,
+    matrixraft_capability_evidence, matrixraft_debug_bundle_validation_prometheus,
+    matrixraft_debug_snapshot, matrixraft_debug_snapshot_metadata_prometheus,
+    matrixraft_observability_provisioning,
+    matrixraft_observability_provisioning_validation_prometheus,
+    matrixraft_operator_runbook_prometheus, matrixraft_operator_triage_prometheus,
+    matrixraft_runtime_admin_report, matrixraft_validate_debug_snapshot,
+    matrixraft_validate_observability_provisioning, RaftCluster, RaftPeerPipelineState,
     RustRaftDebugBundleValidationReport, RustRaftPeer, RustRaftPeerProgressState,
     RustRaftReadinessSnapshot, RustRaftReplicaRole,
 };
@@ -41,16 +42,16 @@ fn peer(node_id: u64) -> RustRaftPeer {
 
 fn readiness() -> RustRaftReadinessSnapshot {
     RustRaftReadinessSnapshot {
-        rustraft_leader_write_authority_present: true,
-        rustraft_operator_observability_present: true,
-        rustraft_rpc_transport_contract_present: true,
-        rustraft_log_retention_snapshot_trigger_present: true,
-        rustraft_apply_snapshot_fence_present: true,
+        matrixraft_leader_write_authority_present: true,
+        matrixraft_operator_observability_present: true,
+        matrixraft_rpc_transport_contract_present: true,
+        matrixraft_log_retention_snapshot_trigger_present: true,
+        matrixraft_apply_snapshot_fence_present: true,
         raft_storage_apply_fence_present: true,
-        rustraft_snapshot_floor_log_matching_present: true,
-        rustraft_snapshot_tail_catchup_present: true,
-        rustraft_compacted_entry_rejection_present: true,
-        rustraft_metaserver_snapshot_floor_election_present: true,
+        matrixraft_snapshot_floor_log_matching_present: true,
+        matrixraft_snapshot_tail_catchup_present: true,
+        matrixraft_compacted_entry_rejection_present: true,
+        matrixraft_metaserver_snapshot_floor_election_present: true,
         learner_catchup_promotion_present: true,
         metaserver_membership_workflow_present: true,
     }
@@ -134,8 +135,8 @@ fn main() {
         .expect("write commits");
 
     let readiness = readiness();
-    let capability_evidence = rustraft_capability_evidence(&readiness);
-    let report = rustraft_runtime_admin_report(
+    let capability_evidence = matrixraft_capability_evidence(&readiness);
+    let report = matrixraft_runtime_admin_report(
         cluster.cluster_status_report().expect("cluster status"),
         readiness,
         capability_evidence,
@@ -154,7 +155,7 @@ fn main() {
         wal_segment_lifecycle_present: true,
     };
     let labels = [("service", "rustraft-example")];
-    let snapshot = rustraft_debug_snapshot(&report, &status_surface, &labels);
+    let snapshot = matrixraft_debug_snapshot(&report, &status_surface, &labels);
     let snapshot_json = serde_json::to_string_pretty(&snapshot).expect("debug snapshot serializes");
     let diagnostic_json_lines = snapshot
         .diagnostics
@@ -163,25 +164,25 @@ fn main() {
         .collect::<Vec<_>>()
         .join("\n");
     let snapshot_metadata_prometheus =
-        rustraft_debug_snapshot_metadata_prometheus(&snapshot, &labels);
-    let validation = rustraft_validate_debug_snapshot(&snapshot);
-    let validation_prometheus = rustraft_debug_bundle_validation_prometheus(&validation, &labels);
-    let triage_prometheus = rustraft_operator_triage_prometheus(&snapshot.triage, &labels);
-    let provisioning = rustraft_observability_provisioning();
+        matrixraft_debug_snapshot_metadata_prometheus(&snapshot, &labels);
+    let validation = matrixraft_validate_debug_snapshot(&snapshot);
+    let validation_prometheus = matrixraft_debug_bundle_validation_prometheus(&validation, &labels);
+    let triage_prometheus = matrixraft_operator_triage_prometheus(&snapshot.triage, &labels);
+    let provisioning = matrixraft_observability_provisioning();
     let dashboard_json = serde_json::to_string_pretty(&provisioning.dashboard)
         .expect("grafana dashboard serializes");
     let alert_rules_json =
         serde_json::to_string_pretty(&provisioning.alert_rules).expect("alert rules serialize");
     let provisioning_json =
         serde_json::to_string_pretty(&provisioning).expect("observability provisioning serializes");
-    let provisioning_validation = rustraft_validate_observability_provisioning(&provisioning);
+    let provisioning_validation = matrixraft_validate_observability_provisioning(&provisioning);
     let provisioning_validation_prometheus =
-        rustraft_observability_provisioning_validation_prometheus(
+        matrixraft_observability_provisioning_validation_prometheus(
             &provisioning_validation,
             &labels,
         );
     let provisioning_runbook_prometheus =
-        rustraft_operator_runbook_prometheus(&provisioning.runbook_steps, &labels);
+        matrixraft_operator_runbook_prometheus(&provisioning.runbook_steps, &labels);
     let envelope_artifact_names = vec![
         "debug_snapshot",
         "debug_snapshot_json",
@@ -2806,7 +2807,7 @@ fn main() {
         ("support_envelope_status", support_envelope_status),
         ("support_envelope_severity", support_envelope_severity),
     ];
-    let support_envelope_validation_prometheus = rustraft_debug_bundle_validation_prometheus(
+    let support_envelope_validation_prometheus = matrixraft_debug_bundle_validation_prometheus(
         &support_envelope_report,
         &support_envelope_labels,
     );

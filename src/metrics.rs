@@ -8,11 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::rustraft_baseline_raft_runtime_capability_prometheus;
+pub use crate::matrixraft_baseline_raft_runtime_capability_prometheus;
 use crate::status::{
-    rustraft_admin_diagnostic_log_entries, rustraft_optimization_report, RaftRuntimeAdminReport,
-    RustRaftAdminStatusSurfaceInput, RustRaftDiagnosticLogEntry, RustRaftDiagnosticSeverity,
-    RustRaftOptimizationHintSeverity, RustRaftOptimizationReport,
+    matrixraft_admin_diagnostic_log_entries, matrixraft_optimization_report,
+    RaftRuntimeAdminReport, RustRaftAdminStatusSurfaceInput, RustRaftDiagnosticLogEntry,
+    RustRaftDiagnosticSeverity, RustRaftOptimizationHintSeverity, RustRaftOptimizationReport,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,7 +176,7 @@ pub struct RustRaftDebugSnapshot {
     pub runbook_steps: Vec<RustRaftOperatorRunbookStep>,
 }
 
-pub fn rustraft_metric_names() -> RustRaftMetricNames {
+pub fn matrixraft_metric_names() -> RustRaftMetricNames {
     RustRaftMetricNames {
         ready: "rustraft_ready".to_string(),
         append_latency_ms: "rustraft_append_latency_ms".to_string(),
@@ -242,8 +242,8 @@ pub fn rustraft_metric_names() -> RustRaftMetricNames {
     }
 }
 
-pub fn rustraft_alert_rules() -> Vec<RustRaftAlertRule> {
-    let metrics = rustraft_metric_names();
+pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
+    let metrics = matrixraft_metric_names();
     vec![
         RustRaftAlertRule {
             alert: "RustRaftOptimizationNotReady".to_string(),
@@ -395,13 +395,13 @@ pub fn rustraft_alert_rules() -> Vec<RustRaftAlertRule> {
     ]
 }
 
-pub fn rustraft_alert_rules_json() -> String {
-    serde_json::to_string_pretty(&rustraft_alert_rules())
+pub fn matrixraft_alert_rules_json() -> String {
+    serde_json::to_string_pretty(&matrixraft_alert_rules())
         .expect("RustRaft alert rules must serialize")
 }
 
-pub fn rustraft_observability_provisioning() -> RustRaftObservabilityProvisioning {
-    let metrics = rustraft_metric_names();
+pub fn matrixraft_observability_provisioning() -> RustRaftObservabilityProvisioning {
+    let metrics = matrixraft_metric_names();
     RustRaftObservabilityProvisioning {
         service: "rustraft".to_string(),
         prometheus_format: "prometheus_text_v0.0.4".to_string(),
@@ -489,15 +489,15 @@ pub fn rustraft_observability_provisioning() -> RustRaftObservabilityProvisionin
             "provisioning_runbook_prometheus".to_string(),
             "support_envelope_validation_prometheus".to_string(),
         ],
-        dashboard: rustraft_grafana_dashboard(),
-        alert_rules: rustraft_alert_rules(),
-        runbook_steps: rustraft_observability_provisioning_runbook_steps(),
-        debug_bundle_contract: rustraft_debug_bundle_contract(),
+        dashboard: matrixraft_grafana_dashboard(),
+        alert_rules: matrixraft_alert_rules(),
+        runbook_steps: matrixraft_observability_provisioning_runbook_steps(),
+        debug_bundle_contract: matrixraft_debug_bundle_contract(),
         sample_artifact_command: "cargo run --example debug_artifacts".to_string(),
     }
 }
 
-pub fn rustraft_observability_provisioning_runbook_steps() -> Vec<RustRaftOperatorRunbookStep> {
+pub fn matrixraft_observability_provisioning_runbook_steps() -> Vec<RustRaftOperatorRunbookStep> {
     let triage = RustRaftOperatorTriageSummary {
         status: "needs_attention".to_string(),
         severity: "critical".to_string(),
@@ -507,7 +507,7 @@ pub fn rustraft_observability_provisioning_runbook_steps() -> Vec<RustRaftOperat
         diagnostic_warning_count: 1,
         critical_optimization_count: 1,
         warning_optimization_count: 1,
-        alert_rule_count: rustraft_alert_rules().len(),
+        alert_rule_count: matrixraft_alert_rules().len(),
         top_diagnostic_target: Some("rustraft.observability".to_string()),
         top_diagnostic_message: Some("observability_contract_stale".to_string()),
         top_alert: Some("RustRaftOperatorTriageNeedsAttention".to_string()),
@@ -521,15 +521,15 @@ pub fn rustraft_observability_provisioning_runbook_steps() -> Vec<RustRaftOperat
         hints: vec![],
     };
     let mut steps =
-        rustraft_operator_runbook_steps(&triage, &optimization, &rustraft_alert_rules());
-    steps.push(rustraft_runbook_step(
+        matrixraft_operator_runbook_steps(&triage, &optimization, &matrixraft_alert_rules());
+    steps.push(matrixraft_runbook_step(
         "refresh_debug_snapshot",
         "warning",
         "debug_bundle",
         "Regenerate the RustRaft debug artifact when validation fails, snapshot age is stale, RustRaftDebugSnapshotFreshnessLow warns, or RustRaftDebugSnapshotFreshnessLost fires.",
         "rustraft_debug_bundle_validation_ready is 1, rustraft_debug_snapshot_age_ms is below rustraft_debug_snapshot_max_age_ms, rustraft_debug_snapshot_stale_after_unix_ms is in the future, rustraft_debug_snapshot_remaining_fresh_ms is above rustraft_debug_snapshot_low_fresh_ms, rustraft_debug_snapshot_low_fresh is 1, and rustraft_debug_snapshot_fresh is 1.",
     ));
-    steps.push(rustraft_runbook_step(
+    steps.push(matrixraft_runbook_step(
         "validate_support_envelope",
         "warning",
         "support_envelope",
@@ -539,15 +539,15 @@ pub fn rustraft_observability_provisioning_runbook_steps() -> Vec<RustRaftOperat
     steps
 }
 
-pub fn rustraft_observability_provisioning_json() -> String {
-    serde_json::to_string_pretty(&rustraft_observability_provisioning())
+pub fn matrixraft_observability_provisioning_json() -> String {
+    serde_json::to_string_pretty(&matrixraft_observability_provisioning())
         .expect("RustRaft observability provisioning must serialize")
 }
 
-pub fn rustraft_validate_observability_provisioning(
+pub fn matrixraft_validate_observability_provisioning(
     provisioning: &RustRaftObservabilityProvisioning,
 ) -> RustRaftDebugBundleValidationReport {
-    let expected = rustraft_observability_provisioning();
+    let expected = matrixraft_observability_provisioning();
     let mut issues = Vec::new();
 
     if provisioning != &expected {
@@ -574,13 +574,13 @@ pub fn rustraft_validate_observability_provisioning(
     if provisioning.dashboard != expected.dashboard {
         issues.push("observability_dashboard_mismatch".to_string());
     }
-    if rustraft_dashboard_has_unadvertised_metrics(provisioning) {
+    if matrixraft_dashboard_has_unadvertised_metrics(provisioning) {
         issues.push("observability_dashboard_metric_not_advertised".to_string());
     }
     if provisioning.alert_rules != expected.alert_rules {
         issues.push("observability_alert_rules_mismatch".to_string());
     }
-    if rustraft_alert_rules_have_unadvertised_metrics(provisioning) {
+    if matrixraft_alert_rules_have_unadvertised_metrics(provisioning) {
         issues.push("observability_alert_metric_not_advertised".to_string());
     }
     if provisioning.runbook_steps != expected.runbook_steps {
@@ -593,10 +593,10 @@ pub fn rustraft_validate_observability_provisioning(
         issues.push("observability_sample_artifact_command_mismatch".to_string());
     }
 
-    rustraft_debug_bundle_validation_report(issues)
+    matrixraft_debug_bundle_validation_report(issues)
 }
 
-fn rustraft_alert_rules_have_unadvertised_metrics(
+fn matrixraft_alert_rules_have_unadvertised_metrics(
     provisioning: &RustRaftObservabilityProvisioning,
 ) -> bool {
     let advertised_metrics: BTreeSet<&str> = provisioning
@@ -607,12 +607,12 @@ fn rustraft_alert_rules_have_unadvertised_metrics(
         .collect();
 
     provisioning.alert_rules.iter().any(|rule| {
-        rustraft_alert_expr_metric_name(&rule.expr)
+        matrixraft_alert_expr_metric_name(&rule.expr)
             .is_none_or(|metric| !advertised_metrics.contains(metric))
     })
 }
 
-fn rustraft_dashboard_has_unadvertised_metrics(
+fn matrixraft_dashboard_has_unadvertised_metrics(
     provisioning: &RustRaftObservabilityProvisioning,
 ) -> bool {
     let advertised_metrics: BTreeSet<&str> = provisioning
@@ -625,11 +625,11 @@ fn rustraft_dashboard_has_unadvertised_metrics(
     provisioning.dashboard.panels.iter().any(|panel| {
         !advertised_metrics
             .iter()
-            .any(|metric| rustraft_expr_references_metric(&panel.expr, metric))
+            .any(|metric| matrixraft_expr_references_metric(&panel.expr, metric))
     })
 }
 
-fn rustraft_expr_references_metric(expr: &str, metric: &str) -> bool {
+fn matrixraft_expr_references_metric(expr: &str, metric: &str) -> bool {
     if let Some(start) = expr.find(metric) {
         let end = start + metric.len();
         let before_ok = start == 0
@@ -649,7 +649,7 @@ fn rustraft_expr_references_metric(expr: &str, metric: &str) -> bool {
     }
 }
 
-fn rustraft_alert_expr_metric_name(expr: &str) -> Option<&str> {
+fn matrixraft_alert_expr_metric_name(expr: &str) -> Option<&str> {
     let start = expr.find(|ch: char| ch.is_ascii_alphabetic() || ch == '_')?;
     let end = expr[start..]
         .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
@@ -658,22 +658,22 @@ fn rustraft_alert_expr_metric_name(expr: &str) -> Option<&str> {
     Some(&expr[start..end])
 }
 
-pub fn rustraft_validate_observability_provisioning_json(
+pub fn matrixraft_validate_observability_provisioning_json(
     json: &str,
 ) -> RustRaftDebugBundleValidationReport {
     match serde_json::from_str::<RustRaftObservabilityProvisioning>(json) {
-        Ok(provisioning) => rustraft_validate_observability_provisioning(&provisioning),
-        Err(_) => rustraft_debug_bundle_validation_report(vec![
+        Ok(provisioning) => matrixraft_validate_observability_provisioning(&provisioning),
+        Err(_) => matrixraft_debug_bundle_validation_report(vec![
             "observability_provisioning_json_parse_error".to_string(),
         ]),
     }
 }
 
-pub fn rustraft_observability_provisioning_validation_prometheus(
+pub fn matrixraft_observability_provisioning_validation_prometheus(
     report: &RustRaftDebugBundleValidationReport,
     labels: &[(&str, &str)],
 ) -> RustRaftPrometheusMetricSet {
-    let metrics = rustraft_metric_names();
+    let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut metric_count = 0_u64;
 
@@ -722,19 +722,19 @@ pub fn rustraft_observability_provisioning_validation_prometheus(
     }
 }
 
-pub fn rustraft_debug_bundle_contract() -> RustRaftDebugBundleContract {
+pub fn matrixraft_debug_bundle_contract() -> RustRaftDebugBundleContract {
     RustRaftDebugBundleContract {
-        name: "rustraft_debug_snapshot".to_string(),
+        name: "matrixraft_debug_snapshot".to_string(),
         version: 1,
         producer: "matrixraft".to_string(),
         schema: "rustraft.debug_snapshot.v1".to_string(),
     }
 }
 
-pub fn rustraft_validate_debug_snapshot(
+pub fn matrixraft_validate_debug_snapshot(
     snapshot: &RustRaftDebugSnapshot,
 ) -> RustRaftDebugBundleValidationReport {
-    let expected = rustraft_debug_bundle_contract();
+    let expected = matrixraft_debug_bundle_contract();
     let mut issues = Vec::new();
 
     if snapshot.contract != expected {
@@ -743,10 +743,10 @@ pub fn rustraft_validate_debug_snapshot(
     if snapshot.generated_at_unix_ms == 0 {
         issues.push("generated_at_missing".to_string());
     } else if snapshot.generated_at_unix_ms
-        > rustraft_debug_snapshot_now_unix_ms().saturating_add(60_000)
+        > matrixraft_debug_snapshot_now_unix_ms().saturating_add(60_000)
     {
         issues.push("generated_at_in_future".to_string());
-    } else if rustraft_debug_snapshot_now_unix_ms().saturating_sub(snapshot.generated_at_unix_ms)
+    } else if matrixraft_debug_snapshot_now_unix_ms().saturating_sub(snapshot.generated_at_unix_ms)
         > 3_600_000
     {
         issues.push("generated_at_stale".to_string());
@@ -759,11 +759,11 @@ pub fn rustraft_validate_debug_snapshot(
     }
     let expected_prometheus_metric_count = 3
         + snapshot.optimization.hints.len() as u64
-        + rustraft_optimization_component_hint_counts(&snapshot.optimization).len() as u64;
+        + matrixraft_optimization_component_hint_counts(&snapshot.optimization).len() as u64;
     if snapshot.optimization_prometheus.metric_count != expected_prometheus_metric_count {
         issues.push("prometheus_metric_count_mismatch".to_string());
     }
-    let metric_names = rustraft_metric_names();
+    let metric_names = matrixraft_metric_names();
     for required_metric in [
         metric_names.optimization_ready.as_str(),
         metric_names.optimization_critical_total.as_str(),
@@ -786,7 +786,7 @@ pub fn rustraft_validate_debug_snapshot(
         }
     }
     for ((component, severity), _) in
-        rustraft_optimization_component_hint_counts(&snapshot.optimization)
+        matrixraft_optimization_component_hint_counts(&snapshot.optimization)
     {
         let component_label = format!(
             "component=\"{}\"",
@@ -805,7 +805,7 @@ pub fn rustraft_validate_debug_snapshot(
     if snapshot.grafana.panels.is_empty() {
         issues.push("grafana_panels_missing".to_string());
     }
-    let expected_grafana = rustraft_grafana_dashboard();
+    let expected_grafana = matrixraft_grafana_dashboard();
     if snapshot.grafana.uid != expected_grafana.uid
         || snapshot.grafana.title != expected_grafana.title
         || snapshot.grafana.schema_version != expected_grafana.schema_version
@@ -832,7 +832,7 @@ pub fn rustraft_validate_debug_snapshot(
     if snapshot.triage.status.is_empty() {
         issues.push("triage_status_missing".to_string());
     }
-    let expected_triage = rustraft_operator_triage_summary(
+    let expected_triage = matrixraft_operator_triage_summary(
         &snapshot.diagnostics,
         &snapshot.optimization,
         &snapshot.alerts,
@@ -840,7 +840,7 @@ pub fn rustraft_validate_debug_snapshot(
     if snapshot.triage != expected_triage {
         issues.push("triage_contract_mismatch".to_string());
     }
-    if snapshot.diagnostics != rustraft_admin_diagnostic_log_entries(&snapshot.admin_report) {
+    if snapshot.diagnostics != matrixraft_admin_diagnostic_log_entries(&snapshot.admin_report) {
         issues.push("diagnostic_log_contract_mismatch".to_string());
     }
     if snapshot.diagnostic_prometheus.format != "prometheus_text_v0.0.4" {
@@ -882,7 +882,7 @@ pub fn rustraft_validate_debug_snapshot(
         );
         let severity_label = format!(
             "severity=\"{}\"",
-            rustraft_diagnostic_severity_label(entry.severity)
+            matrixraft_diagnostic_severity_label(entry.severity)
         );
         let message_label = format!(
             "message=\"{}\"",
@@ -948,7 +948,7 @@ pub fn rustraft_validate_debug_snapshot(
     if snapshot.triage.alert_rule_count != snapshot.alerts.len() {
         issues.push("triage_alert_count_mismatch".to_string());
     }
-    for expected_alert in rustraft_alert_rules() {
+    for expected_alert in matrixraft_alert_rules() {
         match snapshot
             .alerts
             .iter()
@@ -1004,7 +1004,7 @@ pub fn rustraft_validate_debug_snapshot(
         issues.push("runbook_prometheus_metrics_missing".to_string());
     }
     let expected_runbook_metric_count = snapshot.runbook_steps.len() as u64
-        + rustraft_runbook_step_counts(&snapshot.runbook_steps).len() as u64
+        + matrixraft_runbook_step_counts(&snapshot.runbook_steps).len() as u64
         + u64::from(!snapshot.runbook_steps.is_empty());
     if snapshot.runbook_prometheus.metric_count != expected_runbook_metric_count {
         issues.push("runbook_prometheus_metric_count_mismatch".to_string());
@@ -1063,8 +1063,11 @@ pub fn rustraft_validate_debug_snapshot(
             break;
         }
     }
-    let expected_runbook_steps =
-        rustraft_operator_runbook_steps(&snapshot.triage, &snapshot.optimization, &snapshot.alerts);
+    let expected_runbook_steps = matrixraft_operator_runbook_steps(
+        &snapshot.triage,
+        &snapshot.optimization,
+        &snapshot.alerts,
+    );
     if snapshot.runbook_steps.len() != expected_runbook_steps.len() {
         issues.push("runbook_step_count_mismatch".to_string());
     }
@@ -1122,21 +1125,21 @@ pub fn rustraft_validate_debug_snapshot(
         _ => issues.push("triage_status_unknown".to_string()),
     }
 
-    rustraft_debug_bundle_validation_report(issues)
+    matrixraft_debug_bundle_validation_report(issues)
 }
 
-pub fn rustraft_validate_debug_snapshot_json(json: &str) -> RustRaftDebugBundleValidationReport {
+pub fn matrixraft_validate_debug_snapshot_json(json: &str) -> RustRaftDebugBundleValidationReport {
     match serde_json::from_str::<RustRaftDebugSnapshot>(json) {
-        Ok(snapshot) => rustraft_validate_debug_snapshot(&snapshot),
-        Err(_) => rustraft_debug_bundle_validation_report(vec!["json_parse_failed".to_string()]),
+        Ok(snapshot) => matrixraft_validate_debug_snapshot(&snapshot),
+        Err(_) => matrixraft_debug_bundle_validation_report(vec!["json_parse_failed".to_string()]),
     }
 }
 
-pub fn rustraft_debug_bundle_validation_prometheus(
+pub fn matrixraft_debug_bundle_validation_prometheus(
     report: &RustRaftDebugBundleValidationReport,
     labels: &[(&str, &str)],
 ) -> RustRaftPrometheusMetricSet {
-    let metrics = rustraft_metric_names();
+    let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut metric_count = 0_u64;
 
@@ -1185,7 +1188,7 @@ pub fn rustraft_debug_bundle_validation_prometheus(
     }
 }
 
-fn rustraft_debug_bundle_validation_report(
+fn matrixraft_debug_bundle_validation_report(
     issues: Vec<String>,
 ) -> RustRaftDebugBundleValidationReport {
     RustRaftDebugBundleValidationReport {
@@ -1195,14 +1198,14 @@ fn rustraft_debug_bundle_validation_report(
     }
 }
 
-fn rustraft_debug_snapshot_now_unix_ms() -> u64 {
+fn matrixraft_debug_snapshot_now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
 }
 
-pub fn rustraft_operator_triage_summary(
+pub fn matrixraft_operator_triage_summary(
     diagnostics: &[RustRaftDiagnosticLogEntry],
     optimization: &RustRaftOptimizationReport,
     alerts: &[RustRaftAlertRule],
@@ -1274,11 +1277,11 @@ pub fn rustraft_operator_triage_summary(
     }
 }
 
-pub fn rustraft_operator_triage_prometheus(
+pub fn matrixraft_operator_triage_prometheus(
     triage: &RustRaftOperatorTriageSummary,
     labels: &[(&str, &str)],
 ) -> RustRaftPrometheusMetricSet {
-    let metrics = rustraft_metric_names();
+    let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut status_labels = labels.to_vec();
     status_labels.push(("status", triage.status.as_str()));
@@ -1380,18 +1383,18 @@ pub fn rustraft_operator_triage_prometheus(
     }
 }
 
-pub fn rustraft_diagnostic_log_prometheus(
+pub fn matrixraft_diagnostic_log_prometheus(
     diagnostics: &[RustRaftDiagnosticLogEntry],
     labels: &[(&str, &str)],
 ) -> RustRaftPrometheusMetricSet {
-    let metrics = rustraft_metric_names();
+    let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut metric_count = 0_u64;
 
     for severity in ["info", "warn", "error"] {
         let count = diagnostics
             .iter()
-            .filter(|entry| rustraft_diagnostic_severity_label(entry.severity) == severity)
+            .filter(|entry| matrixraft_diagnostic_severity_label(entry.severity) == severity)
             .count() as u64;
         let mut severity_labels = labels.to_vec();
         severity_labels.push(("severity", severity));
@@ -1409,7 +1412,7 @@ pub fn rustraft_diagnostic_log_prometheus(
         entry_labels.push(("target", entry.target.as_str()));
         entry_labels.push((
             "severity",
-            rustraft_diagnostic_severity_label(entry.severity),
+            matrixraft_diagnostic_severity_label(entry.severity),
         ));
         entry_labels.push(("message", entry.message.as_str()));
         push_metric(
@@ -1428,7 +1431,7 @@ pub fn rustraft_diagnostic_log_prometheus(
     }
 }
 
-fn rustraft_diagnostic_severity_label(severity: RustRaftDiagnosticSeverity) -> &'static str {
+fn matrixraft_diagnostic_severity_label(severity: RustRaftDiagnosticSeverity) -> &'static str {
     match severity {
         RustRaftDiagnosticSeverity::Info => "info",
         RustRaftDiagnosticSeverity::Warn => "warn",
@@ -1436,7 +1439,7 @@ fn rustraft_diagnostic_severity_label(severity: RustRaftDiagnosticSeverity) -> &
     }
 }
 
-pub fn rustraft_operator_runbook_steps(
+pub fn matrixraft_operator_runbook_steps(
     triage: &RustRaftOperatorTriageSummary,
     optimization: &RustRaftOptimizationReport,
     alerts: &[RustRaftAlertRule],
@@ -1444,7 +1447,7 @@ pub fn rustraft_operator_runbook_steps(
     let mut steps = Vec::new();
 
     if triage.diagnostic_error_count > 0 {
-        steps.push(rustraft_runbook_step(
+        steps.push(matrixraft_runbook_step(
             "inspect_error_diagnostics",
             "critical",
             "diagnostics",
@@ -1453,7 +1456,7 @@ pub fn rustraft_operator_runbook_steps(
         ));
     }
     if optimization.critical_count > 0 {
-        steps.push(rustraft_runbook_step(
+        steps.push(matrixraft_runbook_step(
             "resolve_critical_optimization_hints",
             "critical",
             "optimization",
@@ -1462,7 +1465,7 @@ pub fn rustraft_operator_runbook_steps(
         ));
     }
     if triage.severity == "critical" && alerts.iter().any(|rule| rule.severity == "critical") {
-        steps.push(rustraft_runbook_step(
+        steps.push(matrixraft_runbook_step(
             "wire_critical_alerts",
             "critical",
             "alerts",
@@ -1471,7 +1474,7 @@ pub fn rustraft_operator_runbook_steps(
         ));
     }
     if triage.diagnostic_warning_count > 0 || optimization.warning_count > 0 {
-        steps.push(rustraft_runbook_step(
+        steps.push(matrixraft_runbook_step(
             "review_warning_signals",
             "warning",
             "diagnostics",
@@ -1480,7 +1483,7 @@ pub fn rustraft_operator_runbook_steps(
         ));
     }
     if steps.is_empty() {
-        steps.push(rustraft_runbook_step(
+        steps.push(matrixraft_runbook_step(
             "continue_normal_observation",
             "info",
             "observability",
@@ -1492,15 +1495,15 @@ pub fn rustraft_operator_runbook_steps(
     steps
 }
 
-pub fn rustraft_operator_runbook_prometheus(
+pub fn matrixraft_operator_runbook_prometheus(
     steps: &[RustRaftOperatorRunbookStep],
     labels: &[(&str, &str)],
 ) -> RustRaftPrometheusMetricSet {
-    let metrics = rustraft_metric_names();
+    let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut metric_count = 0_u64;
 
-    for ((severity, target), count) in rustraft_runbook_step_counts(steps) {
+    for ((severity, target), count) in matrixraft_runbook_step_counts(steps) {
         let mut step_labels = labels.to_vec();
         step_labels.push(("severity", severity.as_str()));
         step_labels.push(("target", target.as_str()));
@@ -1546,7 +1549,7 @@ pub fn rustraft_operator_runbook_prometheus(
     }
 }
 
-fn rustraft_runbook_step_counts(
+fn matrixraft_runbook_step_counts(
     steps: &[RustRaftOperatorRunbookStep],
 ) -> BTreeMap<(String, String), u64> {
     let mut counts = BTreeMap::new();
@@ -1558,7 +1561,7 @@ fn rustraft_runbook_step_counts(
     counts
 }
 
-fn rustraft_runbook_step(
+fn matrixraft_runbook_step(
     id: &str,
     severity: &str,
     target: &str,
@@ -1574,11 +1577,11 @@ fn rustraft_runbook_step(
     }
 }
 
-pub fn rustraft_optimization_report_prometheus(
+pub fn matrixraft_optimization_report_prometheus(
     report: &RustRaftOptimizationReport,
     labels: &[(&str, &str)],
 ) -> RustRaftPrometheusMetricSet {
-    let metrics = rustraft_metric_names();
+    let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut metric_count = 0_u64;
 
@@ -1617,7 +1620,7 @@ pub fn rustraft_optimization_report_prometheus(
         push_metric(&mut text, &metrics.optimization_hint_total, &hint_labels, 1);
         metric_count += 1;
     }
-    for ((component, severity), count) in rustraft_optimization_component_hint_counts(report) {
+    for ((component, severity), count) in matrixraft_optimization_component_hint_counts(report) {
         let mut component_labels = labels.to_vec();
         component_labels.push(("component", component.as_str()));
         component_labels.push(("severity", severity.as_str()));
@@ -1637,7 +1640,7 @@ pub fn rustraft_optimization_report_prometheus(
     }
 }
 
-fn rustraft_optimization_component_hint_counts(
+fn matrixraft_optimization_component_hint_counts(
     report: &RustRaftOptimizationReport,
 ) -> BTreeMap<(String, String), u64> {
     let mut counts = BTreeMap::new();
@@ -1654,27 +1657,27 @@ fn rustraft_optimization_component_hint_counts(
     counts
 }
 
-pub fn rustraft_debug_snapshot(
+pub fn matrixraft_debug_snapshot(
     admin_report: &RaftRuntimeAdminReport,
     status_surface: &RustRaftAdminStatusSurfaceInput,
     labels: &[(&str, &str)],
 ) -> RustRaftDebugSnapshot {
-    let optimization = rustraft_optimization_report(status_surface);
-    let diagnostics = rustraft_admin_diagnostic_log_entries(admin_report);
-    let diagnostic_prometheus = rustraft_diagnostic_log_prometheus(&diagnostics, labels);
-    let alerts = rustraft_alert_rules();
-    let triage = rustraft_operator_triage_summary(&diagnostics, &optimization, &alerts);
-    let runbook_steps = rustraft_operator_runbook_steps(&triage, &optimization, &alerts);
-    let runbook_prometheus = rustraft_operator_runbook_prometheus(&runbook_steps, labels);
+    let optimization = matrixraft_optimization_report(status_surface);
+    let diagnostics = matrixraft_admin_diagnostic_log_entries(admin_report);
+    let diagnostic_prometheus = matrixraft_diagnostic_log_prometheus(&diagnostics, labels);
+    let alerts = matrixraft_alert_rules();
+    let triage = matrixraft_operator_triage_summary(&diagnostics, &optimization, &alerts);
+    let runbook_steps = matrixraft_operator_runbook_steps(&triage, &optimization, &alerts);
+    let runbook_prometheus = matrixraft_operator_runbook_prometheus(&runbook_steps, labels);
     RustRaftDebugSnapshot {
-        contract: rustraft_debug_bundle_contract(),
-        generated_at_unix_ms: rustraft_debug_snapshot_now_unix_ms(),
+        contract: matrixraft_debug_bundle_contract(),
+        generated_at_unix_ms: matrixraft_debug_snapshot_now_unix_ms(),
         admin_report: admin_report.clone(),
         diagnostics,
         diagnostic_prometheus,
-        optimization_prometheus: rustraft_optimization_report_prometheus(&optimization, labels),
+        optimization_prometheus: matrixraft_optimization_report_prometheus(&optimization, labels),
         optimization,
-        grafana: rustraft_grafana_dashboard(),
+        grafana: matrixraft_grafana_dashboard(),
         alerts,
         triage,
         runbook_prometheus,
@@ -1682,12 +1685,12 @@ pub fn rustraft_debug_snapshot(
     }
 }
 
-pub fn rustraft_debug_snapshot_json(
+pub fn matrixraft_debug_snapshot_json(
     admin_report: &RaftRuntimeAdminReport,
     status_surface: &RustRaftAdminStatusSurfaceInput,
     labels: &[(&str, &str)],
 ) -> String {
-    serde_json::to_string_pretty(&rustraft_debug_snapshot(
+    serde_json::to_string_pretty(&matrixraft_debug_snapshot(
         admin_report,
         status_surface,
         labels,
@@ -1695,14 +1698,14 @@ pub fn rustraft_debug_snapshot_json(
     .expect("RustRaft debug snapshot must serialize")
 }
 
-pub fn rustraft_debug_snapshot_metadata_prometheus(
+pub fn matrixraft_debug_snapshot_metadata_prometheus(
     snapshot: &RustRaftDebugSnapshot,
     labels: &[(&str, &str)],
 ) -> RustRaftPrometheusMetricSet {
-    let metrics = rustraft_metric_names();
+    let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let generated_at_unix_ms = snapshot.generated_at_unix_ms;
-    let age_ms = rustraft_debug_snapshot_now_unix_ms().saturating_sub(generated_at_unix_ms);
+    let age_ms = matrixraft_debug_snapshot_now_unix_ms().saturating_sub(generated_at_unix_ms);
     let max_age_ms = 3_600_000u64;
     let low_fresh_ms = 300_000u64;
     let stale_after_unix_ms = generated_at_unix_ms.saturating_add(3_600_000);
@@ -1754,8 +1757,8 @@ pub fn rustraft_debug_snapshot_metadata_prometheus(
     }
 }
 
-pub fn rustraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
-    let metrics = rustraft_metric_names();
+pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
+    let metrics = matrixraft_metric_names();
     RustRaftGrafanaDashboard {
         title: "RustRaft Runtime Overview".to_string(),
         uid: "rustraft-runtime-overview".to_string(),
@@ -2308,8 +2311,8 @@ pub fn rustraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
     }
 }
 
-pub fn rustraft_grafana_dashboard_json() -> String {
-    serde_json::to_string_pretty(&rustraft_grafana_dashboard())
+pub fn matrixraft_grafana_dashboard_json() -> String {
+    serde_json::to_string_pretty(&matrixraft_grafana_dashboard())
         .expect("RustRaft Grafana dashboard must serialize")
 }
 

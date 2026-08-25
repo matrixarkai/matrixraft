@@ -13,7 +13,7 @@ use crate::{
     RustRaftLogIndex, RustRaftNodeId, RustRaftRole, RustRaftSnapshotChunk, RustRaftTerm,
 };
 
-pub fn rustraft_apply_entry<S, G, P>(
+pub fn matrixraft_apply_entry<S, G, P>(
     state_machine: &mut S,
     group_id: G,
     entry: RaftLogEntry<P>,
@@ -607,7 +607,7 @@ where
         Ok(report)
     }
 
-    pub fn apply_batch_like_matrixraft(
+    pub fn apply_batch(
         &mut self,
         entries: &[RaftLogEntry<P>],
         max_entries: usize,
@@ -639,7 +639,7 @@ where
 
         for entry in &entries[..apply_count] {
             report.attempted += 1;
-            match rustraft_fsm_entry_kind(entry) {
+            match matrixraft_fsm_entry_kind(entry) {
                 RaftFsmApplyEntryKind::Data => {
                     let outcome = self.apply_entry(entry.clone())?;
                     if outcome.applied {
@@ -727,7 +727,7 @@ where
     }
 }
 
-pub fn rustraft_fsm_entry_kind<P>(entry: &RaftLogEntry<P>) -> RaftFsmApplyEntryKind {
+pub fn matrixraft_fsm_entry_kind<P>(entry: &RaftLogEntry<P>) -> RaftFsmApplyEntryKind {
     if entry.is_command {
         RaftFsmApplyEntryKind::Data
     } else {

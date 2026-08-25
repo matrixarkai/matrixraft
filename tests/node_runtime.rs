@@ -8,7 +8,7 @@ use matrixraft::{
     RustRaftNodeOptions, RustRaftPeer, RustRaftProposeOptions, RustRaftReplicaRole,
     RustRaftRequestTimer, RustRaftSnapshotChunk, RustRaftSnapshotMeta, RustRaftSnapshotState,
     RustRaftStepResult, RustRaftStorageApplyFence, RustRaftTickBackpressure, VoteRequest,
-    RUSTRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS,
+    MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -254,7 +254,7 @@ fn node_runtime_expires_and_renews_leader_lease() {
 }
 
 #[test]
-fn node_runtime_steps_down_leader_after_lost_quorum_like_matrixraft() {
+fn node_runtime_steps_down_leader_after_lost_quorum() {
     let mut options = node_options();
     options.config.heartbeat_interval_ms = 5;
     options.config.election_timeout_ms = 50;
@@ -295,7 +295,7 @@ fn node_runtime_steps_down_leader_after_lost_quorum_like_matrixraft() {
 }
 
 #[test]
-fn node_runtime_election_timeout_campaigns_after_stale_leader_like_matrixraft() {
+fn node_runtime_election_timeout_campaigns_after_stale_leader() {
     let mut options = node_options();
     options.node_id = 2;
     options.config.enable_lease_read = false;
@@ -328,7 +328,7 @@ fn node_runtime_election_timeout_campaigns_after_stale_leader_like_matrixraft() 
 }
 
 #[test]
-fn node_runtime_transfers_leader_on_fatal_event_like_matrixraft() {
+fn node_runtime_transfers_leader_on_fatal_event() {
     let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
@@ -528,7 +528,7 @@ fn node_runtime_step_down_transfers_to_selected_follower() {
 }
 
 #[test]
-fn node_runtime_resigns_leader_without_transfer_target_like_matrixraft() {
+fn node_runtime_resigns_leader_without_transfer_target() {
     let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.set_node_healthy(2, false).expect("stop follower 2");
@@ -987,7 +987,7 @@ fn node_runtime_reports_all_peer_pipeline_statuses() {
 }
 
 #[test]
-fn node_runtime_steps_batch_of_raft_messages_like_matrixraft() {
+fn node_runtime_steps_batch_of_raft_messages() {
     let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
@@ -1266,7 +1266,7 @@ fn node_runtime_tracks_and_expires_reorder_queue() {
 }
 
 #[test]
-fn tick_backpressure_caps_pending_ticks_like_matrixraft() {
+fn tick_backpressure_caps_pending_ticks() {
     let mut ticks = RustRaftTickBackpressure::new(2);
 
     let first = ticks.admit_tick();
@@ -1313,11 +1313,11 @@ fn tick_backpressure_handles_empty_completion_and_reset() {
 }
 
 #[test]
-fn request_timer_watch_cancel_and_notify_like_matrixraft() {
+fn request_timer_watch_cancel_and_notify() {
     let mut timer = RustRaftRequestTimer::new();
     assert_eq!(
         timer.next_timeout_ms(100),
-        RUSTRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS
+        MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS
     );
 
     assert!(timer.watch(1, 1, 0, 100).is_none());
@@ -1325,7 +1325,7 @@ fn request_timer_watch_cancel_and_notify_like_matrixraft() {
     assert_eq!(timer.timed_len(), 0);
     assert_eq!(
         timer.next_timeout_ms(100),
-        RUSTRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS
+        MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS
     );
 
     assert!(timer.watch(1, 2, 110, 100).is_none());
@@ -1344,7 +1344,7 @@ fn request_timer_watch_cancel_and_notify_like_matrixraft() {
 }
 
 #[test]
-fn request_timer_lapses_with_limit_and_removes_node_tasks_like_matrixraft() {
+fn request_timer_lapses_with_limit_and_removes_node_tasks() {
     let mut timer = RustRaftRequestTimer::new();
     timer.watch(1, 1, 90, 80);
     timer.watch(1, 2, 95, 80);
@@ -1367,7 +1367,7 @@ fn request_timer_lapses_with_limit_and_removes_node_tasks_like_matrixraft() {
     assert!(timer.is_empty());
     assert_eq!(
         timer.next_timeout_ms(100),
-        RUSTRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS
+        MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS
     );
 }
 

@@ -257,11 +257,11 @@ impl RustRaftTransport for InMemoryRaftTransport {
         request: RustRaftAppendEntriesRequest,
     ) -> Result<RustRaftAppendEntriesResponse, RustRaftError> {
         if self.validate_messages {
-            require_transport_validation(rustraft_validate_append_entries_request(&request))?;
+            require_transport_validation(matrixraft_validate_append_entries_request(&request))?;
         }
         let response = self.handler(target)?.append_entries(target, request)?;
         if self.validate_messages {
-            require_transport_validation(rustraft_validate_append_entries_response(&response))?;
+            require_transport_validation(matrixraft_validate_append_entries_response(&response))?;
         }
         Ok(response)
     }
@@ -272,11 +272,11 @@ impl RustRaftTransport for InMemoryRaftTransport {
         request: RustRaftVoteRequest,
     ) -> Result<RustRaftVoteResponse, RustRaftError> {
         if self.validate_messages {
-            require_transport_validation(rustraft_validate_vote_request(&request))?;
+            require_transport_validation(matrixraft_validate_vote_request(&request))?;
         }
         let response = self.handler(target)?.vote(target, request)?;
         if self.validate_messages {
-            require_transport_validation(rustraft_validate_vote_response(&response))?;
+            require_transport_validation(matrixraft_validate_vote_response(&response))?;
         }
         Ok(response)
     }
@@ -287,11 +287,11 @@ impl RustRaftTransport for InMemoryRaftTransport {
         request: RustRaftInstallSnapshotRequest,
     ) -> Result<RustRaftInstallSnapshotResponse, RustRaftError> {
         if self.validate_messages {
-            require_transport_validation(rustraft_validate_install_snapshot_request(&request))?;
+            require_transport_validation(matrixraft_validate_install_snapshot_request(&request))?;
         }
         let response = self.handler(target)?.install_snapshot(target, request)?;
         if self.validate_messages {
-            require_transport_validation(rustraft_validate_install_snapshot_response(&response))?;
+            require_transport_validation(matrixraft_validate_install_snapshot_response(&response))?;
         }
         Ok(response)
     }
@@ -302,11 +302,11 @@ impl RustRaftTransport for InMemoryRaftTransport {
         request: RustRaftReadIndexRequest,
     ) -> Result<RustRaftReadIndexResponse, RustRaftError> {
         if self.validate_messages {
-            require_transport_validation(rustraft_validate_read_index_request(&request))?;
+            require_transport_validation(matrixraft_validate_read_index_request(&request))?;
         }
         let response = self.handler(target)?.read_index(target, request)?;
         if self.validate_messages {
-            require_transport_validation(rustraft_validate_read_index_response(&response))?;
+            require_transport_validation(matrixraft_validate_read_index_response(&response))?;
         }
         Ok(response)
     }
@@ -420,7 +420,7 @@ impl TcpRaftTransport {
             return Ok(Vec::new());
         }
         for request in &requests {
-            require_transport_validation(rustraft_validate_tcp_transport_request(request))?;
+            require_transport_validation(matrixraft_validate_tcp_transport_request(request))?;
         }
         match self.send_rpc(target, TcpRaftTransportRequest::Batch { requests })? {
             TcpRaftTransportResponse::Batch(responses) => Ok(responses),
@@ -437,14 +437,14 @@ impl RustRaftTransport for TcpRaftTransport {
         target: u64,
         request: RustRaftAppendEntriesRequest,
     ) -> Result<RustRaftAppendEntriesResponse, RustRaftError> {
-        require_transport_validation(rustraft_validate_append_entries_request(&request))?;
+        require_transport_validation(matrixraft_validate_append_entries_request(&request))?;
         match self.send_rpc(
             target,
             TcpRaftTransportRequest::AppendEntries { target, request },
         )? {
             TcpRaftTransportResponse::AppendEntries(response) => {
                 let response = response.into_result()?;
-                require_transport_validation(rustraft_validate_append_entries_response(&response))?;
+                require_transport_validation(matrixraft_validate_append_entries_response(&response))?;
                 Ok(response)
             }
             _ => Err(RaftError::Transport(
@@ -458,11 +458,11 @@ impl RustRaftTransport for TcpRaftTransport {
         target: u64,
         request: RustRaftVoteRequest,
     ) -> Result<RustRaftVoteResponse, RustRaftError> {
-        require_transport_validation(rustraft_validate_vote_request(&request))?;
+        require_transport_validation(matrixraft_validate_vote_request(&request))?;
         match self.send_rpc(target, TcpRaftTransportRequest::Vote { target, request })? {
             TcpRaftTransportResponse::Vote(response) => {
                 let response = response.into_result()?;
-                require_transport_validation(rustraft_validate_vote_response(&response))?;
+                require_transport_validation(matrixraft_validate_vote_response(&response))?;
                 Ok(response)
             }
             _ => Err(RaftError::Transport(
@@ -476,14 +476,14 @@ impl RustRaftTransport for TcpRaftTransport {
         target: u64,
         request: RustRaftInstallSnapshotRequest,
     ) -> Result<RustRaftInstallSnapshotResponse, RustRaftError> {
-        require_transport_validation(rustraft_validate_install_snapshot_request(&request))?;
+        require_transport_validation(matrixraft_validate_install_snapshot_request(&request))?;
         match self.send_rpc(
             target,
             TcpRaftTransportRequest::InstallSnapshot { target, request },
         )? {
             TcpRaftTransportResponse::InstallSnapshot(response) => {
                 let response = response.into_result()?;
-                require_transport_validation(rustraft_validate_install_snapshot_response(
+                require_transport_validation(matrixraft_validate_install_snapshot_response(
                     &response,
                 ))?;
                 Ok(response)
@@ -499,14 +499,14 @@ impl RustRaftTransport for TcpRaftTransport {
         target: u64,
         request: RustRaftReadIndexRequest,
     ) -> Result<RustRaftReadIndexResponse, RustRaftError> {
-        require_transport_validation(rustraft_validate_read_index_request(&request))?;
+        require_transport_validation(matrixraft_validate_read_index_request(&request))?;
         match self.send_rpc(
             target,
             TcpRaftTransportRequest::ReadIndex { target, request },
         )? {
             TcpRaftTransportResponse::ReadIndex(response) => {
                 let response = response.into_result()?;
-                require_transport_validation(rustraft_validate_read_index_response(&response))?;
+                require_transport_validation(matrixraft_validate_read_index_response(&response))?;
                 Ok(response)
             }
             _ => Err(RaftError::Transport(
@@ -600,7 +600,7 @@ where
     }
     let request: TcpRaftTransportRequest = serde_json::from_str(&line)
         .map_err(|err| RaftError::Transport(format!("failed to decode raft TCP request: {err}")))?;
-    require_transport_validation(rustraft_validate_tcp_transport_request(&request))?;
+    require_transport_validation(matrixraft_validate_tcp_transport_request(&request))?;
     let response = handle_tcp_raft_request(request, handler);
     let encoded = serde_json::to_vec(&response).map_err(|err| {
         RaftError::Transport(format!("failed to encode raft TCP response: {err}"))
