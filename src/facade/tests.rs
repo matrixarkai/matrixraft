@@ -5,6 +5,120 @@
 // Split from src/lib.rs to keep the crate facade small and focused.
 
 #[cfg(test)]
+mod log_addressing_tests {
+    use super::*;
+
+    fn entry(term: RustRaftTerm, index: RustRaftLogIndex, bytes: usize) -> RustRaftLogEntry {
+        RustRaftLogEntry {
+            log_id: RustRaftLogId { term, index },
+            payload: vec![b'x'; bytes],
+            is_command: false,
+        }
+    }
+
+    fn summed_payload_bytes(node: &RaftNode) -> u64 {
+        node.log.iter().map(|entry| entry.payload.len() as u64).sum()
+    }
+
+    fn assert_byte_count_matches_log(node: &RaftNode, stage: &str) {
+        assert_eq!(
+            node.retained_log_bytes(),
+            summed_payload_bytes(node),
+            "retained byte count drifted from the log after {stage}"
+        );
+    }
+
+    fn voter() -> RaftNode {
+        RaftNode::new(1, RustRaftReplicaRole::Voter, false)
+    }
+
+    #[test]
+    fn retained_byte_count_follows_every_log_mutation() {
+        let mut node = voter();
+        assert_byte_count_matches_log(&node, "construction");
+
+        for index in 1..=10 {
+            node.append_entry(entry(1, index, index as usize * 4));
+        }
+        assert_byte_count_matches_log(&node, "appends");
+        assert_eq!(node.retained_log_bytes(), (1..=10_u64).map(|i| i * 4).sum::<u64>());
+
+        // Re-appending an occupied index drops the conflicting tail with it.
+        node.append_entry(entry(2, 6, 1));
+        assert_byte_count_matches_log(&node, "conflicting append");
+        assert_eq!(node.log.len(), 6);
+        assert_eq!(node.log_term_at(6), Some(2));
+
+        node.truncate_log_from(4);
+        assert_byte_count_matches_log(&node, "truncate");
+        assert_eq!(node.log.len(), 3);
+
+        // Truncating past the tail is a no-op, not a rewind.
+        node.truncate_log_from(99);
+        assert_byte_count_matches_log(&node, "truncate past the tail");
+        assert_eq!(node.log.len(), 3);
+
+        let discarded = node.discard_log_through(2);
+        assert_eq!(discarded, 2);
+        assert_byte_count_matches_log(&node, "discard");
+        assert_eq!(node.log.first().map(|entry| entry.log_id.index), Some(3));
+
+        node.set_log(vec![entry(3, 20, 7), entry(3, 21, 9)]);
+        assert_byte_count_matches_log(&node, "restore");
+        assert_eq!(node.retained_log_bytes(), 16);
+    }
+
+    #[test]
+    fn log_term_lookup_survives_a_compacted_prefix() {
+        let mut node = voter();
+        for index in 1..=8 {
+            let term = if index <= 4 { 1 } else { 2 };
+            node.append_entry(entry(term, index, 3));
+        }
+        node.discard_log_through(5);
+
+        assert_eq!(node.log_term_at(0), Some(0));
+        // Indices below the retained prefix are gone, not mislabelled.
+        assert_eq!(node.log_term_at(3), None);
+        assert_eq!(node.log_term_at(5), None);
+        assert_eq!(node.log_term_at(6), Some(2));
+        assert_eq!(node.log_term_at(8), Some(2));
+        assert_eq!(node.log_term_at(9), None);
+    }
+
+    #[test]
+    fn log_positions_agree_with_a_scan() {
+        let mut node = voter();
+        for index in 1..=32 {
+            node.append_entry(entry(1, index, 2));
+        }
+        node.discard_log_through(7);
+
+        for log_index in 0..40 {
+            let scanned = node
+                .log
+                .iter()
+                .position(|entry| entry.log_id.index == log_index);
+            assert_eq!(
+                node.log_position(log_index),
+                scanned,
+                "log_position disagreed with a scan at index {log_index}"
+            );
+
+            let scanned_after = node
+                .log
+                .iter()
+                .position(|entry| entry.log_id.index >= log_index);
+            assert_eq!(
+                node.log_position_at_or_after(log_index),
+                scanned_after,
+                "log_position_at_or_after disagreed with a scan at index {log_index}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

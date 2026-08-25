@@ -37,6 +37,10 @@ struct RaftNode {
     raft_role: RustRaftRole,
     hard_state: RustRaftHardState,
     log: Vec<RustRaftLogEntry>,
+    // Running total of `log` payload bytes. Maintained by every log mutation so
+    // that the admission checks on the propose path do not sum the log.
+    #[serde(default)]
+    retained_log_bytes: u64,
     installed_snapshot: Option<RustRaftSnapshotMeta>,
     commit_index: RustRaftLogIndex,
     applied_index: RustRaftLogIndex,
@@ -65,6 +69,7 @@ impl RaftNode {
                 committed: None,
             },
             log: Vec::new(),
+            retained_log_bytes: 0,
             installed_snapshot: None,
             commit_index: 0,
             applied_index: 0,
@@ -95,6 +100,71 @@ impl RaftNode {
         log_index.max(snapshot_index)
     }
 
+    /// Slot holding `log_index`, or `None` when the index is outside the
+    /// retained log.
+    ///
+    /// `log` is ordered by index, so a contiguous log answers by subtracting
+    /// the first retained index. The binary search only runs if a gap ever puts
+    /// the entry somewhere other than its arithmetic slot.
+    fn log_position(&self, log_index: RustRaftLogIndex) -> Option<usize> {
+        let first_index = self.log.first()?.log_id.index;
+        let offset = log_index.checked_sub(first_index)? as usize;
+        if self.log.get(offset).map(|entry| entry.log_id.index) == Some(log_index) {
+            return Some(offset);
+        }
+        self.log
+            .binary_search_by(|entry| entry.log_id.index.cmp(&log_index))
+            .ok()
+    }
+
+    /// Slot of the first entry at or after `log_index`, or `None` when every
+    /// retained entry is below it.
+    fn log_position_at_or_after(&self, log_index: RustRaftLogIndex) -> Option<usize> {
+        if self
+            .log
+            .last()
+            .is_none_or(|last| last.log_id.index < log_index)
+        {
+            return None;
+        }
+        Some(
+            self.log
+                .partition_point(|entry| entry.log_id.index < log_index),
+        )
+    }
+
+    fn truncate_log_at(&mut self, position: usize) {
+        let released: u64 = self.log[position..]
+            .iter()
+            .map(|entry| entry.payload.len() as u64)
+            .sum();
+        self.retained_log_bytes = self.retained_log_bytes.saturating_sub(released);
+        self.log.truncate(position);
+    }
+
+    /// Drops every retained entry at or below `log_index` and reports how many
+    /// went away.
+    fn discard_log_through(&mut self, log_index: RustRaftLogIndex) -> usize {
+        let cut = self
+            .log
+            .partition_point(|entry| entry.log_id.index <= log_index);
+        if cut == 0 {
+            return 0;
+        }
+        let released: u64 = self.log[..cut]
+            .iter()
+            .map(|entry| entry.payload.len() as u64)
+            .sum();
+        self.retained_log_bytes = self.retained_log_bytes.saturating_sub(released);
+        self.log.drain(..cut);
+        cut
+    }
+
+    fn set_log(&mut self, log: Vec<RustRaftLogEntry>) {
+        self.retained_log_bytes = log.iter().map(|entry| entry.payload.len() as u64).sum();
+        self.log = log;
+    }
+
     fn log_term_at(&self, log_index: RustRaftLogIndex) -> Option<RustRaftTerm> {
         if log_index == 0 {
             return Some(0);
@@ -104,10 +174,8 @@ impl RaftNode {
                 return Some(snapshot.last_log_id.term);
             }
         }
-        self.log
-            .iter()
-            .find(|entry| entry.log_id.index == log_index)
-            .map(|entry| entry.log_id.term)
+        self.log_position(log_index)
+            .map(|position| self.log[position].log_id.term)
     }
 
     fn is_fresh_candidate_log(&self, candidate_last_log_id: Option<&RustRaftLogId>) -> bool {
@@ -121,23 +189,26 @@ impl RaftNode {
     }
 
     fn append_entry(&mut self, entry: RustRaftLogEntry) {
-        if let Some(position) = self
+        // An entry past the tail cannot collide with a retained index, so the
+        // steady-state append never looks at the rest of the log.
+        let extends_tail = self
             .log
-            .iter()
-            .position(|existing| existing.log_id.index == entry.log_id.index)
-        {
-            self.log.truncate(position);
+            .last()
+            .is_none_or(|last| last.log_id.index < entry.log_id.index);
+        if !extends_tail {
+            if let Some(position) = self.log_position(entry.log_id.index) {
+                self.truncate_log_at(position);
+            }
         }
+        self.retained_log_bytes = self
+            .retained_log_bytes
+            .saturating_add(entry.payload.len() as u64);
         self.log.push(entry);
     }
 
     fn truncate_log_from(&mut self, log_index: RustRaftLogIndex) {
-        if let Some(position) = self
-            .log
-            .iter()
-            .position(|existing| existing.log_id.index >= log_index)
-        {
-            self.log.truncate(position);
+        if let Some(position) = self.log_position_at_or_after(log_index) {
+            self.truncate_log_at(position);
         }
     }
 
@@ -207,7 +278,7 @@ impl RaftNode {
         let snapshot_index = snapshot.meta.last_log_id.index;
         let snapshot_log_id = snapshot.meta.last_log_id.clone();
         self.installed_snapshot = Some(snapshot.meta);
-        self.log.retain(|entry| entry.log_id.index > snapshot_index);
+        self.discard_log_through(snapshot_index);
         if self.replica_role == RustRaftReplicaRole::Witness {
             self.witness_ack_index = self.witness_ack_index.max(snapshot_index);
         }
@@ -232,16 +303,11 @@ impl RaftNode {
             self.commit_index
         };
         let log_index = log_index.min(safe_compaction_index);
-        let before = self.log.len();
-        self.log.retain(|entry| entry.log_id.index > log_index);
-        before.saturating_sub(self.log.len()) as u64
+        self.discard_log_through(log_index) as u64
     }
 
     fn retained_log_bytes(&self) -> u64 {
-        self.log
-            .iter()
-            .map(|entry| entry.payload.len() as u64)
-            .sum()
+        self.retained_log_bytes
     }
 }
 
@@ -2575,7 +2641,7 @@ impl RaftCluster {
             .get_mut(&record.node_id)
             .ok_or(RaftError::NodeNotFound(record.node_id))?;
         node.hard_state = record.hard_state;
-        node.log = record.entries;
+        node.set_log(record.entries);
         node.installed_snapshot = record.installed_snapshot;
         node.commit_index = record.apply_snapshot_fence.commit_index;
         node.applied_index = record.apply_snapshot_fence.applied_index;
@@ -3816,12 +3882,12 @@ impl RaftCluster {
         reason_prefix: &str,
     ) -> Result<RaftLearnerCatchUpLoopReport, RaftError> {
         let leader_id = self.leader_id.ok_or(RaftError::NoLeader)?;
-        let leader = self
+        let leader_snapshot = self
             .nodes
             .get(&leader_id)
-            .ok_or(RaftError::NodeNotFound(leader_id))?;
-        let leader_log = leader.log.clone();
-        let leader_snapshot = leader.installed_snapshot.clone();
+            .ok_or(RaftError::NodeNotFound(leader_id))?
+            .installed_snapshot
+            .clone();
         let leader_commit_index = self.commit_index;
 
         let peer = self
@@ -3837,10 +3903,23 @@ impl RaftCluster {
             }
         }
         let current_match = peer.match_index();
-        for entry in leader_log
-            .into_iter()
-            .filter(|entry| entry.log_id.index > current_match)
-        {
+
+        // Copy only the tail the peer is missing rather than the whole leader
+        // log, which this runs over once per lagging peer per tick.
+        let leader = self
+            .nodes
+            .get(&leader_id)
+            .ok_or(RaftError::NodeNotFound(leader_id))?;
+        let missing_tail: Vec<RustRaftLogEntry> = leader
+            .log_position_at_or_after(current_match.saturating_add(1))
+            .map(|position| leader.log[position..].to_vec())
+            .unwrap_or_default();
+
+        let peer = self
+            .nodes
+            .get_mut(&peer_id)
+            .ok_or(RaftError::NodeNotFound(peer_id))?;
+        for entry in missing_tail {
             if peer.replica_role == RustRaftReplicaRole::Witness {
                 peer.append_witness_entry(entry, false);
             } else {
@@ -4287,16 +4366,17 @@ impl RaftCluster {
     }
 
     fn log_retained_range(&self) -> RaftLogRetainedRange {
+        // Each node's log is index-ordered, so its bounds are its ends.
         let first_log_index = self
             .nodes
             .values()
-            .flat_map(|node| node.log.iter().map(|entry| entry.log_id.index))
+            .filter_map(|node| node.log.first().map(|entry| entry.log_id.index))
             .min()
             .unwrap_or_default();
         let last_log_index = self
             .nodes
             .values()
-            .flat_map(|node| node.log.iter().map(|entry| entry.log_id.index))
+            .filter_map(|node| node.log.last().map(|entry| entry.log_id.index))
             .max()
             .unwrap_or(self.last_log_index);
         let record_count = self.nodes.values().map(|node| node.log.len() as u64).sum();
