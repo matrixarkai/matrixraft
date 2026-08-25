@@ -349,6 +349,40 @@ impl PersistentRaftWal {
         self.inject_next_fsync_delay_ms = Some(delay_ms);
     }
 
+    /// What the active segment already describes, for a caller that wants to
+    /// build the delta itself rather than hand over the whole log.
+    pub fn active_coverage(&self) -> Option<(RustRaftLogIndex, RustRaftLogIndex, RustRaftTerm)> {
+        self.active_covered
+    }
+
+    /// Appends a record the caller builds on demand.
+    ///
+    /// `build` is handed the coverage the record should be written against, or
+    /// `None` when a whole-log record is required -- at the start of a segment,
+    /// and again if rolling turns out to be necessary after the record was
+    /// built. Callers that can produce a delta cheaply should use this instead
+    /// of [`Self::append`], which has to be given the whole log every time.
+    pub fn append_built<F>(&mut self, mut build: F) -> Result<RaftWalWriteReport, RaftError>
+    where
+        F: FnMut(
+            Option<(RustRaftLogIndex, RustRaftLogIndex, RustRaftTerm)>,
+        ) -> Result<RaftWalRecord, RaftError>,
+    {
+        let active_records = self
+            .segments
+            .last()
+            .map(|segment| segment.records.len())
+            .unwrap_or_default();
+        let rolling_by_count = active_records >= self.options.max_records_per_segment;
+        let coverage = if rolling_by_count {
+            None
+        } else {
+            self.active_covered
+        };
+        let record = build(coverage)?;
+        self.write_record(record, active_records, rolling_by_count, || build(None))
+    }
+
     pub fn append(&mut self, record: RaftWalRecord) -> Result<String, RaftError> {
         Ok(self.append_with_report(record)?.checksum)
     }
@@ -357,6 +391,37 @@ impl PersistentRaftWal {
         &mut self,
         record: RaftWalRecord,
     ) -> Result<RaftWalWriteReport, RaftError> {
+        let active_records = self
+            .segments
+            .last()
+            .map(|segment| segment.records.len())
+            .unwrap_or_default();
+        let rolling_by_count = active_records >= self.options.max_records_per_segment;
+        let stored = if rolling_by_count {
+            whole_record(&record)
+        } else {
+            self.delta_record(&record)
+        };
+        self.write_record(stored, active_records, rolling_by_count, || {
+            Ok(whole_record(&record))
+        })
+    }
+
+    /// Writes a record that has already been reduced to what will be stored.
+    ///
+    /// `whole` is only called when rolling turns out to be necessary after the
+    /// record was built, since the segment it was a delta against is then
+    /// sealed and the new segment has to open with a whole-log record.
+    fn write_record<W>(
+        &mut self,
+        mut record: RaftWalRecord,
+        active_records: usize,
+        rolling_by_count: bool,
+        whole: W,
+    ) -> Result<RaftWalWriteReport, RaftError>
+    where
+        W: FnOnce() -> Result<RaftWalRecord, RaftError>,
+    {
         let hard_state_persisted = rustraft_validate_hard_state_persistence(&record).is_ok();
         let active_len = self
             .active_segment
@@ -365,23 +430,7 @@ impl PersistentRaftWal {
                 RaftError::Storage(format!("failed to read WAL active segment metadata: {err}"))
             })?
             .len();
-        let active_records = self
-            .segments
-            .last()
-            .map(|segment| segment.records.len())
-            .unwrap_or_default();
-        let rolling_by_count = active_records >= self.options.max_records_per_segment;
-
-        // A record only becomes a delta when it stays in a segment that already
-        // describes a log it extends. Anything else -- a fresh segment, a log
-        // truncated by a conflict, a log compacted past this segment's start --
-        // is stored whole.
-        let mut stored = if rolling_by_count {
-            whole_record(&record)
-        } else {
-            self.delta_record(&record)
-        };
-        let mut encoded = encode_wal_record(&stored)?;
+        let mut encoded = encode_wal_record(&record)?;
         let mut record_bytes = encoded.len() as u64 + 1;
 
         let mut segment_rolled = false;
@@ -390,14 +439,14 @@ impl PersistentRaftWal {
         {
             self.roll_segment()?;
             segment_rolled = true;
-            if stored.entries_are_delta {
-                // The segment it was a delta against is now sealed.
-                stored = whole_record(&record);
-                encoded = encode_wal_record(&stored)?;
+            if record.entries_are_delta {
+                record = whole()?;
+                record.entries_are_delta = false;
+                record.checksum = rustraft_wal_checksum(&record);
+                encoded = encode_wal_record(&record)?;
                 record_bytes = encoded.len() as u64 + 1;
             }
         }
-        let record = stored;
 
         self.active_segment
             .write_all(encoded.as_bytes())

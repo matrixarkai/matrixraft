@@ -2631,6 +2631,82 @@ impl RaftCluster {
         Ok(record)
     }
 
+    /// Builds a WAL record carrying only the entries a WAL does not already
+    /// hold.
+    ///
+    /// `coverage` is what the WAL's active segment already describes, as
+    /// (first index, last index, term at the last index). When the node's log
+    /// still extends that, only the tail past it is copied; otherwise -- a log
+    /// truncated and rewritten, a tail rewritten under a newer term, or a log
+    /// compacted past where the segment starts -- the whole log is copied, and
+    /// the record says so. Passing `None` always copies the whole log.
+    ///
+    /// This is what keeps the per-proposal cost off the length of the log: the
+    /// whole log is only materialised when a whole record is actually needed.
+    pub fn wal_record_for_coverage(
+        &self,
+        node_id: RustRaftNodeId,
+        coverage: Option<(RustRaftLogIndex, RustRaftLogIndex, RustRaftTerm)>,
+    ) -> Result<RaftWalRecord, RaftError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(RaftError::NodeNotFound(node_id))?;
+        let extends = coverage.and_then(|(first_index, last_index, last_term)| {
+            let log_first = node.log.first()?.log_id.index;
+            if log_first > first_index {
+                return None;
+            }
+            let position = node.log_position(last_index)?;
+            if node.log[position].log_id.term != last_term {
+                return None;
+            }
+            Some(position + 1)
+        });
+        let mut record = self.wal_record_shell(node_id, node);
+        match extends {
+            Some(from) => {
+                record.entries = node.log[from..].to_vec();
+                record.entries_are_delta = true;
+            }
+            None => record.entries = node.log.clone(),
+        }
+        record.checksum = rustraft_wal_checksum(&record);
+        Ok(record)
+    }
+
+    /// Everything in a WAL record except the entries and the checksum.
+    fn wal_record_shell(&self, node_id: RustRaftNodeId, node: &RaftNode) -> RaftWalRecord {
+        let installed_snapshot = node.installed_snapshot.clone();
+        let snapshot_index = installed_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.last_log_id.index)
+            .unwrap_or_default();
+        RaftWalRecord {
+            entries_are_delta: false,
+            group_id: self.group_id,
+            node_id,
+            hard_state: node.hard_state.clone(),
+            membership: self.membership(),
+            entries: Vec::new(),
+            installed_snapshot,
+            apply_snapshot_fence: RustRaftApplySnapshotFence {
+                applied_index: node.applied_index,
+                commit_index: node.commit_index,
+                installed_snapshot_index: snapshot_index,
+                first_retained_log_index: if snapshot_index > 0 {
+                    snapshot_index + 1
+                } else {
+                    node.log
+                        .first()
+                        .map(|entry| entry.log_id.index)
+                        .unwrap_or_default()
+                },
+            },
+            checksum: String::new(),
+        }
+    }
+
     pub fn restore_wal_record(&mut self, record: RaftWalRecord) -> Result<(), RaftError> {
         if record.group_id != self.group_id {
             return Err(RaftError::InvalidRequest(

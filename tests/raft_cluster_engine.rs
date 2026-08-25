@@ -5443,3 +5443,48 @@ fn raft_cluster_implements_consensus_trait_surface() {
     assert!(read.safe);
     assert_eq!(read.read_index, 2);
 }
+
+#[test]
+fn wal_record_for_coverage_copies_only_the_tail_the_wal_lacks() {
+    let mut cluster = three_node_cluster();
+    cluster.start().expect("start");
+    cluster.campaign(1, true).expect("campaign");
+    for index in 0..5 {
+        cluster
+            .propose(format!("entry-{index}").into_bytes())
+            .expect("propose");
+    }
+
+    let whole = cluster
+        .wal_record_for_coverage(1, None)
+        .expect("whole record");
+    assert!(!whole.entries_are_delta);
+    let entry_count = whole.entries.len();
+    let first = whole.entries.first().expect("a log").log_id.index;
+    let last = whole.entries.last().expect("a log").log_id.clone();
+
+    // Coverage that matches the log exactly: nothing left to carry.
+    let caught_up = cluster
+        .wal_record_for_coverage(1, Some((first, last.index, last.term)))
+        .expect("delta record");
+    assert!(caught_up.entries_are_delta);
+    assert!(caught_up.entries.is_empty());
+
+    // Two more proposals: the delta carries exactly those two, not the log.
+    cluster.propose(b"six".to_vec()).expect("propose");
+    cluster.propose(b"seven".to_vec()).expect("propose");
+    let delta = cluster
+        .wal_record_for_coverage(1, Some((first, last.index, last.term)))
+        .expect("delta record");
+    assert!(delta.entries_are_delta);
+    assert_eq!(delta.entries.len(), 2);
+    assert_eq!(delta.entries[0].log_id.index, last.index + 1);
+
+    // A different term at the overlap means the log diverged, so the whole log
+    // has to be carried instead.
+    let diverged = cluster
+        .wal_record_for_coverage(1, Some((first, last.index, last.term + 1)))
+        .expect("whole record");
+    assert!(!diverged.entries_are_delta);
+    assert_eq!(diverged.entries.len(), entry_count + 2);
+}

@@ -1101,7 +1101,9 @@ fn runtime_step_message(
             }
             let log_id = cluster.propose_with_options(payload, options)?;
             if let Some(wal) = wal.as_mut() {
-                wal.append(cluster.wal_record_for(node_id)?)?;
+                // Built against what the WAL already holds, so a proposal does
+                // not copy and hash the whole log to write one entry.
+                wal.append_built(|coverage| cluster.wal_record_for_coverage(node_id, coverage))?;
             }
             Ok(RustRaftStepResult::Proposed(log_id))
         }
