@@ -3969,6 +3969,7 @@ fn benchmark_peer(node_id: u64) -> RustRaftPeer {
 
 fn benchmark_wal_record(index: u64, payload: Vec<u8>) -> RustRaftWalRecord {
     RustRaftWalRecord {
+        entries_are_delta: false,
         group_id: 10,
         node_id: 1,
         hard_state: RustRaftHardState {

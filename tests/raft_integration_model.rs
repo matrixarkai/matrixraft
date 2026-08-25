@@ -90,6 +90,7 @@ fn status_for(node: &ModelNode, nodes: &[ModelNode]) -> RustRaftStatusSnapshot {
 
 fn wal_record(node: &ModelNode) -> RustRaftWalRecord {
     let mut record = RustRaftWalRecord {
+        entries_are_delta: false,
         group_id: 7,
         node_id: node.id,
         hard_state: RustRaftHardState {

@@ -31,6 +31,7 @@ fn tail_entry(index: u64) -> RustRaftLogEntry {
 fn wal_record(committed_index: u64) -> RaftWalRecord {
     let meta = snapshot_meta();
     let mut record = RaftWalRecord {
+        entries_are_delta: false,
         group_id: 404,
         node_id: 1,
         hard_state: RustRaftHardState {

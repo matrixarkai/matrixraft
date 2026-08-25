@@ -30,6 +30,7 @@ fn wal_options(dir: PathBuf) -> PersistentRaftWalOptions {
 
 fn wal_record(index: u64) -> RaftWalRecord {
     RaftWalRecord {
+        entries_are_delta: false,
         group_id: 9,
         node_id: 1,
         hard_state: RustRaftHardState {
@@ -314,4 +315,211 @@ fn persistent_wal_compaction_fence_blocks_unsafe_release_and_reports_range() {
     assert_eq!(released.retained_range.last_log_index, 5);
 
     let _ = fs::remove_dir_all(dir);
+}
+
+// ---------------------------------------------------------------------------
+// Records are stored as deltas against the segment they land in. These pin the
+// two things that has to be true: what comes back out is the whole log, and a
+// log that stops being an extension of the segment is stored whole instead.
+// ---------------------------------------------------------------------------
+
+/// A record whose log is every index from 1 to `last`, at `term`.
+fn growing_wal_record(last: u64, term: u64) -> RaftWalRecord {
+    let mut record = wal_record(last);
+    record.hard_state.current_term = term;
+    record.hard_state.committed = Some(RustRaftLogId { term, index: last });
+    record.entries = (1..=last)
+        .map(|index| RustRaftLogEntry {
+            log_id: RustRaftLogId {
+                // The tail carries the newer term; the prefix keeps term 3.
+                term: if index == last { term } else { 3 },
+                index,
+            },
+            payload: format!("entry-{index}").into_bytes(),
+            is_command: true,
+        })
+        .collect();
+    record.apply_snapshot_fence.applied_index = last;
+    record.apply_snapshot_fence.commit_index = last;
+    record
+}
+
+fn wide_segment_options(dir: PathBuf) -> PersistentRaftWalOptions {
+    PersistentRaftWalOptions {
+        dir,
+        max_records_per_segment: 1_000,
+        max_segment_bytes: u64::MAX,
+        min_keep_segments: 1,
+        fsync_on_append: false,
+    }
+}
+
+fn stored_bytes(dir: &PathBuf) -> u64 {
+    fs::read_dir(dir)
+        .expect("read wal dir")
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|meta| meta.len())
+        .sum()
+}
+
+fn stored_delta_count(dir: &PathBuf) -> usize {
+    fs::read_dir(dir)
+        .expect("read wal dir")
+        .flatten()
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .map(|text| text.matches("\"entries_are_delta\":true").count())
+        .sum()
+}
+
+#[test]
+fn a_growing_log_is_stored_as_deltas_and_recovers_whole() {
+    let dir = temp_wal_dir("delta-growing");
+    let last = 200_u64;
+    {
+        let mut wal = PersistentRaftWal::open(wide_segment_options(dir.clone())).expect("open");
+        for index in 1..=last {
+            wal.append(growing_wal_record(index, 3)).expect("append");
+        }
+        // The optimisation has to have engaged, or the rest of this test is
+        // just re-testing whole-log records.
+        assert_eq!(
+            stored_delta_count(&dir),
+            (last - 1) as usize,
+            "every record after the first in the segment should be a delta"
+        );
+    }
+
+    let mut reopened = PersistentRaftWal::open(wide_segment_options(dir.clone())).expect("reopen");
+    let report = reopened.recover().expect("recover");
+    let recovered = report.recovered.expect("a record survives recovery");
+    assert_eq!(
+        recovered.entries.len(),
+        last as usize,
+        "recovery must fold the deltas back into the whole log"
+    );
+    assert!(!recovered.entries_are_delta);
+    for (offset, entry) in recovered.entries.iter().enumerate() {
+        assert_eq!(entry.log_id.index, offset as u64 + 1);
+        assert_eq!(entry.payload, format!("entry-{}", offset + 1).into_bytes());
+    }
+
+    // The point of the change is that a record's cost stops growing with the
+    // log. Stored whole, the average record here would carry ~100 entries; as
+    // deltas it carries one.
+    let bytes = stored_bytes(&dir);
+    let bytes_per_record = bytes / last;
+    assert!(
+        bytes_per_record < 1_000,
+        "expected a roughly constant per-record cost, got {bytes_per_record} bytes          across {bytes} total"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_log_truncated_by_a_conflict_is_stored_whole() {
+    let dir = temp_wal_dir("delta-conflict");
+    {
+        let mut wal = PersistentRaftWal::open(wide_segment_options(dir.clone())).expect("open");
+        for index in 1..=5 {
+            wal.append(growing_wal_record(index, 3)).expect("append");
+        }
+        assert_eq!(stored_delta_count(&dir), 4);
+
+        // A conflict truncates the log back to 3 and rewrites index 3 under a
+        // newer term. That is not an extension of what the segment describes,
+        // so it must be stored whole -- a delta here would leave recovery
+        // rebuilding the entries that were thrown away.
+        wal.append(growing_wal_record(3, 7))
+            .expect("append conflict");
+        assert_eq!(
+            stored_delta_count(&dir),
+            4,
+            "the diverging record must not be stored as a delta"
+        );
+    }
+
+    let reopened = PersistentRaftWal::open(wide_segment_options(dir.clone())).expect("reopen");
+    // Read the folded records rather than going through recovery, which picks
+    // by highest committed index and would hand back the pre-conflict record.
+    let folded = reopened.records();
+    let last = folded.last().expect("a record was stored");
+    assert_eq!(
+        last.entries.len(),
+        3,
+        "folding must not resurrect the truncated tail"
+    );
+    assert_eq!(last.entries[2].log_id.term, 7);
+    assert!(!last.entries_are_delta);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn each_segment_can_be_read_without_the_ones_compaction_removed() {
+    let dir = temp_wal_dir("delta-compaction");
+    let options = PersistentRaftWalOptions {
+        dir: dir.clone(),
+        max_records_per_segment: 10,
+        max_segment_bytes: u64::MAX,
+        min_keep_segments: 1,
+        fsync_on_append: false,
+    };
+    {
+        let mut wal = PersistentRaftWal::open(options.clone()).expect("open");
+        for index in 1..=50 {
+            wal.append(growing_wal_record(index, 3)).expect("append");
+        }
+        assert!(wal.segments().len() >= 4);
+        // Drop the early segments. Every segment opens with a whole-log record,
+        // so the survivors stay readable on their own.
+        wal.compact_through(20).expect("compact");
+    }
+
+    let mut reopened = PersistentRaftWal::open(options).expect("reopen");
+    let recovered = reopened
+        .recover()
+        .expect("recover")
+        .recovered
+        .expect("a record survives recovery");
+    assert_eq!(recovered.entries.len(), 50);
+    assert_eq!(recovered.entries.last().expect("tail").log_id.index, 50);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_tail_rewritten_at_the_same_index_is_stored_whole() {
+    // The nastiest divergence: the log keeps the same last index but that entry
+    // now carries a newer term. Nothing about the shape of the log changed, so
+    // only comparing the term catches it. Storing a delta here would write an
+    // empty delta and leave folding handing back the entry that was replaced.
+    let dir = temp_wal_dir("delta-rewritten-tail");
+    {
+        let mut wal = PersistentRaftWal::open(wide_segment_options(dir.clone())).expect("open");
+        for index in 1..=5 {
+            wal.append(growing_wal_record(index, 3)).expect("append");
+        }
+        assert_eq!(stored_delta_count(&dir), 4);
+
+        wal.append(growing_wal_record(5, 7))
+            .expect("append rewritten tail");
+        assert_eq!(
+            stored_delta_count(&dir),
+            4,
+            "a tail rewritten under a newer term must not be stored as a delta"
+        );
+    }
+
+    let reopened = PersistentRaftWal::open(wide_segment_options(dir.clone())).expect("reopen");
+    let folded = reopened.records();
+    let last = folded.last().expect("a record was stored");
+    assert_eq!(last.entries.len(), 5);
+    assert_eq!(
+        last.entries[4].log_id.term, 7,
+        "folding handed back the replaced entry instead of the rewritten one"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }

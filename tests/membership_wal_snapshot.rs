@@ -21,6 +21,7 @@ fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
 
 fn wal_record(index: u64) -> RaftWalRecord {
     let mut record = RaftWalRecord {
+        entries_are_delta: false,
         group_id: 9,
         node_id: 1,
         hard_state: RaftHardState {

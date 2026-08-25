@@ -43,6 +43,7 @@ fn wal_record(commit_index: u64, snapshot_index: Option<u64>) -> RustRaftWalReco
         members: Vec::new(),
     });
     let mut record = RustRaftWalRecord {
+        entries_are_delta: false,
         group_id: 7,
         node_id: 1,
         hard_state: RustRaftHardState {

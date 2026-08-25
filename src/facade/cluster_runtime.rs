@@ -2605,6 +2605,7 @@ impl RaftCluster {
             .map(|snapshot| snapshot.last_log_id.index)
             .unwrap_or_default();
         let mut record = RaftWalRecord {
+            entries_are_delta: false,
             group_id: self.group_id,
             node_id,
             hard_state: node.hard_state.clone(),

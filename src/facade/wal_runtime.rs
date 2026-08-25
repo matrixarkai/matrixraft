@@ -234,6 +234,10 @@ pub struct PersistentRaftWal {
     max_fsync_elapsed_ms: u64,
     compacted_after_slow_fsync_count: u64,
     inject_next_fsync_delay_ms: Option<u64>,
+    /// What the active segment's records already describe, as
+    /// (first index, last index, term at the last index). `None` means the
+    /// segment is empty, so the next record has to be stored whole.
+    active_covered: Option<(RustRaftLogIndex, RustRaftLogIndex, RustRaftTerm)>,
 }
 
 impl PersistentRaftWal {
@@ -265,7 +269,7 @@ impl PersistentRaftWal {
         }
         let active_segment = open_segment_for_append(&options.dir, active_id)?;
         let next_segment_id = active_id + 1;
-        Ok(Self {
+        let mut wal = Self {
             options,
             segments,
             active_segment,
@@ -278,7 +282,63 @@ impl PersistentRaftWal {
             max_fsync_elapsed_ms: 0,
             compacted_after_slow_fsync_count: 0,
             inject_next_fsync_delay_ms: None,
-        })
+            active_covered: None,
+        };
+        wal.active_covered = wal.covered_from_active_segment();
+        Ok(wal)
+    }
+
+    /// Advances coverage using the record just appended. The whole-log case
+    /// resets it; a delta only moves the far end.
+    fn advance_active_covered(&mut self) {
+        let Some(record) = self.segments.last().and_then(|s| s.records.last()) else {
+            self.active_covered = None;
+            return;
+        };
+        let last = record.entries.last();
+        if record.entries_are_delta {
+            if let (Some((first_index, _, _)), Some(last)) = (self.active_covered, last) {
+                self.active_covered = Some((first_index, last.log_id.index, last.log_id.term));
+            }
+            return;
+        }
+        self.active_covered = match (record.entries.first(), last) {
+            (Some(first), Some(last)) => {
+                Some((first.log_id.index, last.log_id.index, last.log_id.term))
+            }
+            _ => None,
+        };
+    }
+
+    /// Turns a whole-log record into the delta this segment can store, or
+    /// returns it whole when a delta would not be sound.
+    fn delta_record(&self, record: &RaftWalRecord) -> RaftWalRecord {
+        let Some((first_index, last_index, last_term)) = self.active_covered else {
+            return whole_record(record);
+        };
+        let Some(base) =
+            rustraft_wal_delta_base(&record.entries, first_index, last_index, last_term)
+        else {
+            return whole_record(record);
+        };
+        let mut delta = record.clone();
+        delta.entries = record.entries[base..].to_vec();
+        delta.entries_are_delta = true;
+        delta.checksum = rustraft_wal_checksum(&delta);
+        delta
+    }
+
+    /// Rebuilds the active segment's coverage by folding what is already on
+    /// disk, so an appended-to WAL keeps writing deltas after a reopen.
+    fn covered_from_active_segment(
+        &self,
+    ) -> Option<(RustRaftLogIndex, RustRaftLogIndex, RustRaftTerm)> {
+        let segment = self.segments.last()?;
+        let folded = rustraft_fold_wal_records(&segment.records);
+        let entries = &folded.last()?.entries;
+        let first = entries.first()?;
+        let last = entries.last()?;
+        Some((first.log_id.index, last.log_id.index, last.log_id.term))
     }
 
     pub fn set_slow_fsync_threshold_ms(&mut self, threshold_ms: u64) {
@@ -295,13 +355,9 @@ impl PersistentRaftWal {
 
     pub fn append_with_report(
         &mut self,
-        mut record: RaftWalRecord,
+        record: RaftWalRecord,
     ) -> Result<RaftWalWriteReport, RaftError> {
-        record.checksum = rustraft_wal_checksum(&record);
         let hard_state_persisted = rustraft_validate_hard_state_persistence(&record).is_ok();
-        let encoded = serde_json::to_string(&record)
-            .map_err(|err| RaftError::Storage(format!("failed to encode WAL record: {err}")))?;
-        let record_bytes = encoded.len() as u64 + 1;
         let active_len = self
             .active_segment
             .metadata()
@@ -314,13 +370,34 @@ impl PersistentRaftWal {
             .last()
             .map(|segment| segment.records.len())
             .unwrap_or_default();
+        let rolling_by_count = active_records >= self.options.max_records_per_segment;
+
+        // A record only becomes a delta when it stays in a segment that already
+        // describes a log it extends. Anything else -- a fresh segment, a log
+        // truncated by a conflict, a log compacted past this segment's start --
+        // is stored whole.
+        let mut stored = if rolling_by_count {
+            whole_record(&record)
+        } else {
+            self.delta_record(&record)
+        };
+        let mut encoded = encode_wal_record(&stored)?;
+        let mut record_bytes = encoded.len() as u64 + 1;
+
         let mut segment_rolled = false;
-        if active_records >= self.options.max_records_per_segment
+        if rolling_by_count
             || (active_records > 0 && active_len + record_bytes > self.options.max_segment_bytes)
         {
             self.roll_segment()?;
             segment_rolled = true;
+            if stored.entries_are_delta {
+                // The segment it was a delta against is now sealed.
+                stored = whole_record(&record);
+                encoded = encode_wal_record(&stored)?;
+                record_bytes = encoded.len() as u64 + 1;
+            }
         }
+        let record = stored;
 
         self.active_segment
             .write_all(encoded.as_bytes())
@@ -363,6 +440,7 @@ impl PersistentRaftWal {
         segment.last_index = record_index;
         segment.records.push(record);
         let segment_id = segment.segment_id;
+        self.advance_active_covered();
         Ok(RaftWalWriteReport {
             segment_id,
             log_index: record_index,
@@ -382,10 +460,11 @@ impl PersistentRaftWal {
     pub fn recover(&mut self) -> Result<RaftWalRecoveryReport, RaftError> {
         let (segments, truncated_corrupt_tail) = read_wal_segments_from_dir(&self.options.dir)?;
         let original_len = self.records().len();
-        let records: Vec<_> = segments
+        let stored: Vec<_> = segments
             .iter()
             .flat_map(|segment| segment.records.iter().cloned())
             .collect();
+        let records = rustraft_fold_wal_records(&stored);
         self.segments = if segments.is_empty() {
             vec![RaftWalSegment {
                 segment_id: 0,
@@ -407,6 +486,7 @@ impl PersistentRaftWal {
         }
         self.active_segment = open_segment_for_append(&self.options.dir, active_id)?;
         self.next_segment_id = active_id + 1;
+        self.active_covered = self.covered_from_active_segment();
         let observed_corrupt_tail = self.truncated_corrupt_tail || truncated_corrupt_tail;
         self.truncated_corrupt_tail = observed_corrupt_tail;
         Ok(RaftWalRecoveryReport {
@@ -578,10 +658,12 @@ impl PersistentRaftWal {
     }
 
     pub fn records(&self) -> Vec<RaftWalRecord> {
-        self.segments
+        let stored: Vec<_> = self
+            .segments
             .iter()
             .flat_map(|segment| segment.records.iter().cloned())
-            .collect()
+            .collect();
+        rustraft_fold_wal_records(&stored)
     }
 
     pub fn corrupt_tail_for_test(&mut self) -> Result<(), RaftError> {
@@ -615,6 +697,18 @@ impl PersistentRaftWal {
 }
 
 pub type FileRaftWal = PersistentRaftWal;
+
+fn whole_record(record: &RaftWalRecord) -> RaftWalRecord {
+    let mut whole = record.clone();
+    whole.entries_are_delta = false;
+    whole.checksum = rustraft_wal_checksum(&whole);
+    whole
+}
+
+fn encode_wal_record(record: &RaftWalRecord) -> Result<String, RaftError> {
+    serde_json::to_string(record)
+        .map_err(|err| RaftError::Storage(format!("failed to encode WAL record: {err}")))
+}
 
 fn wal_segment_path(dir: &Path, segment_id: u64) -> PathBuf {
     dir.join(format!("{segment_id:020}.wal"))

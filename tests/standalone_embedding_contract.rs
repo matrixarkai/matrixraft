@@ -73,6 +73,7 @@ fn tail_entry(index: u64) -> RustRaftLogEntry {
 
 fn wal_record(index: u64) -> RustRaftWalRecord {
     RustRaftWalRecord {
+        entries_are_delta: false,
         group_id: 909,
         node_id: 1,
         hard_state: RustRaftHardState {

@@ -236,9 +236,10 @@ pub use unique_id::{
     RUSTRAFT_UNIQUE_ID_TIMESTAMP_MASK,
 };
 pub use wal::{
-    rustraft_recover_latest_wal_record, rustraft_validate_apply_snapshot_fence,
-    rustraft_validate_hard_state_persistence, rustraft_validate_wal_lifecycle_evidence_artifact,
-    rustraft_wal_checksum, rustraft_wal_checksum_format, rustraft_wal_checksum_valid,
+    rustraft_fold_wal_records, rustraft_recover_latest_wal_record,
+    rustraft_validate_apply_snapshot_fence, rustraft_validate_hard_state_persistence,
+    rustraft_validate_wal_lifecycle_evidence_artifact, rustraft_wal_checksum,
+    rustraft_wal_checksum_format, rustraft_wal_checksum_valid, rustraft_wal_delta_base,
     rustraft_wal_lifecycle_evidence, rustraft_wal_lifecycle_evidence_artifact,
     RaftLogRetainedRange, RaftWalChecksumFormat, RaftWalCompactionReport, RaftWalRecord,
     RaftWalRecoveryReport, RaftWalSegment, RaftWalSegmentIndex, RaftWalWriteReport,

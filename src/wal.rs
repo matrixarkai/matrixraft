@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::{
     rustraft_durability_parity_report, FileRaftWal, LocalRaftWal, PersistentRaftWal,
     PersistentRaftWalOptions, RaftHardState, RustRaftDurabilityParityReport, RustRaftHardState,
+    RustRaftTerm,
 };
 
 use crate::{
@@ -77,6 +78,13 @@ pub struct RustRaftWalRecord {
     pub membership: RustRaftMembership,
     #[serde(default)]
     pub entries: Vec<RustRaftLogEntry>,
+    /// When true, `entries` carries only what was appended since the previous
+    /// record in the same segment rather than the whole retained log. The first
+    /// record of every segment is always a full one, so a segment can be read
+    /// without reading any other -- which is what lets whole-segment compaction
+    /// stay as simple as it was.
+    #[serde(default)]
+    pub entries_are_delta: bool,
     #[serde(default)]
     pub installed_snapshot: Option<RustRaftSnapshotMeta>,
     pub apply_snapshot_fence: RustRaftApplySnapshotFence,
@@ -191,6 +199,11 @@ pub fn rustraft_wal_checksum(record: &RaftWalRecord) -> String {
         mix(entry.log_id.index);
         mix(entry.payload.len() as u64);
     }
+    if record.entries_are_delta {
+        // Mixed only when set: a full record hashes exactly as it did before
+        // this field existed, so WAL files written earlier still validate.
+        mix(1);
+    }
     if let Some(snapshot) = &record.installed_snapshot {
         mix(snapshot.last_log_id.term);
         mix(snapshot.last_log_id.index);
@@ -214,6 +227,7 @@ pub fn rustraft_wal_checksum_format() -> RaftWalChecksumFormat {
             "hard_state.committed".to_string(),
             "entries.log_id".to_string(),
             "entries.payload_len".to_string(),
+            "entries_are_delta".to_string(),
             "installed_snapshot.last_log_id".to_string(),
             "apply_snapshot_fence".to_string(),
         ],
@@ -287,6 +301,71 @@ pub fn rustraft_validate_apply_snapshot_fence(
         }
     }
     Ok(())
+}
+
+/// Folds stored records back into whole-log records.
+///
+/// Records are stored so that the first one in a segment carries the whole
+/// retained log and the rest carry only what was appended after it. Every
+/// reader upstream of this function expects whole-log records, so folding
+/// happens here, once, on the way out.
+///
+/// Checksums are verified against the bytes as stored, before folding, and the
+/// fold stops at the first record that fails -- the same place a reader
+/// scanning for a valid prefix would have stopped. The folded records are then
+/// re-checksummed so they validate as the whole-log records they now are.
+pub fn rustraft_fold_wal_records(stored: &[RustRaftWalRecord]) -> Vec<RustRaftWalRecord> {
+    let mut folded_entries: Vec<RustRaftLogEntry> = Vec::new();
+    let mut out = Vec::with_capacity(stored.len());
+    for record in stored {
+        if !rustraft_wal_checksum_valid(record) {
+            break;
+        }
+        if record.entries_are_delta {
+            if let Some(first) = record.entries.first() {
+                let cut =
+                    folded_entries.partition_point(|entry| entry.log_id.index < first.log_id.index);
+                folded_entries.truncate(cut);
+            }
+            folded_entries.extend(record.entries.iter().cloned());
+        } else {
+            folded_entries.clone_from(&record.entries);
+        }
+        let mut whole = record.clone();
+        whole.entries.clone_from(&folded_entries);
+        whole.entries_are_delta = false;
+        whole.checksum = rustraft_wal_checksum(&whole);
+        out.push(whole);
+    }
+    out
+}
+
+/// Whether `entries` extends `covered` rather than diverging from it.
+///
+/// A delta is only sound when the record continues the log the segment already
+/// describes. If the log was truncated by a conflict and rewritten, or compacted
+/// so it now starts later than the segment does, the overlap no longer matches
+/// and the record has to be stored whole.
+pub fn rustraft_wal_delta_base(
+    entries: &[RustRaftLogEntry],
+    covered_first_index: RustRaftLogIndex,
+    covered_last_index: RustRaftLogIndex,
+    covered_last_term: RustRaftTerm,
+) -> Option<usize> {
+    let first = entries.first()?;
+    if first.log_id.index > covered_first_index {
+        // The log was compacted past where this segment starts; folding would
+        // resurrect entries the node no longer holds.
+        return None;
+    }
+    let position = entries
+        .binary_search_by(|entry| entry.log_id.index.cmp(&covered_last_index))
+        .ok()?;
+    if entries[position].log_id.term != covered_last_term {
+        // Same index, different term: the log diverged here.
+        return None;
+    }
+    Some(position + 1)
 }
 
 pub fn rustraft_recover_latest_wal_record(
