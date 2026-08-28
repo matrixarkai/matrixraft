@@ -2,8 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    readiness::rustraft_temporalstore_adapter_shape, rustraft_parity_report,
-    rustraft_read_safety_decision, rustraft_temporalstore_extraction_plan,
+    matrixraft_parity_report, matrixraft_read_safety_decision,
+    matrixraft_temporalstore_extraction_plan, readiness::matrixraft_temporalstore_adapter_shape,
     RustRaftExtractionStatus, RustRaftProductionStatus, RustRaftReadIndexRequest,
     RustRaftReadinessSnapshot, RustRaftRole, RustRaftStatusSnapshot,
 };
@@ -11,21 +11,21 @@ use matrixraft::{
 #[test]
 fn production_readiness_snapshot_reports_ready_when_all_evidence_is_present() {
     let readiness = RustRaftReadinessSnapshot {
-        rustraft_leader_write_authority_present: true,
-        rustraft_operator_observability_present: true,
-        rustraft_rpc_transport_contract_present: true,
-        rustraft_log_retention_snapshot_trigger_present: true,
-        rustraft_apply_snapshot_fence_present: true,
+        matrixraft_leader_write_authority_present: true,
+        matrixraft_operator_observability_present: true,
+        matrixraft_rpc_transport_contract_present: true,
+        matrixraft_log_retention_snapshot_trigger_present: true,
+        matrixraft_apply_snapshot_fence_present: true,
         raft_storage_apply_fence_present: true,
-        rustraft_snapshot_floor_log_matching_present: true,
-        rustraft_snapshot_tail_catchup_present: true,
-        rustraft_compacted_entry_rejection_present: true,
-        rustraft_metaserver_snapshot_floor_election_present: true,
+        matrixraft_snapshot_floor_log_matching_present: true,
+        matrixraft_snapshot_tail_catchup_present: true,
+        matrixraft_compacted_entry_rejection_present: true,
+        matrixraft_metaserver_snapshot_floor_election_present: true,
         learner_catchup_promotion_present: true,
         metaserver_membership_workflow_present: true,
     };
 
-    let report = rustraft_parity_report(&readiness);
+    let report = matrixraft_parity_report(&readiness);
     assert!(report.ready);
     assert!(report.missing.is_empty());
     assert_eq!(
@@ -49,7 +49,7 @@ fn read_safety_example_rejects_reads_ahead_of_applied_index() {
         peers: Vec::new(),
     };
 
-    let decision = rustraft_read_safety_decision(
+    let decision = matrixraft_read_safety_decision(
         &status,
         &RustRaftReadIndexRequest {
             group_id: 7,
@@ -65,7 +65,7 @@ fn read_safety_example_rejects_reads_ahead_of_applied_index() {
 
 #[test]
 fn extraction_plan_keeps_reusable_raft_logic_out_of_temporalstore() {
-    let plan = rustraft_temporalstore_extraction_plan();
+    let plan = matrixraft_temporalstore_extraction_plan();
     assert!(plan.policy.contains("RustRaft owns reusable consensus"));
     assert!(plan
         .slices
@@ -87,7 +87,7 @@ fn extraction_plan_keeps_reusable_raft_logic_out_of_temporalstore() {
 
 #[test]
 fn temporalstore_adapter_shape_keeps_consensus_inside_rustraft_runtime() {
-    let shape = rustraft_temporalstore_adapter_shape();
+    let shape = matrixraft_temporalstore_adapter_shape();
     assert_eq!(shape.backend_type, "TemporalRaftConsensusBackend");
     assert_eq!(shape.node_field, "node");
     assert_eq!(
@@ -97,7 +97,7 @@ fn temporalstore_adapter_shape_keeps_consensus_inside_rustraft_runtime() {
     assert_eq!(shape.codec_field, "codec: TemporalCommandCodec");
     assert_eq!(shape.engine_field, "engine: TemporalEngine");
     assert!(shape
-        .rustraft_owned
+        .matrixraft_owned
         .iter()
         .any(|item| item.contains("consensus node runtime")));
     for temporalstore_owned in [

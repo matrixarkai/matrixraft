@@ -2,10 +2,10 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_append_safety_decision, rustraft_learner_promotion_decision,
-    rustraft_membership_readiness_report, rustraft_read_safety_decision,
-    rustraft_recover_latest_wal_record, rustraft_validate_apply_snapshot_fence,
-    rustraft_wal_checksum, RustRaftAppendEntriesRequest, RustRaftApplySnapshotFence,
+    matrixraft_append_safety_decision, matrixraft_learner_promotion_decision,
+    matrixraft_membership_readiness_report, matrixraft_read_safety_decision,
+    matrixraft_recover_latest_wal_record, matrixraft_validate_apply_snapshot_fence,
+    matrixraft_wal_checksum, RustRaftAppendEntriesRequest, RustRaftApplySnapshotFence,
     RustRaftHardState, RustRaftLogEntry, RustRaftLogId, RustRaftMembership,
     RustRaftMembershipScope, RustRaftMembershipTransitionEvidence,
     RustRaftMembershipTransitionKind, RustRaftPeerStatus, RustRaftPendingReadIndexQueue,
@@ -78,7 +78,7 @@ fn wal_record(commit_index: u64, snapshot_index: Option<u64>) -> RustRaftWalReco
         },
         checksum: String::new(),
     };
-    record.checksum = rustraft_wal_checksum(&record);
+    record.checksum = matrixraft_wal_checksum(&record);
     record
 }
 
@@ -150,7 +150,7 @@ fn transition(
 
 #[test]
 fn raft_safety_helpers_reject_non_leader_and_apply_lag() {
-    let follower_decision = rustraft_read_safety_decision(
+    let follower_decision = matrixraft_read_safety_decision(
         &status(RustRaftRole::Follower, 10),
         &RustRaftReadIndexRequest {
             group_id: 7,
@@ -162,7 +162,7 @@ fn raft_safety_helpers_reject_non_leader_and_apply_lag() {
     assert!(!follower_decision.safe);
     assert_eq!(follower_decision.reason, "not_leader");
 
-    let lag_decision = rustraft_read_safety_decision(
+    let lag_decision = matrixraft_read_safety_decision(
         &status(RustRaftRole::Leader, 9),
         &RustRaftReadIndexRequest {
             group_id: 7,
@@ -176,7 +176,7 @@ fn raft_safety_helpers_reject_non_leader_and_apply_lag() {
 }
 
 #[test]
-fn pending_read_index_queue_releases_only_after_apply_fence_like_matrixraft() {
+fn pending_read_index_queue_releases_only_after_apply_fence() {
     let mut queue = RustRaftPendingReadIndexQueue::new();
     queue.push(
         RustRaftReadIndexRequest {
@@ -219,7 +219,7 @@ fn pending_read_index_queue_releases_only_after_apply_fence_like_matrixraft() {
 }
 
 #[test]
-fn pending_read_index_queue_releases_waiters_on_node_removal_like_matrixraft() {
+fn pending_read_index_queue_releases_waiters_on_node_removal() {
     let mut queue = RustRaftPendingReadIndexQueue::new();
     queue.push(
         RustRaftReadIndexRequest {
@@ -272,7 +272,7 @@ fn membership_transitions_require_safe_failover_scale_up_and_scale_down() {
     })
     .collect::<Vec<_>>();
 
-    let report = rustraft_membership_readiness_report(&transitions);
+    let report = matrixraft_membership_readiness_report(&transitions);
     assert!(report.ready, "{report:#?}");
     assert_eq!(report.decisions.len(), 6);
 }
@@ -283,7 +283,7 @@ fn wal_recovery_uses_latest_record_with_valid_snapshot_fence() {
     let mut corrupt_new = wal_record(11, Some(9));
     corrupt_new.apply_snapshot_fence.applied_index = 12;
 
-    let recovered = rustraft_recover_latest_wal_record(&[old.clone(), corrupt_new]).unwrap();
+    let recovered = matrixraft_recover_latest_wal_record(&[old.clone(), corrupt_new]).unwrap();
     assert_eq!(recovered.hard_state.committed.unwrap().index, 10);
     assert_eq!(recovered.checksum, old.checksum);
 }
@@ -293,13 +293,13 @@ fn snapshot_fence_rejects_snapshot_floor_overlap() {
     let mut record = wal_record(10, Some(8));
     record.apply_snapshot_fence.first_retained_log_index = 8;
 
-    let err = rustraft_validate_apply_snapshot_fence(&record).unwrap_err();
+    let err = matrixraft_validate_apply_snapshot_fence(&record).unwrap_err();
     assert!(err.to_string().contains("overlaps installed snapshot"));
 }
 
 #[test]
 fn compacted_entry_rejection_blocks_prev_log_before_snapshot_floor() {
-    let decision = rustraft_append_safety_decision(
+    let decision = matrixraft_append_safety_decision(
         9,
         8,
         &RustRaftAppendEntriesRequest {
@@ -320,7 +320,7 @@ fn compacted_entry_rejection_blocks_prev_log_before_snapshot_floor() {
 #[test]
 fn read_safety_and_learner_promotion_accept_caught_up_learner() {
     let status = status(RustRaftRole::Leader, 10);
-    let read = rustraft_read_safety_decision(
+    let read = matrixraft_read_safety_decision(
         &status,
         &RustRaftReadIndexRequest {
             group_id: 7,
@@ -332,7 +332,7 @@ fn read_safety_and_learner_promotion_accept_caught_up_learner() {
     assert!(read.safe);
     assert!(read.lease_read);
 
-    let learner = rustraft_learner_promotion_decision(&status, 2, 0);
+    let learner = matrixraft_learner_promotion_decision(&status, 2, 0);
     assert!(learner.promotable);
     assert!(RustRaftReplicaRole::Witness.participates_in_quorum());
 }

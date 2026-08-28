@@ -2,8 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_validate_snapshot_floor_log_matching, rustraft_validate_snapshot_install,
-    rustraft_wal_checksum, rustraft_wal_checksum_valid, JointConsensusMembership, LocalRaftWal,
+    matrixraft_validate_snapshot_floor_log_matching, matrixraft_validate_snapshot_install,
+    matrixraft_wal_checksum, matrixraft_wal_checksum_valid, JointConsensusMembership, LocalRaftWal,
     RaftCluster, RaftHardState, RaftMembership, RaftSnapshot, RaftSnapshotInstallState,
     RaftWalRecord, RustRaftApplySnapshotFence, RustRaftLogEntry, RustRaftLogId, RustRaftPeer,
     RustRaftReplicaRole, RustRaftSnapshotChunk, RustRaftSnapshotMeta,
@@ -50,7 +50,7 @@ fn wal_record(index: u64) -> RaftWalRecord {
         },
         checksum: String::new(),
     };
-    record.checksum = rustraft_wal_checksum(&record);
+    record.checksum = matrixraft_wal_checksum(&record);
     record
 }
 
@@ -216,7 +216,7 @@ fn local_raft_wal_segments_recovers_and_truncates_corrupt_tail() {
     wal.append(wal_record(2)).expect("append");
     wal.append(wal_record(3)).expect("append");
     assert_eq!(wal.segments().len(), 2);
-    assert!(rustraft_wal_checksum_valid(&wal.records()[2]));
+    assert!(matrixraft_wal_checksum_valid(&wal.records()[2]));
 
     wal.corrupt_tail_for_test().expect("corrupt tail");
     let report = wal.recover().expect("recover");
@@ -269,14 +269,14 @@ fn chunked_snapshot_install_validates_offsets_and_snapshot_fence() {
         installed_snapshot_index: 10,
         first_retained_log_index: 11,
     };
-    rustraft_validate_snapshot_install(&snapshot, &fence).expect("valid install");
-    rustraft_validate_snapshot_floor_log_matching(
+    matrixraft_validate_snapshot_install(&snapshot, &fence).expect("valid install");
+    matrixraft_validate_snapshot_floor_log_matching(
         &meta,
         11,
         Some(&RustRaftLogId { term: 4, index: 10 }),
     )
     .expect("floor matches");
-    assert!(rustraft_validate_snapshot_floor_log_matching(
+    assert!(matrixraft_validate_snapshot_floor_log_matching(
         &meta,
         11,
         Some(&RustRaftLogId { term: 3, index: 10 }),

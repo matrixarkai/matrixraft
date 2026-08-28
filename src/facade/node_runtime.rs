@@ -1388,7 +1388,7 @@ fn raft_node_runtime_loop(
                         heartbeat_ticks > 0,
                         pre_vote_executions > 0,
                     ),
-                    fatal_blocker_report: rustraft_fatal_blocker_report(
+                    fatal_blocker_report: matrixraft_fatal_blocker_report(
                         "raft_node_runtime",
                         blockers.clone(),
                         fatal_blockers.clone(),

@@ -35,7 +35,7 @@ fn byte_quota_limiter_grants_rejects_and_refills_like_baseline_raft_quota_gate()
 }
 
 #[test]
-fn byte_quota_limiter_can_grant_partial_quota_like_matrixraft_streaming() {
+fn byte_quota_limiter_can_grant_partial_quota_streaming() {
     let mut limiter = RustRaftByteQuotaLimiter::with_available(10, 3);
 
     let partial = limiter.reserve_limited_bytes(8);

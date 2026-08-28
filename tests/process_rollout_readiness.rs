@@ -3,8 +3,8 @@
 
 use matrixraft::{
     readiness::{
-        rustraft_data_node_process_rollout_readiness_report,
-        rustraft_meta_process_rollout_readiness_report,
+        matrixraft_data_node_process_rollout_readiness_report,
+        matrixraft_meta_process_rollout_readiness_report,
     },
     RustRaftDataNodeProcessRolloutReport, RustRaftMetaProcessRolloutReport,
     RustRaftProcessNodeEvidence, RustRaftProcessOperationalSemanticsEvidence,
@@ -172,7 +172,7 @@ fn data_node_process_rollout_report_fails_closed_on_missing_process_proof() {
     rollout.independent_wal_dirs = false;
     rollout.operational_semantics.stale_follower_write_rejected = false;
 
-    let report = rustraft_data_node_process_rollout_readiness_report(&rollout);
+    let report = matrixraft_data_node_process_rollout_readiness_report(&rollout);
     assert!(!report.ready);
     assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
     assert!(report
@@ -185,7 +185,7 @@ fn data_node_process_rollout_report_fails_closed_on_missing_process_proof() {
 
 #[test]
 fn data_node_process_rollout_report_accepts_complete_process_evidence() {
-    let report = rustraft_data_node_process_rollout_readiness_report(&ready_data_rollout());
+    let report = matrixraft_data_node_process_rollout_readiness_report(&ready_data_rollout());
     assert!(report.ready, "{report:#?}");
     assert_eq!(
         report.production_status,
@@ -203,7 +203,7 @@ fn metaserver_process_rollout_report_tracks_scheduler_and_membership_proof() {
     rollout.scheduler_task_replay_validated = false;
     rollout.data_node_raft_group_results_observed = false;
 
-    let report = rustraft_meta_process_rollout_readiness_report(&rollout);
+    let report = matrixraft_meta_process_rollout_readiness_report(&rollout);
     assert!(!report.ready);
     assert!(report
         .missing
@@ -215,7 +215,7 @@ fn metaserver_process_rollout_report_tracks_scheduler_and_membership_proof() {
 
 #[test]
 fn metaserver_process_rollout_report_accepts_complete_process_evidence() {
-    let report = rustraft_meta_process_rollout_readiness_report(&ready_meta_rollout());
+    let report = matrixraft_meta_process_rollout_readiness_report(&ready_meta_rollout());
     assert!(report.ready, "{report:#?}");
     assert_eq!(report.scope, "metaserver");
     assert!(report

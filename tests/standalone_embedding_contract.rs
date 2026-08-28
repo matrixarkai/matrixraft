@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    metrics::rustraft_metric_names, readiness::rustraft_standalone_readiness_report,
+    metrics::matrixraft_metric_names, readiness::matrixraft_standalone_readiness_report,
     snapshot::PersistentRaftSnapshotStore, AppendEntriesRequest, InstallSnapshotRequest,
     PersistentRaftSnapshotStoreOptions, PersistentRaftWal, PersistentRaftWalOptions, RaftCluster,
     RaftConfig, RaftMembershipExecutor, RaftMembershipOperation, RaftNodeRuntime,
@@ -359,7 +359,7 @@ fn pass_4_non_temporalstore_app_gets_wal_snapshot_recovery_and_fences() {
 
 #[test]
 fn pass_5_standalone_status_api_covers_all_embedding_capabilities() {
-    let report = rustraft_standalone_readiness_report();
+    let report = matrixraft_standalone_readiness_report();
     let capability_ids = report
         .capabilities
         .iter()
@@ -381,7 +381,7 @@ fn pass_5_standalone_status_api_covers_all_embedding_capabilities() {
     assert!(report.standalone);
     assert!(report.evidence.len() >= capability_ids.len());
     assert!(report.missing.is_empty());
-    assert!(rustraft_metric_names()
+    assert!(matrixraft_metric_names()
         .append_latency_ms
         .starts_with("rustraft_"));
 

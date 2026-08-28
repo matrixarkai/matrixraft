@@ -8,18 +8,18 @@ use matrixraft::{
         JointConsensusMembership, RaftMembershipExecutor, RaftMembershipOperation, RustRaftPeer,
         RustRaftReplicaRole,
     },
-    metrics::rustraft_metric_names,
+    metrics::matrixraft_metric_names,
     node::{RaftNodeRuntime, RustRaftNodeOptions},
     readiness::{
-        rustraft_open_source_surface, rustraft_parity_report, rustraft_public_api_contract,
-        rustraft_standalone_readiness_report, rustraft_temporalstore_adapter_shape,
+        matrixraft_open_source_surface, matrixraft_parity_report, matrixraft_public_api_contract,
+        matrixraft_standalone_readiness_report, matrixraft_temporalstore_adapter_shape,
         RustRaftReadinessSnapshot,
     },
     snapshot::{
         PersistentRaftSnapshotStoreOptions, RaftSnapshot, RustRaftApplySnapshotFence,
         RustRaftSnapshotMeta,
     },
-    status::{rustraft_cluster_status_report, RaftHealthStatus},
+    status::{matrixraft_cluster_status_report, RaftHealthStatus},
     transport::{AppendEntriesRequest, ReadIndexRequest, RustRaftTransport, VoteRequest},
     wal::{PersistentRaftWalOptions, RaftHardState, RaftWalRecord},
 };
@@ -130,7 +130,7 @@ fn public_modules_expose_temporalstore_consumption_boundary() {
     assert!(membership.witnesses.contains(&5));
     assert!(!membership.voters.contains(&3));
 
-    let report = rustraft_cluster_status_report(
+    let report = matrixraft_cluster_status_report(
         cluster.group_id,
         cluster.leader_id(),
         cluster.leader_transfer_state(),
@@ -140,26 +140,26 @@ fn public_modules_expose_temporalstore_consumption_boundary() {
     assert_eq!(report.leader_id, Some(1));
 
     let readiness = RustRaftReadinessSnapshot {
-        rustraft_leader_write_authority_present: true,
-        rustraft_operator_observability_present: true,
-        rustraft_rpc_transport_contract_present: true,
-        rustraft_log_retention_snapshot_trigger_present: true,
-        rustraft_apply_snapshot_fence_present: true,
+        matrixraft_leader_write_authority_present: true,
+        matrixraft_operator_observability_present: true,
+        matrixraft_rpc_transport_contract_present: true,
+        matrixraft_log_retention_snapshot_trigger_present: true,
+        matrixraft_apply_snapshot_fence_present: true,
         raft_storage_apply_fence_present: true,
-        rustraft_snapshot_floor_log_matching_present: true,
-        rustraft_snapshot_tail_catchup_present: true,
-        rustraft_compacted_entry_rejection_present: true,
-        rustraft_metaserver_snapshot_floor_election_present: true,
+        matrixraft_snapshot_floor_log_matching_present: true,
+        matrixraft_snapshot_tail_catchup_present: true,
+        matrixraft_compacted_entry_rejection_present: true,
+        matrixraft_metaserver_snapshot_floor_election_present: true,
         learner_catchup_promotion_present: true,
         metaserver_membership_workflow_present: true,
     };
-    assert!(rustraft_parity_report(&readiness).ready);
-    assert!(!rustraft_metric_names().append_latency_ms.is_empty());
+    assert!(matrixraft_parity_report(&readiness).ready);
+    assert!(!matrixraft_metric_names().append_latency_ms.is_empty());
 }
 
 #[test]
 fn standalone_readiness_report_covers_non_temporalstore_embedding_status() {
-    let report = rustraft_standalone_readiness_report();
+    let report = matrixraft_standalone_readiness_report();
     assert!(report.standalone, "{:?}", report.missing);
     assert_eq!(
         report.production_status,
@@ -208,14 +208,14 @@ fn standalone_readiness_report_covers_non_temporalstore_embedding_status() {
         .iter()
         .all(|item| !item.contains("TemporalStore")));
 
-    let api = rustraft_public_api_contract();
+    let api = matrixraft_public_api_contract();
     assert!(api
         .compatibility_reports
-        .contains(&"rustraft_standalone_readiness_report".to_string()));
-    let surface = rustraft_open_source_surface();
+        .contains(&"matrixraft_standalone_readiness_report".to_string()));
+    let surface = matrixraft_open_source_surface();
     assert!(surface
         .compatibility_reports
-        .contains(&"rustraft_standalone_readiness_report".to_string()));
+        .contains(&"matrixraft_standalone_readiness_report".to_string()));
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn public_modules_export_runtime_storage_wal_snapshot_and_transport_types() {
 
 #[test]
 fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
-    let api = rustraft_public_api_contract();
+    let api = matrixraft_public_api_contract();
     for module in [
         "node",
         "cluster",
@@ -268,9 +268,9 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         .contains(&"RustRaftBenchmarkRunner".to_string()));
     assert!(api
         .compatibility_reports
-        .contains(&"rustraft_production_readiness_report".to_string()));
+        .contains(&"matrixraft_production_readiness_report".to_string()));
 
-    let surface = rustraft_open_source_surface();
+    let surface = matrixraft_open_source_surface();
     assert_eq!(surface.crate_name, "rustraft");
     assert!(surface.public_modules.contains(&"wal".to_string()));
     assert!(surface.embedding_docs.contains(&"README.md".to_string()));
@@ -279,15 +279,15 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         .contains(&"leader_election".to_string()));
     assert!(surface
         .benchmark_harness_interface
-        .contains(&"rustraft_run_baseline_raft_parity_benchmark".to_string()));
+        .contains(&"matrixraft_run_baseline_raft_parity_benchmark".to_string()));
     assert!(surface
         .compatibility_reports
-        .contains(&"rustraft_public_api_contract".to_string()));
+        .contains(&"matrixraft_public_api_contract".to_string()));
     assert!(surface
         .temporalstore_adapter_boundary
         .iter()
         .any(|item| item.contains("TemporalStore command codecs")));
-    let adapter_shape = rustraft_temporalstore_adapter_shape();
+    let adapter_shape = matrixraft_temporalstore_adapter_shape();
     assert_eq!(adapter_shape.node_field, "node");
     assert!(adapter_shape.node_runtime_type.contains("RaftNodeRuntime"));
     assert!(adapter_shape
@@ -329,7 +329,7 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("snapshot.diagnostic_prometheus"));
     assert!(example.contains("snapshot.optimization_prometheus"));
     assert!(example.contains("snapshot.runbook_prometheus"));
-    assert!(example.contains("rustraft_operator_runbook_prometheus(&provisioning.runbook_steps"));
+    assert!(example.contains("matrixraft_operator_runbook_prometheus(&provisioning.runbook_steps"));
     assert!(example.contains("missing_debug_artifacts"));
     assert!(example.contains("extra_debug_artifacts"));
     assert!(example.contains("debug_artifact_unadvertised"));

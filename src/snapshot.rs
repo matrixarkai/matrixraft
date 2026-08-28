@@ -68,7 +68,7 @@ pub struct RustRaftSnapshotLifecycleEvidenceValidationReport {
     pub missing: Vec<String>,
 }
 
-pub fn rustraft_validate_snapshot_floor_log_matching(
+pub fn matrixraft_validate_snapshot_floor_log_matching(
     snapshot: &RustRaftSnapshotMeta,
     first_retained_log_index: RustRaftLogIndex,
     prev_log_id: Option<&RustRaftLogId>,
@@ -95,7 +95,7 @@ pub fn rustraft_validate_snapshot_floor_log_matching(
     Ok(())
 }
 
-pub fn rustraft_validate_snapshot_install(
+pub fn matrixraft_validate_snapshot_install(
     snapshot: &RaftSnapshot,
     fence: &RustRaftApplySnapshotFence,
 ) -> Result<(), RustRaftError> {
@@ -104,14 +104,14 @@ pub fn rustraft_validate_snapshot_install(
             "snapshot install fence does not match snapshot last log index".to_string(),
         ));
     }
-    rustraft_validate_snapshot_floor_log_matching(
+    matrixraft_validate_snapshot_floor_log_matching(
         &snapshot.meta,
         fence.first_retained_log_index,
         Some(&snapshot.meta.last_log_id),
     )
 }
 
-pub fn rustraft_validate_snapshot_tail_catchup(
+pub fn matrixraft_validate_snapshot_tail_catchup(
     snapshot: &RustRaftSnapshotMeta,
     tail_entries: &[RustRaftLogEntry],
 ) -> Result<(), RustRaftError> {
@@ -131,7 +131,7 @@ pub fn rustraft_validate_snapshot_tail_catchup(
     Ok(())
 }
 
-pub fn rustraft_snapshot_lifecycle_evidence(
+pub fn matrixraft_snapshot_lifecycle_evidence(
     peers: &[RustRaftPeerPipelineStatus],
     send_snapshot_timeout_ms: u64,
     max_inflights_replicate: u64,
@@ -198,12 +198,12 @@ pub fn rustraft_snapshot_lifecycle_evidence(
     }
 }
 
-pub fn rustraft_snapshot_lifecycle_evidence_artifact(
+pub fn matrixraft_snapshot_lifecycle_evidence_artifact(
     peers: Vec<RustRaftPeerPipelineStatus>,
     send_snapshot_timeout_ms: u64,
     max_inflights_replicate: u64,
 ) -> RustRaftSnapshotLifecycleEvidenceArtifact {
-    let evidence = rustraft_snapshot_lifecycle_evidence(
+    let evidence = matrixraft_snapshot_lifecycle_evidence(
         &peers,
         send_snapshot_timeout_ms,
         max_inflights_replicate,
@@ -217,11 +217,11 @@ pub fn rustraft_snapshot_lifecycle_evidence_artifact(
     }
 }
 
-pub fn rustraft_validate_snapshot_lifecycle_evidence_artifact(
+pub fn matrixraft_validate_snapshot_lifecycle_evidence_artifact(
     artifact: &RustRaftSnapshotLifecycleEvidenceArtifact,
 ) -> RustRaftSnapshotLifecycleEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.snapshot_lifecycle_evidence.v1";
-    let recomputed = rustraft_snapshot_lifecycle_evidence(
+    let recomputed = matrixraft_snapshot_lifecycle_evidence(
         &artifact.peers,
         artifact.send_snapshot_timeout_ms,
         artifact.max_inflights_replicate,

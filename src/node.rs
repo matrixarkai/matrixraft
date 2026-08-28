@@ -52,7 +52,7 @@ pub trait RustRaftConsensus {
     }
 }
 
-pub const RUSTRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS: u64 = u64::MAX;
+pub const MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS: u64 = u64::MAX;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RustRaftTimerTask {
@@ -167,7 +167,7 @@ impl RustRaftRequestTimer {
 
     pub fn next_timeout_ms(&self, now_ms: u64) -> u64 {
         let Some(timeout_key) = self.pending_timeouts.iter().next() else {
-            return RUSTRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS;
+            return MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS;
         };
         if timeout_key.deadline_ms < now_ms {
             return 0;

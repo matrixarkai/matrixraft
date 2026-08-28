@@ -69,7 +69,7 @@ impl LocalRaftWal {
     }
 
     pub fn append(&mut self, mut record: RaftWalRecord) -> Result<String, RaftError> {
-        record.checksum = rustraft_wal_checksum(&record);
+        record.checksum = matrixraft_wal_checksum(&record);
         if self
             .segments
             .last()
@@ -141,10 +141,10 @@ impl LocalRaftWal {
     pub fn recover(&mut self) -> Result<RaftWalRecoveryReport, RaftError> {
         let mut records = self.records();
         let original_len = records.len();
-        while matches!(records.last(), Some(record) if !rustraft_wal_checksum_valid(record)) {
+        while matches!(records.last(), Some(record) if !matrixraft_wal_checksum_valid(record)) {
             records.pop();
         }
-        let recovered = rustraft_recover_latest_wal_record(&records).ok();
+        let recovered = matrixraft_recover_latest_wal_record(&records).ok();
         let truncated_corrupt_tail = records.len() != original_len;
         if truncated_corrupt_tail {
             self.rebuild_from_records(records.clone())?;
@@ -155,7 +155,7 @@ impl LocalRaftWal {
             surviving_records: records.len(),
             removed_records: original_len.saturating_sub(records.len()),
             segments_scanned: self.segments.len() as u64,
-            checksum_format: Some(rustraft_wal_checksum_format()),
+            checksum_format: Some(matrixraft_wal_checksum_format()),
             retained_range: Some(wal_retained_range(&self.segments)),
         })
     }
@@ -317,14 +317,14 @@ impl PersistentRaftWal {
             return whole_record(record);
         };
         let Some(base) =
-            rustraft_wal_delta_base(&record.entries, first_index, last_index, last_term)
+            matrixraft_wal_delta_base(&record.entries, first_index, last_index, last_term)
         else {
             return whole_record(record);
         };
         let mut delta = record.clone();
         delta.entries = record.entries[base..].to_vec();
         delta.entries_are_delta = true;
-        delta.checksum = rustraft_wal_checksum(&delta);
+        delta.checksum = matrixraft_wal_checksum(&delta);
         delta
     }
 
@@ -334,7 +334,7 @@ impl PersistentRaftWal {
         &self,
     ) -> Option<(RustRaftLogIndex, RustRaftLogIndex, RustRaftTerm)> {
         let segment = self.segments.last()?;
-        let folded = rustraft_fold_wal_records(&segment.records);
+        let folded = matrixraft_fold_wal_records(&segment.records);
         let entries = &folded.last()?.entries;
         let first = entries.first()?;
         let last = entries.last()?;
@@ -422,7 +422,7 @@ impl PersistentRaftWal {
     where
         W: FnOnce() -> Result<RaftWalRecord, RaftError>,
     {
-        let hard_state_persisted = rustraft_validate_hard_state_persistence(&record).is_ok();
+        let hard_state_persisted = matrixraft_validate_hard_state_persistence(&record).is_ok();
         let active_len = self
             .active_segment
             .metadata()
@@ -442,7 +442,7 @@ impl PersistentRaftWal {
             if record.entries_are_delta {
                 record = whole()?;
                 record.entries_are_delta = false;
-                record.checksum = rustraft_wal_checksum(&record);
+                record.checksum = matrixraft_wal_checksum(&record);
                 encoded = encode_wal_record(&record)?;
                 record_bytes = encoded.len() as u64 + 1;
             }
@@ -494,7 +494,7 @@ impl PersistentRaftWal {
             segment_id,
             log_index: record_index,
             checksum,
-            checksum_format: rustraft_wal_checksum_format(),
+            checksum_format: matrixraft_wal_checksum_format(),
             bytes_written: record_bytes,
             fsync_on_append: self.options.fsync_on_append,
             fsync_elapsed_ms,
@@ -513,7 +513,7 @@ impl PersistentRaftWal {
             .iter()
             .flat_map(|segment| segment.records.iter().cloned())
             .collect();
-        let records = rustraft_fold_wal_records(&stored);
+        let records = matrixraft_fold_wal_records(&stored);
         self.segments = if segments.is_empty() {
             vec![RaftWalSegment {
                 segment_id: 0,
@@ -539,12 +539,12 @@ impl PersistentRaftWal {
         let observed_corrupt_tail = self.truncated_corrupt_tail || truncated_corrupt_tail;
         self.truncated_corrupt_tail = observed_corrupt_tail;
         Ok(RaftWalRecoveryReport {
-            recovered: rustraft_recover_latest_wal_record(&records).ok(),
+            recovered: matrixraft_recover_latest_wal_record(&records).ok(),
             truncated_corrupt_tail: observed_corrupt_tail,
             surviving_records: records.len(),
             removed_records: original_len.saturating_sub(records.len()),
             segments_scanned: self.segments.len() as u64,
-            checksum_format: Some(rustraft_wal_checksum_format()),
+            checksum_format: Some(matrixraft_wal_checksum_format()),
             retained_range: Some(wal_retained_range(&self.segments)),
         })
     }
@@ -593,7 +593,7 @@ impl PersistentRaftWal {
         log_index: RustRaftLogIndex,
         fence: &RustRaftStorageApplyFence,
     ) -> Result<RaftWalCompactionReport, RaftError> {
-        if let Err(error) = rustraft_validate_storage_apply_fence(fence) {
+        if let Err(error) = matrixraft_validate_storage_apply_fence(fence) {
             return Ok(RaftWalCompactionReport {
                 requested_log_index: log_index,
                 released_segments: 0,
@@ -703,7 +703,7 @@ impl PersistentRaftWal {
     }
 
     pub fn checksum_format(&self) -> RaftWalChecksumFormat {
-        rustraft_wal_checksum_format()
+        matrixraft_wal_checksum_format()
     }
 
     pub fn records(&self) -> Vec<RaftWalRecord> {
@@ -712,7 +712,7 @@ impl PersistentRaftWal {
             .iter()
             .flat_map(|segment| segment.records.iter().cloned())
             .collect();
-        rustraft_fold_wal_records(&stored)
+        matrixraft_fold_wal_records(&stored)
     }
 
     pub fn corrupt_tail_for_test(&mut self) -> Result<(), RaftError> {
@@ -750,7 +750,7 @@ pub type FileRaftWal = PersistentRaftWal;
 fn whole_record(record: &RaftWalRecord) -> RaftWalRecord {
     let mut whole = record.clone();
     whole.entries_are_delta = false;
-    whole.checksum = rustraft_wal_checksum(&whole);
+    whole.checksum = matrixraft_wal_checksum(&whole);
     whole
 }
 
@@ -899,7 +899,7 @@ fn read_wal_segment_file(path: &Path) -> Result<(Vec<RaftWalRecord>, bool), Raft
             truncated = true;
             break;
         };
-        if !rustraft_wal_checksum_valid(&record) {
+        if !matrixraft_wal_checksum_valid(&record) {
             truncated = true;
             break;
         }

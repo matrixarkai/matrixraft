@@ -109,7 +109,7 @@ impl RustRaftPendingReadIndex {
     }
 }
 
-pub fn rustraft_append_safety_decision(
+pub fn matrixraft_append_safety_decision(
     first_retained_log_index: u64,
     snapshot_index: u64,
     request: &RustRaftAppendEntriesRequest,
@@ -140,7 +140,7 @@ pub fn rustraft_append_safety_decision(
     }
 }
 
-pub fn rustraft_read_safety_decision(
+pub fn matrixraft_read_safety_decision(
     status: &RustRaftStatusSnapshot,
     request: &RustRaftReadIndexRequest,
 ) -> RustRaftReadSafetyDecision {
@@ -176,7 +176,7 @@ pub fn rustraft_read_safety_decision(
     }
 }
 
-pub fn rustraft_applied_index_fence_report(
+pub fn matrixraft_applied_index_fence_report(
     min_commit_index: RustRaftLogIndex,
     commit_index: RustRaftLogIndex,
     applied_index: RustRaftLogIndex,
@@ -197,7 +197,7 @@ pub fn rustraft_applied_index_fence_report(
     }
 }
 
-pub fn rustraft_lease_read_eligibility_report(
+pub fn matrixraft_lease_read_eligibility_report(
     node_id: RustRaftNodeId,
     leader_id: Option<RustRaftNodeId>,
     config_enabled: bool,
@@ -229,7 +229,7 @@ pub fn rustraft_lease_read_eligibility_report(
     }
 }
 
-pub fn rustraft_bounded_stale_read_report(
+pub fn matrixraft_bounded_stale_read_report(
     node_id: RustRaftNodeId,
     leader_id: RustRaftNodeId,
     node_commit_index: RustRaftLogIndex,
@@ -254,7 +254,7 @@ pub fn rustraft_bounded_stale_read_report(
     }
 }
 
-pub fn rustraft_read_safety_runtime_decision(
+pub fn matrixraft_read_safety_runtime_decision(
     input: RustRaftReadSafetyRuntimeInput,
 ) -> RustRaftReadSafetyRuntimeDecision {
     let is_follower = input.node_id != input.leader_id;
@@ -368,22 +368,24 @@ pub fn rustraft_read_safety_runtime_decision(
     }
 }
 
-pub fn rustraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceArtifact {
+pub fn matrixraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceArtifact {
     RustRaftReadSafetyEvidenceArtifact {
         schema: "rustraft.read_safety_evidence.v1".to_string(),
-        stale_leader_lease: rustraft_read_safety_runtime_decision(RustRaftReadSafetyRuntimeInput {
-            operation: RustRaftReadSafetyOperation::LeaseRead,
-            node_id: 1,
-            leader_id: 1,
-            node_alive: true,
-            role_can_serve_data: true,
-            leader_lease_valid: false,
-            has_majority: true,
-            node_commit_index: 10,
-            leader_commit_index: 10,
-            max_stale_index_lag: 0,
-        }),
-        lagging_follower_read: rustraft_read_safety_runtime_decision(
+        stale_leader_lease: matrixraft_read_safety_runtime_decision(
+            RustRaftReadSafetyRuntimeInput {
+                operation: RustRaftReadSafetyOperation::LeaseRead,
+                node_id: 1,
+                leader_id: 1,
+                node_alive: true,
+                role_can_serve_data: true,
+                leader_lease_valid: false,
+                has_majority: true,
+                node_commit_index: 10,
+                leader_commit_index: 10,
+                max_stale_index_lag: 0,
+            },
+        ),
+        lagging_follower_read: matrixraft_read_safety_runtime_decision(
             RustRaftReadSafetyRuntimeInput {
                 operation: RustRaftReadSafetyOperation::ReadIndex,
                 node_id: 2,
@@ -397,7 +399,7 @@ pub fn rustraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceArt
                 max_stale_index_lag: 0,
             },
         ),
-        stale_follower_write: rustraft_read_safety_runtime_decision(
+        stale_follower_write: matrixraft_read_safety_runtime_decision(
             RustRaftReadSafetyRuntimeInput {
                 operation: RustRaftReadSafetyOperation::Write,
                 node_id: 2,
@@ -411,7 +413,7 @@ pub fn rustraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceArt
                 max_stale_index_lag: 0,
             },
         ),
-        bounded_stale_read_accept: rustraft_read_safety_runtime_decision(
+        bounded_stale_read_accept: matrixraft_read_safety_runtime_decision(
             RustRaftReadSafetyRuntimeInput {
                 operation: RustRaftReadSafetyOperation::BoundedStaleRead,
                 node_id: 2,
@@ -425,7 +427,7 @@ pub fn rustraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceArt
                 max_stale_index_lag: 1,
             },
         ),
-        bounded_stale_read_reject: rustraft_read_safety_runtime_decision(
+        bounded_stale_read_reject: matrixraft_read_safety_runtime_decision(
             RustRaftReadSafetyRuntimeInput {
                 operation: RustRaftReadSafetyOperation::BoundedStaleRead,
                 node_id: 2,
@@ -439,7 +441,7 @@ pub fn rustraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceArt
                 max_stale_index_lag: 1,
             },
         ),
-        minority_partition_read: rustraft_read_safety_runtime_decision(
+        minority_partition_read: matrixraft_read_safety_runtime_decision(
             RustRaftReadSafetyRuntimeInput {
                 operation: RustRaftReadSafetyOperation::ReadIndex,
                 node_id: 1,
@@ -453,7 +455,7 @@ pub fn rustraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceArt
                 max_stale_index_lag: 0,
             },
         ),
-        minority_partition_write: rustraft_read_safety_runtime_decision(
+        minority_partition_write: matrixraft_read_safety_runtime_decision(
             RustRaftReadSafetyRuntimeInput {
                 operation: RustRaftReadSafetyOperation::Write,
                 node_id: 1,
@@ -467,7 +469,7 @@ pub fn rustraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceArt
                 max_stale_index_lag: 0,
             },
         ),
-        healed_follower_catchup: rustraft_read_safety_runtime_decision(
+        healed_follower_catchup: matrixraft_read_safety_runtime_decision(
             RustRaftReadSafetyRuntimeInput {
                 operation: RustRaftReadSafetyOperation::ReadIndex,
                 node_id: 2,
@@ -484,7 +486,7 @@ pub fn rustraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceArt
     }
 }
 
-pub fn rustraft_validate_read_safety_evidence_artifact(
+pub fn matrixraft_validate_read_safety_evidence_artifact(
     artifact: &RustRaftReadSafetyEvidenceArtifact,
 ) -> RustRaftReadSafetyEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.read_safety_evidence.v1";

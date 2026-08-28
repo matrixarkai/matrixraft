@@ -2,31 +2,32 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    fault, rustraft_admin_status_surface_evidence,
-    rustraft_baseline_raft_operational_evidence_bundle,
-    rustraft_baseline_raft_runtime_capability_prometheus,
-    rustraft_baseline_raft_runtime_capability_report, rustraft_capability_evidence_from_fields,
-    rustraft_cross_plane_process_evidence_artifact,
-    rustraft_cross_plane_process_evidence_prometheus,
-    rustraft_cross_plane_process_evidence_summary,
-    rustraft_cross_plane_process_readiness_blocker_report,
-    rustraft_cross_plane_process_readiness_report, rustraft_data_node_process_rollout_blockers,
-    rustraft_data_node_strict_process_rollout_validated,
-    rustraft_membership_semantics_evidence_artifact, rustraft_meta_process_rollout_blockers,
-    rustraft_meta_strict_process_rollout_validated, rustraft_named_readiness_blockers,
-    rustraft_process_readiness_blocker, rustraft_production_readiness_report,
-    rustraft_read_safety_evidence_artifact, rustraft_replication_pipeline_evidence_artifact,
-    rustraft_require_production_ready, rustraft_runtime_capability_report_from_evidence,
-    rustraft_snapshot_lifecycle_evidence_artifact,
-    rustraft_validate_baseline_raft_operational_evidence_bundle,
-    rustraft_validate_cross_plane_process_evidence_artifact, rustraft_validate_deployment_mode,
-    rustraft_validate_deployment_readiness,
-    rustraft_validate_membership_semantics_evidence_artifact,
-    rustraft_validate_read_safety_evidence_artifact,
-    rustraft_validate_replication_pipeline_evidence_artifact,
-    rustraft_validate_snapshot_lifecycle_evidence_artifact,
-    rustraft_validate_wal_lifecycle_evidence_artifact, rustraft_wal_lifecycle_evidence_artifact,
-    RaftCapabilityEvidence, RustRaftAdminStatusSurfaceEvidence, RustRaftAdminStatusSurfaceInput,
+    fault, matrixraft_admin_status_surface_evidence,
+    matrixraft_baseline_raft_operational_evidence_bundle,
+    matrixraft_baseline_raft_runtime_capability_prometheus,
+    matrixraft_baseline_raft_runtime_capability_report, matrixraft_capability_evidence_from_fields,
+    matrixraft_cross_plane_process_evidence_artifact,
+    matrixraft_cross_plane_process_evidence_prometheus,
+    matrixraft_cross_plane_process_evidence_summary,
+    matrixraft_cross_plane_process_readiness_blocker_report,
+    matrixraft_cross_plane_process_readiness_report, matrixraft_data_node_process_rollout_blockers,
+    matrixraft_data_node_strict_process_rollout_validated,
+    matrixraft_membership_semantics_evidence_artifact, matrixraft_meta_process_rollout_blockers,
+    matrixraft_meta_strict_process_rollout_validated, matrixraft_named_readiness_blockers,
+    matrixraft_process_readiness_blocker, matrixraft_production_readiness_report,
+    matrixraft_read_safety_evidence_artifact, matrixraft_replication_pipeline_evidence_artifact,
+    matrixraft_require_production_ready, matrixraft_runtime_capability_report_from_evidence,
+    matrixraft_snapshot_lifecycle_evidence_artifact,
+    matrixraft_validate_baseline_raft_operational_evidence_bundle,
+    matrixraft_validate_cross_plane_process_evidence_artifact, matrixraft_validate_deployment_mode,
+    matrixraft_validate_deployment_readiness,
+    matrixraft_validate_membership_semantics_evidence_artifact,
+    matrixraft_validate_read_safety_evidence_artifact,
+    matrixraft_validate_replication_pipeline_evidence_artifact,
+    matrixraft_validate_snapshot_lifecycle_evidence_artifact,
+    matrixraft_validate_wal_lifecycle_evidence_artifact,
+    matrixraft_wal_lifecycle_evidence_artifact, RaftCapabilityEvidence,
+    RustRaftAdminStatusSurfaceEvidence, RustRaftAdminStatusSurfaceInput,
     RustRaftDataNodeProcessRolloutReport, RustRaftDeploymentMode, RustRaftLearnerPromotionDecision,
     RustRaftMembershipScope, RustRaftMembershipTransitionEvidence,
     RustRaftMembershipTransitionKind, RustRaftMetaProcessRolloutReport, RustRaftPeerPipelineStatus,
@@ -38,16 +39,16 @@ use matrixraft::{
 
 fn ready_snapshot() -> RustRaftReadinessSnapshot {
     RustRaftReadinessSnapshot {
-        rustraft_leader_write_authority_present: true,
-        rustraft_operator_observability_present: true,
-        rustraft_rpc_transport_contract_present: true,
-        rustraft_log_retention_snapshot_trigger_present: true,
-        rustraft_apply_snapshot_fence_present: true,
+        matrixraft_leader_write_authority_present: true,
+        matrixraft_operator_observability_present: true,
+        matrixraft_rpc_transport_contract_present: true,
+        matrixraft_log_retention_snapshot_trigger_present: true,
+        matrixraft_apply_snapshot_fence_present: true,
         raft_storage_apply_fence_present: true,
-        rustraft_snapshot_floor_log_matching_present: true,
-        rustraft_snapshot_tail_catchup_present: true,
-        rustraft_compacted_entry_rejection_present: true,
-        rustraft_metaserver_snapshot_floor_election_present: true,
+        matrixraft_snapshot_floor_log_matching_present: true,
+        matrixraft_snapshot_tail_catchup_present: true,
+        matrixraft_compacted_entry_rejection_present: true,
+        matrixraft_metaserver_snapshot_floor_election_present: true,
         learner_catchup_promotion_present: true,
         metaserver_membership_workflow_present: true,
     }
@@ -345,7 +346,7 @@ fn ready_admin_status_surface() -> RustRaftAdminStatusSurfaceEvidence {
     peer_3.inflight_entries = 1;
     peer_3.inflight_bytes = 128;
 
-    rustraft_admin_status_surface_evidence(&RustRaftAdminStatusSurfaceInput {
+    matrixraft_admin_status_surface_evidence(&RustRaftAdminStatusSurfaceInput {
         commit_index: 104,
         max_observed_node_commit_index: 104,
         quorum_size: 2,
@@ -431,7 +432,7 @@ fn complete_wal_lifecycle_status() -> RustRaftWalLifecycleStatus {
 }
 
 fn ready_fault_harness() -> fault::RustRaftFaultHarnessReadinessReport {
-    let evidence = fault::rustraft_baseline_raft_fault_scenarios()
+    let evidence = fault::matrixraft_baseline_raft_fault_scenarios()
         .into_iter()
         .map(|requirement| fault::RustRaftFaultScenarioEvidence {
             scenario: requirement.scenario,
@@ -450,7 +451,7 @@ fn ready_fault_harness() -> fault::RustRaftFaultHarnessReadinessReport {
             report_path: Some(format!("reports/{}.json", requirement.scenario.id())),
         })
         .collect::<Vec<_>>();
-    fault::rustraft_fault_harness_readiness_report(&evidence)
+    fault::matrixraft_fault_harness_readiness_report(&evidence)
 }
 
 fn ready_input() -> RustRaftProductionReadinessInput {
@@ -503,12 +504,12 @@ fn ready_input() -> RustRaftProductionReadinessInput {
         membership_transitions: transitions(),
         baseline_raft_benchmark: Some(matrixraft::RustRaftBaselineRaftBenchmarkEvidence {
             real_baseline_raft: true,
-            rustraft_runtime: true,
+            matrixraft_runtime: true,
             baseline_raft_reference: true,
-            rustraft_rust_candidate: true,
+            matrixraft_rust_candidate: true,
             correctness_passed: true,
             performance_within_threshold: true,
-            workloads: matrixraft::benchmark::rustraft_baseline_raft_benchmark_workloads()
+            workloads: matrixraft::benchmark::matrixraft_baseline_raft_benchmark_workloads()
                 .into_iter()
                 .map(|workload| workload.id().to_string())
                 .collect(),
@@ -523,7 +524,7 @@ fn ready_input() -> RustRaftProductionReadinessInput {
 
 #[test]
 fn baseline_raft_runtime_capability_report_accepts_complete_evidence() {
-    let report = rustraft_baseline_raft_runtime_capability_report(&ready_input());
+    let report = matrixraft_baseline_raft_runtime_capability_report(&ready_input());
     assert!(report.ready, "{report:#?}");
     assert!(report.missing.is_empty());
     assert!(report.blockers.is_empty());
@@ -537,7 +538,7 @@ fn baseline_raft_runtime_capability_report_accepts_complete_evidence() {
 
 #[test]
 fn capability_evidence_from_fields_formats_present_and_missing_rows() {
-    let evidence = rustraft_capability_evidence_from_fields(
+    let evidence = matrixraft_capability_evidence_from_fields(
         "wal_segment_lifecycle",
         "product_admin_report",
         [
@@ -560,7 +561,7 @@ fn capability_evidence_from_fields_formats_present_and_missing_rows() {
 
 #[test]
 fn runtime_capability_report_builder_accepts_product_evidence_rows() {
-    let report = rustraft_runtime_capability_report_from_evidence(
+    let report = matrixraft_runtime_capability_report_from_evidence(
         vec![
             RaftCapabilityEvidence {
                 capability: "process_path_rollout_evidence".to_string(),
@@ -611,7 +612,7 @@ fn baseline_raft_runtime_capability_report_fails_closed_on_missing_wal_lifecycle
         compaction_after_slow_fsync_observed: false,
     });
 
-    let report = rustraft_baseline_raft_runtime_capability_report(&input);
+    let report = matrixraft_baseline_raft_runtime_capability_report(&input);
     assert!(!report.ready);
     assert!(report
         .missing
@@ -635,7 +636,7 @@ fn baseline_raft_runtime_capability_report_names_process_path_missing_fields() {
         .unwrap()
         .per_node_log_store_inspection_count = 0;
 
-    let report = rustraft_baseline_raft_runtime_capability_report(&input);
+    let report = matrixraft_baseline_raft_runtime_capability_report(&input);
     assert!(!report.ready);
     assert!(report
         .missing
@@ -653,7 +654,7 @@ fn cross_plane_process_readiness_requires_real_three_process_evidence() {
     let data = ready_data_rollout_three_processes();
     let meta = ready_meta_rollout_three_processes();
 
-    let report = rustraft_cross_plane_process_readiness_report(&data, &meta);
+    let report = matrixraft_cross_plane_process_readiness_report(&data, &meta);
 
     assert!(report.ready);
     assert!(report.multi_process_data_node_and_metaserver_raft);
@@ -671,7 +672,7 @@ fn cross_plane_process_readiness_names_missing_evidence_fields() {
     data.independent_wal_dirs = false;
     meta.operational_semantics.read_index_validated = false;
 
-    let report = rustraft_cross_plane_process_readiness_report(&data, &meta);
+    let report = matrixraft_cross_plane_process_readiness_report(&data, &meta);
 
     assert!(!report.ready);
     assert!(!report.multi_process_data_node_and_metaserver_raft);
@@ -685,7 +686,7 @@ fn cross_plane_process_readiness_names_missing_evidence_fields() {
 
 #[test]
 fn process_readiness_blocker_classifier_is_library_owned() {
-    let blocker = rustraft_process_readiness_blocker("data_node_report.independent_wal_dirs");
+    let blocker = matrixraft_process_readiness_blocker("data_node_report.independent_wal_dirs");
 
     assert_eq!(
         blocker.blocker,
@@ -700,7 +701,7 @@ fn process_readiness_blocker_classifier_is_library_owned() {
         "each process must use an independent WAL directory"
     );
 
-    let operational = rustraft_process_readiness_blocker(
+    let operational = matrixraft_process_readiness_blocker(
         "metaserver_report.operational_semantics.read_index_validated",
     );
     assert_eq!(
@@ -711,7 +712,7 @@ fn process_readiness_blocker_classifier_is_library_owned() {
 
 #[test]
 fn process_rollout_blocker_expansion_is_library_owned() {
-    let missing = rustraft_data_node_process_rollout_blockers("data_node_report", None);
+    let missing = matrixraft_data_node_process_rollout_blockers("data_node_report", None);
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0].blocker, "data_node_report_missing");
     assert_eq!(missing[0].evidence_field, "data_node_report");
@@ -721,7 +722,7 @@ fn process_rollout_blocker_expansion_is_library_owned() {
     data.independent_wal_dirs = false;
     data.read_index_responses_observed = 0;
     let data_blockers =
-        rustraft_data_node_process_rollout_blockers("data_node_report", Some(&data));
+        matrixraft_data_node_process_rollout_blockers("data_node_report", Some(&data));
     assert!(data_blockers.iter().any(|blocker| {
         blocker.evidence_field == "data_node_report.independent_wal_dirs"
             && blocker.detail == "each process must use an independent WAL directory"
@@ -732,7 +733,7 @@ fn process_rollout_blocker_expansion_is_library_owned() {
 
     let mut meta = ready_meta_rollout_three_processes();
     meta.operational_semantics.read_index_validated = false;
-    let meta_blockers = rustraft_meta_process_rollout_blockers("metaserver_report", Some(&meta));
+    let meta_blockers = matrixraft_meta_process_rollout_blockers("metaserver_report", Some(&meta));
     assert!(meta_blockers.iter().any(|blocker| {
         blocker.evidence_field == "metaserver_report.operational_semantics.read_index_validated"
             && blocker.detail
@@ -748,8 +749,8 @@ fn cross_plane_blocker_report_is_library_owned() {
     meta.operational_semantics
         .follower_rejoin_after_compaction_validated = false;
 
-    let string_report = rustraft_cross_plane_process_readiness_report(&data, &meta);
-    let blocker_report = rustraft_cross_plane_process_readiness_blocker_report(&data, &meta);
+    let string_report = matrixraft_cross_plane_process_readiness_report(&data, &meta);
+    let blocker_report = matrixraft_cross_plane_process_readiness_blocker_report(&data, &meta);
 
     assert_eq!(blocker_report.ready, string_report.ready);
     assert_eq!(
@@ -781,7 +782,7 @@ fn cross_plane_process_evidence_summary_is_library_owned() {
     let data = ready_data_rollout_three_processes();
     let meta = ready_meta_rollout_three_processes();
 
-    let summary = rustraft_cross_plane_process_evidence_summary(&data, &meta);
+    let summary = matrixraft_cross_plane_process_evidence_summary(&data, &meta);
 
     assert_eq!(summary.data_node_spawned_process_count, 3);
     assert_eq!(summary.metaserver_spawned_process_count, 3);
@@ -804,9 +805,9 @@ fn cross_plane_process_evidence_summary_is_library_owned() {
 fn cross_plane_process_evidence_prometheus_is_library_owned() {
     let data = ready_data_rollout_three_processes();
     let meta = ready_meta_rollout_three_processes();
-    let summary = rustraft_cross_plane_process_evidence_summary(&data, &meta);
+    let summary = matrixraft_cross_plane_process_evidence_summary(&data, &meta);
 
-    let metrics = rustraft_cross_plane_process_evidence_prometheus(
+    let metrics = matrixraft_cross_plane_process_evidence_prometheus(
         &summary,
         &[("cluster", "a\"b\\c\n"), ("source", "process")],
     );
@@ -837,7 +838,7 @@ fn cross_plane_process_evidence_artifact_is_library_owned() {
     let meta = ready_meta_rollout_three_processes();
 
     let artifact =
-        rustraft_cross_plane_process_evidence_artifact(&data, &meta, &[("cluster", "raft-a")]);
+        matrixraft_cross_plane_process_evidence_artifact(&data, &meta, &[("cluster", "raft-a")]);
     let json = serde_json::to_string(&artifact).expect("serialize process evidence artifact");
 
     assert_eq!(artifact.schema, "rustraft.cross_plane_process_evidence.v1");
@@ -859,9 +860,9 @@ fn cross_plane_process_evidence_artifact_validator_is_library_owned() {
     let data = ready_data_rollout_three_processes();
     let meta = ready_meta_rollout_three_processes();
     let artifact =
-        rustraft_cross_plane_process_evidence_artifact(&data, &meta, &[("cluster", "raft-a")]);
+        matrixraft_cross_plane_process_evidence_artifact(&data, &meta, &[("cluster", "raft-a")]);
 
-    let validation = rustraft_validate_cross_plane_process_evidence_artifact(&artifact);
+    let validation = matrixraft_validate_cross_plane_process_evidence_artifact(&artifact);
 
     assert!(validation.valid);
     assert!(validation.schema_valid);
@@ -876,7 +877,7 @@ fn cross_plane_process_evidence_artifact_validator_reports_missing_fields() {
     let data = ready_data_rollout_three_processes();
     let meta = ready_meta_rollout_three_processes();
     let mut artifact =
-        rustraft_cross_plane_process_evidence_artifact(&data, &meta, &[("cluster", "raft-a")]);
+        matrixraft_cross_plane_process_evidence_artifact(&data, &meta, &[("cluster", "raft-a")]);
     artifact.schema = "old.schema".to_string();
     artifact.readiness.ready = false;
     artifact.summary.total_spawned_process_count = 2;
@@ -885,7 +886,7 @@ fn cross_plane_process_evidence_artifact_validator_reports_missing_fields() {
     artifact.prometheus.metric_count = 0;
     artifact.prometheus.text.clear();
 
-    let validation = rustraft_validate_cross_plane_process_evidence_artifact(&artifact);
+    let validation = matrixraft_validate_cross_plane_process_evidence_artifact(&artifact);
 
     assert!(!validation.valid);
     assert!(!validation.schema_valid);
@@ -911,7 +912,7 @@ fn cross_plane_process_evidence_artifact_validator_reports_missing_fields() {
 
 #[test]
 fn read_safety_evidence_artifact_is_library_owned() {
-    let artifact = rustraft_read_safety_evidence_artifact();
+    let artifact = matrixraft_read_safety_evidence_artifact();
 
     assert_eq!(artifact.schema, "rustraft.read_safety_evidence.v1");
     assert!(!artifact.stale_leader_lease.allowed);
@@ -948,8 +949,8 @@ fn read_safety_evidence_artifact_is_library_owned() {
 
 #[test]
 fn read_safety_evidence_artifact_validator_reports_missing_fields() {
-    let artifact = rustraft_read_safety_evidence_artifact();
-    let valid = rustraft_validate_read_safety_evidence_artifact(&artifact);
+    let artifact = matrixraft_read_safety_evidence_artifact();
+    let valid = matrixraft_validate_read_safety_evidence_artifact(&artifact);
     assert!(valid.valid);
     assert!(valid.missing.is_empty());
 
@@ -958,7 +959,7 @@ fn read_safety_evidence_artifact_validator_reports_missing_fields() {
     broken.stale_leader_lease.allowed = true;
     broken.bounded_stale_read_accept.allowed = false;
     broken.minority_partition_write.reason = "write_authority".to_string();
-    let invalid = rustraft_validate_read_safety_evidence_artifact(&broken);
+    let invalid = matrixraft_validate_read_safety_evidence_artifact(&broken);
 
     assert!(!invalid.valid);
     assert!(!invalid.schema_valid);
@@ -979,7 +980,7 @@ fn read_safety_evidence_artifact_validator_reports_missing_fields() {
 
 #[test]
 fn membership_semantics_evidence_artifact_is_library_owned() {
-    let artifact = rustraft_membership_semantics_evidence_artifact();
+    let artifact = matrixraft_membership_semantics_evidence_artifact();
 
     assert_eq!(artifact.schema, "rustraft.membership_semantics_evidence.v1");
     assert!(artifact
@@ -1006,8 +1007,8 @@ fn membership_semantics_evidence_artifact_is_library_owned() {
 
 #[test]
 fn membership_semantics_evidence_artifact_validator_reports_missing_fields() {
-    let artifact = rustraft_membership_semantics_evidence_artifact();
-    let valid = rustraft_validate_membership_semantics_evidence_artifact(&artifact);
+    let artifact = matrixraft_membership_semantics_evidence_artifact();
+    let valid = matrixraft_validate_membership_semantics_evidence_artifact(&artifact);
     assert!(valid.valid);
     assert!(valid.missing.is_empty());
 
@@ -1034,7 +1035,7 @@ fn membership_semantics_evidence_artifact_validator_reports_missing_fields() {
     broken.witness_promotion_rejected_observed = false;
     broken.witness_role_blocker = None;
 
-    let invalid = rustraft_validate_membership_semantics_evidence_artifact(&broken);
+    let invalid = matrixraft_validate_membership_semantics_evidence_artifact(&broken);
 
     assert!(!invalid.valid);
     assert!(!invalid.schema_valid);
@@ -1067,13 +1068,13 @@ fn membership_semantics_evidence_artifact_validator_reports_missing_fields() {
 
 #[test]
 fn membership_semantics_evidence_requires_joint_quorum_commit_proof() {
-    let mut artifact = rustraft_membership_semantics_evidence_artifact();
+    let mut artifact = matrixraft_membership_semantics_evidence_artifact();
     artifact.learner_add.joint_acknowledged_voters = vec![1, 2];
     artifact.learner_add.joint_new_majority_acked = false;
     artifact.voter_remove.joint_acknowledged_voters = vec![1, 2];
     artifact.voter_remove.joint_old_majority_acked = false;
 
-    let invalid = rustraft_validate_membership_semantics_evidence_artifact(&artifact);
+    let invalid = matrixraft_validate_membership_semantics_evidence_artifact(&artifact);
 
     assert!(!invalid.valid);
     assert!(!invalid.learner_added);
@@ -1085,7 +1086,7 @@ fn membership_semantics_evidence_requires_joint_quorum_commit_proof() {
 #[test]
 fn replication_pipeline_evidence_artifact_is_library_owned() {
     let limits = RustRaftPipelineLimits::production_default();
-    let artifact = rustraft_replication_pipeline_evidence_artifact(
+    let artifact = matrixraft_replication_pipeline_evidence_artifact(
         complete_replication_pipeline_peers(),
         limits,
     );
@@ -1111,11 +1112,11 @@ fn replication_pipeline_evidence_artifact_is_library_owned() {
 #[test]
 fn replication_pipeline_evidence_artifact_validator_reports_missing_fields() {
     let limits = RustRaftPipelineLimits::production_default();
-    let artifact = rustraft_replication_pipeline_evidence_artifact(
+    let artifact = matrixraft_replication_pipeline_evidence_artifact(
         complete_replication_pipeline_peers(),
         limits,
     );
-    let valid = rustraft_validate_replication_pipeline_evidence_artifact(&artifact);
+    let valid = matrixraft_validate_replication_pipeline_evidence_artifact(&artifact);
     assert!(valid.valid);
     assert!(valid.missing.is_empty());
 
@@ -1129,7 +1130,7 @@ fn replication_pipeline_evidence_artifact_validator_reports_missing_fields() {
     broken.evidence.packet_loss_reorder_same_peer_recovered = false;
     broken.evidence.reorder_queue_enabled = false;
 
-    let invalid = rustraft_validate_replication_pipeline_evidence_artifact(&broken);
+    let invalid = matrixraft_validate_replication_pipeline_evidence_artifact(&broken);
 
     assert!(!invalid.valid);
     assert!(!invalid.schema_valid);
@@ -1166,8 +1167,8 @@ fn replication_pipeline_evidence_requires_recovery_after_packet_loss_and_reorder
     recovered_peer.match_index = recovered_peer.next_index.saturating_sub(2);
     recovered_peer.reorder_queue_depth = 1;
 
-    let artifact = rustraft_replication_pipeline_evidence_artifact(peers, limits);
-    let invalid = rustraft_validate_replication_pipeline_evidence_artifact(&artifact);
+    let artifact = matrixraft_replication_pipeline_evidence_artifact(peers, limits);
+    let invalid = matrixraft_validate_replication_pipeline_evidence_artifact(&artifact);
 
     assert!(!invalid.valid);
     assert!(invalid.packet_loss_probe_present);
@@ -1203,8 +1204,8 @@ fn replication_pipeline_evidence_rejects_split_peer_packet_loss_and_reorder_reco
     reorder_peer.match_index = reorder_peer.next_index.saturating_sub(1);
     reorder_peer.reorder_queue_depth = 0;
 
-    let artifact = rustraft_replication_pipeline_evidence_artifact(peers, limits);
-    let invalid = rustraft_validate_replication_pipeline_evidence_artifact(&artifact);
+    let artifact = matrixraft_replication_pipeline_evidence_artifact(peers, limits);
+    let invalid = matrixraft_validate_replication_pipeline_evidence_artifact(&artifact);
 
     assert!(!invalid.valid);
     assert!(invalid.packet_loss_recovery_present);
@@ -1217,7 +1218,7 @@ fn replication_pipeline_evidence_rejects_split_peer_packet_loss_and_reorder_reco
 
 #[test]
 fn snapshot_lifecycle_evidence_artifact_is_library_owned() {
-    let artifact = rustraft_snapshot_lifecycle_evidence_artifact(
+    let artifact = matrixraft_snapshot_lifecycle_evidence_artifact(
         complete_snapshot_lifecycle_peers(),
         1_000,
         1,
@@ -1245,12 +1246,12 @@ fn snapshot_lifecycle_evidence_artifact_is_library_owned() {
 
 #[test]
 fn snapshot_lifecycle_evidence_artifact_validator_reports_missing_fields() {
-    let artifact = rustraft_snapshot_lifecycle_evidence_artifact(
+    let artifact = matrixraft_snapshot_lifecycle_evidence_artifact(
         complete_snapshot_lifecycle_peers(),
         1_000,
         1,
     );
-    let valid = rustraft_validate_snapshot_lifecycle_evidence_artifact(&artifact);
+    let valid = matrixraft_validate_snapshot_lifecycle_evidence_artifact(&artifact);
     assert!(valid.valid);
     assert!(valid.missing.is_empty());
 
@@ -1264,7 +1265,7 @@ fn snapshot_lifecycle_evidence_artifact_validator_reports_missing_fields() {
     broken.evidence.sustained_downloader_completion_present = false;
     broken.evidence.install_rollback_present = false;
 
-    let invalid = rustraft_validate_snapshot_lifecycle_evidence_artifact(&broken);
+    let invalid = matrixraft_validate_snapshot_lifecycle_evidence_artifact(&broken);
 
     assert!(!invalid.valid);
     assert!(!invalid.schema_valid);
@@ -1308,8 +1309,8 @@ fn snapshot_lifecycle_evidence_requires_sustained_completion() {
     downloader.snapshot_installing = true;
     downloader.snapshot_install_progress_per_mille = 750;
 
-    let artifact = rustraft_snapshot_lifecycle_evidence_artifact(peers, 1_000, 1);
-    let invalid = rustraft_validate_snapshot_lifecycle_evidence_artifact(&artifact);
+    let artifact = matrixraft_snapshot_lifecycle_evidence_artifact(peers, 1_000, 1);
+    let invalid = matrixraft_validate_snapshot_lifecycle_evidence_artifact(&artifact);
 
     assert!(!invalid.valid);
     assert!(invalid.sustained_sender_load_present);
@@ -1326,7 +1327,7 @@ fn snapshot_lifecycle_evidence_requires_sustained_completion() {
 
 #[test]
 fn wal_lifecycle_evidence_artifact_is_library_owned() {
-    let artifact = rustraft_wal_lifecycle_evidence_artifact(complete_wal_lifecycle_status());
+    let artifact = matrixraft_wal_lifecycle_evidence_artifact(complete_wal_lifecycle_status());
 
     assert_eq!(artifact.schema, "rustraft.wal_lifecycle_evidence.v1");
     assert_eq!(artifact.status.segment_count, 3);
@@ -1343,8 +1344,8 @@ fn wal_lifecycle_evidence_artifact_is_library_owned() {
 
 #[test]
 fn wal_lifecycle_evidence_artifact_validator_reports_missing_fields() {
-    let artifact = rustraft_wal_lifecycle_evidence_artifact(complete_wal_lifecycle_status());
-    let valid = rustraft_validate_wal_lifecycle_evidence_artifact(&artifact);
+    let artifact = matrixraft_wal_lifecycle_evidence_artifact(complete_wal_lifecycle_status());
+    let valid = matrixraft_validate_wal_lifecycle_evidence_artifact(&artifact);
     assert!(valid.valid);
     assert!(valid.missing.is_empty());
 
@@ -1358,7 +1359,7 @@ fn wal_lifecycle_evidence_artifact_validator_reports_missing_fields() {
     broken.status.compacted_after_slow_fsync_count = 0;
     broken.evidence.retained_range_present = false;
 
-    let invalid = rustraft_validate_wal_lifecycle_evidence_artifact(&broken);
+    let invalid = matrixraft_validate_wal_lifecycle_evidence_artifact(&broken);
 
     assert!(!invalid.valid);
     assert!(!invalid.schema_valid);
@@ -1385,7 +1386,7 @@ fn wal_lifecycle_evidence_artifact_validator_reports_missing_fields() {
 
 #[test]
 fn baseline_raft_operational_evidence_bundle_is_library_owned() {
-    let bundle = rustraft_baseline_raft_operational_evidence_bundle(
+    let bundle = matrixraft_baseline_raft_operational_evidence_bundle(
         complete_replication_pipeline_peers(),
         RustRaftPipelineLimits::production_default(),
         complete_snapshot_lifecycle_peers(),
@@ -1398,7 +1399,7 @@ fn baseline_raft_operational_evidence_bundle_is_library_owned() {
         bundle.schema,
         "rustraft.baseline_raft_operational_evidence_bundle.v1"
     );
-    let validation = rustraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
+    let validation = matrixraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
     assert!(validation.valid, "{validation:#?}");
     assert!(validation.read_safety_valid);
     assert!(validation.membership_valid);
@@ -1410,7 +1411,7 @@ fn baseline_raft_operational_evidence_bundle_is_library_owned() {
 
 #[test]
 fn baseline_raft_operational_evidence_bundle_validator_prefixes_missing_fields() {
-    let mut bundle = rustraft_baseline_raft_operational_evidence_bundle(
+    let mut bundle = matrixraft_baseline_raft_operational_evidence_bundle(
         complete_replication_pipeline_peers(),
         RustRaftPipelineLimits::production_default(),
         complete_snapshot_lifecycle_peers(),
@@ -1424,7 +1425,7 @@ fn baseline_raft_operational_evidence_bundle_validator_prefixes_missing_fields()
     bundle.snapshot_lifecycle.peers.clear();
     bundle.wal_lifecycle.status.released_segment_count = 0;
 
-    let validation = rustraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
+    let validation = matrixraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
 
     assert!(!validation.valid);
     assert!(!validation.schema_valid);
@@ -1447,14 +1448,16 @@ fn baseline_raft_operational_evidence_bundle_validator_prefixes_missing_fields()
 fn strict_process_rollout_helpers_require_crash_window_evidence() {
     let mut data = ready_data_rollout_three_processes();
     let mut meta = ready_meta_rollout_three_processes();
-    assert!(rustraft_data_node_strict_process_rollout_validated(&data));
-    assert!(rustraft_meta_strict_process_rollout_validated(&meta));
+    assert!(matrixraft_data_node_strict_process_rollout_validated(&data));
+    assert!(matrixraft_meta_strict_process_rollout_validated(&meta));
 
     data.crash_after_storage_mutation_recovered = false;
     meta.crash_during_meta_snapshot_install_recovered = false;
 
-    assert!(!rustraft_data_node_strict_process_rollout_validated(&data));
-    assert!(!rustraft_meta_strict_process_rollout_validated(&meta));
+    assert!(!matrixraft_data_node_strict_process_rollout_validated(
+        &data
+    ));
+    assert!(!matrixraft_meta_strict_process_rollout_validated(&meta));
 }
 
 #[test]
@@ -1467,7 +1470,7 @@ fn baseline_raft_runtime_capability_report_requires_read_safety_on_both_planes()
         .operational_semantics
         .minority_partition_read_rejection_observed = false;
 
-    let report = rustraft_baseline_raft_runtime_capability_report(&input);
+    let report = matrixraft_baseline_raft_runtime_capability_report(&input);
     assert!(!report.ready);
     assert!(report
         .missing
@@ -1483,8 +1486,8 @@ fn baseline_raft_runtime_capability_prometheus_exports_generic_metrics() {
     let mut input = ready_input();
     input.wal_lifecycle.as_mut().unwrap().compaction_observed = false;
 
-    let report = rustraft_baseline_raft_runtime_capability_report(&input);
-    let metrics = rustraft_baseline_raft_runtime_capability_prometheus(
+    let report = matrixraft_baseline_raft_runtime_capability_report(&input);
+    let metrics = matrixraft_baseline_raft_runtime_capability_prometheus(
         &report,
         &[("plane", "data_node"), ("cluster", "a\"b\\c\n")],
     );
@@ -1511,17 +1514,17 @@ fn baseline_raft_runtime_capability_prometheus_exports_generic_metrics() {
 
 #[test]
 fn deployment_mode_validation_is_library_owned_and_fails_closed() {
-    let ready = rustraft_production_readiness_report(&ready_input());
+    let ready = matrixraft_production_readiness_report(&ready_input());
     assert!(ready.ready);
-    assert!(rustraft_validate_deployment_mode(
+    assert!(matrixraft_validate_deployment_mode(
         RustRaftDeploymentMode::ProductionDistributed,
         &ready
     )
     .is_ok());
-    assert!(rustraft_require_production_ready(&ready).is_ok());
+    assert!(matrixraft_require_production_ready(&ready).is_ok());
 
-    let local_err =
-        rustraft_validate_deployment_mode(RustRaftDeploymentMode::LocalModel, &ready).unwrap_err();
+    let local_err = matrixraft_validate_deployment_mode(RustRaftDeploymentMode::LocalModel, &ready)
+        .unwrap_err();
     assert_eq!(local_err.mode, RustRaftDeploymentMode::LocalModel);
     assert!(local_err
         .message
@@ -1529,10 +1532,12 @@ fn deployment_mode_validation_is_library_owned_and_fails_closed() {
 
     let mut blocked_input = ready_input();
     blocked_input.peer_pipeline = None;
-    let blocked = rustraft_production_readiness_report(&blocked_input);
-    let production_err =
-        rustraft_validate_deployment_mode(RustRaftDeploymentMode::ProductionDistributed, &blocked)
-            .unwrap_err();
+    let blocked = matrixraft_production_readiness_report(&blocked_input);
+    let production_err = matrixraft_validate_deployment_mode(
+        RustRaftDeploymentMode::ProductionDistributed,
+        &blocked,
+    )
+    .unwrap_err();
     assert_eq!(
         production_err.mode,
         RustRaftDeploymentMode::ProductionDistributed
@@ -1544,7 +1549,7 @@ fn deployment_mode_validation_is_library_owned_and_fails_closed() {
         .missing
         .contains(&"pipeline:evidence_present".to_string()));
 
-    let direct_err = rustraft_validate_deployment_readiness(
+    let direct_err = matrixraft_validate_deployment_readiness(
         RustRaftDeploymentMode::ProductionDistributed,
         false,
         vec!["process_path:missing".to_string()],
@@ -1555,7 +1560,7 @@ fn deployment_mode_validation_is_library_owned_and_fails_closed() {
 
 #[test]
 fn named_readiness_blockers_expand_component_missing_details() {
-    let blockers = rustraft_named_readiness_blockers(
+    let blockers = matrixraft_named_readiness_blockers(
         "transport_security_missing",
         "transport_security.{mtls,auth}",
         ["mtls disabled", "auth token missing"],

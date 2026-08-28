@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::{RustRaftMailPriority, RustRaftNodeId};
 
-pub const RUSTRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS: u64 = i64::MAX as u64;
+pub const MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS: u64 = i64::MAX as u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RustRaftChannelSelectorPolicy {
@@ -21,7 +21,7 @@ impl Default for RustRaftChannelSelectorPolicy {
     fn default() -> Self {
         Self {
             limit: 1,
-            timeout_ms: RUSTRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
+            timeout_ms: MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
         }
     }
 }
@@ -231,7 +231,8 @@ impl<Mail> RustRaftChannelSelector<Mail> {
     ) -> RustRaftChannelSelection<Mail> {
         let mut inner = self.inner.lock().expect("channel selector mutex poisoned");
         self.rearrange(&mut inner, input);
-        if !inner.has_ready_work() && policy.timeout_ms == RUSTRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS
+        if !inner.has_ready_work()
+            && policy.timeout_ms == MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS
         {
             while !inner.has_ready_work() {
                 inner = self

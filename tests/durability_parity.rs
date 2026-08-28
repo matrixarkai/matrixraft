@@ -2,11 +2,11 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    snapshot::{rustraft_validate_snapshot_tail_catchup, RaftSnapshot, RustRaftSnapshotMeta},
-    storage::{rustraft_validate_storage_apply_fence, RustRaftStorageApplyFence},
+    snapshot::{matrixraft_validate_snapshot_tail_catchup, RaftSnapshot, RustRaftSnapshotMeta},
+    storage::{matrixraft_validate_storage_apply_fence, RustRaftStorageApplyFence},
     wal::{
-        rustraft_durability_parity_report, rustraft_validate_hard_state_persistence,
-        rustraft_wal_checksum, LocalRaftWal, RaftWalRecord, RustRaftHardState,
+        matrixraft_durability_parity_report, matrixraft_validate_hard_state_persistence,
+        matrixraft_wal_checksum, LocalRaftWal, RaftWalRecord, RustRaftHardState,
     },
     RaftMembership, RustRaftApplySnapshotFence, RustRaftLogEntry, RustRaftLogId,
 };
@@ -59,7 +59,7 @@ fn wal_record(committed_index: u64) -> RaftWalRecord {
         },
         checksum: String::new(),
     };
-    record.checksum = rustraft_wal_checksum(&record);
+    record.checksum = matrixraft_wal_checksum(&record);
     record
 }
 
@@ -87,7 +87,7 @@ fn durability_report_accepts_generic_wal_snapshot_and_storage_fences() {
     let recovery = wal.recover().expect("recover and truncate corrupt tail");
     let recovered = recovery.recovered.clone().expect("recovered record");
     assert_eq!(recovered.hard_state.committed.as_ref().unwrap().index, 11);
-    rustraft_validate_hard_state_persistence(&recovered).expect("hard-state persisted");
+    matrixraft_validate_hard_state_persistence(&recovered).expect("hard-state persisted");
 
     let snapshot = RaftSnapshot {
         group_id: 404,
@@ -95,10 +95,10 @@ fn durability_report_accepts_generic_wal_snapshot_and_storage_fences() {
         payload: b"opaque snapshot bytes".to_vec(),
     };
     let tail = vec![tail_entry(11)];
-    rustraft_validate_snapshot_tail_catchup(&snapshot.meta, &tail).expect("tail catch-up");
-    rustraft_validate_storage_apply_fence(&storage_fence()).expect("storage apply fence");
+    matrixraft_validate_snapshot_tail_catchup(&snapshot.meta, &tail).expect("tail catch-up");
+    matrixraft_validate_storage_apply_fence(&storage_fence()).expect("storage apply fence");
 
-    let report = rustraft_durability_parity_report(
+    let report = matrixraft_durability_parity_report(
         &recovered,
         &recovery,
         Some(&snapshot),
@@ -119,7 +119,7 @@ fn storage_apply_fence_rejects_durable_apply_ahead_of_memory_apply() {
     let mut fence = storage_fence();
     fence.durable_applied_index = 12;
 
-    let err = rustraft_validate_storage_apply_fence(&fence).expect_err("invalid fence");
+    let err = matrixraft_validate_storage_apply_fence(&fence).expect_err("invalid fence");
     assert!(err.to_string().contains("durable applied index"));
 }
 
@@ -127,13 +127,13 @@ fn storage_apply_fence_rejects_durable_apply_ahead_of_memory_apply() {
 fn snapshot_tail_catchup_rejects_overlap_and_gaps_after_snapshot_floor() {
     let meta = snapshot_meta();
     let overlap = vec![tail_entry(10)];
-    assert!(rustraft_validate_snapshot_tail_catchup(&meta, &overlap)
+    assert!(matrixraft_validate_snapshot_tail_catchup(&meta, &overlap)
         .unwrap_err()
         .to_string()
         .contains("overlaps installed snapshot"));
 
     let gap = vec![tail_entry(12)];
-    assert!(rustraft_validate_snapshot_tail_catchup(&meta, &gap)
+    assert!(matrixraft_validate_snapshot_tail_catchup(&meta, &gap)
         .unwrap_err()
         .to_string()
         .contains("not contiguous"));

@@ -60,7 +60,7 @@ pub struct RaftWitnessQuorumReport {
     pub witnesses: Vec<RustRaftNodeId>,
 }
 
-pub fn rustraft_membership_readiness_report(
+pub fn matrixraft_membership_readiness_report(
     transitions: &[RustRaftMembershipTransitionEvidence],
 ) -> RustRaftMembershipReadinessReport {
     let required = [
@@ -108,7 +108,7 @@ pub fn rustraft_membership_readiness_report(
             });
             continue;
         };
-        let transition_missing = rustraft_membership_transition_missing(evidence);
+        let transition_missing = matrixraft_membership_transition_missing(evidence);
         if transition_missing.is_empty() {
             satisfied.push(id);
             decisions.push(RustRaftMembershipTransitionDecision {
@@ -140,7 +140,7 @@ pub fn rustraft_membership_readiness_report(
     }
 }
 
-pub fn rustraft_membership_transition_missing(
+pub fn matrixraft_membership_transition_missing(
     evidence: &RustRaftMembershipTransitionEvidence,
 ) -> Vec<String> {
     let mut missing = Vec::new();
@@ -200,7 +200,7 @@ pub fn rustraft_membership_transition_missing(
             if !evidence.joint_consensus_used {
                 missing.push("joint_consensus_used".to_string());
             }
-            if !rustraft_joint_quorum_commit_proven(evidence) {
+            if !matrixraft_joint_quorum_commit_proven(evidence) {
                 missing.push("joint_quorum_commit_proven".to_string());
             }
             if evidence.added_nodes.is_empty() {
@@ -217,7 +217,7 @@ pub fn rustraft_membership_transition_missing(
             if !evidence.joint_consensus_used {
                 missing.push("joint_consensus_used".to_string());
             }
-            if !rustraft_joint_quorum_commit_proven(evidence) {
+            if !matrixraft_joint_quorum_commit_proven(evidence) {
                 missing.push("joint_quorum_commit_proven".to_string());
             }
             if evidence.failed_or_removed_nodes.is_empty() {
@@ -237,7 +237,7 @@ pub fn rustraft_membership_transition_missing(
     missing
 }
 
-fn rustraft_joint_quorum_commit_proven(evidence: &RustRaftMembershipTransitionEvidence) -> bool {
+fn matrixraft_joint_quorum_commit_proven(evidence: &RustRaftMembershipTransitionEvidence) -> bool {
     let joint = RustRaftJointMembership {
         old_voters: evidence.before_voters.clone(),
         new_voters: evidence.after_voters.clone(),
@@ -250,7 +250,7 @@ fn rustraft_joint_quorum_commit_proven(evidence: &RustRaftMembershipTransitionEv
         && computed.joint_quorum_reached
 }
 
-pub fn rustraft_learner_promotion_decision(
+pub fn matrixraft_learner_promotion_decision(
     status: &RustRaftStatusSnapshot,
     learner_id: u64,
     max_lag: u64,
@@ -279,7 +279,7 @@ pub fn rustraft_learner_promotion_decision(
     }
 }
 
-fn rustraft_membership_semantics_transition(
+fn matrixraft_membership_semantics_transition(
     transition: RustRaftMembershipTransitionKind,
 ) -> RustRaftMembershipTransitionEvidence {
     let (before_voters, after_voters, before_learners, after_learners, added, removed) =
@@ -369,11 +369,11 @@ fn rustraft_membership_semantics_transition(
     }
 }
 
-pub fn rustraft_membership_semantics_evidence_artifact(
+pub fn matrixraft_membership_semantics_evidence_artifact(
 ) -> RustRaftMembershipSemanticsEvidenceArtifact {
     RustRaftMembershipSemanticsEvidenceArtifact {
         schema: "rustraft.membership_semantics_evidence.v1".to_string(),
-        learner_add: rustraft_membership_semantics_transition(
+        learner_add: matrixraft_membership_semantics_transition(
             RustRaftMembershipTransitionKind::ScaleUp,
         ),
         learner_catchup: RustRaftLearnerPromotionDecision {
@@ -383,13 +383,13 @@ pub fn rustraft_membership_semantics_evidence_artifact(
             required_match_index: 144,
             reason: "caught_up".to_string(),
         },
-        learner_promote: rustraft_membership_semantics_transition(
+        learner_promote: matrixraft_membership_semantics_transition(
             RustRaftMembershipTransitionKind::ScaleUp,
         ),
-        leader_transfer: rustraft_membership_semantics_transition(
+        leader_transfer: matrixraft_membership_semantics_transition(
             RustRaftMembershipTransitionKind::Failover,
         ),
-        voter_remove: rustraft_membership_semantics_transition(
+        voter_remove: matrixraft_membership_semantics_transition(
             RustRaftMembershipTransitionKind::ScaleDown,
         ),
         auto_promote_learner_observed: true,
@@ -402,7 +402,7 @@ pub fn rustraft_membership_semantics_evidence_artifact(
     }
 }
 
-pub fn rustraft_validate_membership_semantics_evidence_artifact(
+pub fn matrixraft_validate_membership_semantics_evidence_artifact(
     artifact: &RustRaftMembershipSemanticsEvidenceArtifact,
 ) -> RustRaftMembershipSemanticsEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.membership_semantics_evidence.v1";
@@ -416,7 +416,7 @@ pub fn rustraft_validate_membership_semantics_evidence_artifact(
             .contains(&artifact.learner_catchup.learner_id)
         && artifact.learner_add.joint_consensus_used
         && artifact.learner_add.new_majority_reached
-        && rustraft_joint_quorum_commit_proven(&artifact.learner_add);
+        && matrixraft_joint_quorum_commit_proven(&artifact.learner_add);
     let learner_caught_up = artifact.learner_catchup.promotable
         && artifact.learner_catchup.learner_match_index
             >= artifact.learner_catchup.required_match_index
@@ -446,7 +446,7 @@ pub fn rustraft_validate_membership_semantics_evidence_artifact(
             })
         && artifact.voter_remove.old_majority_preserved
         && artifact.voter_remove.new_majority_reached
-        && rustraft_joint_quorum_commit_proven(&artifact.voter_remove);
+        && matrixraft_joint_quorum_commit_proven(&artifact.voter_remove);
     let witness_role_accounted_for = artifact.witness_role_supported
         || artifact
             .witness_role_blocker

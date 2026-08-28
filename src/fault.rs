@@ -3,9 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const RUSTRAFT_FAULT_MIN_SCENARIO_RUNTIME_MS: u64 = 1_000;
-pub const RUSTRAFT_FAULT_MIN_CLIENT_OPERATION_COUNT: u64 = 1;
-pub const RUSTRAFT_FAULT_MIN_INJECTED_FAULT_COUNT: u64 = 1;
+pub const MATRIXRAFT_FAULT_MIN_SCENARIO_RUNTIME_MS: u64 = 1_000;
+pub const MATRIXRAFT_FAULT_MIN_CLIENT_OPERATION_COUNT: u64 = 1;
+pub const MATRIXRAFT_FAULT_MIN_INJECTED_FAULT_COUNT: u64 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -81,7 +81,7 @@ pub struct RustRaftFaultHarnessReadinessReport {
     pub missing: Vec<String>,
 }
 
-pub fn rustraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRequirement> {
+pub fn matrixraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRequirement> {
     vec![
         RustRaftFaultScenarioRequirement {
             scenario: RustRaftFaultScenario::PacketLossMajority,
@@ -157,17 +157,17 @@ pub fn rustraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRequ
     ]
 }
 
-pub fn rustraft_fault_harness_readiness_report(
+pub fn matrixraft_fault_harness_readiness_report(
     evidence: &[RustRaftFaultScenarioEvidence],
 ) -> RustRaftFaultHarnessReadinessReport {
-    let required_scenarios = rustraft_baseline_raft_fault_scenarios();
+    let required_scenarios = matrixraft_baseline_raft_fault_scenarios();
     let results = required_scenarios
         .iter()
         .map(|requirement| {
             let scenario_evidence = evidence
                 .iter()
                 .find(|item| item.scenario == requirement.scenario);
-            let missing = rustraft_fault_scenario_missing(requirement, scenario_evidence);
+            let missing = matrixraft_fault_scenario_missing(requirement, scenario_evidence);
             RustRaftFaultScenarioResult {
                 scenario: requirement.scenario,
                 ready: missing.is_empty(),
@@ -192,7 +192,7 @@ pub fn rustraft_fault_harness_readiness_report(
     }
 }
 
-fn rustraft_fault_scenario_missing(
+fn matrixraft_fault_scenario_missing(
     requirement: &RustRaftFaultScenarioRequirement,
     evidence: Option<&RustRaftFaultScenarioEvidence>,
 ) -> Vec<String> {
@@ -214,22 +214,22 @@ fn rustraft_fault_scenario_missing(
     if distinct_process_ids.len() < 3 {
         missing.push("distinct_process_ids_at_least_3".to_string());
     }
-    if evidence.scenario_runtime_ms < RUSTRAFT_FAULT_MIN_SCENARIO_RUNTIME_MS {
+    if evidence.scenario_runtime_ms < MATRIXRAFT_FAULT_MIN_SCENARIO_RUNTIME_MS {
         missing.push(format!(
             "scenario_runtime_ms_at_least_{}",
-            RUSTRAFT_FAULT_MIN_SCENARIO_RUNTIME_MS
+            MATRIXRAFT_FAULT_MIN_SCENARIO_RUNTIME_MS
         ));
     }
-    if evidence.client_operation_count < RUSTRAFT_FAULT_MIN_CLIENT_OPERATION_COUNT {
+    if evidence.client_operation_count < MATRIXRAFT_FAULT_MIN_CLIENT_OPERATION_COUNT {
         missing.push(format!(
             "client_operation_count_at_least_{}",
-            RUSTRAFT_FAULT_MIN_CLIENT_OPERATION_COUNT
+            MATRIXRAFT_FAULT_MIN_CLIENT_OPERATION_COUNT
         ));
     }
-    if evidence.injected_fault_count < RUSTRAFT_FAULT_MIN_INJECTED_FAULT_COUNT {
+    if evidence.injected_fault_count < MATRIXRAFT_FAULT_MIN_INJECTED_FAULT_COUNT {
         missing.push(format!(
             "injected_fault_count_at_least_{}",
-            RUSTRAFT_FAULT_MIN_INJECTED_FAULT_COUNT
+            MATRIXRAFT_FAULT_MIN_INJECTED_FAULT_COUNT
         ));
     }
     if !evidence.independent_wal_dirs_observed {

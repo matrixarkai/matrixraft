@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_wal_checksum_format, rustraft_wal_lifecycle_evidence, PersistentRaftWal,
+    matrixraft_wal_checksum_format, matrixraft_wal_lifecycle_evidence, PersistentRaftWal,
     PersistentRaftWalOptions, RaftWalRecord, RustRaftApplySnapshotFence, RustRaftHardState,
     RustRaftLogEntry, RustRaftLogId, RustRaftMembership, RustRaftStorageApplyFence,
 };
@@ -101,7 +101,7 @@ fn persistent_wal_writer_reports_checksum_segment_index_and_retained_range() {
     let first = wal.append_with_report(wal_record(1)).expect("append first");
     assert_eq!(first.segment_id, 0);
     assert_eq!(first.log_index, 1);
-    assert_eq!(first.checksum_format, rustraft_wal_checksum_format());
+    assert_eq!(first.checksum_format, matrixraft_wal_checksum_format());
     assert!(first.hard_state_persisted);
     assert!(first.fsync_on_append);
     assert_eq!(first.retained_range.first_log_index, 1);
@@ -145,7 +145,7 @@ fn persistent_wal_truncates_corrupt_tail_on_recovery() {
     assert_eq!(report.segments_scanned, 1);
     assert_eq!(
         report.checksum_format.expect("checksum format"),
-        rustraft_wal_checksum_format()
+        matrixraft_wal_checksum_format()
     );
     assert_eq!(
         report
@@ -175,7 +175,7 @@ fn persistent_wal_compacts_released_segments_and_reports_lifecycle_evidence() {
     assert_eq!(status.segment_count, 1);
     assert_eq!(status.first_log_index, 5);
     assert_eq!(status.released_segment_count, 2);
-    let evidence = rustraft_wal_lifecycle_evidence(&status);
+    let evidence = matrixraft_wal_lifecycle_evidence(&status);
     assert!(evidence.segment_lifecycle_present);
     assert!(evidence.compaction_observed);
 
@@ -254,7 +254,7 @@ fn persistent_wal_reports_slow_fsync_backpressure_through_lifecycle_status() {
     assert!(released.fence_valid);
     assert!(released.released_segments > 0);
 
-    let evidence = rustraft_wal_lifecycle_evidence(&wal.status());
+    let evidence = matrixraft_wal_lifecycle_evidence(&wal.status());
     assert!(evidence.compaction_observed);
     assert!(evidence.slow_fsync_backpressure_observed);
     assert!(evidence.compaction_after_slow_fsync_observed);

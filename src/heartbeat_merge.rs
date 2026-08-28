@@ -11,7 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 
-pub const RUSTRAFT_HEARTBEAT_MERGE_BUCKETS: usize = 16;
+pub const MATRIXRAFT_HEARTBEAT_MERGE_BUCKETS: usize = 16;
 
 pub trait RustRaftHeartbeatAddressResolver {
     fn resolve_raft_addr(
@@ -106,7 +106,7 @@ pub struct RustRaftHeartbeatMerger {
 
 impl RustRaftHeartbeatMerger {
     pub fn new(enabled: bool) -> Self {
-        Self::with_bucket_count(enabled, RUSTRAFT_HEARTBEAT_MERGE_BUCKETS)
+        Self::with_bucket_count(enabled, MATRIXRAFT_HEARTBEAT_MERGE_BUCKETS)
     }
 
     pub fn enabled() -> Self {

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-pub const RUSTRAFT_MAILBOX_MAX_TIMEOUT_MS: u64 = i64::MAX as u64;
+pub const MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS: u64 = i64::MAX as u64;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -40,7 +40,7 @@ impl Default for RustRaftMailBoxFetchPolicy {
     fn default() -> Self {
         Self {
             limit: 1,
-            timeout_ms: RUSTRAFT_MAILBOX_MAX_TIMEOUT_MS,
+            timeout_ms: MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS,
             include_until: RustRaftMailPriority::Urgent,
         }
     }
@@ -111,7 +111,7 @@ impl<Mail> RustRaftMailBox<Mail> {
 
     pub fn fetch(&self, policy: RustRaftMailBoxFetchPolicy) -> Vec<Mail> {
         let mut inner = self.inner.lock().expect("mailbox mutex poisoned");
-        if !inner.has_new_mail() && policy.timeout_ms == RUSTRAFT_MAILBOX_MAX_TIMEOUT_MS {
+        if !inner.has_new_mail() && policy.timeout_ms == MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS {
             while !inner.has_new_mail() {
                 inner = self.readable.wait(inner).expect("mailbox mutex poisoned");
             }

@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::benchmark::{
-    rustraft_assert_production_baseline_raft_artifacts, RustRaftBenchmarkFailureSummary,
+    matrixraft_assert_production_baseline_raft_artifacts, RustRaftBenchmarkFailureSummary,
     RustRaftBenchmarkReport,
 };
 use std::{
@@ -67,7 +67,7 @@ fn main() {
     assert_fresh_artifact(&summary_path, "summary", max_age_seconds);
     let report = read_json::<RustRaftBenchmarkReport>(&report_path, "report");
     let summary = read_json::<RustRaftBenchmarkFailureSummary>(&summary_path, "summary");
-    match rustraft_assert_production_baseline_raft_artifacts(&report, &summary) {
+    match matrixraft_assert_production_baseline_raft_artifacts(&report, &summary) {
         Ok(()) => {
             println!("BaselineRaft-vs-RustRaft benchmark artifacts verified");
         }
