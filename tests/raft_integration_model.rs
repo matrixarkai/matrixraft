@@ -2,8 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_learner_promotion_decision, rustraft_read_safety_runtime_decision,
-    rustraft_recover_latest_wal_record, rustraft_wal_checksum, RustRaftApplySnapshotFence,
+    matrixraft_learner_promotion_decision, matrixraft_read_safety_runtime_decision,
+    matrixraft_recover_latest_wal_record, matrixraft_wal_checksum, RustRaftApplySnapshotFence,
     RustRaftHardState, RustRaftLogEntry, RustRaftLogId, RustRaftMembership, RustRaftPeerStatus,
     RustRaftReadSafetyOperation, RustRaftReadSafetyRuntimeInput, RustRaftReplicaRole, RustRaftRole,
     RustRaftSnapshotMeta, RustRaftStatusSnapshot, RustRaftWalRecord,
@@ -136,7 +136,7 @@ fn wal_record(node: &ModelNode) -> RustRaftWalRecord {
         },
         checksum: String::new(),
     };
-    record.checksum = rustraft_wal_checksum(&record);
+    record.checksum = matrixraft_wal_checksum(&record);
     record
 }
 
@@ -146,7 +146,7 @@ fn three_node_replication_and_restart_recover_committed_state() {
     replicate(&mut nodes, 3);
     nodes[1].restarted = true;
 
-    let recovered = rustraft_recover_latest_wal_record(&[
+    let recovered = matrixraft_recover_latest_wal_record(&[
         wal_record(&nodes[0]),
         wal_record(&nodes[1]),
         wal_record(&nodes[2]),
@@ -172,7 +172,7 @@ fn learner_catchup_promotion_and_witness_quorum_are_modeled() {
     replicate(&mut nodes, 5);
 
     let leader_status = status_for(&nodes[0], &nodes);
-    assert!(rustraft_learner_promotion_decision(&leader_status, 4, 0).promotable);
+    assert!(matrixraft_learner_promotion_decision(&leader_status, 4, 0).promotable);
 
     nodes[3].replica_role = RustRaftReplicaRole::Witness;
     assert!(nodes[3].replica_role.participates_in_quorum());
@@ -186,7 +186,7 @@ fn leader_failover_and_transfer_preserve_read_safety() {
     nodes[0].role = RustRaftRole::Follower;
     nodes[1].role = RustRaftRole::Leader;
 
-    let decision = rustraft_read_safety_runtime_decision(RustRaftReadSafetyRuntimeInput {
+    let decision = matrixraft_read_safety_runtime_decision(RustRaftReadSafetyRuntimeInput {
         operation: RustRaftReadSafetyOperation::ReadIndex,
         node_id: 2,
         leader_id: 2,
@@ -209,7 +209,7 @@ fn snapshot_install_after_compaction_keeps_fence_and_recovery_valid() {
     replicate(&mut nodes, 9);
     nodes[2].last_snapshot_index = 9;
 
-    let recovered = rustraft_recover_latest_wal_record(&[wal_record(&nodes[2])]).unwrap();
+    let recovered = matrixraft_recover_latest_wal_record(&[wal_record(&nodes[2])]).unwrap();
     assert_eq!(
         recovered
             .installed_snapshot

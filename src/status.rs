@@ -8,33 +8,34 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    rustraft_parity_report, rustraft_public_api_contract, rustraft_readiness_evidence,
+    matrixraft_parity_report, matrixraft_public_api_contract, matrixraft_readiness_evidence,
     RaftPeerPipelineState, RustRaftGroupId, RustRaftLogIndex, RustRaftNodeId, RustRaftParityReport,
     RustRaftPeerPipelineStatus, RustRaftPublicApiContract, RustRaftReadinessSnapshot,
     RustRaftReplicaRole, RustRaftRole, RustRaftStatusSnapshot,
 };
 
 pub use crate::{
-    rustraft_baseline_raft_operational_evidence_bundle,
-    rustraft_baseline_raft_runtime_capability_report,
-    rustraft_cross_plane_process_evidence_artifact,
-    rustraft_cross_plane_process_evidence_prometheus,
-    rustraft_cross_plane_process_evidence_summary,
-    rustraft_cross_plane_process_readiness_blocker_report,
-    rustraft_cross_plane_process_readiness_report, rustraft_data_node_process_rollout_blockers,
-    rustraft_data_node_strict_process_rollout_validated, rustraft_meta_process_rollout_blockers,
-    rustraft_meta_strict_process_rollout_validated, rustraft_named_readiness_blockers,
-    rustraft_pipeline_evidence, rustraft_process_readiness_blocker,
-    rustraft_process_readiness_field_detail, rustraft_require_production_ready,
-    rustraft_validate_baseline_raft_operational_evidence_bundle,
-    rustraft_validate_cross_plane_process_evidence_artifact, rustraft_validate_deployment_mode,
-    rustraft_validate_deployment_readiness,
-    rustraft_validate_membership_semantics_evidence_artifact,
-    rustraft_validate_read_safety_evidence_artifact,
-    rustraft_validate_replication_pipeline_evidence_artifact,
-    rustraft_validate_snapshot_lifecycle_evidence_artifact,
-    rustraft_validate_wal_lifecycle_evidence_artifact, rustraft_wal_lifecycle_evidence_artifact,
-    RustRaftBaselineRaftOperationalEvidenceBundle,
+    matrixraft_baseline_raft_operational_evidence_bundle,
+    matrixraft_baseline_raft_runtime_capability_report,
+    matrixraft_cross_plane_process_evidence_artifact,
+    matrixraft_cross_plane_process_evidence_prometheus,
+    matrixraft_cross_plane_process_evidence_summary,
+    matrixraft_cross_plane_process_readiness_blocker_report,
+    matrixraft_cross_plane_process_readiness_report, matrixraft_data_node_process_rollout_blockers,
+    matrixraft_data_node_strict_process_rollout_validated,
+    matrixraft_meta_process_rollout_blockers, matrixraft_meta_strict_process_rollout_validated,
+    matrixraft_named_readiness_blockers, matrixraft_pipeline_evidence,
+    matrixraft_process_readiness_blocker, matrixraft_process_readiness_field_detail,
+    matrixraft_require_production_ready,
+    matrixraft_validate_baseline_raft_operational_evidence_bundle,
+    matrixraft_validate_cross_plane_process_evidence_artifact, matrixraft_validate_deployment_mode,
+    matrixraft_validate_deployment_readiness,
+    matrixraft_validate_membership_semantics_evidence_artifact,
+    matrixraft_validate_read_safety_evidence_artifact,
+    matrixraft_validate_replication_pipeline_evidence_artifact,
+    matrixraft_validate_snapshot_lifecycle_evidence_artifact,
+    matrixraft_validate_wal_lifecycle_evidence_artifact,
+    matrixraft_wal_lifecycle_evidence_artifact, RustRaftBaselineRaftOperationalEvidenceBundle,
     RustRaftBaselineRaftOperationalEvidenceBundleValidationReport,
     RustRaftCrossPlaneProcessEvidenceArtifact,
     RustRaftCrossPlaneProcessEvidenceArtifactValidationReport,
@@ -51,7 +52,7 @@ pub use crate::{
 };
 
 pub use crate::fault::{
-    rustraft_baseline_raft_fault_scenarios, rustraft_fault_harness_readiness_report,
+    matrixraft_baseline_raft_fault_scenarios, matrixraft_fault_harness_readiness_report,
     RustRaftFaultHarnessReadinessReport, RustRaftFaultScenario, RustRaftFaultScenarioEvidence,
     RustRaftFaultScenarioRequirement, RustRaftFaultScenarioResult,
 };
@@ -135,7 +136,7 @@ impl RaftLeaderTransferAdmission {
     }
 }
 
-pub fn rustraft_leader_transfer_admission(
+pub fn matrixraft_leader_transfer_admission(
     local_id: RustRaftNodeId,
     transferee_id: RustRaftNodeId,
     current_transferee_id: Option<RustRaftNodeId>,
@@ -577,7 +578,7 @@ pub struct RustRaftOptimizationReport {
     pub hints: Vec<RustRaftOptimizationHint>,
 }
 
-pub fn rustraft_fatal_blocker_report(
+pub fn matrixraft_fatal_blocker_report(
     source: impl Into<String>,
     blockers: Vec<String>,
     fatal_blockers: Vec<String>,
@@ -613,18 +614,18 @@ pub fn rustraft_fatal_blocker_report(
     }
 }
 
-pub fn rustraft_admin_fatal_blocker_report(
+pub fn matrixraft_admin_fatal_blocker_report(
     report: &RaftRuntimeAdminReport,
     fatal_blockers: Vec<String>,
 ) -> RustRaftFatalBlockerReport {
-    rustraft_fatal_blocker_report(
+    matrixraft_fatal_blocker_report(
         "rustraft_admin_report",
         report.blockers.clone(),
         fatal_blockers,
     )
 }
 
-pub fn rustraft_admin_diagnostic_log_entries(
+pub fn matrixraft_admin_diagnostic_log_entries(
     report: &RaftRuntimeAdminReport,
 ) -> Vec<RustRaftDiagnosticLogEntry> {
     let cluster = &report.cluster_status;
@@ -721,8 +722,8 @@ pub fn rustraft_admin_diagnostic_log_entries(
     entries
 }
 
-pub fn rustraft_admin_diagnostic_json_lines(report: &RaftRuntimeAdminReport) -> String {
-    rustraft_admin_diagnostic_log_entries(report)
+pub fn matrixraft_admin_diagnostic_json_lines(report: &RaftRuntimeAdminReport) -> String {
+    matrixraft_admin_diagnostic_log_entries(report)
         .into_iter()
         .map(|entry| {
             serde_json::to_string(&entry).expect("RustRaft diagnostic entry must serialize")
@@ -739,7 +740,7 @@ fn health_severity(status: RaftHealthStatus) -> RustRaftDiagnosticSeverity {
     }
 }
 
-pub fn rustraft_replication_health(
+pub fn matrixraft_replication_health(
     status: &RustRaftStatusSnapshot,
     peer_pipeline: &[RaftPeerPipelineState],
 ) -> RaftReplicationHealth {
@@ -783,7 +784,7 @@ pub fn rustraft_replication_health(
     }
 }
 
-pub fn rustraft_apply_health(status: &RustRaftStatusSnapshot) -> RaftApplyHealth {
+pub fn matrixraft_apply_health(status: &RustRaftStatusSnapshot) -> RaftApplyHealth {
     let apply_lag = status.commit_index.saturating_sub(status.applied_index);
     let status_value = if status.leader_id.is_none() {
         RaftHealthStatus::Unavailable
@@ -805,13 +806,13 @@ pub fn rustraft_apply_health(status: &RustRaftStatusSnapshot) -> RaftApplyHealth
     }
 }
 
-pub fn rustraft_runtime_local_status_report(
+pub fn matrixraft_runtime_local_status_report(
     node_status: RustRaftStatusSnapshot,
     peer_pipeline: Vec<RaftPeerPipelineState>,
     readiness: RustRaftReadinessSnapshot,
 ) -> RaftRuntimeLocalStatusReport {
-    let replication_health = rustraft_replication_health(&node_status, &peer_pipeline);
-    let apply_health = rustraft_apply_health(&node_status);
+    let replication_health = matrixraft_replication_health(&node_status, &peer_pipeline);
+    let apply_health = matrixraft_apply_health(&node_status);
     let mut blockers = Vec::new();
     if replication_health.status != RaftHealthStatus::Healthy {
         blockers.push(replication_health.reason.clone());
@@ -819,7 +820,7 @@ pub fn rustraft_runtime_local_status_report(
     if apply_health.status != RaftHealthStatus::Healthy {
         blockers.push(apply_health.reason.clone());
     }
-    if !readiness.rustraft_operator_observability_present {
+    if !readiness.matrixraft_operator_observability_present {
         blockers.push("operator_observability_missing".to_string());
     }
     let ready = blockers.is_empty();
@@ -834,7 +835,7 @@ pub fn rustraft_runtime_local_status_report(
     }
 }
 
-pub fn rustraft_admin_status_surface_evidence(
+pub fn matrixraft_admin_status_surface_evidence(
     input: &RustRaftAdminStatusSurfaceInput,
 ) -> RustRaftAdminStatusSurfaceEvidence {
     let quorum_peer_ids = input
@@ -932,7 +933,7 @@ pub fn rustraft_admin_status_surface_evidence(
     }
 }
 
-pub fn rustraft_optimization_report(
+pub fn matrixraft_optimization_report(
     input: &RustRaftAdminStatusSurfaceInput,
 ) -> RustRaftOptimizationReport {
     let mut hints = Vec::new();
@@ -1098,7 +1099,7 @@ fn optimization_hint(
     }
 }
 
-pub fn rustraft_cluster_status_report(
+pub fn matrixraft_cluster_status_report(
     group_id: RustRaftGroupId,
     leader_id: Option<RustRaftNodeId>,
     leader_transfer: Option<RaftLeaderTransferState>,
@@ -1110,8 +1111,8 @@ pub fn rustraft_cluster_status_report(
         .or_else(|| nodes.first());
     let (replication_health, apply_health) = if let Some(status) = representative {
         (
-            rustraft_replication_health(status, &[]),
-            rustraft_apply_health(status),
+            matrixraft_replication_health(status, &[]),
+            matrixraft_apply_health(status),
         )
     } else {
         (
@@ -1163,10 +1164,10 @@ pub fn rustraft_cluster_status_report(
     }
 }
 
-pub fn rustraft_capability_evidence(
+pub fn matrixraft_capability_evidence(
     readiness: &RustRaftReadinessSnapshot,
 ) -> Vec<RaftCapabilityEvidence> {
-    rustraft_readiness_evidence(readiness)
+    matrixraft_readiness_evidence(readiness)
         .into_iter()
         .map(|evidence| RaftCapabilityEvidence {
             capability: evidence.requirement_id,
@@ -1177,7 +1178,7 @@ pub fn rustraft_capability_evidence(
         .collect()
 }
 
-pub fn rustraft_capability_evidence_from_fields<C, R, I, S>(
+pub fn matrixraft_capability_evidence_from_fields<C, R, I, S>(
     capability: C,
     source_reference: R,
     fields: I,
@@ -1206,7 +1207,7 @@ where
     }
 }
 
-pub fn rustraft_runtime_capability_report_from_evidence<I, S>(
+pub fn matrixraft_runtime_capability_report_from_evidence<I, S>(
     capability_evidence: Vec<RaftCapabilityEvidence>,
     product_blockers: I,
 ) -> RustRaftBaselineRaftRuntimeCapabilityReport
@@ -1250,13 +1251,13 @@ where
     }
 }
 
-pub fn rustraft_runtime_admin_report(
+pub fn matrixraft_runtime_admin_report(
     cluster_status: RaftClusterStatusReport,
     readiness: RustRaftReadinessSnapshot,
     capability_evidence: Vec<RaftCapabilityEvidence>,
 ) -> RaftRuntimeAdminReport {
-    let parity = rustraft_parity_report(&readiness);
-    let public_api = rustraft_public_api_contract();
+    let parity = matrixraft_parity_report(&readiness);
+    let public_api = matrixraft_public_api_contract();
     let mut blockers = cluster_status.blockers.clone();
     blockers.extend(
         capability_evidence

@@ -2626,7 +2626,7 @@ impl RaftCluster {
             },
             checksum: String::new(),
         };
-        record.checksum = rustraft_wal_checksum(&record);
+        record.checksum = matrixraft_wal_checksum(&record);
         Ok(record)
     }
 
@@ -3186,12 +3186,12 @@ impl RaftCluster {
             .get(&request.requester_id)
             .ok_or(RaftError::NodeNotFound(request.requester_id))?;
         let quorum = self.read_quorum_report();
-        let applied_index_fence = rustraft_applied_index_fence_report(
+        let applied_index_fence = matrixraft_applied_index_fence_report(
             request.min_commit_index,
             node.commit_index,
             node.applied_index,
         );
-        let lease_read_eligibility = rustraft_lease_read_eligibility_report(
+        let lease_read_eligibility = matrixraft_lease_read_eligibility_report(
             request.requester_id,
             self.leader_id,
             self.config.enable_lease_read && request.allow_lease_read,
@@ -3199,7 +3199,7 @@ impl RaftCluster {
             applied_index_fence.passed,
         );
         let bounded_stale = self.leader_id.map(|leader_id| {
-            rustraft_bounded_stale_read_report(
+            matrixraft_bounded_stale_read_report(
                 request.requester_id,
                 leader_id,
                 node.commit_index,
@@ -3334,7 +3334,7 @@ impl RaftCluster {
             .as_ref()
             .map(|transfer| transfer.transferee_id);
         let target_role = self.nodes.get(&target).map(|node| node.replica_role);
-        let admission = crate::rustraft_leader_transfer_admission(
+        let admission = crate::matrixraft_leader_transfer_admission(
             leader_id,
             target,
             current_transferee_id,
@@ -4192,7 +4192,7 @@ impl RaftCluster {
                 "snapshot group id mismatch".to_string(),
             ));
         }
-        rustraft_validate_snapshot_install(&snapshot, &fence)?;
+        matrixraft_validate_snapshot_install(&snapshot, &fence)?;
         let node = self
             .nodes
             .get_mut(&target)
@@ -4337,7 +4337,7 @@ impl RaftCluster {
         log_index: RustRaftLogIndex,
         fence: RustRaftStorageApplyFence,
     ) -> Result<RaftWalCompactionReport, RaftError> {
-        if let Err(error) = rustraft_validate_storage_apply_fence(&fence) {
+        if let Err(error) = matrixraft_validate_storage_apply_fence(&fence) {
             return Ok(RaftWalCompactionReport {
                 requested_log_index: log_index,
                 released_segments: 0,
@@ -4841,7 +4841,7 @@ impl RaftCluster {
             .into_iter()
             .map(|node_id| self.status(node_id))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(rustraft_cluster_status_report(
+        Ok(matrixraft_cluster_status_report(
             self.group_id,
             self.leader_id,
             self.leader_transfer.clone(),

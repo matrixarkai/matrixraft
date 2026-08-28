@@ -17,7 +17,7 @@ fn entry(index: u64) -> RustRaftLogEntry {
 }
 
 #[test]
-fn scheduler_fetch_preserves_priority_and_fifo_order_like_matrixraft_mailbox() {
+fn scheduler_fetch_preserves_priority_and_fifo_order_mailbox() {
     let scheduler = RustRaftScheduler::new(8);
     scheduler.schedule(
         RustRaftMailPriority::Slowly,

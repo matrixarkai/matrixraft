@@ -2,14 +2,14 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_admin_diagnostic_json_lines, rustraft_admin_diagnostic_log_entries,
-    rustraft_admin_status_surface_evidence, rustraft_capability_evidence,
-    rustraft_debug_bundle_validation_prometheus, rustraft_debug_snapshot,
-    rustraft_debug_snapshot_json, rustraft_debug_snapshot_metadata_prometheus,
-    rustraft_diagnostic_log_prometheus, rustraft_operator_runbook_prometheus,
-    rustraft_optimization_report, rustraft_optimization_report_prometheus,
-    rustraft_runtime_admin_report, rustraft_runtime_local_status_report,
-    rustraft_validate_debug_snapshot, rustraft_validate_debug_snapshot_json, RaftCluster,
+    matrixraft_admin_diagnostic_json_lines, matrixraft_admin_diagnostic_log_entries,
+    matrixraft_admin_status_surface_evidence, matrixraft_capability_evidence,
+    matrixraft_debug_bundle_validation_prometheus, matrixraft_debug_snapshot,
+    matrixraft_debug_snapshot_json, matrixraft_debug_snapshot_metadata_prometheus,
+    matrixraft_diagnostic_log_prometheus, matrixraft_operator_runbook_prometheus,
+    matrixraft_optimization_report, matrixraft_optimization_report_prometheus,
+    matrixraft_runtime_admin_report, matrixraft_runtime_local_status_report,
+    matrixraft_validate_debug_snapshot, matrixraft_validate_debug_snapshot_json, RaftCluster,
     RaftHealthStatus, RaftPeerPipelineState, RustRaftAdminStatusSurfaceInput,
     RustRaftDiagnosticLogEntry, RustRaftDiagnosticSeverity, RustRaftOperatorRunbookStep,
     RustRaftOptimizationHint, RustRaftOptimizationHintSeverity, RustRaftPeer,
@@ -29,16 +29,16 @@ fn peer(node_id: u64) -> RustRaftPeer {
 
 fn ready_snapshot() -> matrixraft::RustRaftReadinessSnapshot {
     matrixraft::RustRaftReadinessSnapshot {
-        rustraft_leader_write_authority_present: true,
-        rustraft_operator_observability_present: true,
-        rustraft_rpc_transport_contract_present: true,
-        rustraft_log_retention_snapshot_trigger_present: true,
-        rustraft_apply_snapshot_fence_present: true,
+        matrixraft_leader_write_authority_present: true,
+        matrixraft_operator_observability_present: true,
+        matrixraft_rpc_transport_contract_present: true,
+        matrixraft_log_retention_snapshot_trigger_present: true,
+        matrixraft_apply_snapshot_fence_present: true,
         raft_storage_apply_fence_present: true,
-        rustraft_snapshot_floor_log_matching_present: true,
-        rustraft_snapshot_tail_catchup_present: true,
-        rustraft_compacted_entry_rejection_present: true,
-        rustraft_metaserver_snapshot_floor_election_present: true,
+        matrixraft_snapshot_floor_log_matching_present: true,
+        matrixraft_snapshot_tail_catchup_present: true,
+        matrixraft_compacted_entry_rejection_present: true,
+        matrixraft_metaserver_snapshot_floor_election_present: true,
         learner_catchup_promotion_present: true,
         metaserver_membership_workflow_present: true,
     }
@@ -194,7 +194,7 @@ fn local_status_report_tracks_replication_apply_and_pipeline_health() {
         witness_quorum_reached: false,
     }];
 
-    let report = rustraft_runtime_local_status_report(status, pipeline, ready_snapshot());
+    let report = matrixraft_runtime_local_status_report(status, pipeline, ready_snapshot());
     assert_eq!(report.replication_health.status, RaftHealthStatus::Degraded);
     assert_eq!(report.apply_health.status, RaftHealthStatus::Degraded);
     assert!(report.blockers.contains(&"replication_lagging".to_string()));
@@ -216,7 +216,7 @@ fn admin_status_surface_evidence_accepts_quorum_progress_with_lagging_peer() {
         wal_last_log_index: 10,
         wal_segment_lifecycle_present: true,
     };
-    let evidence = rustraft_admin_status_surface_evidence(&input);
+    let evidence = matrixraft_admin_status_surface_evidence(&input);
     assert!(evidence.complete, "{evidence:?}");
     assert!(evidence.quorum_peer_progress_observed);
     assert!(evidence.peer_pipeline_runtime_activity_observed);
@@ -235,7 +235,7 @@ fn admin_status_surface_evidence_fails_closed_on_missing_wal_or_quorum() {
         wal_last_log_index: 9,
         wal_segment_lifecycle_present: false,
     };
-    let evidence = rustraft_admin_status_surface_evidence(&input);
+    let evidence = matrixraft_admin_status_surface_evidence(&input);
     assert!(!evidence.complete);
     assert!(evidence
         .blockers
@@ -260,7 +260,7 @@ fn optimization_report_surfaces_pipeline_wal_and_commit_pressure() {
     apply_saturated.apply_inflight_tasks = apply_saturated.apply_inflight_limit;
     apply_saturated.inflight_bytes = apply_saturated.inflight_bytes_limit;
 
-    let report = rustraft_optimization_report(&RustRaftAdminStatusSurfaceInput {
+    let report = matrixraft_optimization_report(&RustRaftAdminStatusSurfaceInput {
         commit_index: 10,
         max_observed_node_commit_index: 11,
         quorum_size: 2,
@@ -301,7 +301,7 @@ fn optimization_report_surfaces_pipeline_wal_and_commit_pressure() {
 
 #[test]
 fn optimization_report_is_ready_for_clean_admin_status_surface() {
-    let report = rustraft_optimization_report(&RustRaftAdminStatusSurfaceInput {
+    let report = matrixraft_optimization_report(&RustRaftAdminStatusSurfaceInput {
         commit_index: 10,
         max_observed_node_commit_index: 10,
         quorum_size: 2,
@@ -337,8 +337,8 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     cluster.start().expect("start");
     cluster.propose(b"x".to_vec()).expect("write");
     let readiness = ready_snapshot();
-    let capability_evidence = rustraft_capability_evidence(&readiness);
-    let report = rustraft_runtime_admin_report(
+    let capability_evidence = matrixraft_capability_evidence(&readiness);
+    let report = matrixraft_runtime_admin_report(
         cluster.cluster_status_report().expect("cluster status"),
         readiness,
         capability_evidence,
@@ -357,7 +357,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .feature_reference
         .contains("BaselineRaft"));
 
-    let entries = rustraft_admin_diagnostic_log_entries(&report);
+    let entries = matrixraft_admin_diagnostic_log_entries(&report);
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].target, "rustraft.admin");
     assert_eq!(entries[0].severity, RustRaftDiagnosticSeverity::Info);
@@ -371,7 +371,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .iter()
         .any(|entry| entry.target == "rustraft.apply" && entry.message == "apply_healthy"));
 
-    let json_lines = rustraft_admin_diagnostic_json_lines(&report);
+    let json_lines = matrixraft_admin_diagnostic_json_lines(&report);
     let parsed = json_lines
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("diagnostic json line"))
@@ -393,8 +393,8 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         wal_last_log_index: 10,
         wal_segment_lifecycle_present: true,
     };
-    let snapshot = rustraft_debug_snapshot(&report, &status_surface, &[("service", "raft-a")]);
-    assert_eq!(snapshot.contract.name, "rustraft_debug_snapshot");
+    let snapshot = matrixraft_debug_snapshot(&report, &status_surface, &[("service", "raft-a")]);
+    assert_eq!(snapshot.contract.name, "matrixraft_debug_snapshot");
     assert_eq!(snapshot.contract.version, 1);
     assert_eq!(snapshot.contract.schema, "rustraft.debug_snapshot.v1");
     assert!(snapshot.generated_at_unix_ms > 0);
@@ -426,11 +426,11 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     assert!(snapshot.runbook_prometheus.text.contains(
         "rustraft_operator_runbook_step_present{service=\"raft-a\",step=\"continue_normal_observation\",severity=\"info\",target=\"observability\"} 1"
     ));
-    let validation = rustraft_validate_debug_snapshot(&snapshot);
+    let validation = matrixraft_validate_debug_snapshot(&snapshot);
     assert!(validation.ready);
     assert_eq!(validation.issue_count, 0);
     let metadata_prometheus =
-        rustraft_debug_snapshot_metadata_prometheus(&snapshot, &[("service", "raft\"a")]);
+        matrixraft_debug_snapshot_metadata_prometheus(&snapshot, &[("service", "raft\"a")]);
     assert_eq!(metadata_prometheus.metric_count, 8);
     assert!(metadata_prometheus
         .text
@@ -462,14 +462,16 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
 
     let mut invalid_snapshot = snapshot.clone();
     invalid_snapshot.contract.schema = "rustraft.debug_snapshot.v0".to_string();
-    let invalid_validation = rustraft_validate_debug_snapshot(&invalid_snapshot);
+    let invalid_validation = matrixraft_validate_debug_snapshot(&invalid_snapshot);
     assert!(!invalid_validation.ready);
     assert_eq!(
         invalid_validation.issues,
         vec!["contract_mismatch".to_string()]
     );
-    let invalid_validation_metrics =
-        rustraft_debug_bundle_validation_prometheus(&invalid_validation, &[("service", "raft\"a")]);
+    let invalid_validation_metrics = matrixraft_debug_bundle_validation_prometheus(
+        &invalid_validation,
+        &[("service", "raft\"a")],
+    );
     assert_eq!(invalid_validation_metrics.format, "prometheus_text_v0.0.4");
     assert_eq!(invalid_validation_metrics.metric_count, 4);
     assert!(invalid_validation_metrics
@@ -488,7 +490,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let mut missing_timestamp_snapshot = snapshot.clone();
     missing_timestamp_snapshot.generated_at_unix_ms = 0;
     let missing_timestamp_validation =
-        rustraft_validate_debug_snapshot(&missing_timestamp_snapshot);
+        matrixraft_validate_debug_snapshot(&missing_timestamp_snapshot);
     assert!(!missing_timestamp_validation.ready);
     assert!(missing_timestamp_validation
         .issues
@@ -496,7 +498,8 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
 
     let mut future_timestamp_snapshot = snapshot.clone();
     future_timestamp_snapshot.generated_at_unix_ms = u64::MAX;
-    let future_timestamp_validation = rustraft_validate_debug_snapshot(&future_timestamp_snapshot);
+    let future_timestamp_validation =
+        matrixraft_validate_debug_snapshot(&future_timestamp_snapshot);
     assert!(!future_timestamp_validation.ready);
     assert!(future_timestamp_validation
         .issues
@@ -504,12 +507,12 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
 
     let mut stale_timestamp_snapshot = snapshot.clone();
     stale_timestamp_snapshot.generated_at_unix_ms = 1;
-    let stale_timestamp_validation = rustraft_validate_debug_snapshot(&stale_timestamp_snapshot);
+    let stale_timestamp_validation = matrixraft_validate_debug_snapshot(&stale_timestamp_snapshot);
     assert!(!stale_timestamp_validation.ready);
     assert!(stale_timestamp_validation
         .issues
         .contains(&"generated_at_stale".to_string()));
-    let stale_timestamp_validation_metrics = rustraft_debug_bundle_validation_prometheus(
+    let stale_timestamp_validation_metrics = matrixraft_debug_bundle_validation_prometheus(
         &stale_timestamp_validation,
         &[("service", "raft-a")],
     );
@@ -522,7 +525,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
 
     let mut stale_snapshot = snapshot.clone();
     stale_snapshot.triage.critical_optimization_count = 7;
-    let stale_validation = rustraft_validate_debug_snapshot(&stale_snapshot);
+    let stale_validation = matrixraft_validate_debug_snapshot(&stale_snapshot);
     assert!(!stale_validation.ready);
     assert!(stale_validation
         .issues
@@ -530,7 +533,8 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
 
     let mut stale_diagnostic_snapshot = snapshot.clone();
     stale_diagnostic_snapshot.triage.diagnostic_warning_count = 13;
-    let stale_diagnostic_validation = rustraft_validate_debug_snapshot(&stale_diagnostic_snapshot);
+    let stale_diagnostic_validation =
+        matrixraft_validate_debug_snapshot(&stale_diagnostic_snapshot);
     assert!(!stale_diagnostic_validation.ready);
     assert!(stale_diagnostic_validation
         .issues
@@ -538,7 +542,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
 
     let mut stale_triage_snapshot = snapshot.clone();
     stale_triage_snapshot.triage.first_action = "stale action".to_string();
-    let stale_triage_validation = rustraft_validate_debug_snapshot(&stale_triage_snapshot);
+    let stale_triage_validation = matrixraft_validate_debug_snapshot(&stale_triage_snapshot);
     assert!(!stale_triage_validation.ready);
     assert!(stale_triage_validation
         .issues
@@ -547,7 +551,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let mut stale_diagnostic_log_snapshot = snapshot.clone();
     stale_diagnostic_log_snapshot.diagnostics[0].message = "stale diagnostic".to_string();
     let stale_diagnostic_log_validation =
-        rustraft_validate_debug_snapshot(&stale_diagnostic_log_snapshot);
+        matrixraft_validate_debug_snapshot(&stale_diagnostic_log_snapshot);
     assert!(!stale_diagnostic_log_validation.ready);
     assert!(stale_diagnostic_log_validation
         .issues
@@ -566,7 +570,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .map(|line| format!("{}\n", line))
         .collect();
     let missing_diagnostic_severity_validation =
-        rustraft_validate_debug_snapshot(&missing_diagnostic_severity_snapshot);
+        matrixraft_validate_debug_snapshot(&missing_diagnostic_severity_snapshot);
     assert!(!missing_diagnostic_severity_validation.ready);
     assert!(missing_diagnostic_severity_validation
         .issues
@@ -582,7 +586,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
             .map(|line| format!("{}\n", line))
             .collect();
     let missing_diagnostic_entry_validation =
-        rustraft_validate_debug_snapshot(&missing_diagnostic_entry_snapshot);
+        matrixraft_validate_debug_snapshot(&missing_diagnostic_entry_snapshot);
     assert!(!missing_diagnostic_entry_validation.ready);
     assert!(missing_diagnostic_entry_validation
         .issues
@@ -601,9 +605,9 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
             )],
         });
     escaped_diagnostic_snapshot.diagnostic_prometheus =
-        rustraft_diagnostic_log_prometheus(&escaped_diagnostic_snapshot.diagnostics, &[]);
+        matrixraft_diagnostic_log_prometheus(&escaped_diagnostic_snapshot.diagnostics, &[]);
     let escaped_diagnostic_validation =
-        rustraft_validate_debug_snapshot(&escaped_diagnostic_snapshot);
+        matrixraft_validate_debug_snapshot(&escaped_diagnostic_snapshot);
     assert!(
         !escaped_diagnostic_validation
             .issues
@@ -624,7 +628,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .optimization
         .hint_count = 99;
     let stale_optimization_hint_count_validation =
-        rustraft_validate_debug_snapshot(&stale_optimization_hint_count_snapshot);
+        matrixraft_validate_debug_snapshot(&stale_optimization_hint_count_snapshot);
     assert!(!stale_optimization_hint_count_validation.ready);
     assert!(stale_optimization_hint_count_validation
         .issues
@@ -635,7 +639,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .optimization
         .warning_count = 99;
     let stale_optimization_warning_count_validation =
-        rustraft_validate_debug_snapshot(&stale_optimization_warning_count_snapshot);
+        matrixraft_validate_debug_snapshot(&stale_optimization_warning_count_snapshot);
     assert!(!stale_optimization_warning_count_validation.ready);
     assert!(stale_optimization_warning_count_validation
         .issues
@@ -658,7 +662,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .optimization
         .critical_count += 1;
     let stale_optimization_ready_validation =
-        rustraft_validate_debug_snapshot(&stale_optimization_ready_snapshot);
+        matrixraft_validate_debug_snapshot(&stale_optimization_ready_snapshot);
     assert!(!stale_optimization_ready_validation.ready);
     assert!(stale_optimization_ready_validation
         .issues
@@ -669,7 +673,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .optimization_prometheus
         .metric_count = 99;
     let stale_prometheus_count_validation =
-        rustraft_validate_debug_snapshot(&stale_prometheus_count_snapshot);
+        matrixraft_validate_debug_snapshot(&stale_prometheus_count_snapshot);
     assert!(!stale_prometheus_count_validation.ready);
     assert!(stale_prometheus_count_validation
         .issues
@@ -680,7 +684,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .optimization_prometheus
         .text = "rustraft_optimization_ready 1\n".to_string();
     let missing_prometheus_metric_validation =
-        rustraft_validate_debug_snapshot(&missing_prometheus_metric_snapshot);
+        matrixraft_validate_debug_snapshot(&missing_prometheus_metric_snapshot);
     assert!(!missing_prometheus_metric_validation.ready);
     assert!(missing_prometheus_metric_validation
         .issues
@@ -700,7 +704,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         });
     missing_prometheus_hint_snapshot.optimization.hint_count += 1;
     let missing_prometheus_hint_validation =
-        rustraft_validate_debug_snapshot(&missing_prometheus_hint_snapshot);
+        matrixraft_validate_debug_snapshot(&missing_prometheus_hint_snapshot);
     assert!(!missing_prometheus_hint_validation.ready);
     assert!(missing_prometheus_hint_validation
         .issues
@@ -724,8 +728,8 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     escaped_hint_snapshot.optimization.hint_count += 1;
     escaped_hint_snapshot.optimization.warning_count += 1;
     escaped_hint_snapshot.optimization_prometheus =
-        rustraft_optimization_report_prometheus(&escaped_hint_snapshot.optimization, &[]);
-    let escaped_hint_validation = rustraft_validate_debug_snapshot(&escaped_hint_snapshot);
+        matrixraft_optimization_report_prometheus(&escaped_hint_snapshot.optimization, &[]);
+    let escaped_hint_validation = matrixraft_validate_debug_snapshot(&escaped_hint_snapshot);
     assert!(
         !escaped_hint_validation
             .issues
@@ -740,7 +744,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let mut stale_grafana_contract_snapshot = snapshot.clone();
     stale_grafana_contract_snapshot.grafana.uid = "old-dashboard".to_string();
     let stale_grafana_contract_validation =
-        rustraft_validate_debug_snapshot(&stale_grafana_contract_snapshot);
+        matrixraft_validate_debug_snapshot(&stale_grafana_contract_snapshot);
     assert!(!stale_grafana_contract_validation.ready);
     assert!(stale_grafana_contract_validation
         .issues
@@ -749,7 +753,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let mut stale_grafana_panel_snapshot = snapshot.clone();
     stale_grafana_panel_snapshot.grafana.panels[0].expr = "rustraft_ready == 0".to_string();
     let stale_grafana_panel_validation =
-        rustraft_validate_debug_snapshot(&stale_grafana_panel_snapshot);
+        matrixraft_validate_debug_snapshot(&stale_grafana_panel_snapshot);
     assert!(!stale_grafana_panel_validation.ready);
     assert!(stale_grafana_panel_validation
         .issues
@@ -761,7 +765,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .panels
         .retain(|panel| panel.id != 17);
     let missing_grafana_panel_validation =
-        rustraft_validate_debug_snapshot(&missing_grafana_panel_snapshot);
+        matrixraft_validate_debug_snapshot(&missing_grafana_panel_snapshot);
     assert!(!missing_grafana_panel_validation.ready);
     assert!(missing_grafana_panel_validation
         .issues
@@ -769,7 +773,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
 
     let mut stale_runbook_snapshot = snapshot.clone();
     stale_runbook_snapshot.runbook_steps[0].action = "do something else".to_string();
-    let stale_runbook_validation = rustraft_validate_debug_snapshot(&stale_runbook_snapshot);
+    let stale_runbook_validation = matrixraft_validate_debug_snapshot(&stale_runbook_snapshot);
     assert!(!stale_runbook_validation.ready);
     assert!(stale_runbook_validation
         .issues
@@ -779,7 +783,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     missing_runbook_prometheus_snapshot.runbook_prometheus.text =
         "rustraft_operator_runbook_step_total 1\n".to_string();
     let missing_runbook_prometheus_validation =
-        rustraft_validate_debug_snapshot(&missing_runbook_prometheus_snapshot);
+        matrixraft_validate_debug_snapshot(&missing_runbook_prometheus_snapshot);
     assert!(!missing_runbook_prometheus_validation.ready);
     assert!(missing_runbook_prometheus_validation
         .issues
@@ -801,7 +805,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .runbook_prometheus
         .metric_count -= 1;
     let missing_runbook_first_step_validation =
-        rustraft_validate_debug_snapshot(&missing_runbook_first_step_snapshot);
+        matrixraft_validate_debug_snapshot(&missing_runbook_first_step_snapshot);
     assert!(!missing_runbook_first_step_validation.ready);
     assert!(missing_runbook_first_step_validation
         .issues
@@ -821,8 +825,8 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
             validation: "validator still recognizes escaped runbook metrics".to_string(),
         });
     escaped_runbook_snapshot.runbook_prometheus =
-        rustraft_operator_runbook_prometheus(&escaped_runbook_snapshot.runbook_steps, &[]);
-    let escaped_runbook_validation = rustraft_validate_debug_snapshot(&escaped_runbook_snapshot);
+        matrixraft_operator_runbook_prometheus(&escaped_runbook_snapshot.runbook_steps, &[]);
+    let escaped_runbook_validation = matrixraft_validate_debug_snapshot(&escaped_runbook_snapshot);
     assert!(
         !escaped_runbook_validation
             .issues
@@ -843,7 +847,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .runbook_steps
         .push(snapshot.runbook_steps[0].clone());
     extra_runbook_snapshot.runbook_steps[1].id = "unexpected_extra_step".to_string();
-    let extra_runbook_validation = rustraft_validate_debug_snapshot(&extra_runbook_snapshot);
+    let extra_runbook_validation = matrixraft_validate_debug_snapshot(&extra_runbook_snapshot);
     assert!(!extra_runbook_validation.ready);
     assert!(extra_runbook_validation
         .issues
@@ -852,7 +856,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let mut stale_alert_contract_snapshot = snapshot.clone();
     stale_alert_contract_snapshot.alerts[0].expr = "rustraft_optimization_ready < 0".to_string();
     let stale_alert_contract_validation =
-        rustraft_validate_debug_snapshot(&stale_alert_contract_snapshot);
+        matrixraft_validate_debug_snapshot(&stale_alert_contract_snapshot);
     assert!(!stale_alert_contract_validation.ready);
     assert!(stale_alert_contract_validation
         .issues
@@ -865,7 +869,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     missing_alert_contract_snapshot.triage.alert_rule_count =
         missing_alert_contract_snapshot.alerts.len();
     let missing_alert_contract_validation =
-        rustraft_validate_debug_snapshot(&missing_alert_contract_snapshot);
+        matrixraft_validate_debug_snapshot(&missing_alert_contract_snapshot);
     assert!(!missing_alert_contract_validation.ready);
     assert!(missing_alert_contract_validation
         .issues
@@ -873,7 +877,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
 
     let mut stale_top_alert_snapshot = snapshot.clone();
     stale_top_alert_snapshot.triage.top_alert = Some("MissingRustRaftAlert".to_string());
-    let stale_top_alert_validation = rustraft_validate_debug_snapshot(&stale_top_alert_snapshot);
+    let stale_top_alert_validation = matrixraft_validate_debug_snapshot(&stale_top_alert_snapshot);
     assert!(!stale_top_alert_validation.ready);
     assert!(stale_top_alert_validation
         .issues
@@ -885,7 +889,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     stale_top_diagnostic_snapshot.triage.top_diagnostic_message =
         Some("missing_diagnostic".to_string());
     let stale_top_diagnostic_validation =
-        rustraft_validate_debug_snapshot(&stale_top_diagnostic_snapshot);
+        matrixraft_validate_debug_snapshot(&stale_top_diagnostic_snapshot);
     assert!(!stale_top_diagnostic_validation.ready);
     assert!(stale_top_diagnostic_validation
         .issues
@@ -896,7 +900,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .triage
         .top_diagnostic_message = None;
     let incomplete_top_diagnostic_validation =
-        rustraft_validate_debug_snapshot(&incomplete_top_diagnostic_snapshot);
+        matrixraft_validate_debug_snapshot(&incomplete_top_diagnostic_snapshot);
     assert!(!incomplete_top_diagnostic_validation.ready);
     assert!(incomplete_top_diagnostic_validation
         .issues
@@ -905,7 +909,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let mut stale_top_hint_snapshot = snapshot.clone();
     stale_top_hint_snapshot.triage.top_optimization_hint =
         Some("missing_optimization_hint".to_string());
-    let stale_top_hint_validation = rustraft_validate_debug_snapshot(&stale_top_hint_snapshot);
+    let stale_top_hint_validation = matrixraft_validate_debug_snapshot(&stale_top_hint_snapshot);
     assert!(!stale_top_hint_validation.ready);
     assert!(stale_top_hint_validation
         .issues
@@ -913,7 +917,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
 
     let mut stale_severity_snapshot = snapshot.clone();
     stale_severity_snapshot.triage.severity = "warning".to_string();
-    let stale_severity_validation = rustraft_validate_debug_snapshot(&stale_severity_snapshot);
+    let stale_severity_validation = matrixraft_validate_debug_snapshot(&stale_severity_snapshot);
     assert!(!stale_severity_validation.ready);
     assert!(stale_severity_validation
         .issues
@@ -922,18 +926,18 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let mut missing_ready_runbook_snapshot = snapshot.clone();
     missing_ready_runbook_snapshot.runbook_steps.clear();
     let missing_ready_runbook_validation =
-        rustraft_validate_debug_snapshot(&missing_ready_runbook_snapshot);
+        matrixraft_validate_debug_snapshot(&missing_ready_runbook_snapshot);
     assert!(!missing_ready_runbook_validation.ready);
     assert!(missing_ready_runbook_validation
         .issues
         .contains(&"runbook_ready_step_missing".to_string()));
 
     let snapshot_json =
-        rustraft_debug_snapshot_json(&report, &status_surface, &[("service", "raft-a")]);
-    let json_validation = rustraft_validate_debug_snapshot_json(&snapshot_json);
+        matrixraft_debug_snapshot_json(&report, &status_surface, &[("service", "raft-a")]);
+    let json_validation = matrixraft_validate_debug_snapshot_json(&snapshot_json);
     assert!(json_validation.ready);
     assert_eq!(json_validation.issue_count, 0);
-    let invalid_json_validation = rustraft_validate_debug_snapshot_json("{not-json");
+    let invalid_json_validation = matrixraft_validate_debug_snapshot_json("{not-json");
     assert!(!invalid_json_validation.ready);
     assert_eq!(
         invalid_json_validation.issues,
@@ -943,7 +947,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         serde_json::from_str(&snapshot_json).expect("debug snapshot json for mutation");
     stale_contract_json["contract"]["schema"] = Value::String("rustraft.debug_snapshot.old".into());
     let stale_contract_validation =
-        rustraft_validate_debug_snapshot_json(&stale_contract_json.to_string());
+        matrixraft_validate_debug_snapshot_json(&stale_contract_json.to_string());
     assert!(!stale_contract_validation.ready);
     assert!(stale_contract_validation
         .issues

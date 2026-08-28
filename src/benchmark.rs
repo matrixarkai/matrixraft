@@ -9,33 +9,33 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::{
-    rustraft_production_readiness_report, PersistentRaftWal, PersistentRaftWalOptions, RaftCluster,
-    RaftConfig, RaftError, RustRaftApplySnapshotFence, RustRaftHardState, RustRaftLogEntry,
-    RustRaftLogId, RustRaftMembership, RustRaftPeer, RustRaftProductionReadinessInput,
-    RustRaftProductionReadinessReport, RustRaftReplicaRole, RustRaftSnapshotMeta,
-    RustRaftWalRecord,
+    matrixraft_production_readiness_report, PersistentRaftWal, PersistentRaftWalOptions,
+    RaftCluster, RaftConfig, RaftError, RustRaftApplySnapshotFence, RustRaftHardState,
+    RustRaftLogEntry, RustRaftLogId, RustRaftMembership, RustRaftPeer,
+    RustRaftProductionReadinessInput, RustRaftProductionReadinessReport, RustRaftReplicaRole,
+    RustRaftSnapshotMeta, RustRaftWalRecord,
 };
 
-const RUSTRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
-const RUSTRAFT_BENCHMARK_MAX_FUTURE_SKEW_MS: u64 = 60 * 1000;
-pub const RUSTRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT: usize = 5;
-pub const RUSTRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD: usize = 128;
-pub const RUSTRAFT_BENCHMARK_MIN_PRODUCTION_BATCH_SIZE: usize = 2;
-pub const RUSTRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES: usize = 4096;
-pub const RUSTRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT: f64 = 10.0;
-pub const RUSTRAFT_BENCHMARK_REPORT_SCHEMA: &str = "rustraft.baseline_raft_benchmark_report.v1";
-pub const RUSTRAFT_BENCHMARK_SUMMARY_SCHEMA: &str = "rustraft.baseline_raft_benchmark_summary.v1";
+const MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
+const MATRIXRAFT_BENCHMARK_MAX_FUTURE_SKEW_MS: u64 = 60 * 1000;
+pub const MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT: usize = 5;
+pub const MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD: usize = 128;
+pub const MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_BATCH_SIZE: usize = 2;
+pub const MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES: usize = 4096;
+pub const MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT: f64 = 10.0;
+pub const MATRIXRAFT_BENCHMARK_REPORT_SCHEMA: &str = "rustraft.baseline_raft_benchmark_report.v1";
+pub const MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA: &str = "rustraft.baseline_raft_benchmark_summary.v1";
 
-static RUSTRAFT_BENCHMARK_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static MATRIXRAFT_BENCHMARK_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RustRaftBaselineRaftBenchmarkEvidence {
     pub real_baseline_raft: bool,
-    pub rustraft_runtime: bool,
+    pub matrixraft_runtime: bool,
     #[serde(default)]
     pub baseline_raft_reference: bool,
     #[serde(default)]
-    pub rustraft_rust_candidate: bool,
+    pub matrixraft_rust_candidate: bool,
     pub correctness_passed: bool,
     pub performance_within_threshold: bool,
     pub workloads: Vec<String>,
@@ -145,7 +145,7 @@ impl RustRaftBenchmarkWorkload {
     }
 }
 
-pub fn rustraft_baseline_raft_benchmark_workloads() -> Vec<RustRaftBenchmarkWorkload> {
+pub fn matrixraft_baseline_raft_benchmark_workloads() -> Vec<RustRaftBenchmarkWorkload> {
     vec![
         RustRaftBenchmarkWorkload::SingleKeyWrites,
         RustRaftBenchmarkWorkload::BatchedWrites,
@@ -159,45 +159,45 @@ pub fn rustraft_baseline_raft_benchmark_workloads() -> Vec<RustRaftBenchmarkWork
     ]
 }
 
-pub fn rustraft_baseline_raft_benchmark_required_workloads() -> Vec<String> {
-    rustraft_baseline_raft_benchmark_workloads()
+pub fn matrixraft_baseline_raft_benchmark_required_workloads() -> Vec<String> {
+    matrixraft_baseline_raft_benchmark_workloads()
         .into_iter()
         .map(|workload| workload.id().to_string())
         .collect()
 }
 
-pub fn rustraft_production_readiness_input_with_benchmark_artifacts(
+pub fn matrixraft_production_readiness_input_with_benchmark_artifacts(
     mut input: RustRaftProductionReadinessInput,
     report: &RustRaftBenchmarkReport,
     summary: &RustRaftBenchmarkFailureSummary,
 ) -> Result<RustRaftProductionReadinessInput, String> {
-    input.baseline_raft_benchmark = Some(rustraft_baseline_raft_benchmark_evidence_from_artifacts(
-        report, summary,
-    )?);
+    input.baseline_raft_benchmark = Some(
+        matrixraft_baseline_raft_benchmark_evidence_from_artifacts(report, summary)?,
+    );
     Ok(input)
 }
 
-pub fn rustraft_production_readiness_input_with_benchmark_summary(
+pub fn matrixraft_production_readiness_input_with_benchmark_summary(
     mut input: RustRaftProductionReadinessInput,
     summary: &RustRaftBenchmarkFailureSummary,
 ) -> RustRaftProductionReadinessInput {
-    input.baseline_raft_benchmark = Some(rustraft_baseline_raft_benchmark_evidence_from_summary(
+    input.baseline_raft_benchmark = Some(matrixraft_baseline_raft_benchmark_evidence_from_summary(
         summary,
     ));
     input
 }
 
-pub fn rustraft_production_readiness_report_with_benchmark_artifacts(
+pub fn matrixraft_production_readiness_report_with_benchmark_artifacts(
     input: &RustRaftProductionReadinessInput,
     report: &RustRaftBenchmarkReport,
     summary: &RustRaftBenchmarkFailureSummary,
 ) -> Result<RustRaftProductionReadinessReport, String> {
-    let input = rustraft_production_readiness_input_with_benchmark_artifacts(
+    let input = matrixraft_production_readiness_input_with_benchmark_artifacts(
         input.clone(),
         report,
         summary,
     )?;
-    Ok(rustraft_production_readiness_report(&input))
+    Ok(matrixraft_production_readiness_report(&input))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -212,11 +212,11 @@ pub struct RustRaftBenchmarkOptions {
 impl Default for RustRaftBenchmarkOptions {
     fn default() -> Self {
         Self {
-            node_count: RUSTRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT,
+            node_count: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT,
             iterations_per_workload: 128,
             batch_size: 16,
-            payload_size_bytes: RUSTRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES,
-            pass_tolerance_percent: RUSTRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT,
+            payload_size_bytes: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES,
+            pass_tolerance_percent: MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT,
         }
     }
 }
@@ -326,70 +326,70 @@ pub struct RustRaftBenchmarkWorkloadSummary {
     pub workload: RustRaftBenchmarkWorkload,
     pub passed: bool,
     pub baseline_raft_correctness_passed: bool,
-    pub rustraft_correctness_passed: bool,
+    pub matrixraft_correctness_passed: bool,
     pub baseline_raft_engine_source: RustRaftBenchmarkEngineSource,
-    pub rustraft_engine_source: RustRaftBenchmarkEngineSource,
+    pub matrixraft_engine_source: RustRaftBenchmarkEngineSource,
     #[serde(default)]
     pub baseline_raft_benchmark_run_id: String,
     #[serde(default)]
-    pub rustraft_benchmark_run_id: String,
+    pub matrixraft_benchmark_run_id: String,
     #[serde(default)]
     pub baseline_raft_implementation: RustRaftBenchmarkImplementation,
     #[serde(default)]
-    pub rustraft_implementation: RustRaftBenchmarkImplementation,
+    pub matrixraft_implementation: RustRaftBenchmarkImplementation,
     #[serde(default)]
     pub baseline_raft_binary_path: Option<String>,
     #[serde(default)]
-    pub rustraft_binary_path: Option<String>,
+    pub matrixraft_binary_path: Option<String>,
     #[serde(default)]
     pub baseline_raft_git_revision: Option<String>,
     #[serde(default)]
-    pub rustraft_git_revision: Option<String>,
+    pub matrixraft_git_revision: Option<String>,
     #[serde(default)]
     pub baseline_raft_build_profile: String,
     #[serde(default)]
-    pub rustraft_build_profile: String,
+    pub matrixraft_build_profile: String,
     #[serde(default)]
     pub baseline_raft_harness_kind: RustRaftBenchmarkHarnessKind,
     #[serde(default)]
-    pub rustraft_harness_kind: RustRaftBenchmarkHarnessKind,
+    pub matrixraft_harness_kind: RustRaftBenchmarkHarnessKind,
     pub node_count: usize,
     #[serde(default)]
     pub baseline_raft_node_count: usize,
     #[serde(default)]
-    pub rustraft_node_count: usize,
+    pub matrixraft_node_count: usize,
     pub baseline_raft_iterations_per_workload: usize,
-    pub rustraft_iterations_per_workload: usize,
+    pub matrixraft_iterations_per_workload: usize,
     pub baseline_raft_batch_size: usize,
-    pub rustraft_batch_size: usize,
+    pub matrixraft_batch_size: usize,
     pub baseline_raft_payload_size_bytes: usize,
-    pub rustraft_payload_size_bytes: usize,
+    pub matrixraft_payload_size_bytes: usize,
     #[serde(default)]
     pub baseline_raft_timed_iteration_count: usize,
     #[serde(default)]
-    pub rustraft_timed_iteration_count: usize,
+    pub matrixraft_timed_iteration_count: usize,
     #[serde(default)]
     pub baseline_raft_operations_per_timed_iteration: usize,
     #[serde(default)]
-    pub rustraft_operations_per_timed_iteration: usize,
+    pub matrixraft_operations_per_timed_iteration: usize,
     #[serde(default)]
     pub baseline_raft_total_duration_micros: u64,
     #[serde(default)]
-    pub rustraft_total_duration_micros: u64,
+    pub matrixraft_total_duration_micros: u64,
     pub baseline_raft_operation_count: usize,
-    pub rustraft_operation_count: usize,
+    pub matrixraft_operation_count: usize,
     #[serde(default)]
     pub baseline_raft_p50_latency_micros: u64,
     #[serde(default)]
-    pub rustraft_p50_latency_micros: u64,
+    pub matrixraft_p50_latency_micros: u64,
     #[serde(default)]
     pub baseline_raft_p99_latency_micros: u64,
     #[serde(default)]
-    pub rustraft_p99_latency_micros: u64,
+    pub matrixraft_p99_latency_micros: u64,
     #[serde(default)]
     pub baseline_raft_throughput_ops_per_sec: f64,
     #[serde(default)]
-    pub rustraft_throughput_ops_per_sec: f64,
+    pub matrixraft_throughput_ops_per_sec: f64,
     pub p50_ratio: f64,
     pub p99_ratio: f64,
     pub throughput_ratio: f64,
@@ -448,7 +448,7 @@ impl RustRaftSameMachineModelRunner {
         }
     }
 
-    pub fn rustraft_candidate() -> Self {
+    pub fn matrixraft_candidate() -> Self {
         Self {
             engine: RustRaftBenchmarkEngine::RustRaft,
         }
@@ -546,7 +546,7 @@ impl RustRaftExternalBaselineRaftRunner {
                 binary_path.display()
             ));
         }
-        if let Some(blocker) = rustraft_baseline_raft_harness_executable_blocker(&binary_path) {
+        if let Some(blocker) = matrixraft_baseline_raft_harness_executable_blocker(&binary_path) {
             return Err(blocker);
         }
         let baseline_raft_root = baseline_raft_root.map(Into::into);
@@ -567,7 +567,7 @@ impl RustRaftExternalBaselineRaftRunner {
     ) -> Result<Self, String> {
         let root = baseline_raft_root.as_ref();
         let build_profile = build_profile.into();
-        let binary = rustraft_find_or_build_baseline_raft_harness(root, &build_profile)?;
+        let binary = matrixraft_find_or_build_baseline_raft_harness(root, &build_profile)?;
         Self::new(binary, Some(root.to_path_buf()), build_profile)
     }
 }
@@ -957,7 +957,7 @@ fn failed_real_baseline_raft_sample(
     }
 }
 
-pub fn rustraft_find_baseline_raft_harness(
+pub fn matrixraft_find_baseline_raft_harness(
     baseline_raft_root: impl AsRef<Path>,
 ) -> Result<PathBuf, String> {
     let root = baseline_raft_root.as_ref();
@@ -979,7 +979,7 @@ pub fn rustraft_find_baseline_raft_harness(
         if !path.is_file() {
             continue;
         }
-        if let Some(blocker) = rustraft_baseline_raft_harness_executable_blocker(&path) {
+        if let Some(blocker) = matrixraft_baseline_raft_harness_executable_blocker(&path) {
             non_executable.push(blocker);
             continue;
         }
@@ -996,7 +996,7 @@ pub fn rustraft_find_baseline_raft_harness(
 }
 
 #[cfg(unix)]
-fn rustraft_baseline_raft_harness_executable_blocker(path: &Path) -> Option<String> {
+fn matrixraft_baseline_raft_harness_executable_blocker(path: &Path) -> Option<String> {
     use std::os::unix::fs::PermissionsExt;
 
     match fs::metadata(path) {
@@ -1013,16 +1013,16 @@ fn rustraft_baseline_raft_harness_executable_blocker(path: &Path) -> Option<Stri
 }
 
 #[cfg(not(unix))]
-fn rustraft_baseline_raft_harness_executable_blocker(_path: &Path) -> Option<String> {
+fn matrixraft_baseline_raft_harness_executable_blocker(_path: &Path) -> Option<String> {
     None
 }
 
-pub fn rustraft_probe_baseline_raft_native_benchmark(
+pub fn matrixraft_probe_baseline_raft_native_benchmark(
     baseline_raft_root: impl AsRef<Path>,
 ) -> RustRaftBaselineRaftNativeBenchmarkCapability {
     let root = baseline_raft_root.as_ref();
-    let kvserver_binary = rustraft_find_baseline_raft_kvserver(root).ok();
-    let kvbench_binary = rustraft_find_baseline_raft_kvbench(root).ok();
+    let kvserver_binary = matrixraft_find_baseline_raft_kvserver(root).ok();
+    let kvbench_binary = matrixraft_find_baseline_raft_kvbench(root).ok();
     let kvserver_source = root.join("example/kv/kv_server.cc");
     let kvbench_source = root.join("example/kv/kv_benchmark.cc");
     let bench_script = root.join("script/bench.sh");
@@ -1047,7 +1047,7 @@ pub fn rustraft_probe_baseline_raft_native_benchmark(
         supported_workloads.push(RustRaftBenchmarkWorkload::LeaseReads.id().to_string());
     }
 
-    let required = rustraft_baseline_raft_benchmark_workloads()
+    let required = matrixraft_baseline_raft_benchmark_workloads()
         .into_iter()
         .map(|workload| workload.id().to_string())
         .collect::<Vec<_>>();
@@ -1096,7 +1096,7 @@ pub fn rustraft_probe_baseline_raft_native_benchmark(
     }
 }
 
-fn rustraft_find_baseline_raft_kvserver(baseline_raft_root: &Path) -> Result<PathBuf, String> {
+fn matrixraft_find_baseline_raft_kvserver(baseline_raft_root: &Path) -> Result<PathBuf, String> {
     let root = baseline_raft_root;
     let candidates = [
         root.join("build/example/kv/kvserver"),
@@ -1115,7 +1115,7 @@ fn rustraft_find_baseline_raft_kvserver(baseline_raft_root: &Path) -> Result<Pat
         })
 }
 
-fn rustraft_find_baseline_raft_kvbench(baseline_raft_root: &Path) -> Result<PathBuf, String> {
+fn matrixraft_find_baseline_raft_kvbench(baseline_raft_root: &Path) -> Result<PathBuf, String> {
     let root = baseline_raft_root;
     let candidates = [
         root.join("build/example/kv/kvbench"),
@@ -1134,12 +1134,12 @@ fn rustraft_find_baseline_raft_kvbench(baseline_raft_root: &Path) -> Result<Path
         })
 }
 
-pub fn rustraft_find_or_build_baseline_raft_harness(
+pub fn matrixraft_find_or_build_baseline_raft_harness(
     baseline_raft_root: impl AsRef<Path>,
     build_profile: &str,
 ) -> Result<PathBuf, String> {
     let root = baseline_raft_root.as_ref();
-    let initial_harness_error = match rustraft_find_baseline_raft_harness(root) {
+    let initial_harness_error = match matrixraft_find_baseline_raft_harness(root) {
         Ok(binary) => return Ok(binary),
         Err(err) => err,
     };
@@ -1165,7 +1165,7 @@ pub fn rustraft_find_or_build_baseline_raft_harness(
         try_baseline_raft_bazel_target(root, build_profile),
     ];
 
-    let final_harness_error = match rustraft_find_baseline_raft_harness(root) {
+    let final_harness_error = match matrixraft_find_baseline_raft_harness(root) {
         Ok(binary) => return Ok(binary),
         Err(err) => err,
     };
@@ -1280,7 +1280,7 @@ fn try_baseline_raft_bazel_target(root: &Path, _build_profile: &str) -> Result<(
     }
 }
 
-pub fn rustraft_run_baseline_raft_parity_benchmark(
+pub fn matrixraft_run_baseline_raft_parity_benchmark(
     baseline_raft: &mut impl RustRaftBenchmarkRunner,
     rustraft: &mut impl RustRaftBenchmarkRunner,
     options: &RustRaftBenchmarkOptions,
@@ -1291,7 +1291,7 @@ pub fn rustraft_run_baseline_raft_parity_benchmark(
     );
     assert_eq!(rustraft.engine(), RustRaftBenchmarkEngine::RustRaft);
     let benchmark_run_id = benchmark_run_id();
-    let comparisons = rustraft_baseline_raft_benchmark_workloads()
+    let comparisons = matrixraft_baseline_raft_benchmark_workloads()
         .into_iter()
         .map(|workload| {
             let mut baseline = baseline_raft.run_workload(workload, options);
@@ -1301,10 +1301,10 @@ pub fn rustraft_run_baseline_raft_parity_benchmark(
             compare_samples(baseline, candidate, options.pass_tolerance_percent)
         })
         .collect::<Vec<_>>();
-    let passed = comparisons.len() == rustraft_baseline_raft_benchmark_workloads().len()
+    let passed = comparisons.len() == matrixraft_baseline_raft_benchmark_workloads().len()
         && comparisons.iter().all(|comparison| comparison.passed);
     RustRaftBenchmarkReport {
-        schema: RUSTRAFT_BENCHMARK_REPORT_SCHEMA.to_string(),
+        schema: MATRIXRAFT_BENCHMARK_REPORT_SCHEMA.to_string(),
         generated_at_unix_ms: benchmark_now_unix_ms(),
         benchmark_run_id,
         environment_fingerprint: benchmark_environment_fingerprint(),
@@ -1312,13 +1312,13 @@ pub fn rustraft_run_baseline_raft_parity_benchmark(
         options: options.clone(),
         pass_tolerance_percent: options.pass_tolerance_percent,
         correctness_required: true,
-        required_workloads: rustraft_baseline_raft_benchmark_required_workloads(),
+        required_workloads: matrixraft_baseline_raft_benchmark_required_workloads(),
         passed,
         comparisons,
     }
 }
 
-pub fn rustraft_assert_baseline_raft_parity(
+pub fn matrixraft_assert_baseline_raft_parity(
     report: &RustRaftBenchmarkReport,
 ) -> Result<(), String> {
     if report.passed {
@@ -1338,13 +1338,13 @@ pub fn rustraft_assert_baseline_raft_parity(
     Err(blockers.join("; "))
 }
 
-pub fn rustraft_assert_production_baseline_raft_parity(
+pub fn matrixraft_assert_production_baseline_raft_parity(
     report: &RustRaftBenchmarkReport,
 ) -> Result<(), String> {
-    let parity_error = rustraft_assert_baseline_raft_parity(report).err();
-    let evidence = rustraft_baseline_raft_benchmark_evidence(report);
+    let parity_error = matrixraft_assert_baseline_raft_parity(report).err();
+    let evidence = matrixraft_baseline_raft_benchmark_evidence(report);
     if evidence.real_baseline_raft
-        && evidence.rustraft_runtime
+        && evidence.matrixraft_runtime
         && evidence.correctness_passed
         && evidence.performance_within_threshold
         && evidence.blockers.is_empty()
@@ -1365,19 +1365,19 @@ pub fn rustraft_assert_production_baseline_raft_parity(
     Err(blockers.join("; "))
 }
 
-pub fn rustraft_assert_production_baseline_raft_artifacts(
+pub fn matrixraft_assert_production_baseline_raft_artifacts(
     report: &RustRaftBenchmarkReport,
     summary: &RustRaftBenchmarkFailureSummary,
 ) -> Result<(), String> {
-    let expected = rustraft_baseline_raft_benchmark_failure_summary(report);
+    let expected = matrixraft_baseline_raft_benchmark_failure_summary(report);
     if summary != &expected {
         return Err("benchmark:summary_artifact_mismatch".to_string());
     }
     let mut blockers = Vec::new();
-    if let Err(error) = rustraft_assert_production_baseline_raft_summary(summary) {
+    if let Err(error) = matrixraft_assert_production_baseline_raft_summary(summary) {
         blockers.extend(error.split("; ").map(str::to_string));
     }
-    if let Err(error) = rustraft_assert_production_baseline_raft_parity(report) {
+    if let Err(error) = matrixraft_assert_production_baseline_raft_parity(report) {
         blockers.extend(error.split("; ").map(str::to_string));
     }
     blockers.sort();
@@ -1389,14 +1389,14 @@ pub fn rustraft_assert_production_baseline_raft_artifacts(
     }
 }
 
-pub fn rustraft_assert_production_baseline_raft_summary(
+pub fn matrixraft_assert_production_baseline_raft_summary(
     summary: &RustRaftBenchmarkFailureSummary,
 ) -> Result<(), String> {
     let mut blockers = Vec::new();
-    if summary.schema != RUSTRAFT_BENCHMARK_SUMMARY_SCHEMA {
+    if summary.schema != MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA {
         blockers.push(format!(
             "benchmark:summary_schema_mismatch:{}:{}",
-            summary.schema, RUSTRAFT_BENCHMARK_SUMMARY_SCHEMA
+            summary.schema, MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA
         ));
     }
     blockers.extend(benchmark_artifact_timestamp_blockers(
@@ -1442,7 +1442,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
             summary.failed_workload_count, actual_failed_workload_count
         ));
     }
-    let required_workload_manifest = rustraft_baseline_raft_benchmark_required_workloads();
+    let required_workload_manifest = matrixraft_baseline_raft_benchmark_required_workloads();
     if summary.required_workloads != required_workload_manifest {
         blockers.push(format!(
             "benchmark:summary_required_workloads_mismatch:declared_{}_required_{}",
@@ -1597,7 +1597,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
             && workload.p99_ratio <= max_latency_ratio
             && workload.throughput_ratio >= min_throughput_ratio;
         let workload_correctness_passed =
-            workload.baseline_raft_correctness_passed && workload.rustraft_correctness_passed;
+            workload.baseline_raft_correctness_passed && workload.matrixraft_correctness_passed;
         if workload.passed && !workload.blockers.is_empty() {
             blockers.push(format!(
                 "benchmark:summary_workload_passed_with_blockers:{}",
@@ -1632,7 +1632,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 workload.workload.id()
             ));
         }
-        if !workload.rustraft_correctness_passed {
+        if !workload.matrixraft_correctness_passed {
             blockers.push(format!(
                 "benchmark:summary_rustraft_correctness_failed:{}",
                 workload.workload.id()
@@ -1644,7 +1644,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 workload.workload.id()
             ));
         }
-        if workload.rustraft_engine_source != RustRaftBenchmarkEngineSource::RustRaftRuntime {
+        if workload.matrixraft_engine_source != RustRaftBenchmarkEngineSource::RustRaftRuntime {
             blockers.push(format!(
                 "benchmark:summary_rustraft_runtime_missing:{}",
                 workload.workload.id()
@@ -1663,28 +1663,28 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 summary.benchmark_run_id
             ));
         }
-        if workload.rustraft_benchmark_run_id.is_empty() {
+        if workload.matrixraft_benchmark_run_id.is_empty() {
             blockers.push(format!(
                 "benchmark:summary_rustraft_run_id_missing:{}",
                 workload.workload.id()
             ));
-        } else if workload.rustraft_benchmark_run_id != summary.benchmark_run_id {
+        } else if workload.matrixraft_benchmark_run_id != summary.benchmark_run_id {
             blockers.push(format!(
                 "benchmark:summary_rustraft_run_id_mismatch:{}:{}:{}",
                 workload.workload.id(),
-                workload.rustraft_benchmark_run_id,
+                workload.matrixraft_benchmark_run_id,
                 summary.benchmark_run_id
             ));
         }
         if !workload.baseline_raft_benchmark_run_id.is_empty()
-            && !workload.rustraft_benchmark_run_id.is_empty()
-            && workload.baseline_raft_benchmark_run_id != workload.rustraft_benchmark_run_id
+            && !workload.matrixraft_benchmark_run_id.is_empty()
+            && workload.baseline_raft_benchmark_run_id != workload.matrixraft_benchmark_run_id
         {
             blockers.push(format!(
                 "benchmark:summary_sample_run_id_pair_mismatch:{}:{}:{}",
                 workload.workload.id(),
                 workload.baseline_raft_benchmark_run_id,
-                workload.rustraft_benchmark_run_id
+                workload.matrixraft_benchmark_run_id
             ));
         }
         if workload.baseline_raft_implementation != RustRaftBenchmarkImplementation::BaselineRaft {
@@ -1694,11 +1694,11 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 workload.baseline_raft_implementation.id()
             ));
         }
-        if workload.rustraft_implementation != RustRaftBenchmarkImplementation::RustRaftRust {
+        if workload.matrixraft_implementation != RustRaftBenchmarkImplementation::RustRaftRust {
             blockers.push(format!(
                 "benchmark:summary_rustraft_implementation_mismatch:{}:{}:rustraft_rust",
                 workload.workload.id(),
-                workload.rustraft_implementation.id()
+                workload.matrixraft_implementation.id()
             ));
         }
         blockers.extend(summary_binary_path_blockers(
@@ -1709,7 +1709,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
         blockers.extend(summary_binary_path_blockers(
             "rustraft",
             workload.workload,
-            workload.rustraft_binary_path.as_deref(),
+            workload.matrixraft_binary_path.as_deref(),
         ));
         blockers.extend(summary_git_revision_blockers(
             "baseline_raft",
@@ -1719,7 +1719,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
         blockers.extend(summary_git_revision_blockers(
             "rustraft",
             workload.workload,
-            workload.rustraft_git_revision.as_deref(),
+            workload.matrixraft_git_revision.as_deref(),
         ));
         if workload.baseline_raft_build_profile.is_empty() {
             blockers.push(format!(
@@ -1727,29 +1727,29 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 workload.workload.id()
             ));
         }
-        if workload.rustraft_build_profile.is_empty() {
+        if workload.matrixraft_build_profile.is_empty() {
             blockers.push(format!(
                 "benchmark:summary_rustraft_provenance_build_profile_missing:{}",
                 workload.workload.id()
             ));
         }
         if !workload.baseline_raft_build_profile.is_empty()
-            && !workload.rustraft_build_profile.is_empty()
-            && workload.baseline_raft_build_profile != workload.rustraft_build_profile
+            && !workload.matrixraft_build_profile.is_empty()
+            && workload.baseline_raft_build_profile != workload.matrixraft_build_profile
         {
             blockers.push(format!(
                 "benchmark:summary_build_profile_mismatch:{}:{}:{}",
                 workload.workload.id(),
                 workload.baseline_raft_build_profile,
-                workload.rustraft_build_profile
+                workload.matrixraft_build_profile
             ));
         }
-        if let (Some(baseline_raft_binary_path), Some(rustraft_binary_path)) = (
+        if let (Some(baseline_raft_binary_path), Some(matrixraft_binary_path)) = (
             workload.baseline_raft_binary_path.as_deref(),
-            workload.rustraft_binary_path.as_deref(),
+            workload.matrixraft_binary_path.as_deref(),
         ) {
             if !baseline_raft_binary_path.is_empty()
-                && baseline_raft_binary_path == rustraft_binary_path
+                && baseline_raft_binary_path == matrixraft_binary_path
             {
                 blockers.push(format!(
                     "benchmark:summary_binary_path_collision:{}:{}",
@@ -1767,13 +1767,13 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 workload.baseline_raft_build_profile
             ));
         }
-        if !workload.rustraft_build_profile.is_empty()
-            && workload.rustraft_build_profile != "release"
+        if !workload.matrixraft_build_profile.is_empty()
+            && workload.matrixraft_build_profile != "release"
         {
             blockers.push(format!(
                 "benchmark:summary_rustraft_build_profile_not_release:{}:{}",
                 workload.workload.id(),
-                workload.rustraft_build_profile
+                workload.matrixraft_build_profile
             ));
         }
         if workload.baseline_raft_harness_kind
@@ -1785,11 +1785,11 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 workload.baseline_raft_harness_kind.id()
             ));
         }
-        if workload.rustraft_harness_kind != RustRaftBenchmarkHarnessKind::RustRaftRuntime {
+        if workload.matrixraft_harness_kind != RustRaftBenchmarkHarnessKind::RustRaftRuntime {
             blockers.push(format!(
                 "benchmark:summary_rustraft_runtime_harness_missing:{}:{}",
                 workload.workload.id(),
-                workload.rustraft_harness_kind.id()
+                workload.matrixraft_harness_kind.id()
             ));
         }
         if workload.node_count != summary.options.node_count {
@@ -1808,11 +1808,11 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 summary.options.node_count
             ));
         }
-        if workload.rustraft_node_count != summary.options.node_count {
+        if workload.matrixraft_node_count != summary.options.node_count {
             blockers.push(format!(
                 "benchmark:summary_rustraft_node_count_mismatch:{}:{}:{}",
                 workload.workload.id(),
-                workload.rustraft_node_count,
+                workload.matrixraft_node_count,
                 summary.options.node_count
             ));
         }
@@ -1825,11 +1825,11 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 summary.options.iterations_per_workload
             ));
         }
-        if workload.rustraft_iterations_per_workload != summary.options.iterations_per_workload {
+        if workload.matrixraft_iterations_per_workload != summary.options.iterations_per_workload {
             blockers.push(format!(
                 "benchmark:summary_rustraft_iterations_mismatch:{}:{}:{}",
                 workload.workload.id(),
-                workload.rustraft_iterations_per_workload,
+                workload.matrixraft_iterations_per_workload,
                 summary.options.iterations_per_workload
             ));
         }
@@ -1841,11 +1841,11 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 summary.options.batch_size
             ));
         }
-        if workload.rustraft_batch_size != summary.options.batch_size {
+        if workload.matrixraft_batch_size != summary.options.batch_size {
             blockers.push(format!(
                 "benchmark:summary_rustraft_batch_size_mismatch:{}:{}:{}",
                 workload.workload.id(),
-                workload.rustraft_batch_size,
+                workload.matrixraft_batch_size,
                 summary.options.batch_size
             ));
         }
@@ -1857,11 +1857,11 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 summary.options.payload_size_bytes
             ));
         }
-        if workload.rustraft_payload_size_bytes != summary.options.payload_size_bytes {
+        if workload.matrixraft_payload_size_bytes != summary.options.payload_size_bytes {
             blockers.push(format!(
                 "benchmark:summary_rustraft_payload_size_mismatch:{}:{}:{}",
                 workload.workload.id(),
-                workload.rustraft_payload_size_bytes,
+                workload.matrixraft_payload_size_bytes,
                 summary.options.payload_size_bytes
             ));
         }
@@ -1873,11 +1873,11 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 summary.options.iterations_per_workload
             ));
         }
-        if workload.rustraft_timed_iteration_count != summary.options.iterations_per_workload {
+        if workload.matrixraft_timed_iteration_count != summary.options.iterations_per_workload {
             blockers.push(format!(
                 "benchmark:summary_rustraft_timed_iteration_count_mismatch:{}:{}:{}",
                 workload.workload.id(),
-                workload.rustraft_timed_iteration_count,
+                workload.matrixraft_timed_iteration_count,
                 summary.options.iterations_per_workload
             ));
         }
@@ -1893,13 +1893,13 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 expected_operations_per_timed_iteration
             ));
         }
-        if workload.rustraft_operations_per_timed_iteration
+        if workload.matrixraft_operations_per_timed_iteration
             != expected_operations_per_timed_iteration
         {
             blockers.push(format!(
                 "benchmark:summary_rustraft_operations_per_timed_iteration_mismatch:{}:{}:{}",
                 workload.workload.id(),
-                workload.rustraft_operations_per_timed_iteration,
+                workload.matrixraft_operations_per_timed_iteration,
                 expected_operations_per_timed_iteration
             ));
         }
@@ -1909,7 +1909,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 workload.workload.id()
             ));
         }
-        if workload.rustraft_total_duration_micros == 0 {
+        if workload.matrixraft_total_duration_micros == 0 {
             blockers.push(format!(
                 "benchmark:summary_rustraft_total_duration_zero:{}",
                 workload.workload.id()
@@ -1924,15 +1924,15 @@ pub fn rustraft_assert_production_baseline_raft_summary(
                 expected_operation_count
             ));
         }
-        if workload.rustraft_operation_count != expected_operation_count {
+        if workload.matrixraft_operation_count != expected_operation_count {
             blockers.push(format!(
                 "benchmark:summary_rustraft_operation_count_mismatch:{}:{}:{}",
                 workload.workload.id(),
-                workload.rustraft_operation_count,
+                workload.matrixraft_operation_count,
                 expected_operation_count
             ));
         }
-        if workload.baseline_raft_operation_count == 0 || workload.rustraft_operation_count == 0 {
+        if workload.baseline_raft_operation_count == 0 || workload.matrixraft_operation_count == 0 {
             blockers.push(format!(
                 "benchmark:summary_zero_operations:{}",
                 workload.workload.id()
@@ -1951,12 +1951,12 @@ pub fn rustraft_assert_production_baseline_raft_summary(
         blockers.extend(summary_sample_metric_blockers(
             "rustraft",
             workload.workload,
-            workload.rustraft_p50_latency_micros,
-            workload.rustraft_p99_latency_micros,
-            workload.rustraft_throughput_ops_per_sec,
-            workload.rustraft_operation_count,
-            workload.rustraft_timed_iteration_count,
-            workload.rustraft_total_duration_micros,
+            workload.matrixraft_p50_latency_micros,
+            workload.matrixraft_p99_latency_micros,
+            workload.matrixraft_throughput_ops_per_sec,
+            workload.matrixraft_operation_count,
+            workload.matrixraft_timed_iteration_count,
+            workload.matrixraft_total_duration_micros,
         ));
         push_workload_summary_ratio_finite_blocker(
             &mut blockers,
@@ -1964,7 +1964,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
             "p50",
             workload.p50_ratio,
             ratio(
-                workload.rustraft_p50_latency_micros as f64,
+                workload.matrixraft_p50_latency_micros as f64,
                 workload.baseline_raft_p50_latency_micros as f64,
             ),
         );
@@ -1974,7 +1974,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
             "p99",
             workload.p99_ratio,
             ratio(
-                workload.rustraft_p99_latency_micros as f64,
+                workload.matrixraft_p99_latency_micros as f64,
                 workload.baseline_raft_p99_latency_micros as f64,
             ),
         );
@@ -1984,7 +1984,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
             "throughput",
             workload.throughput_ratio,
             ratio(
-                workload.rustraft_throughput_ops_per_sec,
+                workload.matrixraft_throughput_ops_per_sec,
                 workload.baseline_raft_throughput_ops_per_sec,
             ),
         );
@@ -1994,7 +1994,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
             "p50",
             workload.p50_ratio,
             ratio(
-                workload.rustraft_p50_latency_micros as f64,
+                workload.matrixraft_p50_latency_micros as f64,
                 workload.baseline_raft_p50_latency_micros as f64,
             ),
         );
@@ -2004,7 +2004,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
             "p99",
             workload.p99_ratio,
             ratio(
-                workload.rustraft_p99_latency_micros as f64,
+                workload.matrixraft_p99_latency_micros as f64,
                 workload.baseline_raft_p99_latency_micros as f64,
             ),
         );
@@ -2014,7 +2014,7 @@ pub fn rustraft_assert_production_baseline_raft_summary(
             "throughput",
             workload.throughput_ratio,
             ratio(
-                workload.rustraft_throughput_ops_per_sec,
+                workload.matrixraft_throughput_ops_per_sec,
                 workload.baseline_raft_throughput_ops_per_sec,
             ),
         );
@@ -2061,18 +2061,18 @@ pub fn rustraft_assert_production_baseline_raft_summary(
     }
 }
 
-pub fn rustraft_baseline_raft_benchmark_evidence_from_artifacts(
+pub fn matrixraft_baseline_raft_benchmark_evidence_from_artifacts(
     report: &RustRaftBenchmarkReport,
     summary: &RustRaftBenchmarkFailureSummary,
 ) -> Result<RustRaftBaselineRaftBenchmarkEvidence, String> {
-    let expected = rustraft_baseline_raft_benchmark_failure_summary(report);
+    let expected = matrixraft_baseline_raft_benchmark_failure_summary(report);
     if summary != &expected {
         return Err("benchmark:summary_artifact_mismatch".to_string());
     }
-    Ok(rustraft_baseline_raft_benchmark_evidence(report))
+    Ok(matrixraft_baseline_raft_benchmark_evidence(report))
 }
 
-pub fn rustraft_baseline_raft_benchmark_evidence_from_summary(
+pub fn matrixraft_baseline_raft_benchmark_evidence_from_summary(
     summary: &RustRaftBenchmarkFailureSummary,
 ) -> RustRaftBaselineRaftBenchmarkEvidence {
     let has_required_workloads = benchmark_summary_has_required_workload_set(summary);
@@ -2082,23 +2082,23 @@ pub fn rustraft_baseline_raft_benchmark_evidence_from_summary(
                 workload.baseline_raft_engine_source
                     == RustRaftBenchmarkEngineSource::RealBaselineRaft
             }),
-        rustraft_runtime: has_required_workloads
+        matrixraft_runtime: has_required_workloads
             && summary.workloads.iter().all(|workload| {
-                workload.rustraft_engine_source == RustRaftBenchmarkEngineSource::RustRaftRuntime
+                workload.matrixraft_engine_source == RustRaftBenchmarkEngineSource::RustRaftRuntime
             }),
         baseline_raft_reference: has_required_workloads
             && summary.workloads.iter().all(|workload| {
                 workload.baseline_raft_implementation
                     == RustRaftBenchmarkImplementation::BaselineRaft
             }),
-        rustraft_rust_candidate: has_required_workloads
+        matrixraft_rust_candidate: has_required_workloads
             && summary.workloads.iter().all(|workload| {
-                workload.rustraft_implementation == RustRaftBenchmarkImplementation::RustRaftRust
+                workload.matrixraft_implementation == RustRaftBenchmarkImplementation::RustRaftRust
             }),
         correctness_passed: has_required_workloads
             && summary.correctness_blocker_count == 0
             && summary.workloads.iter().all(|workload| {
-                workload.baseline_raft_correctness_passed && workload.rustraft_correctness_passed
+                workload.baseline_raft_correctness_passed && workload.matrixraft_correctness_passed
             }),
         performance_within_threshold: has_required_workloads
             && summary.performance_blocker_count == 0
@@ -2108,7 +2108,7 @@ pub fn rustraft_baseline_raft_benchmark_evidence_from_summary(
             .iter()
             .map(|workload| workload.workload.id().to_string())
             .collect(),
-        blockers: rustraft_baseline_raft_summary_blockers(summary),
+        blockers: matrixraft_baseline_raft_summary_blockers(summary),
         missing_baseline_raft_binaries: summary_blockers_with_prefix(
             summary,
             "benchmark:summary_missing_baseline_raft",
@@ -2128,10 +2128,10 @@ pub fn rustraft_baseline_raft_benchmark_evidence_from_summary(
     }
 }
 
-fn rustraft_baseline_raft_summary_blockers(
+fn matrixraft_baseline_raft_summary_blockers(
     summary: &RustRaftBenchmarkFailureSummary,
 ) -> Vec<String> {
-    match rustraft_assert_production_baseline_raft_summary(summary) {
+    match matrixraft_assert_production_baseline_raft_summary(summary) {
         Ok(()) => Vec::new(),
         Err(error) => error
             .split("; ")
@@ -2145,16 +2145,16 @@ fn summary_blockers_with_prefix(
     summary: &RustRaftBenchmarkFailureSummary,
     prefix: &str,
 ) -> Vec<String> {
-    rustraft_baseline_raft_summary_blockers(summary)
+    matrixraft_baseline_raft_summary_blockers(summary)
         .into_iter()
         .filter(|blocker| blocker.starts_with(prefix))
         .collect()
 }
 
-pub fn rustraft_baseline_raft_benchmark_failure_summary(
+pub fn matrixraft_baseline_raft_benchmark_failure_summary(
     report: &RustRaftBenchmarkReport,
 ) -> RustRaftBenchmarkFailureSummary {
-    let evidence = rustraft_baseline_raft_benchmark_evidence(report);
+    let evidence = matrixraft_baseline_raft_benchmark_evidence(report);
     let classified = evidence
         .missing_baseline_raft_binaries
         .iter()
@@ -2188,15 +2188,15 @@ pub fn rustraft_baseline_raft_benchmark_failure_summary(
         0.0
     };
     RustRaftBenchmarkFailureSummary {
-        schema: RUSTRAFT_BENCHMARK_SUMMARY_SCHEMA.to_string(),
+        schema: MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA.to_string(),
         generated_at_unix_ms: report.generated_at_unix_ms,
         benchmark_run_id: report.benchmark_run_id.clone(),
         environment_fingerprint: report.environment_fingerprint.clone(),
         passed: report.passed,
         production_evidence_ready: evidence.real_baseline_raft
-            && evidence.rustraft_runtime
+            && evidence.matrixraft_runtime
             && evidence.baseline_raft_reference
-            && evidence.rustraft_rust_candidate
+            && evidence.matrixraft_rust_candidate
             && evidence.correctness_passed
             && evidence.performance_within_threshold
             && evidence.blockers.is_empty(),
@@ -2211,7 +2211,7 @@ pub fn rustraft_baseline_raft_benchmark_failure_summary(
         workloads: report
             .comparisons
             .iter()
-            .map(rustraft_baseline_raft_workload_summary)
+            .map(matrixraft_baseline_raft_workload_summary)
             .collect(),
         missing_baseline_raft_binary_count: evidence.missing_baseline_raft_binaries.len(),
         unsupported_workload_count: evidence.unsupported_workloads.len(),
@@ -2225,53 +2225,55 @@ pub fn rustraft_baseline_raft_benchmark_failure_summary(
     }
 }
 
-fn rustraft_baseline_raft_workload_summary(
+fn matrixraft_baseline_raft_workload_summary(
     comparison: &RustRaftBenchmarkComparison,
 ) -> RustRaftBenchmarkWorkloadSummary {
     RustRaftBenchmarkWorkloadSummary {
         workload: comparison.workload,
         passed: comparison.passed,
         baseline_raft_correctness_passed: comparison.baseline_raft.correctness_passed,
-        rustraft_correctness_passed: comparison.rustraft.correctness_passed,
+        matrixraft_correctness_passed: comparison.rustraft.correctness_passed,
         baseline_raft_engine_source: comparison.baseline_raft.engine_source,
-        rustraft_engine_source: comparison.rustraft.engine_source,
+        matrixraft_engine_source: comparison.rustraft.engine_source,
         baseline_raft_benchmark_run_id: comparison.baseline_raft.benchmark_run_id.clone(),
-        rustraft_benchmark_run_id: comparison.rustraft.benchmark_run_id.clone(),
+        matrixraft_benchmark_run_id: comparison.rustraft.benchmark_run_id.clone(),
         baseline_raft_implementation: comparison.baseline_raft.implementation,
-        rustraft_implementation: comparison.rustraft.implementation,
+        matrixraft_implementation: comparison.rustraft.implementation,
         baseline_raft_binary_path: comparison.baseline_raft.binary_path.clone(),
-        rustraft_binary_path: comparison.rustraft.binary_path.clone(),
+        matrixraft_binary_path: comparison.rustraft.binary_path.clone(),
         baseline_raft_git_revision: comparison.baseline_raft.git_revision.clone(),
-        rustraft_git_revision: comparison.rustraft.git_revision.clone(),
+        matrixraft_git_revision: comparison.rustraft.git_revision.clone(),
         baseline_raft_build_profile: comparison.baseline_raft.build_profile.clone(),
-        rustraft_build_profile: comparison.rustraft.build_profile.clone(),
+        matrixraft_build_profile: comparison.rustraft.build_profile.clone(),
         baseline_raft_harness_kind: comparison.baseline_raft.harness_kind,
-        rustraft_harness_kind: comparison.rustraft.harness_kind,
+        matrixraft_harness_kind: comparison.rustraft.harness_kind,
         node_count: comparison.baseline_raft.node_count,
         baseline_raft_node_count: comparison.baseline_raft.node_count,
-        rustraft_node_count: comparison.rustraft.node_count,
+        matrixraft_node_count: comparison.rustraft.node_count,
         baseline_raft_iterations_per_workload: comparison.baseline_raft.iterations_per_workload,
-        rustraft_iterations_per_workload: comparison.rustraft.iterations_per_workload,
+        matrixraft_iterations_per_workload: comparison.rustraft.iterations_per_workload,
         baseline_raft_batch_size: comparison.baseline_raft.batch_size,
-        rustraft_batch_size: comparison.rustraft.batch_size,
+        matrixraft_batch_size: comparison.rustraft.batch_size,
         baseline_raft_payload_size_bytes: comparison.baseline_raft.payload_size_bytes,
-        rustraft_payload_size_bytes: comparison.rustraft.payload_size_bytes,
+        matrixraft_payload_size_bytes: comparison.rustraft.payload_size_bytes,
         baseline_raft_timed_iteration_count: comparison.baseline_raft.timed_iteration_count,
-        rustraft_timed_iteration_count: comparison.rustraft.timed_iteration_count,
+        matrixraft_timed_iteration_count: comparison.rustraft.timed_iteration_count,
         baseline_raft_operations_per_timed_iteration: comparison
             .baseline_raft
             .operations_per_timed_iteration,
-        rustraft_operations_per_timed_iteration: comparison.rustraft.operations_per_timed_iteration,
+        matrixraft_operations_per_timed_iteration: comparison
+            .rustraft
+            .operations_per_timed_iteration,
         baseline_raft_total_duration_micros: comparison.baseline_raft.total_duration_micros,
-        rustraft_total_duration_micros: comparison.rustraft.total_duration_micros,
+        matrixraft_total_duration_micros: comparison.rustraft.total_duration_micros,
         baseline_raft_operation_count: comparison.baseline_raft.operation_count,
-        rustraft_operation_count: comparison.rustraft.operation_count,
+        matrixraft_operation_count: comparison.rustraft.operation_count,
         baseline_raft_p50_latency_micros: comparison.baseline_raft.p50_latency_micros,
-        rustraft_p50_latency_micros: comparison.rustraft.p50_latency_micros,
+        matrixraft_p50_latency_micros: comparison.rustraft.p50_latency_micros,
         baseline_raft_p99_latency_micros: comparison.baseline_raft.p99_latency_micros,
-        rustraft_p99_latency_micros: comparison.rustraft.p99_latency_micros,
+        matrixraft_p99_latency_micros: comparison.rustraft.p99_latency_micros,
         baseline_raft_throughput_ops_per_sec: comparison.baseline_raft.throughput_ops_per_sec,
-        rustraft_throughput_ops_per_sec: comparison.rustraft.throughput_ops_per_sec,
+        matrixraft_throughput_ops_per_sec: comparison.rustraft.throughput_ops_per_sec,
         p50_ratio: comparison.p50_ratio,
         p99_ratio: comparison.p99_ratio,
         throughput_ratio: comparison.throughput_ratio,
@@ -2283,7 +2285,7 @@ fn rustraft_baseline_raft_workload_summary(
     }
 }
 
-pub fn rustraft_baseline_raft_benchmark_evidence(
+pub fn matrixraft_baseline_raft_benchmark_evidence(
     report: &RustRaftBenchmarkReport,
 ) -> RustRaftBaselineRaftBenchmarkEvidence {
     let mut blockers = Vec::new();
@@ -2298,7 +2300,7 @@ pub fn rustraft_baseline_raft_benchmark_evidence(
             comparison.baseline_raft.engine_source
                 == RustRaftBenchmarkEngineSource::RealBaselineRaft
         });
-    let rustraft_runtime = has_required_workloads
+    let matrixraft_runtime = has_required_workloads
         && report.comparisons.iter().all(|comparison| {
             comparison.rustraft.engine_source == RustRaftBenchmarkEngineSource::RustRaftRuntime
         });
@@ -2306,7 +2308,7 @@ pub fn rustraft_baseline_raft_benchmark_evidence(
         && report.comparisons.iter().all(|comparison| {
             comparison.baseline_raft.implementation == RustRaftBenchmarkImplementation::BaselineRaft
         });
-    let rustraft_rust_candidate = has_required_workloads
+    let matrixraft_rust_candidate = has_required_workloads
         && report.comparisons.iter().all(|comparison| {
             comparison.rustraft.implementation == RustRaftBenchmarkImplementation::RustRaftRust
         });
@@ -2481,14 +2483,14 @@ pub fn rustraft_baseline_raft_benchmark_evidence(
         );
         blockers.push(blocker);
     }
-    if !rustraft_runtime {
+    if !matrixraft_runtime {
         blockers.push("benchmark:rustraft_runtime_missing".to_string());
     }
     RustRaftBaselineRaftBenchmarkEvidence {
         real_baseline_raft,
-        rustraft_runtime,
+        matrixraft_runtime,
         baseline_raft_reference,
-        rustraft_rust_candidate,
+        matrixraft_rust_candidate,
         correctness_passed,
         performance_within_threshold,
         workloads,
@@ -2501,7 +2503,7 @@ pub fn rustraft_baseline_raft_benchmark_evidence(
 }
 
 fn benchmark_report_has_required_workload_set(report: &RustRaftBenchmarkReport) -> bool {
-    let required_workloads = rustraft_baseline_raft_benchmark_required_workloads()
+    let required_workloads = matrixraft_baseline_raft_benchmark_required_workloads()
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
     let observed_workloads = report
@@ -2513,7 +2515,7 @@ fn benchmark_report_has_required_workload_set(report: &RustRaftBenchmarkReport) 
 }
 
 fn benchmark_summary_has_required_workload_set(summary: &RustRaftBenchmarkFailureSummary) -> bool {
-    let required_workloads = rustraft_baseline_raft_benchmark_required_workloads()
+    let required_workloads = matrixraft_baseline_raft_benchmark_required_workloads()
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
     let observed_workloads = summary
@@ -2688,12 +2690,12 @@ fn benchmark_sample_pair_provenance_blockers(
             baseline_raft.build_profile, rustraft.build_profile
         ));
     }
-    if let (Some(baseline_raft_binary_path), Some(rustraft_binary_path)) = (
+    if let (Some(baseline_raft_binary_path), Some(matrixraft_binary_path)) = (
         baseline_raft.binary_path.as_deref(),
         rustraft.binary_path.as_deref(),
     ) {
         if !baseline_raft_binary_path.is_empty()
-            && baseline_raft_binary_path == rustraft_binary_path
+            && baseline_raft_binary_path == matrixraft_binary_path
         {
             blockers.push(format!(
                 "benchmark:binary_path_collision:{baseline_raft_binary_path}"
@@ -3127,7 +3129,7 @@ fn benchmark_now_unix_ms() -> u64 {
 }
 
 fn benchmark_run_id() -> String {
-    let sequence = RUSTRAFT_BENCHMARK_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let sequence = MATRIXRAFT_BENCHMARK_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!(
         "rustraft-baseline-raft-parity-{}-pid-{}-seq-{}",
         benchmark_now_unix_ms(),
@@ -3151,10 +3153,10 @@ fn benchmark_artifact_timestamp_blockers(label: &str, generated_at_unix_ms: u64)
         return vec![format!("benchmark:{label}_generated_at_missing")];
     }
     let now = benchmark_now_unix_ms();
-    if generated_at_unix_ms > now.saturating_add(RUSTRAFT_BENCHMARK_MAX_FUTURE_SKEW_MS) {
+    if generated_at_unix_ms > now.saturating_add(MATRIXRAFT_BENCHMARK_MAX_FUTURE_SKEW_MS) {
         return vec![format!("benchmark:{label}_generated_at_in_future")];
     }
-    if now.saturating_sub(generated_at_unix_ms) > RUSTRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS {
+    if now.saturating_sub(generated_at_unix_ms) > MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS {
         return vec![format!("benchmark:{label}_generated_at_stale")];
     }
     Vec::new()
@@ -3182,10 +3184,10 @@ fn benchmark_environment_release_blockers(
 
 fn benchmark_options_blockers(report: &RustRaftBenchmarkReport) -> Vec<String> {
     let mut blockers = Vec::new();
-    if report.schema != RUSTRAFT_BENCHMARK_REPORT_SCHEMA {
+    if report.schema != MATRIXRAFT_BENCHMARK_REPORT_SCHEMA {
         blockers.push(format!(
             "benchmark:report_schema_mismatch:{}:{}",
-            report.schema, RUSTRAFT_BENCHMARK_REPORT_SCHEMA
+            report.schema, MATRIXRAFT_BENCHMARK_REPORT_SCHEMA
         ));
     }
     blockers.extend(benchmark_artifact_timestamp_blockers(
@@ -3230,7 +3232,7 @@ fn benchmark_options_blockers(report: &RustRaftBenchmarkReport) -> Vec<String> {
         ));
     }
     blockers.extend(benchmark_production_option_blockers(&report.options));
-    let required_workload_manifest = rustraft_baseline_raft_benchmark_required_workloads();
+    let required_workload_manifest = matrixraft_baseline_raft_benchmark_required_workloads();
     if report.required_workloads != required_workload_manifest {
         blockers.push(format!(
             "benchmark:report_required_workloads_mismatch:declared_{}_required_{}",
@@ -3318,42 +3320,43 @@ fn benchmark_options_blockers(report: &RustRaftBenchmarkReport) -> Vec<String> {
 
 fn benchmark_production_option_blockers(options: &RustRaftBenchmarkOptions) -> Vec<String> {
     let mut blockers = Vec::new();
-    if options.node_count < RUSTRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT {
+    if options.node_count < MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT {
         blockers.push(format!(
             "benchmark:node_count_below_production_scale:{}:{}",
-            options.node_count, RUSTRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT
+            options.node_count, MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT
         ));
     }
     if options.iterations_per_workload == 0 {
         blockers.push("benchmark:invalid_iterations_per_workload:0".to_string());
     } else if options.iterations_per_workload
-        < RUSTRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD
+        < MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD
     {
         blockers.push(format!(
             "benchmark:iterations_per_workload_below_production_min:{}:{}",
             options.iterations_per_workload,
-            RUSTRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD
+            MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD
         ));
     }
     if options.batch_size == 0 {
         blockers.push("benchmark:invalid_batch_size:0".to_string());
-    } else if options.batch_size < RUSTRAFT_BENCHMARK_MIN_PRODUCTION_BATCH_SIZE {
+    } else if options.batch_size < MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_BATCH_SIZE {
         blockers.push(format!(
             "benchmark:batch_size_below_production_min:{}:{}",
-            options.batch_size, RUSTRAFT_BENCHMARK_MIN_PRODUCTION_BATCH_SIZE
+            options.batch_size, MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_BATCH_SIZE
         ));
     }
     if options.payload_size_bytes == 0 {
         blockers.push("benchmark:invalid_payload_size_bytes:0".to_string());
-    } else if options.payload_size_bytes < RUSTRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES {
+    } else if options.payload_size_bytes < MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES {
         blockers.push(format!(
             "benchmark:payload_size_below_production_min:{}:{}",
-            options.payload_size_bytes, RUSTRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES
+            options.payload_size_bytes, MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES
         ));
     }
     if !options.pass_tolerance_percent.is_finite()
         || options.pass_tolerance_percent < 0.0
-        || options.pass_tolerance_percent > RUSTRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT
+        || options.pass_tolerance_percent
+            > MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT
     {
         blockers.push(format!(
             "benchmark:invalid_pass_tolerance_percent:{:.3}",
@@ -3363,7 +3366,7 @@ fn benchmark_production_option_blockers(options: &RustRaftBenchmarkOptions) -> V
     blockers
 }
 
-pub fn rustraft_validate_production_baseline_raft_benchmark_options(
+pub fn matrixraft_validate_production_baseline_raft_benchmark_options(
     options: &RustRaftBenchmarkOptions,
 ) -> Result<(), String> {
     let mut blockers = benchmark_production_option_blockers(options);
@@ -3586,7 +3589,7 @@ fn compare_samples(
     tolerance_percent: f64,
 ) -> RustRaftBenchmarkComparison {
     let tolerance_valid = tolerance_percent.is_finite()
-        && (0.0..=RUSTRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT)
+        && (0.0..=MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT)
             .contains(&tolerance_percent);
     let max_latency_ratio = 1.0 + tolerance_percent / 100.0;
     let min_throughput_ratio = 1.0 - tolerance_percent / 100.0;
@@ -4064,10 +4067,10 @@ fn same_machine_correctness_passes(
     workload: RustRaftBenchmarkWorkload,
     options: &RustRaftBenchmarkOptions,
 ) -> bool {
-    let production_scale = options.node_count >= RUSTRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT;
+    let production_scale = options.node_count >= MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT;
     let iterations_present = options.iterations_per_workload > 0;
     let payload_present =
-        options.payload_size_bytes >= RUSTRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES;
+        options.payload_size_bytes >= MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES;
     let batch_valid = !matches!(
         workload,
         RustRaftBenchmarkWorkload::BatchedWrites | RustRaftBenchmarkWorkload::ReplicationBatching

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::thread;
 
-use matrixraft::{RustRaftUniqueIdGenerator, RUSTRAFT_UNIQUE_ID_COUNTER_MASK};
+use matrixraft::{RustRaftUniqueIdGenerator, MATRIXRAFT_UNIQUE_ID_COUNTER_MASK};
 
 #[test]
 fn unique_id_generator_matches_matrixraft_packing() {
@@ -24,7 +24,7 @@ fn unique_id_generator_matches_matrixraft_packing() {
 }
 
 #[test]
-fn unique_id_generator_masks_member_and_timestamp_like_matrixraft() {
+fn unique_id_generator_masks_member_and_timestamp() {
     let generator = RustRaftUniqueIdGenerator::new(0x1_0001, 0x1_0000_0000_0002);
     let decoded = RustRaftUniqueIdGenerator::decode(generator.next());
 
@@ -34,11 +34,11 @@ fn unique_id_generator_masks_member_and_timestamp_like_matrixraft() {
 }
 
 #[test]
-fn unique_id_counter_rolls_into_timestamp_bits_like_matrixraft() {
+fn unique_id_counter_rolls_into_timestamp_bits() {
     let generator = RustRaftUniqueIdGenerator::new(7, 8);
 
     let first = generator.next();
-    for _ in 0..RUSTRAFT_UNIQUE_ID_COUNTER_MASK {
+    for _ in 0..MATRIXRAFT_UNIQUE_ID_COUNTER_MASK {
         generator.next();
     }
     let rolled = RustRaftUniqueIdGenerator::decode(generator.next());

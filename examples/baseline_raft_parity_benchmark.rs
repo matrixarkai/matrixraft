@@ -2,11 +2,12 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::benchmark::{
-    rustraft_assert_production_baseline_raft_parity,
-    rustraft_baseline_raft_benchmark_failure_summary, rustraft_find_baseline_raft_harness,
-    rustraft_run_baseline_raft_parity_benchmark,
-    rustraft_validate_production_baseline_raft_benchmark_options, RustRaftBenchmarkFailureSummary,
-    RustRaftBenchmarkOptions, RustRaftExternalBaselineRaftRunner, RustRaftRuntimeBenchmarkRunner,
+    matrixraft_assert_production_baseline_raft_parity,
+    matrixraft_baseline_raft_benchmark_failure_summary, matrixraft_find_baseline_raft_harness,
+    matrixraft_run_baseline_raft_parity_benchmark,
+    matrixraft_validate_production_baseline_raft_benchmark_options,
+    RustRaftBenchmarkFailureSummary, RustRaftBenchmarkOptions, RustRaftExternalBaselineRaftRunner,
+    RustRaftRuntimeBenchmarkRunner,
 };
 use std::fs::{self, File};
 use std::io::Write;
@@ -48,7 +49,8 @@ fn main() {
             std::process::exit(2);
         });
     }
-    if let Err(blockers) = rustraft_validate_production_baseline_raft_benchmark_options(&options) {
+    if let Err(blockers) = matrixraft_validate_production_baseline_raft_benchmark_options(&options)
+    {
         eprintln!("BaselineRaft parity benchmark invalid production options: {blockers}");
         std::process::exit(2);
     }
@@ -61,7 +63,7 @@ fn main() {
         .or_else(|| {
             baseline_raft_root
                 .as_ref()
-                .and_then(|root| rustraft_find_baseline_raft_harness(root).ok())
+                .and_then(|root| matrixraft_find_baseline_raft_harness(root).ok())
         });
     let Some(baseline_raft_bin) = baseline_raft_bin else {
         eprintln!(
@@ -82,8 +84,8 @@ fn main() {
     };
     let mut rustraft = RustRaftRuntimeBenchmarkRunner::new(build_profile);
     let report =
-        rustraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
-    let summary = rustraft_baseline_raft_benchmark_failure_summary(&report);
+        matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
+    let summary = matrixraft_baseline_raft_benchmark_failure_summary(&report);
 
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
     if let Ok(summary_out) = std::env::var("RUSTRAFT_BENCHMARK_SUMMARY_OUT") {
@@ -94,7 +96,7 @@ fn main() {
             std::process::exit(2);
         }
     }
-    if let Err(blockers) = rustraft_assert_production_baseline_raft_parity(&report) {
+    if let Err(blockers) = matrixraft_assert_production_baseline_raft_parity(&report) {
         eprintln!("BaselineRaft parity benchmark failed: {blockers}");
         eprintln!(
             "BaselineRaft parity benchmark summary: {}",

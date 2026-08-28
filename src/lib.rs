@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 // Lint configuration (the `type_complexity` / `too_many_arguments` allows and the
 // rustdoc broken-intra-doc-links deny) lives in the `[lints]` table of Cargo.toml.
-//! RustRaft is the TemporalStore-owned Raft contract and readiness library.
+//! MatrixRaft is the TemporalStore-owned Raft contract and readiness library.
 //!
 //! The crate intentionally focuses on portable consensus-facing contracts:
 //! request/response types, storage and transport traits, safety decisions,
@@ -16,17 +16,20 @@
 //! Typical integration flow:
 //!
 //! 1. Build a [`RustRaftReadinessSnapshot`] from the serving runtime.
-//! 2. Call [`rustraft_parity_report`] for semantic contract readiness.
+//! 2. Call [`matrixraft_parity_report`] for semantic contract readiness.
 //! 3. Attach live runtime evidence to [`RustRaftProductionReadinessInput`].
-//! 4. Call [`rustraft_production_readiness_report`] and block production claims
+//! 4. Call [`matrixraft_production_readiness_report`] and block production claims
 //!    unless the report is ready.
 //!
 //! The public API is OpenRaft-free by design. Compatibility with existing
-//! TemporalStore deployment semantics is expressed through RustRaft-owned types
-//! and tests instead of upstream-specific type aliases.
-//! BaselineRaft remains the feature and performance reference; RustRaft may expose
-//! more idiomatic Rust traits and error types as long as TemporalStore consumes
-//! it through a stable adapter boundary.
+//! TemporalStore deployment semantics is expressed through MatrixRaft-owned
+//! types and tests instead of upstream-specific type aliases. MatrixRaft is free
+//! to expose idiomatic Rust traits and error types as long as TemporalStore
+//! consumes it through a stable adapter boundary.
+//!
+//! Many public types still carry a `RustRaft` prefix from an earlier name for
+//! this crate. Renaming them is a separate change: seven of them would collide
+//! with distinct types of the same name in the compatibility facade.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -72,34 +75,35 @@ pub mod unique_id;
 pub mod wal;
 
 pub use benchmark::{
-    rustraft_production_readiness_input_with_benchmark_artifacts,
-    rustraft_production_readiness_input_with_benchmark_summary,
-    rustraft_production_readiness_report_with_benchmark_artifacts,
+    matrixraft_production_readiness_input_with_benchmark_artifacts,
+    matrixraft_production_readiness_input_with_benchmark_summary,
+    matrixraft_production_readiness_report_with_benchmark_artifacts,
     RustRaftBaselineRaftBenchmarkEvidence,
 };
 pub use channel_selector::{
     RustRaftChannelSelection, RustRaftChannelSelector, RustRaftChannelSelectorPolicy,
-    RustRaftMailChannel, RUSTRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
+    RustRaftMailChannel, MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
 };
 pub use checksum::{
-    rustraft_checksum_file_list, rustraft_crc32c, rustraft_murmur32, RustRaftChecksumContext,
+    matrixraft_checksum_file_list, matrixraft_crc32c, matrixraft_murmur32, RustRaftChecksumContext,
     RustRaftChecksumResult, RustRaftChecksumType, RustRaftFileChecksumContext,
     RustRaftFileChecksumResult,
 };
 pub use config::{RaftConfig, RaftConfigError, RustRaftConfig};
-pub use durability::rustraft_durability_parity_report;
+pub use durability::matrixraft_durability_parity_report;
 pub use fsm::{
-    matrixraft_flexible_apply_with_store, matrixraft_flexible_apply_with_store_report,
-    rustraft_apply_entry, rustraft_fsm_entry_kind, MatrixRaftBatchId, MatrixRaftCheckpoint,
-    MatrixRaftConfigurationApplied, MatrixRaftFlexibleApplyReport, MatrixRaftFsm,
-    MatrixRaftFsmEntry, MatrixRaftFsmEntryKind, MatrixRaftFsmIterator, MatrixRaftFsmRuntimeBinding,
-    MatrixRaftFsmRuntimeHookReport, MatrixRaftStoreFsm, RaftApply, RaftFsmAdapter,
-    RaftFsmApplyEntryKind, RaftFsmApplyOutcome, RaftFsmBatchApplyReport, RaftFsmCheckpoint,
-    RaftFsmReplayReport, RaftStateMachine, RustRaftStateMachine, MATRIXRAFT_NON_BATCH,
+    matrixraft_apply_entry, matrixraft_flexible_apply_with_store,
+    matrixraft_flexible_apply_with_store_report, matrixraft_fsm_entry_kind, MatrixRaftBatchId,
+    MatrixRaftCheckpoint, MatrixRaftConfigurationApplied, MatrixRaftFlexibleApplyReport,
+    MatrixRaftFsm, MatrixRaftFsmEntry, MatrixRaftFsmEntryKind, MatrixRaftFsmIterator,
+    MatrixRaftFsmRuntimeBinding, MatrixRaftFsmRuntimeHookReport, MatrixRaftStoreFsm, RaftApply,
+    RaftFsmAdapter, RaftFsmApplyEntryKind, RaftFsmApplyOutcome, RaftFsmBatchApplyReport,
+    RaftFsmCheckpoint, RaftFsmReplayReport, RaftStateMachine, RustRaftStateMachine,
+    MATRIXRAFT_NON_BATCH,
 };
 pub use heartbeat_merge::{
     RustRaftHeartbeatAddressResolver, RustRaftHeartbeatMergeMessage, RustRaftHeartbeatMergeStats,
-    RustRaftHeartbeatMerger, RustRaftMergedHeartbeatBatch, RUSTRAFT_HEARTBEAT_MERGE_BUCKETS,
+    RustRaftHeartbeatMerger, RustRaftMergedHeartbeatBatch, MATRIXRAFT_HEARTBEAT_MERGE_BUCKETS,
 };
 pub use lease::{
     RustRaftFollowerLease, RustRaftLeaderLease, RustRaftLeaderLeaseStatus, RustRaftLeaseEpochId,
@@ -108,27 +112,28 @@ pub use lease::{
 pub use log_buffer::{RustRaftLogBuffer, RustRaftLogBufferFlush, RustRaftLogBufferRelease};
 pub use mailbox::{
     RustRaftMailBox, RustRaftMailBoxFetchPolicy, RustRaftMailPriority,
-    RUSTRAFT_MAILBOX_MAX_TIMEOUT_MS,
+    MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS,
 };
 pub use membership::{
-    rustraft_learner_promotion_decision, rustraft_membership_readiness_report,
-    rustraft_membership_semantics_evidence_artifact, rustraft_membership_transition_missing,
-    rustraft_validate_membership_semantics_evidence_artifact, RaftLearnerAutoPromoteReport,
+    matrixraft_learner_promotion_decision, matrixraft_membership_readiness_report,
+    matrixraft_membership_semantics_evidence_artifact, matrixraft_membership_transition_missing,
+    matrixraft_validate_membership_semantics_evidence_artifact, RaftLearnerAutoPromoteReport,
     RaftLearnerAutoPromoteState, RaftLearnerCatchUpLoopReport, RaftWitnessQuorumReport,
 };
 pub use metrics::{
-    rustraft_alert_rules, rustraft_alert_rules_json, rustraft_debug_bundle_contract,
-    rustraft_debug_bundle_validation_prometheus, rustraft_debug_snapshot,
-    rustraft_debug_snapshot_json, rustraft_debug_snapshot_metadata_prometheus,
-    rustraft_diagnostic_log_prometheus, rustraft_grafana_dashboard,
-    rustraft_grafana_dashboard_json, rustraft_metric_names, rustraft_observability_provisioning,
-    rustraft_observability_provisioning_json, rustraft_observability_provisioning_runbook_steps,
-    rustraft_observability_provisioning_validation_prometheus,
-    rustraft_operator_runbook_prometheus, rustraft_operator_runbook_steps,
-    rustraft_operator_triage_prometheus, rustraft_operator_triage_summary,
-    rustraft_optimization_report_prometheus, rustraft_validate_debug_snapshot,
-    rustraft_validate_debug_snapshot_json, rustraft_validate_observability_provisioning,
-    rustraft_validate_observability_provisioning_json, RustRaftAlertRule,
+    matrixraft_alert_rules, matrixraft_alert_rules_json, matrixraft_debug_bundle_contract,
+    matrixraft_debug_bundle_validation_prometheus, matrixraft_debug_snapshot,
+    matrixraft_debug_snapshot_json, matrixraft_debug_snapshot_metadata_prometheus,
+    matrixraft_diagnostic_log_prometheus, matrixraft_grafana_dashboard,
+    matrixraft_grafana_dashboard_json, matrixraft_metric_names,
+    matrixraft_observability_provisioning, matrixraft_observability_provisioning_json,
+    matrixraft_observability_provisioning_runbook_steps,
+    matrixraft_observability_provisioning_validation_prometheus,
+    matrixraft_operator_runbook_prometheus, matrixraft_operator_runbook_steps,
+    matrixraft_operator_triage_prometheus, matrixraft_operator_triage_summary,
+    matrixraft_optimization_report_prometheus, matrixraft_validate_debug_snapshot,
+    matrixraft_validate_debug_snapshot_json, matrixraft_validate_observability_provisioning,
+    matrixraft_validate_observability_provisioning_json, RustRaftAlertRule,
     RustRaftDebugBundleContract, RustRaftDebugBundleValidationReport, RustRaftDebugSnapshot,
     RustRaftGrafanaDashboard, RustRaftGrafanaPanel, RustRaftMetricNames,
     RustRaftObservabilityProvisioning, RustRaftOperatorRunbookStep, RustRaftOperatorTriageSummary,
@@ -136,18 +141,18 @@ pub use metrics::{
 };
 pub use node::{
     RustRaftConsensus, RustRaftRequestTimer, RustRaftTickAdmission, RustRaftTickBackpressure,
-    RustRaftTimerTask, RUSTRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS,
+    RustRaftTimerTask, MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS,
 };
 pub use operational_evidence::{
-    rustraft_baseline_raft_operational_evidence_bundle,
-    rustraft_validate_baseline_raft_operational_evidence_bundle,
+    matrixraft_baseline_raft_operational_evidence_bundle,
+    matrixraft_validate_baseline_raft_operational_evidence_bundle,
     RustRaftBaselineRaftOperationalEvidenceBundle,
     RustRaftBaselineRaftOperationalEvidenceBundleValidationReport,
 };
 pub use pipeline::{
-    rustraft_apply_batch_outcome_like_matrixraft, rustraft_peer_pipeline_status_from_observed,
-    rustraft_pipeline_evidence, rustraft_replication_pipeline_evidence_artifact,
-    rustraft_validate_replication_pipeline_evidence_artifact, RaftInflightAppend,
+    matrixraft_apply_batch_outcome, matrixraft_peer_pipeline_status_from_observed,
+    matrixraft_pipeline_evidence, matrixraft_replication_pipeline_evidence_artifact,
+    matrixraft_validate_replication_pipeline_evidence_artifact, RaftInflightAppend,
     RaftPeerPipelineState, RaftReplicationPipeline, RaftSnapshotTransferState,
     RustRaftApplyBatchOutcome, RustRaftApplyBatchStatus, RustRaftObservedPeerPipeline,
     RustRaftPeerPipelineStatus, RustRaftPeerProgressState, RustRaftPipelineEvidence,
@@ -159,30 +164,30 @@ pub use rate_limit::{
     RustRaftRateLimiterStats,
 };
 pub use read_safety::{
-    rustraft_append_safety_decision, rustraft_applied_index_fence_report,
-    rustraft_bounded_stale_read_report, rustraft_lease_read_eligibility_report,
-    rustraft_read_safety_decision, rustraft_read_safety_evidence_artifact,
-    rustraft_read_safety_runtime_decision, rustraft_validate_read_safety_evidence_artifact,
+    matrixraft_append_safety_decision, matrixraft_applied_index_fence_report,
+    matrixraft_bounded_stale_read_report, matrixraft_lease_read_eligibility_report,
+    matrixraft_read_safety_decision, matrixraft_read_safety_evidence_artifact,
+    matrixraft_read_safety_runtime_decision, matrixraft_validate_read_safety_evidence_artifact,
     RustRaftPendingReadIndex, RustRaftPendingReadIndexQueue, RustRaftPendingReadIndexResult,
 };
 pub use readiness::{
-    rustraft_baseline_raft_parity_matrix, rustraft_baseline_raft_parity_surface,
-    rustraft_baseline_raft_reference_policy, rustraft_benchmark_interface_names,
-    rustraft_compatibility_report_names, rustraft_embedding_examples, rustraft_open_source_surface,
-    rustraft_parity_contract, rustraft_parity_report, rustraft_parity_report_names,
-    rustraft_public_api_contract, rustraft_public_module_names, rustraft_readiness_evidence,
-    rustraft_require_production_ready, rustraft_requirements, rustraft_standalone_readiness_report,
-    rustraft_temporalstore_adapter_shape, rustraft_temporalstore_extraction_plan,
-    rustraft_validate_deployment_mode, rustraft_validate_deployment_readiness,
-    RustRaftBaselineRaftParityItem, RustRaftBaselineRaftParityStatus,
-    RustRaftBaselineRaftReferencePolicy, RustRaftDeploymentMode, RustRaftExtractionSlice,
-    RustRaftExtractionStatus, RustRaftOpenSourceSurface, RustRaftParityContract,
-    RustRaftParityReport, RustRaftProcessRolloutReadinessReport, RustRaftProductionReadinessError,
-    RustRaftProductionReadinessInput, RustRaftProductionReadinessReport, RustRaftProductionStatus,
-    RustRaftPublicApiContract, RustRaftReadinessEvidence, RustRaftReadinessSnapshot,
-    RustRaftRequirementCategory, RustRaftSemanticRequirement, RustRaftStandaloneCapability,
-    RustRaftStandaloneReadinessReport, RustRaftTemporalStoreAdapterShape,
-    RustRaftTemporalStoreExtractionPlan,
+    matrixraft_baseline_raft_parity_matrix, matrixraft_baseline_raft_parity_surface,
+    matrixraft_baseline_raft_reference_policy, matrixraft_benchmark_interface_names,
+    matrixraft_compatibility_report_names, matrixraft_embedding_examples,
+    matrixraft_open_source_surface, matrixraft_parity_contract, matrixraft_parity_report,
+    matrixraft_parity_report_names, matrixraft_public_api_contract, matrixraft_public_module_names,
+    matrixraft_readiness_evidence, matrixraft_require_production_ready, matrixraft_requirements,
+    matrixraft_standalone_readiness_report, matrixraft_temporalstore_adapter_shape,
+    matrixraft_temporalstore_extraction_plan, matrixraft_validate_deployment_mode,
+    matrixraft_validate_deployment_readiness, RustRaftBaselineRaftParityItem,
+    RustRaftBaselineRaftParityStatus, RustRaftBaselineRaftReferencePolicy, RustRaftDeploymentMode,
+    RustRaftExtractionSlice, RustRaftExtractionStatus, RustRaftOpenSourceSurface,
+    RustRaftParityContract, RustRaftParityReport, RustRaftProcessRolloutReadinessReport,
+    RustRaftProductionReadinessError, RustRaftProductionReadinessInput,
+    RustRaftProductionReadinessReport, RustRaftProductionStatus, RustRaftPublicApiContract,
+    RustRaftReadinessEvidence, RustRaftReadinessSnapshot, RustRaftRequirementCategory,
+    RustRaftSemanticRequirement, RustRaftStandaloneCapability, RustRaftStandaloneReadinessReport,
+    RustRaftTemporalStoreAdapterShape, RustRaftTemporalStoreExtractionPlan,
 };
 pub use scheduler::{
     RustRaftApplyResult, RustRaftApplySnapshotTask, RustRaftApplyTask, RustRaftFlushTask,
@@ -190,32 +195,32 @@ pub use scheduler::{
     RustRaftSchedulerTask, RustRaftStepDownSignal, RustRaftTriggerSnapshotTask,
 };
 pub use snapshot::{
-    rustraft_snapshot_lifecycle_evidence, rustraft_snapshot_lifecycle_evidence_artifact,
-    rustraft_validate_snapshot_floor_log_matching, rustraft_validate_snapshot_install,
-    rustraft_validate_snapshot_lifecycle_evidence_artifact,
-    rustraft_validate_snapshot_tail_catchup, RustRaftSnapshotLifecycleEvidence,
+    matrixraft_snapshot_lifecycle_evidence, matrixraft_snapshot_lifecycle_evidence_artifact,
+    matrixraft_validate_snapshot_floor_log_matching, matrixraft_validate_snapshot_install,
+    matrixraft_validate_snapshot_lifecycle_evidence_artifact,
+    matrixraft_validate_snapshot_tail_catchup, RustRaftSnapshotLifecycleEvidence,
     RustRaftSnapshotLifecycleEvidenceArtifact, RustRaftSnapshotLifecycleEvidenceValidationReport,
 };
 pub use status::{
-    rustraft_admin_diagnostic_json_lines, rustraft_admin_diagnostic_log_entries,
-    rustraft_admin_fatal_blocker_report, rustraft_admin_status_surface_evidence,
-    rustraft_apply_health, rustraft_capability_evidence, rustraft_capability_evidence_from_fields,
-    rustraft_cluster_status_report, rustraft_fatal_blocker_report,
-    rustraft_leader_transfer_admission, rustraft_optimization_report, rustraft_replication_health,
-    rustraft_runtime_admin_report, rustraft_runtime_capability_report_from_evidence,
-    rustraft_runtime_local_status_report, RaftApplyHealth, RaftCapabilityEvidence,
-    RaftClusterStatusReport, RaftHealthStatus, RaftLeaderTransferAdmission,
-    RaftLeaderTransferAdmissionKind, RaftLeaderTransferState, RaftPeerRuntimeState,
-    RaftReplicationHealth, RaftRuntimeAdminReport, RaftRuntimeLocalStatusReport,
-    RaftRuntimeTimerStatus, RustRaftAdminStatusSurfaceEvidence, RustRaftAdminStatusSurfaceInput,
-    RustRaftBaselineRaftRuntimeCapabilityReport, RustRaftBlocker, RustRaftBlockerSeverity,
-    RustRaftDiagnosticLogEntry, RustRaftDiagnosticSeverity, RustRaftFatalBlockerReport,
-    RustRaftOptimizationHint, RustRaftOptimizationHintSeverity, RustRaftOptimizationReport,
-    RustRaftProcessNodeEvidence, RustRaftProcessOperationalSemanticsEvidence,
-    RustRaftProcessReadinessBlocker,
+    matrixraft_admin_diagnostic_json_lines, matrixraft_admin_diagnostic_log_entries,
+    matrixraft_admin_fatal_blocker_report, matrixraft_admin_status_surface_evidence,
+    matrixraft_apply_health, matrixraft_capability_evidence,
+    matrixraft_capability_evidence_from_fields, matrixraft_cluster_status_report,
+    matrixraft_fatal_blocker_report, matrixraft_leader_transfer_admission,
+    matrixraft_optimization_report, matrixraft_replication_health, matrixraft_runtime_admin_report,
+    matrixraft_runtime_capability_report_from_evidence, matrixraft_runtime_local_status_report,
+    RaftApplyHealth, RaftCapabilityEvidence, RaftClusterStatusReport, RaftHealthStatus,
+    RaftLeaderTransferAdmission, RaftLeaderTransferAdmissionKind, RaftLeaderTransferState,
+    RaftPeerRuntimeState, RaftReplicationHealth, RaftRuntimeAdminReport,
+    RaftRuntimeLocalStatusReport, RaftRuntimeTimerStatus, RustRaftAdminStatusSurfaceEvidence,
+    RustRaftAdminStatusSurfaceInput, RustRaftBaselineRaftRuntimeCapabilityReport, RustRaftBlocker,
+    RustRaftBlockerSeverity, RustRaftDiagnosticLogEntry, RustRaftDiagnosticSeverity,
+    RustRaftFatalBlockerReport, RustRaftOptimizationHint, RustRaftOptimizationHintSeverity,
+    RustRaftOptimizationReport, RustRaftProcessNodeEvidence,
+    RustRaftProcessOperationalSemanticsEvidence, RustRaftProcessReadinessBlocker,
 };
 pub use storage::{
-    rustraft_validate_storage_apply_fence, MatrixRaftGroupStorage, MatrixRaftLogCompactionReport,
+    matrixraft_validate_storage_apply_fence, MatrixRaftGroupStorage, MatrixRaftLogCompactionReport,
     MatrixRaftLogRange, MatrixRaftLogSegment, MatrixRaftLogSegmentEvent,
     MatrixRaftLogSegmentEventKind, MatrixRaftLogStorage, MatrixRaftLogStorageOptions,
     MatrixRaftLogStoragePrepareOptions, MatrixRaftLogStorageWriteTask,
@@ -223,23 +228,24 @@ pub use storage::{
 };
 use transport::require_transport_validation;
 pub use transport::{
-    rustraft_validate_append_entries_request, rustraft_validate_append_entries_response,
-    rustraft_validate_install_snapshot_request, rustraft_validate_install_snapshot_response,
-    rustraft_validate_read_index_request, rustraft_validate_read_index_response,
-    rustraft_validate_tcp_transport_request, rustraft_validate_vote_request,
-    rustraft_validate_vote_response, RaftTransport, RustRaftTransport,
+    matrixraft_validate_append_entries_request, matrixraft_validate_append_entries_response,
+    matrixraft_validate_install_snapshot_request, matrixraft_validate_install_snapshot_response,
+    matrixraft_validate_read_index_request, matrixraft_validate_read_index_response,
+    matrixraft_validate_tcp_transport_request, matrixraft_validate_vote_request,
+    matrixraft_validate_vote_response, RaftTransport, RustRaftTransport,
 };
 pub use unique_id::{
-    RustRaftUniqueIdGenerator, RustRaftUniqueIdParts, RUSTRAFT_UNIQUE_ID_COUNTER_BITS,
-    RUSTRAFT_UNIQUE_ID_COUNTER_MASK, RUSTRAFT_UNIQUE_ID_MEMBER_BITS,
-    RUSTRAFT_UNIQUE_ID_MEMBER_MASK, RUSTRAFT_UNIQUE_ID_TIMESTAMP_BITS,
-    RUSTRAFT_UNIQUE_ID_TIMESTAMP_MASK,
+    RustRaftUniqueIdGenerator, RustRaftUniqueIdParts, MATRIXRAFT_UNIQUE_ID_COUNTER_BITS,
+    MATRIXRAFT_UNIQUE_ID_COUNTER_MASK, MATRIXRAFT_UNIQUE_ID_MEMBER_BITS,
+    MATRIXRAFT_UNIQUE_ID_MEMBER_MASK, MATRIXRAFT_UNIQUE_ID_TIMESTAMP_BITS,
+    MATRIXRAFT_UNIQUE_ID_TIMESTAMP_MASK,
 };
 pub use wal::{
-    rustraft_recover_latest_wal_record, rustraft_validate_apply_snapshot_fence,
-    rustraft_validate_hard_state_persistence, rustraft_validate_wal_lifecycle_evidence_artifact,
-    rustraft_wal_checksum, rustraft_wal_checksum_format, rustraft_wal_checksum_valid,
-    rustraft_wal_lifecycle_evidence, rustraft_wal_lifecycle_evidence_artifact,
+    matrixraft_recover_latest_wal_record, matrixraft_validate_apply_snapshot_fence,
+    matrixraft_validate_hard_state_persistence,
+    matrixraft_validate_wal_lifecycle_evidence_artifact, matrixraft_wal_checksum,
+    matrixraft_wal_checksum_format, matrixraft_wal_checksum_valid,
+    matrixraft_wal_lifecycle_evidence, matrixraft_wal_lifecycle_evidence_artifact,
     RaftLogRetainedRange, RaftWalChecksumFormat, RaftWalCompactionReport, RaftWalRecord,
     RaftWalRecoveryReport, RaftWalSegment, RaftWalSegmentIndex, RaftWalWriteReport,
     RustRaftWalLifecycleEvidence, RustRaftWalLifecycleEvidenceArtifact,

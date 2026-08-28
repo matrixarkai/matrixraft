@@ -111,11 +111,11 @@ fn fsm_adapter_replay_report_tracks_applied_and_skipped_entries() {
 }
 
 #[test]
-fn fsm_adapter_batch_apply_skips_noops_and_defers_suffix_like_matrixraft() {
+fn fsm_adapter_batch_apply_skips_noops_and_defers_suffix() {
     let mut adapter = RaftFsmAdapter::new(7, CountingFsm::default());
 
     let report = adapter
-        .apply_batch_like_matrixraft(
+        .apply_batch(
             &[
                 noop(1, 1),
                 entry(1, 2, b"set-a"),
@@ -148,10 +148,10 @@ fn fsm_adapter_batch_apply_replays_noop_idempotently() {
     let mut adapter = RaftFsmAdapter::new(7, CountingFsm::default());
 
     adapter
-        .apply_batch_like_matrixraft(&[noop(1, 1), entry(1, 2, b"set-a")], 16)
+        .apply_batch(&[noop(1, 1), entry(1, 2, b"set-a")], 16)
         .expect("first batch");
     let replay = adapter
-        .apply_batch_like_matrixraft(&[noop(1, 1), entry(1, 2, b"set-a")], 16)
+        .apply_batch(&[noop(1, 1), entry(1, 2, b"set-a")], 16)
         .expect("replay batch");
 
     assert_eq!(replay.attempted, 2);

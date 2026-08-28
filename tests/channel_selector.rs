@@ -9,7 +9,7 @@ use matrixraft::{
 };
 
 #[test]
-fn channel_selector_selects_unique_active_channels_like_matrixraft() {
+fn channel_selector_selects_unique_active_channels() {
     let selector = RustRaftChannelSelector::<u64>::new();
     let channel_1 = RustRaftMailChannel::<u64>::new(1, 100);
     let channel_2 = RustRaftMailChannel::<u64>::new(2, 100);
@@ -42,7 +42,7 @@ fn channel_selector_selects_unique_active_channels_like_matrixraft() {
 }
 
 #[test]
-fn mail_channel_fetch_drains_priority_lanes_like_matrixraft() {
+fn mail_channel_fetch_drains_priority_lanes() {
     let selector = RustRaftChannelSelector::new();
     let channel = RustRaftMailChannel::new(9, 100);
 
@@ -85,7 +85,7 @@ fn channel_selector_delivers_global_mails_and_rearranged_inputs() {
 }
 
 #[test]
-fn channel_selector_group_count_drives_channel_overflow_like_matrixraft() {
+fn channel_selector_group_count_drives_channel_overflow() {
     let selector = RustRaftChannelSelector::new();
     let channel = RustRaftMailChannel::new(5, 2);
 

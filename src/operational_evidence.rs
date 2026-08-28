@@ -6,15 +6,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    rustraft_membership_semantics_evidence_artifact, rustraft_read_safety_evidence_artifact,
-    rustraft_replication_pipeline_evidence_artifact, rustraft_snapshot_lifecycle_evidence_artifact,
-    rustraft_validate_membership_semantics_evidence_artifact,
-    rustraft_validate_read_safety_evidence_artifact,
-    rustraft_validate_replication_pipeline_evidence_artifact,
-    rustraft_validate_snapshot_lifecycle_evidence_artifact,
-    rustraft_validate_wal_lifecycle_evidence_artifact, rustraft_wal_lifecycle_evidence_artifact,
-    RustRaftMembershipSemanticsEvidenceArtifact, RustRaftPeerPipelineStatus,
-    RustRaftPipelineLimits, RustRaftReadSafetyEvidenceArtifact,
+    matrixraft_membership_semantics_evidence_artifact, matrixraft_read_safety_evidence_artifact,
+    matrixraft_replication_pipeline_evidence_artifact,
+    matrixraft_snapshot_lifecycle_evidence_artifact,
+    matrixraft_validate_membership_semantics_evidence_artifact,
+    matrixraft_validate_read_safety_evidence_artifact,
+    matrixraft_validate_replication_pipeline_evidence_artifact,
+    matrixraft_validate_snapshot_lifecycle_evidence_artifact,
+    matrixraft_validate_wal_lifecycle_evidence_artifact,
+    matrixraft_wal_lifecycle_evidence_artifact, RustRaftMembershipSemanticsEvidenceArtifact,
+    RustRaftPeerPipelineStatus, RustRaftPipelineLimits, RustRaftReadSafetyEvidenceArtifact,
     RustRaftReplicationPipelineEvidenceArtifact, RustRaftSnapshotLifecycleEvidenceArtifact,
     RustRaftWalLifecycleEvidenceArtifact, RustRaftWalLifecycleStatus,
 };
@@ -42,7 +43,7 @@ pub struct RustRaftBaselineRaftOperationalEvidenceBundleValidationReport {
     pub missing: Vec<String>,
 }
 
-pub fn rustraft_baseline_raft_operational_evidence_bundle(
+pub fn matrixraft_baseline_raft_operational_evidence_bundle(
     pipeline_peers: Vec<RustRaftPeerPipelineStatus>,
     pipeline_limits: RustRaftPipelineLimits,
     snapshot_peers: Vec<RustRaftPeerPipelineStatus>,
@@ -52,32 +53,32 @@ pub fn rustraft_baseline_raft_operational_evidence_bundle(
 ) -> RustRaftBaselineRaftOperationalEvidenceBundle {
     RustRaftBaselineRaftOperationalEvidenceBundle {
         schema: "rustraft.baseline_raft_operational_evidence_bundle.v1".to_string(),
-        read_safety: rustraft_read_safety_evidence_artifact(),
-        membership: rustraft_membership_semantics_evidence_artifact(),
-        replication_pipeline: rustraft_replication_pipeline_evidence_artifact(
+        read_safety: matrixraft_read_safety_evidence_artifact(),
+        membership: matrixraft_membership_semantics_evidence_artifact(),
+        replication_pipeline: matrixraft_replication_pipeline_evidence_artifact(
             pipeline_peers,
             pipeline_limits,
         ),
-        snapshot_lifecycle: rustraft_snapshot_lifecycle_evidence_artifact(
+        snapshot_lifecycle: matrixraft_snapshot_lifecycle_evidence_artifact(
             snapshot_peers,
             send_snapshot_timeout_ms,
             snapshot_max_inflights_replicate,
         ),
-        wal_lifecycle: rustraft_wal_lifecycle_evidence_artifact(wal_status),
+        wal_lifecycle: matrixraft_wal_lifecycle_evidence_artifact(wal_status),
     }
 }
 
-pub fn rustraft_validate_baseline_raft_operational_evidence_bundle(
+pub fn matrixraft_validate_baseline_raft_operational_evidence_bundle(
     bundle: &RustRaftBaselineRaftOperationalEvidenceBundle,
 ) -> RustRaftBaselineRaftOperationalEvidenceBundleValidationReport {
     let schema_valid = bundle.schema == "rustraft.baseline_raft_operational_evidence_bundle.v1";
-    let read_safety = rustraft_validate_read_safety_evidence_artifact(&bundle.read_safety);
-    let membership = rustraft_validate_membership_semantics_evidence_artifact(&bundle.membership);
+    let read_safety = matrixraft_validate_read_safety_evidence_artifact(&bundle.read_safety);
+    let membership = matrixraft_validate_membership_semantics_evidence_artifact(&bundle.membership);
     let replication_pipeline =
-        rustraft_validate_replication_pipeline_evidence_artifact(&bundle.replication_pipeline);
+        matrixraft_validate_replication_pipeline_evidence_artifact(&bundle.replication_pipeline);
     let snapshot_lifecycle =
-        rustraft_validate_snapshot_lifecycle_evidence_artifact(&bundle.snapshot_lifecycle);
-    let wal_lifecycle = rustraft_validate_wal_lifecycle_evidence_artifact(&bundle.wal_lifecycle);
+        matrixraft_validate_snapshot_lifecycle_evidence_artifact(&bundle.snapshot_lifecycle);
+    let wal_lifecycle = matrixraft_validate_wal_lifecycle_evidence_artifact(&bundle.wal_lifecycle);
 
     let mut missing = Vec::new();
     if !schema_valid {

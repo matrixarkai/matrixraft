@@ -32,52 +32,52 @@ License: Apache-2.0.
 - `RustRaftStatusSnapshot`
 - `RustRaftMetricNames`
 - `RustRaftFaultScenario`
-- `rustraft_fault_harness_readiness_report`
-- `rustraft_read_safety_decision`
-- `rustraft_applied_index_fence_report`
-- `rustraft_lease_read_eligibility_report`
-- `rustraft_bounded_stale_read_report`
-- `rustraft_learner_promotion_decision`
-- `rustraft_append_safety_decision`
+- `matrixraft_fault_harness_readiness_report`
+- `matrixraft_read_safety_decision`
+- `matrixraft_applied_index_fence_report`
+- `matrixraft_lease_read_eligibility_report`
+- `matrixraft_bounded_stale_read_report`
+- `matrixraft_learner_promotion_decision`
+- `matrixraft_append_safety_decision`
 - `RustRaftReadinessEvidence`
 - `RustRaftReadinessSnapshot`
-- `rustraft_parity_contract`
-- `rustraft_parity_report`
-- `rustraft_production_readiness_report`
-- `rustraft_data_node_process_rollout_readiness_report`
-- `rustraft_meta_process_rollout_readiness_report`
-- `rustraft_baseline_raft_runtime_capability_report`
-- `rustraft_baseline_raft_runtime_capability_prometheus`
-- `rustraft_public_api_contract`
-- `rustraft_open_source_surface`
-- `rustraft_temporalstore_adapter_shape`
-- `rustraft_temporalstore_extraction_plan`
-- `rustraft_metric_names`
-- `rustraft_grafana_dashboard`
-- `rustraft_grafana_dashboard_json`
-- `rustraft_alert_rules`
-- `rustraft_alert_rules_json`
-- `rustraft_diagnostic_log_prometheus`
-- `rustraft_observability_provisioning`
-- `rustraft_observability_provisioning_json`
-- `rustraft_observability_provisioning_runbook_steps`
-- `rustraft_observability_provisioning_validation_prometheus`
-- `rustraft_validate_observability_provisioning`
-- `rustraft_validate_observability_provisioning_json`
-- `rustraft_operator_triage_summary`
-- `rustraft_operator_triage_prometheus`
-- `rustraft_operator_runbook_steps`
-- `rustraft_operator_runbook_prometheus`
-- `rustraft_debug_bundle_contract`
-- `rustraft_validate_debug_snapshot`
-- `rustraft_validate_debug_snapshot_json`
-- `rustraft_debug_bundle_validation_prometheus`
-- `rustraft_admin_diagnostic_log_entries`
-- `rustraft_admin_diagnostic_json_lines`
-- `rustraft_optimization_report`
-- `rustraft_optimization_report_prometheus`
-- `rustraft_debug_snapshot_json`
-- `rustraft_debug_snapshot_metadata_prometheus`
+- `matrixraft_parity_contract`
+- `matrixraft_parity_report`
+- `matrixraft_production_readiness_report`
+- `matrixraft_data_node_process_rollout_readiness_report`
+- `matrixraft_meta_process_rollout_readiness_report`
+- `matrixraft_baseline_raft_runtime_capability_report`
+- `matrixraft_baseline_raft_runtime_capability_prometheus`
+- `matrixraft_public_api_contract`
+- `matrixraft_open_source_surface`
+- `matrixraft_temporalstore_adapter_shape`
+- `matrixraft_temporalstore_extraction_plan`
+- `matrixraft_metric_names`
+- `matrixraft_grafana_dashboard`
+- `matrixraft_grafana_dashboard_json`
+- `matrixraft_alert_rules`
+- `matrixraft_alert_rules_json`
+- `matrixraft_diagnostic_log_prometheus`
+- `matrixraft_observability_provisioning`
+- `matrixraft_observability_provisioning_json`
+- `matrixraft_observability_provisioning_runbook_steps`
+- `matrixraft_observability_provisioning_validation_prometheus`
+- `matrixraft_validate_observability_provisioning`
+- `matrixraft_validate_observability_provisioning_json`
+- `matrixraft_operator_triage_summary`
+- `matrixraft_operator_triage_prometheus`
+- `matrixraft_operator_runbook_steps`
+- `matrixraft_operator_runbook_prometheus`
+- `matrixraft_debug_bundle_contract`
+- `matrixraft_validate_debug_snapshot`
+- `matrixraft_validate_debug_snapshot_json`
+- `matrixraft_debug_bundle_validation_prometheus`
+- `matrixraft_admin_diagnostic_log_entries`
+- `matrixraft_admin_diagnostic_json_lines`
+- `matrixraft_optimization_report`
+- `matrixraft_optimization_report_prometheus`
+- `matrixraft_debug_snapshot_json`
+- `matrixraft_debug_snapshot_metadata_prometheus`
 
 Run `cargo run --example debug_artifacts` to print a complete sample support
 artifact with the debug snapshot, JSON log lines, diagnostic and optimization
@@ -91,7 +91,7 @@ conservative parity report.
 
 ## Production Readiness Status
 
-`rustraft_parity_report` returns both a compatibility boolean and an explicit
+`matrixraft_parity_report` returns both a compatibility boolean and an explicit
 production status:
 
 - `blocked`: at least one required safety, durability, transport, snapshot,
@@ -105,7 +105,7 @@ Reports include `production_blockers` such as
 `durability:storage_apply_fence`, making missing production evidence easy to
 surface in TemporalStore readiness gates and CI.
 
-`rustraft_production_readiness_report` is the fail-closed deployment gate. It
+`matrixraft_production_readiness_report` is the fail-closed deployment gate. It
 wraps the semantic parity report with runtime evidence for peer pipeline,
 snapshot lifecycle, WAL lifecycle, data-node rollout, metaserver rollout,
 admin/status observability, fault harness results, and real BaselineRaft benchmark
@@ -113,7 +113,7 @@ parity.
 The data-node and metaserver rollout report helpers expose the same fail-closed
 process-path checks independently, so TemporalStore and downstream adopters can
 validate spawned-process evidence before composing the full production report.
-`rustraft_baseline_raft_runtime_capability_report` groups the same evidence into
+`matrixraft_baseline_raft_runtime_capability_report` groups the same evidence into
 BaselineRaft-derived runtime capability families: process-path rollout proof,
 per-peer replication pipeline state, reorder queues, snapshot sender/downloader
 lifecycle, WAL segment lifecycle, read-index/lease safety, membership role
@@ -130,57 +130,57 @@ Membership evidence must prove joint-consensus commits with both old and new
 quorum acknowledgements for voter-changing scale-up and scale-down transitions.
 WAL lifecycle evidence must prove segment compaction after slow-fsync pressure,
 not only slow-fsync and released-segment counters observed independently.
-`rustraft_baseline_raft_runtime_capability_prometheus` renders that report as generic
+`matrixraft_baseline_raft_runtime_capability_prometheus` renders that report as generic
 `rustraft_baseline_raft_*` Prometheus text metrics. Product runtimes such as
 TemporalStore can attach their own service labels without duplicating the
 capability-matrix logic.
-`rustraft_grafana_dashboard_json` renders a deterministic Grafana dashboard
+`matrixraft_grafana_dashboard_json` renders a deterministic Grafana dashboard
 contract for the canonical `rustraft_*` readiness, latency, queue, WAL, snapshot,
 blocker, and fatal-event metrics.
-`rustraft_admin_diagnostic_json_lines` renders the admin report as structured
+`matrixraft_admin_diagnostic_json_lines` renders the admin report as structured
 JSON log lines for embedders that want RustRaft-owned debugging context without
 adopting a specific logging crate.
-`rustraft_diagnostic_log_prometheus` exports those structured diagnostics as
+`matrixraft_diagnostic_log_prometheus` exports those structured diagnostics as
 severity and per-entry Prometheus counters for dashboards and alert triage.
-`rustraft_optimization_report` converts admin status evidence into deterministic
+`matrixraft_optimization_report` converts admin status evidence into deterministic
 pipeline, WAL, quorum, and reorder-queue tuning hints for operators and CI.
-`rustraft_optimization_report_prometheus` renders those hints as Prometheus text
+`matrixraft_optimization_report_prometheus` renders those hints as Prometheus text
 metrics, including readiness, per-hint, and component-level optimization series,
 for Grafana dashboards and alerting rules.
-`rustraft_alert_rules_json` emits deterministic alert-rule metadata for
+`matrixraft_alert_rules_json` emits deterministic alert-rule metadata for
 optimization readiness, critical optimization hints, fatal events, diagnostic
 errors, and blocker presence, operator triage watch/attention states, critical
 runbook steps, stale debug snapshots, debug-bundle validation failures, and
 provisioning validation failures, so operators can wire the same metric contract
 into monitoring.
-`rustraft_observability_provisioning_json` emits the required metrics, Grafana
+`matrixraft_observability_provisioning_json` emits the required metrics, Grafana
 dashboard, alert rules, debug-bundle contract, and default operator runbook
 steps needed to install the same monitoring contract in downstream runtimes.
-`rustraft_debug_snapshot_json` emits a single timestamped support bundle
+`matrixraft_debug_snapshot_json` emits a single timestamped support bundle
 containing the admin report, diagnostic log entries, optimization hints,
 optimization Prometheus text, runbook Prometheus text, Grafana dashboard
 metadata, alert-rule metadata, and an operator triage summary with first action,
 top diagnostic, top alert, top optimization hint, and runbook steps. The bundle includes a
-versioned `rustraft_debug_bundle_contract` marker and
-`rustraft_validate_debug_snapshot` or `rustraft_validate_debug_snapshot_json`
+versioned `matrixraft_debug_bundle_contract` marker and
+`matrixraft_validate_debug_snapshot` or `matrixraft_validate_debug_snapshot_json`
 for downstream tooling, including timestamp, diagnostic-log, optimization,
 pointer, triage, Prometheus, Grafana, alert-rule, derived-field, and runbook consistency checks.
-`rustraft_debug_snapshot_metadata_prometheus` exports the debug snapshot
+`matrixraft_debug_snapshot_metadata_prometheus` exports the debug snapshot
 generation timestamp and age as Prometheus gauges for Grafana freshness triage.
-`rustraft_debug_bundle_validation_prometheus` turns that validation report into
+`matrixraft_debug_bundle_validation_prometheus` turns that validation report into
 Prometheus readiness, issue-count, first-issue, and per-issue series for
 dashboards and alerting.
-`rustraft_operator_runbook_prometheus` exports grouped remediation counts,
+`matrixraft_operator_runbook_prometheus` exports grouped remediation counts,
 per-step presence, and the first active runbook step for Grafana triage.
-`rustraft_observability_provisioning_validation_prometheus` exposes the same
+`matrixraft_observability_provisioning_validation_prometheus` exposes the same
 readiness, issue-count, first-issue, and per-issue shape for provisioning drift.
 
 Production readiness also requires real BaselineRaft benchmark evidence. Model
 benchmark runners remain available for unit tests, but
-`rustraft_production_readiness_report()` blocks production claims unless
+`matrixraft_production_readiness_report()` blocks production claims unless
 benchmark evidence proves the Rust RustRaft runtime ran the same release-scale workload dimensions and passed
 correctness plus the configured latency and throughput threshold. It also
-requires `rustraft_fault_harness_readiness_report`
+requires `matrixraft_fault_harness_readiness_report`
 evidence for the BaselineRaft-derived packet-loss/partition-heal, slow WAL fsync,
 snapshot-during-membership-change, leader-transfer-under-load,
 follower-rejoin-after-compaction, and rolling-restart joint-consensus scenarios.
@@ -219,7 +219,7 @@ in-memory transport router. The router is meant for library tests and harness
 adapters; production TemporalStore still owns real process transports and
 durable FSM adapters.
 
-The `rustraft_temporalstore_extraction_plan()` API is the typed migration
+The `matrixraft_temporalstore_extraction_plan()` API is the typed migration
 ledger. It records which Raft responsibilities are already owned by this
 standalone crate, which remain pending migration, and which must stay as
 TemporalStore-specific adapters.
@@ -229,7 +229,7 @@ TemporalStore-specific adapters.
 RustRaft exposes its standalone boundary through public modules for `node`,
 `cluster`, `membership`, `wal`, `snapshot`, `transport`, `status`, `metrics`,
 `readiness`, `storage`, `benchmark`, and `fault`. The
-`rustraft_open_source_surface()` report names those modules, embedding examples,
+`matrixraft_open_source_surface()` report names those modules, embedding examples,
 BaselineRaft parity matrix entries, benchmark harness APIs, and compatibility
 reports so consumers can check the published surface without scraping docs.
 
@@ -239,7 +239,7 @@ TemporalStore keeps adapter docs and implementation details for command codecs,
 TemporalEngine apply logic, metaserver scheduling, HTTP/process endpoints, and
 storage-object wiring.
 
-`rustraft_standalone_readiness_report()` is the fail-closed status check for a
+`matrixraft_standalone_readiness_report()` is the fail-closed status check for a
 non-TemporalStore embedding. It only reports `ProductionReady` when the public
 crate surface covers node lifecycle, replication, election/pre-vote, membership,
 WAL recovery, snapshots, read-index/lease-read, and status/metrics/readiness
@@ -261,7 +261,7 @@ struct TemporalRaftConsensusBackend {
 }
 ```
 
-`rustraft_temporalstore_adapter_shape()` exposes this as a typed compatibility
+`matrixraft_temporalstore_adapter_shape()` exposes this as a typed compatibility
 report. RustRaft owns consensus behavior inside the node runtime; TemporalStore
 owns command encoding, apply semantics, storage engine integration, and
 process/admin surfaces.
@@ -321,7 +321,7 @@ This example validates and prints a
 `rustraft.baseline_raft_operational_evidence_bundle.v1` JSON document. Real
 embedders should replace the example counters with observations from spawned
 data-node and metaserver processes, then call
-`rustraft_validate_baseline_raft_operational_evidence_bundle` before forwarding the
+`matrixraft_validate_baseline_raft_operational_evidence_bundle` before forwarding the
 bundle into service readiness or CI gates. The bundle deliberately keeps the
 five BaselineRaft-derived evidence families separate:
 

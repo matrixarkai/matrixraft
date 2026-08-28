@@ -2,8 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_apply_batch_outcome_like_matrixraft, rustraft_peer_pipeline_status_from_observed,
-    RaftCluster, RaftReplicationPipeline, RustRaftAppendEntriesResponse, RustRaftApplyBatchStatus,
+    matrixraft_apply_batch_outcome, matrixraft_peer_pipeline_status_from_observed, RaftCluster,
+    RaftReplicationPipeline, RustRaftAppendEntriesResponse, RustRaftApplyBatchStatus,
     RustRaftLogEntry, RustRaftLogId, RustRaftObservedPeerPipeline, RustRaftPeer,
     RustRaftPeerProgressState, RustRaftPipelineLimits, RustRaftReplicaRole, RustRaftRole,
     RustRaftSnapshotState,
@@ -94,7 +94,7 @@ fn observed_peer_pipeline_converts_into_full_status_surface() {
         witness_quorum_acked: 3,
     };
 
-    let status = rustraft_peer_pipeline_status_from_observed(&observed);
+    let status = matrixraft_peer_pipeline_status_from_observed(&observed);
 
     assert_eq!(status.peer_id, 7);
     assert_eq!(status.progress_state, RustRaftPeerProgressState::Replicate);
@@ -112,18 +112,15 @@ fn observed_peer_pipeline_converts_into_full_status_surface() {
 }
 
 #[test]
-fn apply_batch_outcome_splits_pending_suffix_like_matrixraft() {
+fn apply_batch_outcome_splits_pending_suffix() {
     let entries = vec![
         entry(10, b"ten"),
         entry(11, b"eleven"),
         entry(12, b"twelve"),
     ];
 
-    let full = rustraft_apply_batch_outcome_like_matrixraft(
-        &entries,
-        entries.len(),
-        RustRaftApplyBatchStatus::Applied,
-    );
+    let full =
+        matrixraft_apply_batch_outcome(&entries, entries.len(), RustRaftApplyBatchStatus::Applied);
     assert_eq!(full.status, RustRaftApplyBatchStatus::Applied);
     assert_eq!(full.first_log_id.as_ref().map(|id| id.index), Some(10));
     assert_eq!(full.last_log_id.as_ref().map(|id| id.index), Some(12));
@@ -132,11 +129,7 @@ fn apply_batch_outcome_splits_pending_suffix_like_matrixraft() {
     assert_eq!(full.applied_entries.len(), 3);
     assert!(full.pending_entries.is_empty());
 
-    let partial = rustraft_apply_batch_outcome_like_matrixraft(
-        &entries,
-        2,
-        RustRaftApplyBatchStatus::NotReady,
-    );
+    let partial = matrixraft_apply_batch_outcome(&entries, 2, RustRaftApplyBatchStatus::NotReady);
     assert_eq!(partial.status, RustRaftApplyBatchStatus::NotReady);
     assert_eq!(partial.applied_through, 11);
     assert_eq!(partial.next_index, 12);
@@ -157,19 +150,14 @@ fn apply_batch_outcome_splits_pending_suffix_like_matrixraft() {
         vec![12]
     );
 
-    let rejected = rustraft_apply_batch_outcome_like_matrixraft(
-        &entries,
-        0,
-        RustRaftApplyBatchStatus::Rejected,
-    );
+    let rejected = matrixraft_apply_batch_outcome(&entries, 0, RustRaftApplyBatchStatus::Rejected);
     assert_eq!(rejected.status, RustRaftApplyBatchStatus::Rejected);
     assert_eq!(rejected.applied_through, 0);
     assert_eq!(rejected.next_index, 10);
     assert!(rejected.applied_entries.is_empty());
     assert_eq!(rejected.pending_entries, entries);
 
-    let empty =
-        rustraft_apply_batch_outcome_like_matrixraft(&[], 4, RustRaftApplyBatchStatus::Applied);
+    let empty = matrixraft_apply_batch_outcome(&[], 4, RustRaftApplyBatchStatus::Applied);
     assert_eq!(empty.status, RustRaftApplyBatchStatus::Applied);
     assert_eq!(empty.first_log_id, None);
     assert_eq!(empty.last_log_id, None);
@@ -304,7 +292,7 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
 }
 
 #[test]
-fn replication_pipeline_pauses_and_resumes_progress_like_matrixraft() {
+fn replication_pipeline_pauses_and_resumes_progress() {
     let mut probe = RaftReplicationPipeline::new(
         2,
         1,
@@ -376,7 +364,7 @@ fn replication_pipeline_pauses_and_resumes_progress_like_matrixraft() {
 }
 
 #[test]
-fn heartbeat_response_resumes_paused_peer_like_matrixraft() {
+fn heartbeat_response_resumes_paused_peer() {
     let mut probe = RaftReplicationPipeline::new(2, 1, small_limits());
     probe.queue_append(&entry(1, b"a")).expect("queue append");
     assert_eq!(probe.flush_append_batch(1, 1024).len(), 1);
@@ -390,7 +378,7 @@ fn heartbeat_response_resumes_paused_peer_like_matrixraft() {
 }
 
 #[test]
-fn stale_success_does_not_unpause_or_free_inflight_like_matrixraft() {
+fn stale_success_does_not_unpause_or_free_inflight() {
     let mut probe = RaftReplicationPipeline::new(2, 5, RustRaftPipelineLimits::default());
     probe.queue_append(&entry(5, b"five")).expect("queue probe");
     assert_eq!(probe.flush_append_batch(1, 1024).len(), 1);
@@ -486,7 +474,7 @@ fn append_rejection_can_require_snapshot_transfer() {
 }
 
 #[test]
-fn replicate_rejection_falls_back_to_matched_boundary_like_matrixraft() {
+fn replicate_rejection_falls_back_to_matched_boundary() {
     let mut pipeline = RaftReplicationPipeline::new(2, 8, RustRaftPipelineLimits::default());
     pipeline
         .handle_append_response(&RustRaftAppendEntriesResponse {
@@ -530,7 +518,7 @@ fn replicate_rejection_falls_back_to_matched_boundary_like_matrixraft() {
 }
 
 #[test]
-fn probe_rejection_ignores_stale_index_and_pauses_same_index_like_matrixraft() {
+fn probe_rejection_ignores_stale_index_and_pauses_same_index() {
     let mut pipeline = RaftReplicationPipeline::new(2, 5, RustRaftPipelineLimits::default());
 
     pipeline
@@ -690,7 +678,7 @@ fn replication_pipeline_tracks_snapshot_sender_and_receiver_state() {
 }
 
 #[test]
-fn snapshot_finish_advances_or_retries_like_matrixraft() {
+fn snapshot_finish_advances_or_retries() {
     let mut accepted = RaftReplicationPipeline::new(2, 10, RustRaftPipelineLimits::default());
     accepted
         .begin_snapshot_send("snap-20", 20, 2)
@@ -716,7 +704,7 @@ fn snapshot_finish_advances_or_retries_like_matrixraft() {
 }
 
 #[test]
-fn snapshot_require_is_tracked_and_acked_like_matrixraft() {
+fn snapshot_require_is_tracked_and_acked() {
     let mut pipeline = RaftReplicationPipeline::new(2, 10, RustRaftPipelineLimits::default());
 
     assert!(pipeline.maybe_require_snapshot(8));
@@ -742,7 +730,7 @@ fn snapshot_require_is_tracked_and_acked_like_matrixraft() {
 }
 
 #[test]
-fn snapshot_progress_times_out_non_receiving_peer_like_matrixraft() {
+fn snapshot_progress_times_out_non_receiving_peer() {
     let mut pipeline = RaftReplicationPipeline::new(2, 10, RustRaftPipelineLimits::default());
     pipeline
         .begin_snapshot_send("snap-20", 20, 2)
@@ -801,7 +789,7 @@ fn raft_cluster_updates_live_peer_pipelines_during_replication() {
 }
 
 #[test]
-fn raft_cluster_network_error_immediately_probes_replicating_peer_like_matrixraft() {
+fn raft_cluster_network_error_immediately_probes_replicating_peer() {
     let mut cluster = RaftCluster::new(188, Default::default(), vec![peer(1), peer(2), peer(3)])
         .expect("cluster");
     cluster.start().expect("start");

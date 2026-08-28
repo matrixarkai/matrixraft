@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::{
-    rustraft_durability_parity_report, FileRaftWal, LocalRaftWal, PersistentRaftWal,
+    matrixraft_durability_parity_report, FileRaftWal, LocalRaftWal, PersistentRaftWal,
     PersistentRaftWalOptions, RaftHardState, RustRaftDurabilityParityReport, RustRaftHardState,
 };
 
@@ -170,7 +170,7 @@ pub struct RustRaftWalLifecycleEvidenceValidationReport {
     pub missing: Vec<String>,
 }
 
-pub fn rustraft_wal_checksum(record: &RaftWalRecord) -> String {
+pub fn matrixraft_wal_checksum(record: &RaftWalRecord) -> String {
     let mut hash = 14_695_981_039_346_656_037_u64;
     let mut mix = |value: u64| {
         for byte in value.to_le_bytes() {
@@ -202,7 +202,7 @@ pub fn rustraft_wal_checksum(record: &RaftWalRecord) -> String {
     format!("{hash:016x}")
 }
 
-pub fn rustraft_wal_checksum_format() -> RaftWalChecksumFormat {
+pub fn matrixraft_wal_checksum_format() -> RaftWalChecksumFormat {
     RaftWalChecksumFormat {
         algorithm: "fnv1a64-rustraft-v1".to_string(),
         encoding: "lower_hex_16".to_string(),
@@ -220,11 +220,11 @@ pub fn rustraft_wal_checksum_format() -> RaftWalChecksumFormat {
     }
 }
 
-pub fn rustraft_wal_checksum_valid(record: &RaftWalRecord) -> bool {
-    record.checksum == rustraft_wal_checksum(record)
+pub fn matrixraft_wal_checksum_valid(record: &RaftWalRecord) -> bool {
+    record.checksum == matrixraft_wal_checksum(record)
 }
 
-pub fn rustraft_validate_hard_state_persistence(
+pub fn matrixraft_validate_hard_state_persistence(
     record: &RustRaftWalRecord,
 ) -> Result<(), RustRaftError> {
     if let Some(committed) = &record.hard_state.committed {
@@ -252,7 +252,7 @@ pub fn rustraft_validate_hard_state_persistence(
     Ok(())
 }
 
-pub fn rustraft_validate_apply_snapshot_fence(
+pub fn matrixraft_validate_apply_snapshot_fence(
     record: &RustRaftWalRecord,
 ) -> Result<(), RustRaftError> {
     let fence = &record.apply_snapshot_fence;
@@ -289,18 +289,18 @@ pub fn rustraft_validate_apply_snapshot_fence(
     Ok(())
 }
 
-pub fn rustraft_recover_latest_wal_record(
+pub fn matrixraft_recover_latest_wal_record(
     records: &[RustRaftWalRecord],
 ) -> Result<RustRaftWalRecord, RustRaftError> {
     let valid_records = records
         .iter()
-        .take_while(|record| rustraft_wal_checksum_valid(record))
+        .take_while(|record| matrixraft_wal_checksum_valid(record))
         .collect::<Vec<_>>();
     let Some(record) = valid_records
         .into_iter()
         .filter(|record| {
-            rustraft_validate_hard_state_persistence(record).is_ok()
-                && rustraft_validate_apply_snapshot_fence(record).is_ok()
+            matrixraft_validate_hard_state_persistence(record).is_ok()
+                && matrixraft_validate_apply_snapshot_fence(record).is_ok()
         })
         .max_by_key(|record| {
             record
@@ -318,7 +318,7 @@ pub fn rustraft_recover_latest_wal_record(
     Ok(record.clone())
 }
 
-pub fn rustraft_wal_lifecycle_evidence(
+pub fn matrixraft_wal_lifecycle_evidence(
     status: &RustRaftWalLifecycleStatus,
 ) -> RustRaftWalLifecycleEvidence {
     RustRaftWalLifecycleEvidence {
@@ -340,10 +340,10 @@ pub fn rustraft_wal_lifecycle_evidence(
     }
 }
 
-pub fn rustraft_wal_lifecycle_evidence_artifact(
+pub fn matrixraft_wal_lifecycle_evidence_artifact(
     status: RustRaftWalLifecycleStatus,
 ) -> RustRaftWalLifecycleEvidenceArtifact {
-    let evidence = rustraft_wal_lifecycle_evidence(&status);
+    let evidence = matrixraft_wal_lifecycle_evidence(&status);
     RustRaftWalLifecycleEvidenceArtifact {
         schema: "rustraft.wal_lifecycle_evidence.v1".to_string(),
         status,
@@ -351,11 +351,11 @@ pub fn rustraft_wal_lifecycle_evidence_artifact(
     }
 }
 
-pub fn rustraft_validate_wal_lifecycle_evidence_artifact(
+pub fn matrixraft_validate_wal_lifecycle_evidence_artifact(
     artifact: &RustRaftWalLifecycleEvidenceArtifact,
 ) -> RustRaftWalLifecycleEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.wal_lifecycle_evidence.v1";
-    let recomputed = rustraft_wal_lifecycle_evidence(&artifact.status);
+    let recomputed = matrixraft_wal_lifecycle_evidence(&artifact.status);
     let segment_lifecycle_present =
         recomputed.segment_lifecycle_present && artifact.evidence.segment_lifecycle_present;
     let retained_range_present =

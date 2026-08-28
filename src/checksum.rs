@@ -170,7 +170,7 @@ impl RustRaftFileChecksumContext {
     }
 
     pub fn start(&self) -> io::Result<RustRaftFileChecksumResult> {
-        let files = rustraft_checksum_file_list(&self.path)?;
+        let files = matrixraft_checksum_file_list(&self.path)?;
         let mut context = RustRaftChecksumContext::new(self.checksum_type);
         let mut buffer = vec![0; self.block_size];
         for file in &files {
@@ -193,15 +193,15 @@ impl RustRaftFileChecksumContext {
     }
 }
 
-pub fn rustraft_crc32c(data: &[u8]) -> u32 {
+pub fn matrixraft_crc32c(data: &[u8]) -> u32 {
     crc32c_extend(0, data)
 }
 
-pub fn rustraft_murmur32(data: &[u8]) -> u32 {
+pub fn matrixraft_murmur32(data: &[u8]) -> u32 {
     murmur3_x86_32(data, 0)
 }
 
-pub fn rustraft_checksum_file_list(path: &Path) -> io::Result<Vec<PathBuf>> {
+pub fn matrixraft_checksum_file_list(path: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if path.is_dir() {
         collect_files(path, &mut files)?;

@@ -2,8 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    rustraft_validate_read_index_response, rustraft_validate_tcp_transport_request,
-    rustraft_validate_vote_request, AppendEntriesRequest, AppendEntriesResponse,
+    matrixraft_validate_read_index_response, matrixraft_validate_tcp_transport_request,
+    matrixraft_validate_vote_request, AppendEntriesRequest, AppendEntriesResponse,
     AuthenticatedRaftTransport, ClusterRaftTransport, InMemoryRaftTransport,
     InstallSnapshotRequest, InstallSnapshotResponse, RaftCluster, RaftError, RaftTransport,
     ReadIndexRequest, ReadIndexResponse, RustRaftAppendEntriesRequest, RustRaftHeartbeatMerger,
@@ -179,7 +179,7 @@ fn transport_validation_reports_bad_requests_and_responses() {
         pre_vote: true,
         force: false,
     };
-    let vote_report = rustraft_validate_vote_request(&bad_vote);
+    let vote_report = matrixraft_validate_vote_request(&bad_vote);
     assert!(!vote_report.valid);
     assert!(vote_report
         .blockers
@@ -196,7 +196,7 @@ fn transport_validation_reports_bad_requests_and_responses() {
         lease_read: true,
         reason: "".to_string(),
     };
-    let read_report = rustraft_validate_read_index_response(&bad_read_response);
+    let read_report = matrixraft_validate_read_index_response(&bad_read_response);
     assert!(!read_report.valid);
     assert!(read_report
         .blockers
@@ -207,7 +207,7 @@ fn transport_validation_reports_bad_requests_and_responses() {
         target: 0,
         request: bad_vote,
     };
-    let tcp_report = rustraft_validate_tcp_transport_request(&bad_tcp);
+    let tcp_report = matrixraft_validate_tcp_transport_request(&bad_tcp);
     assert!(!tcp_report.valid);
     assert!(tcp_report
         .blockers
@@ -217,7 +217,7 @@ fn transport_validation_reports_bad_requests_and_responses() {
     let empty_batch = TcpRaftTransportRequest::Batch {
         requests: Vec::new(),
     };
-    let empty_batch_report = rustraft_validate_tcp_transport_request(&empty_batch);
+    let empty_batch_report = matrixraft_validate_tcp_transport_request(&empty_batch);
     assert!(!empty_batch_report.valid);
     assert!(empty_batch_report
         .blockers
@@ -229,7 +229,7 @@ fn transport_validation_reports_bad_requests_and_responses() {
             requests: Vec::new(),
         }],
     };
-    let nested_batch_report = rustraft_validate_tcp_transport_request(&nested_batch);
+    let nested_batch_report = matrixraft_validate_tcp_transport_request(&nested_batch);
     assert!(!nested_batch_report.valid);
     assert!(nested_batch_report
         .blockers
@@ -328,7 +328,7 @@ fn in_memory_transport_forwards_and_validates_all_rpc_messages() {
 }
 
 #[test]
-fn heartbeat_merger_queues_empty_append_heartbeats_like_matrixraft() {
+fn heartbeat_merger_queues_empty_append_heartbeats() {
     let mut resolver = HashMap::new();
     resolver.insert((1, 2), "127.0.0.1:7002".to_string());
     resolver.insert((3, 2), "127.0.0.1:7002".to_string());
@@ -533,7 +533,7 @@ fn cluster_installs_snapshot_from_chunked_snapshot_rpc() {
 }
 
 #[test]
-fn cluster_reassembles_multi_chunk_snapshot_rpc_like_matrixraft() {
+fn cluster_reassembles_multi_chunk_snapshot_rpc() {
     let mut cluster = RaftCluster::new(
         3,
         Default::default(),
@@ -703,7 +703,7 @@ fn tcp_transport_round_trips_append_snapshot_vote_and_read_index() {
 }
 
 #[test]
-fn tcp_transport_batches_mixed_rpc_requests_like_matrixraft() {
+fn tcp_transport_batches_mixed_rpc_requests() {
     let cluster = Arc::new(Mutex::new(
         RaftCluster::new(
             3,
