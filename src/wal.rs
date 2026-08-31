@@ -108,7 +108,18 @@ pub struct WalSegment {
     pub segment_id: u64,
     pub first_index: LogIndex,
     pub last_index: LogIndex,
+    /// The records held in memory for this segment.
+    ///
+    /// A sealed segment releases these once it is on disk, so this is empty for
+    /// every segment but the active one. Read them back with
+    /// `PersistentRaftWal::records`, which loads what it needs from the segment
+    /// files. Use `record_count` rather than `records.len()` for how many a
+    /// segment holds -- they differ exactly when the records have been released.
+    #[serde(default)]
     pub records: Vec<WalRecord>,
+    /// How many records the segment has, whether or not they are in memory.
+    #[serde(default)]
+    pub record_count: u64,
     pub sealed: bool,
 }
 
@@ -393,7 +404,22 @@ pub fn matrixraft_fold_wal_entries<'a, I>(records: I) -> Vec<LogEntry>
 where
     I: IntoIterator<Item = &'a WalRecord>,
 {
-    let mut folded: Vec<LogEntry> = Vec::new();
+    matrixraft_fold_wal_entries_from(Vec::new(), records)
+}
+
+/// Continues a fold that has already consumed earlier records.
+///
+/// A sealed segment does not keep its records in memory, so folding a whole WAL
+/// means loading one segment at a time. Continuing from what is folded so far
+/// lets that happen without every segment's records being live at once, which
+/// is the difference between holding the log and holding the whole WAL.
+pub fn matrixraft_fold_wal_entries_from<'a, I>(
+    mut folded: Vec<LogEntry>,
+    records: I,
+) -> Vec<LogEntry>
+where
+    I: IntoIterator<Item = &'a WalRecord>,
+{
     for record in records {
         if !matrixraft_wal_checksum_valid(record) {
             break;

@@ -60,6 +60,7 @@ impl LocalRaftWal {
                 first_index: 0,
                 last_index: 0,
                 records: Vec::new(),
+                record_count: 0,
                 sealed: false,
             }],
             next_segment_id: 1,
@@ -82,6 +83,7 @@ impl LocalRaftWal {
                 first_index: 0,
                 last_index: 0,
                 records: Vec::new(),
+                record_count: 0,
                 sealed: false,
             });
             self.next_segment_id += 1;
@@ -104,6 +106,7 @@ impl LocalRaftWal {
         }
         segment.last_index = record_index;
         segment.records.push(record);
+        segment.record_count = segment.records.len() as u64;
         Ok(checksum)
     }
 
@@ -129,7 +132,7 @@ impl LocalRaftWal {
                 segment_id: segment.segment_id,
                 first_log_index: segment.first_index,
                 last_log_index: segment.last_index,
-                record_count: segment.records.len() as u64,
+                record_count: segment.record_count,
                 sealed: segment.sealed,
                 bytes: 0,
             })
@@ -257,6 +260,7 @@ impl PersistentRaftWal {
                 first_index: 0,
                 last_index: 0,
                 records: Vec::new(),
+                record_count: 0,
                 sealed: false,
             });
             write_wal_segment_file(&options.dir, &segments[0])?;
@@ -287,6 +291,9 @@ impl PersistentRaftWal {
             active_covered: None,
         };
         wal.active_covered = wal.covered_from_segments();
+        // Coverage has been folded, so the sealed segments have served their
+        // purpose in memory.
+        wal.release_sealed_segment_records();
         Ok(wal)
     }
 
@@ -337,12 +344,47 @@ impl PersistentRaftWal {
     /// This folds every segment rather than only the active one: a segment's
     /// first record is now a delta against the segment before it, so the active
     /// segment on its own no longer describes the whole log.
+    /// Reads back a segment's records.
+    ///
+    /// A sealed segment releases its records once they are on disk, so anything
+    /// that needs them -- compaction, or a caller asking for the whole log --
+    /// reads them from the file that already holds them.
+    fn segment_records(&self, segment: &WalSegment) -> Result<Vec<WalRecord>, RaftError> {
+        if segment.record_count == 0 || !segment.records.is_empty() {
+            return Ok(segment.records.clone());
+        }
+        let (records, _) =
+            read_wal_segment_file(&wal_segment_path(&self.options.dir, segment.segment_id))?;
+        Ok(records)
+    }
+
+    /// Drops the in-memory records of every sealed segment.
+    ///
+    /// A segment is written before it is sealed, so this loses nothing. Holding
+    /// them was what made resident memory grow with the whole log rather than
+    /// with the segment currently being written.
+    fn release_sealed_segment_records(&mut self) {
+        for segment in self.segments.iter_mut() {
+            if segment.sealed && !segment.records.is_empty() {
+                segment.records = Vec::new();
+            }
+        }
+    }
+
+    /// How many records are retained, without materialising any of them.
+    fn retained_record_count(&self) -> u64 {
+        self.segments
+            .iter()
+            .map(|segment| segment.record_count)
+            .sum()
+    }
+
     fn covered_from_segments(&self) -> Option<(LogIndex, LogIndex, Term)> {
-        let entries = matrixraft_fold_wal_entries(
-            self.segments
-                .iter()
-                .flat_map(|segment| segment.records.iter()),
-        );
+        let mut entries: Vec<LogEntry> = Vec::new();
+        for segment in &self.segments {
+            let records = self.segment_records(segment).ok()?;
+            entries = matrixraft_fold_wal_entries_from(entries, records.iter());
+        }
         let first = entries.first()?;
         let last = entries.last()?;
         Some((first.log_id.index, last.log_id.index, last.log_id.term))
@@ -543,6 +585,7 @@ impl PersistentRaftWal {
         }
         segment.last_index = record_index;
         segment.records.push(record);
+        segment.record_count = segment.records.len() as u64;
         let segment_id = segment.segment_id;
         self.advance_active_covered();
         Ok(WalWriteReport {
@@ -577,6 +620,7 @@ impl PersistentRaftWal {
                 first_index: 0,
                 last_index: 0,
                 records: Vec::new(),
+                record_count: 0,
                 sealed: false,
             }]
         } else {
@@ -593,6 +637,7 @@ impl PersistentRaftWal {
         self.active_segment = open_segment_for_append(&self.options.dir, active_id)?;
         self.next_segment_id = active_id + 1;
         self.active_covered = self.covered_from_segments();
+        self.release_sealed_segment_records();
         let observed_corrupt_tail = self.truncated_corrupt_tail || truncated_corrupt_tail;
         self.truncated_corrupt_tail = observed_corrupt_tail;
         Ok(WalRecoveryReport {
@@ -669,25 +714,37 @@ impl PersistentRaftWal {
         else {
             return Ok(());
         };
-        let entries = {
-            let Some(first) = self.segments[position].records.first() else {
-                return Ok(());
-            };
-            if !first.entries_are_delta {
-                return Ok(());
-            }
-            matrixraft_fold_wal_entries(
-                self.segments[..position]
-                    .iter()
-                    .flat_map(|segment| segment.records.iter())
-                    .chain(std::iter::once(first)),
-            )
-        };
-        let record = &mut self.segments[position].records[0];
-        record.entries = entries;
-        record.entries_are_delta = false;
-        record.checksum = matrixraft_wal_checksum(record);
-        write_wal_segment_file(&self.options.dir, &self.segments[position])
+        // The survivor is usually sealed, so its records are on disk rather
+        // than in memory.
+        let mut survivor = self.segment_records(&self.segments[position])?;
+        match survivor.first() {
+            Some(first) if first.entries_are_delta => {}
+            _ => return Ok(()),
+        }
+        // Fold the segments that are about to be deleted one at a time, so
+        // compaction never holds all of them at once.
+        let mut entries: Vec<LogEntry> = Vec::new();
+        for segment in &self.segments[..position] {
+            let records = self.segment_records(segment)?;
+            entries = matrixraft_fold_wal_entries_from(entries, records.iter());
+        }
+        let head = survivor[0].clone();
+        entries = matrixraft_fold_wal_entries_from(entries, std::iter::once(&head));
+
+        survivor[0].entries = entries;
+        survivor[0].entries_are_delta = false;
+        survivor[0].checksum = matrixraft_wal_checksum(&survivor[0]);
+
+        let sealed = self.segments[position].sealed;
+        let mut segment = self.segments[position].clone();
+        segment.records = survivor;
+        write_wal_segment_file(&self.options.dir, &segment)?;
+        if !sealed {
+            // The active segment keeps its records; a sealed one goes back to
+            // holding none.
+            self.segments[position].records = segment.records;
+        }
+        Ok(())
     }
 
     pub fn compact_through_with_fence(
@@ -811,21 +868,24 @@ impl PersistentRaftWal {
         matrixraft_wal_checksum_format()
     }
 
-    /// Number of retained records, without materialising them.
-    fn retained_record_count(&self) -> u64 {
-        self.segments
-            .iter()
-            .map(|segment| segment.records.len() as u64)
-            .sum()
+    /// The retained records, folded whole.
+    ///
+    /// Sealed segments are read back from disk, so this is no longer free.
+    /// Callers that only want a count should use [`Self::status`], which no
+    /// longer materialises anything. A segment that cannot be read yields an
+    /// empty result rather than a partial one; [`Self::try_records`] returns
+    /// the error instead.
+    pub fn records(&self) -> Vec<WalRecord> {
+        self.try_records().unwrap_or_default()
     }
 
-    pub fn records(&self) -> Vec<WalRecord> {
-        let stored: Vec<_> = self
-            .segments
-            .iter()
-            .flat_map(|segment| segment.records.iter().cloned())
-            .collect();
-        matrixraft_fold_wal_records(&stored)
+    /// [`Self::records`], with the read failure surfaced.
+    pub fn try_records(&self) -> Result<Vec<WalRecord>, RaftError> {
+        let mut stored: Vec<WalRecord> = Vec::with_capacity(self.retained_record_count() as usize);
+        for segment in &self.segments {
+            stored.extend(self.segment_records(segment)?);
+        }
+        Ok(matrixraft_fold_wal_records(&stored))
     }
 
     pub fn corrupt_tail_for_test(&mut self) -> Result<(), RaftError> {
@@ -841,6 +901,10 @@ impl PersistentRaftWal {
         if let Some(segment) = self.segments.last_mut() {
             segment.sealed = true;
             write_wal_segment_file(&self.options.dir, segment)?;
+            // The segment is on disk now, so nothing needs its records in
+            // memory. This is what bounds resident memory by the segment being
+            // written rather than by the whole log.
+            segment.records = Vec::new();
         }
         let segment_id = self.next_segment_id;
         self.next_segment_id += 1;
@@ -849,6 +913,7 @@ impl PersistentRaftWal {
             first_index: 0,
             last_index: 0,
             records: Vec::new(),
+            record_count: 0,
             sealed: false,
         };
         write_wal_segment_file(&self.options.dir, &segment)?;
@@ -907,10 +972,7 @@ fn wal_retained_range(segments: &[WalSegment]) -> LogRetainedRange {
             .last()
             .map(|segment| segment.segment_id)
             .unwrap_or(0),
-        record_count: segments
-            .iter()
-            .map(|segment| segment.records.len() as u64)
-            .sum(),
+        record_count: segments.iter().map(|segment| segment.record_count).sum(),
     }
 }
 
@@ -921,7 +983,7 @@ fn wal_segment_index(dir: &Path, segments: &[WalSegment]) -> Vec<WalSegmentIndex
             segment_id: segment.segment_id,
             first_log_index: segment.first_index,
             last_log_index: segment.last_index,
-            record_count: segment.records.len() as u64,
+            record_count: segment.record_count,
             sealed: segment.sealed,
             bytes: fs::metadata(wal_segment_path(dir, segment.segment_id))
                 .map(|metadata| metadata.len())
@@ -981,6 +1043,7 @@ fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<WalSegment>, bool), Raf
             segment_id,
             first_index,
             last_index,
+            record_count: records.len() as u64,
             records,
             sealed: file_position != last_file_index,
         });
