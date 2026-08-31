@@ -158,6 +158,7 @@ pub use node::{
 };
 pub use operational_evidence::{
     matrixraft_baseline_raft_operational_evidence_bundle,
+    matrixraft_baseline_raft_operational_evidence_bundle_from_artifacts,
     matrixraft_validate_baseline_raft_operational_evidence_bundle,
     BaselineRaftOperationalEvidenceBundle, BaselineRaftOperationalEvidenceBundleValidationReport,
 };

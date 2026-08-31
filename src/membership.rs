@@ -364,6 +364,19 @@ fn matrixraft_membership_semantics_transition(
     }
 }
 
+/// The built-in **reference** membership-semantics artifact.
+///
+/// This is not a measurement. It takes no inputs, consults no cluster, and its
+/// transitions hardcode their conclusions rather than deriving them --
+/// `old_majority_preserved`, `stale_leader_rejected` and the rest are literals,
+/// and the commit indices are always 128 and 144. It is useful as a schema
+/// example and as a golden vector to validate a runtime's own artifact against.
+///
+/// Because the producer hardcodes exactly the fields
+/// [`matrixraft_validate_membership_semantics_evidence_artifact`] checks,
+/// validating this artifact always succeeds. A `membership_valid: true` derived
+/// from it says nothing about any deployment; the bundle validation report sets
+/// `membership_is_reference` so a reader can tell the two apart.
 pub fn matrixraft_membership_semantics_evidence_artifact() -> MembershipSemanticsEvidenceArtifact {
     MembershipSemanticsEvidenceArtifact {
         schema: "rustraft.membership_semantics_evidence.v1".to_string(),

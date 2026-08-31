@@ -4,6 +4,7 @@
 use matrixraft::{
     fault, matrixraft_admin_status_surface_evidence,
     matrixraft_baseline_raft_operational_evidence_bundle,
+    matrixraft_baseline_raft_operational_evidence_bundle_from_artifacts,
     matrixraft_baseline_raft_runtime_capability_prometheus,
     matrixraft_baseline_raft_runtime_capability_report, matrixraft_capability_evidence_from_fields,
     matrixraft_cross_plane_process_evidence_artifact,
@@ -1402,6 +1403,42 @@ fn baseline_raft_operational_evidence_bundle_is_library_owned() {
     assert!(validation.snapshot_lifecycle_valid);
     assert!(validation.wal_lifecycle_valid);
     assert!(validation.missing.is_empty());
+
+    // The name of this test is the point: the bundle is library-owned. Its
+    // read-safety and membership halves take no inputs and so cannot describe
+    // any deployment, and the report now says so. Without these flags,
+    // `membership_valid: true` reads as a fact about the caller's cluster --
+    // and it is unfalsifiable, because the producer hardcodes exactly the
+    // fields the validator checks.
+    assert!(validation.read_safety_is_reference);
+    assert!(validation.membership_is_reference);
+}
+
+#[test]
+fn baseline_raft_operational_evidence_bundle_marks_supplied_evidence_as_not_reference() {
+    let mut observed_membership = matrixraft_membership_semantics_evidence_artifact();
+    // Stand in for evidence taken from a running cluster: same shape, different
+    // commit indices than the reference artifact's fixed 128/144.
+    observed_membership.learner_add.commit_index_before = 900;
+    observed_membership.learner_add.commit_index_after = 916;
+
+    let bundle = matrixraft_baseline_raft_operational_evidence_bundle_from_artifacts(
+        matrixraft_read_safety_evidence_artifact(),
+        observed_membership,
+        complete_replication_pipeline_peers(),
+        PipelineLimits::production_default(),
+        complete_snapshot_lifecycle_peers(),
+        1_000,
+        1,
+        complete_wal_lifecycle_status(),
+    );
+
+    let validation = matrixraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
+    assert!(validation.valid, "{validation:#?}");
+    // Membership came from the caller, so it is no longer the reference; the
+    // read-safety half still is, and the two are reported independently.
+    assert!(!validation.membership_is_reference);
+    assert!(validation.read_safety_is_reference);
 }
 
 #[test]

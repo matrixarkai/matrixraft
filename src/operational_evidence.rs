@@ -38,6 +38,24 @@ pub struct BaselineRaftOperationalEvidenceBundleValidationReport {
     pub replication_pipeline_valid: bool,
     pub snapshot_lifecycle_valid: bool,
     pub wal_lifecycle_valid: bool,
+    /// True when `read_safety` is byte-for-byte the built-in conformance
+    /// vector, i.e. nobody attached evidence from a running cluster.
+    ///
+    /// `read_safety_valid` says the artifact is well formed; it does not say
+    /// where it came from. The vector runs real decision logic over fixed
+    /// inputs, so it does test something -- but it tests this crate, not the
+    /// caller's deployment.
+    #[serde(default)]
+    pub read_safety_is_reference: bool,
+    /// True when `membership` is byte-for-byte the built-in reference artifact.
+    ///
+    /// This one matters more than the read-safety flag: the reference artifact
+    /// hardcodes its conclusions rather than deriving them, so
+    /// `membership_valid` is true for every caller on every cluster whenever
+    /// this flag is set. Treat `membership_valid: true` as evidence about a
+    /// deployment only when this is false.
+    #[serde(default)]
+    pub membership_is_reference: bool,
     #[serde(default)]
     pub missing: Vec<String>,
 }
@@ -50,10 +68,45 @@ pub fn matrixraft_baseline_raft_operational_evidence_bundle(
     snapshot_max_inflights_replicate: u64,
     wal_status: WalLifecycleStatus,
 ) -> BaselineRaftOperationalEvidenceBundle {
+    // Every parameter above feeds the last three artifacts. The first two have
+    // no inputs and so cannot describe the caller's cluster: they are the
+    // built-in reference artifacts. Callers holding real read-safety and
+    // membership evidence should use
+    // [`matrixraft_baseline_raft_operational_evidence_bundle_from_artifacts`],
+    // which takes them, rather than shipping a bundle whose membership half is
+    // fixed. The validation report flags which halves were the reference.
+    matrixraft_baseline_raft_operational_evidence_bundle_from_artifacts(
+        matrixraft_read_safety_evidence_artifact(),
+        matrixraft_membership_semantics_evidence_artifact(),
+        pipeline_peers,
+        pipeline_limits,
+        snapshot_peers,
+        send_snapshot_timeout_ms,
+        snapshot_max_inflights_replicate,
+        wal_status,
+    )
+}
+
+/// Build the bundle from read-safety and membership evidence the caller has
+/// actually observed, rather than the built-in reference artifacts.
+///
+/// The other three artifacts are derived from the runtime state passed in, as
+/// they already were.
+#[allow(clippy::too_many_arguments)]
+pub fn matrixraft_baseline_raft_operational_evidence_bundle_from_artifacts(
+    read_safety: ReadSafetyEvidenceArtifact,
+    membership: MembershipSemanticsEvidenceArtifact,
+    pipeline_peers: Vec<PeerProgress>,
+    pipeline_limits: PipelineLimits,
+    snapshot_peers: Vec<PeerProgress>,
+    send_snapshot_timeout_ms: u64,
+    snapshot_max_inflights_replicate: u64,
+    wal_status: WalLifecycleStatus,
+) -> BaselineRaftOperationalEvidenceBundle {
     BaselineRaftOperationalEvidenceBundle {
         schema: "rustraft.baseline_raft_operational_evidence_bundle.v1".to_string(),
-        read_safety: matrixraft_read_safety_evidence_artifact(),
-        membership: matrixraft_membership_semantics_evidence_artifact(),
+        read_safety,
+        membership,
         replication_pipeline: matrixraft_replication_pipeline_evidence_artifact(
             pipeline_peers,
             pipeline_limits,
@@ -78,6 +131,14 @@ pub fn matrixraft_validate_baseline_raft_operational_evidence_bundle(
     let snapshot_lifecycle =
         matrixraft_validate_snapshot_lifecycle_evidence_artifact(&bundle.snapshot_lifecycle);
     let wal_lifecycle = matrixraft_validate_wal_lifecycle_evidence_artifact(&bundle.wal_lifecycle);
+
+    // Whether each of the two input-free artifacts is still the built-in one.
+    // `*_valid` only says an artifact is well formed; for the membership
+    // reference, well formed is unconditional, because the producer hardcodes
+    // exactly the fields the validator checks.
+    let read_safety_is_reference = bundle.read_safety == matrixraft_read_safety_evidence_artifact();
+    let membership_is_reference =
+        bundle.membership == matrixraft_membership_semantics_evidence_artifact();
 
     let mut missing = Vec::new();
     if !schema_valid {
@@ -112,6 +173,8 @@ pub fn matrixraft_validate_baseline_raft_operational_evidence_bundle(
         replication_pipeline_valid: replication_pipeline.valid,
         snapshot_lifecycle_valid: snapshot_lifecycle.valid,
         wal_lifecycle_valid: wal_lifecycle.valid,
+        read_safety_is_reference,
+        membership_is_reference,
         missing,
     }
 }
