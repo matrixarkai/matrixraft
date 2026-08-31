@@ -397,11 +397,19 @@ impl TcpRaftTransport {
         })?;
         let mut stream = TcpStream::connect(addr)
             .map_err(|err| RaftError::Transport(format!("failed to connect to {addr}: {err}")))?;
-        let encoded = serde_json::to_vec(&request)
+        // Raft RPCs are small request/response exchanges, which is the shape
+        // Nagle delays. Without this the framing newline below can sit in the
+        // sender's buffer waiting for an ACK the peer will not send until it
+        // has the newline -- the classic write/write/read stall.
+        let _ = stream.set_nodelay(true);
+        let mut encoded = serde_json::to_vec(&request)
             .map_err(|err| RaftError::Transport(format!("failed to encode raft RPC: {err}")))?;
+        // One write, not a body followed by a one-byte newline: the peer reads
+        // a line, so splitting them puts a round trip between the request and
+        // the peer being able to see it.
+        encoded.push(b'\n');
         stream
             .write_all(&encoded)
-            .and_then(|_| stream.write_all(b"\n"))
             .map_err(|err| RaftError::Transport(format!("failed to write raft RPC: {err}")))?;
         let mut response = String::new();
         BufReader::new(stream)
@@ -530,9 +538,11 @@ impl TcpRaftTransportServer {
         let listener = TcpListener::bind(addr.into()).map_err(|err| {
             RaftError::Transport(format!("failed to bind raft TCP server: {err}"))
         })?;
-        listener.set_nonblocking(true).map_err(|err| {
-            RaftError::Transport(format!("failed to configure raft TCP server: {err}"))
-        })?;
+        // Deliberately blocking. This used to poll with a 5ms sleep between
+        // `accept` attempts, which put 0-5ms in front of every inbound RPC --
+        // measured at a 5.35ms median on loopback, where the round trip itself
+        // costs about 275us. `shutdown` already wakes a blocked `accept` by
+        // connecting to its own address, so nothing needed the poll.
         let addr = listener
             .local_addr()
             .map_err(|err| RaftError::Transport(format!("failed to read raft TCP addr: {err}")))?
@@ -545,10 +555,14 @@ impl TcpRaftTransportServer {
                 while !worker_shutdown.load(Ordering::Relaxed) {
                     match listener.accept() {
                         Ok((stream, _)) => {
+                            // `shutdown` wakes this thread by connecting to us,
+                            // so re-check before serving what may be that
+                            // wake-up rather than a peer.
+                            if worker_shutdown.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let _ = stream.set_nodelay(true);
                             let _ = handle_tcp_raft_stream(stream, handler.as_ref());
-                        }
-                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(5));
                         }
                         Err(_) => break,
                     }
