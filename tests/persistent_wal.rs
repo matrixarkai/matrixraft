@@ -445,8 +445,7 @@ fn a_log_truncated_by_a_conflict_is_stored_whole() {
     let reopened = PersistentRaftWal::open(wide_segment_options(dir.clone())).expect("reopen");
     // Read the folded records rather than going through recovery, which picks
     // by highest committed index and would hand back the pre-conflict record.
-    let folded = reopened.records();
-    let last = folded.last().expect("a record was stored");
+    let last = reopened.latest_record().expect("a record was stored");
     assert_eq!(
         last.entries.len(),
         3,
@@ -516,8 +515,7 @@ fn a_tail_rewritten_at_the_same_index_is_stored_whole() {
     }
 
     let reopened = PersistentRaftWal::open(wide_segment_options(dir.clone())).expect("reopen");
-    let folded = reopened.records();
-    let last = folded.last().expect("a record was stored");
+    let last = reopened.latest_record().expect("a record was stored");
     assert_eq!(last.entries.len(), 5);
     assert_eq!(
         last.entries[4].log_id.term, 7,
@@ -739,6 +737,44 @@ fn a_batch_pays_for_one_fsync_not_one_per_record() {
         wal.fsync_count(),
         6,
         "five single appends add five fsyncs to the batch's one"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// `latest_record` is the cheap form of `records().last()`, and has to be the
+/// same record. It folds once instead of building a whole-log record per stored
+/// record, which is what makes `records` quadratic.
+#[test]
+fn latest_record_is_what_records_last_would_have_been() {
+    let dir = temp_wal_dir("latest-record");
+    let options = PersistentRaftWalOptions {
+        dir: dir.clone(),
+        max_records_per_segment: 10,
+        max_segment_bytes: u64::MAX,
+        min_keep_segments: 1,
+        fsync_on_append: false,
+    };
+    let mut wal = PersistentRaftWal::open(options).expect("open");
+    for index in 1..=40 {
+        wal.append(growing_wal_record(index, 3)).expect("append");
+    }
+
+    let expected = wal.records().last().cloned();
+    let actual = wal.latest_record();
+    assert!(expected.is_some(), "the WAL has records");
+    assert_eq!(
+        actual, expected,
+        "latest_record must match records().last()"
+    );
+
+    // And on a conflict-rewritten tail, where the fold has to resolve rather
+    // than append.
+    wal.append(growing_wal_record(40, 4))
+        .expect("append rewrite");
+    assert_eq!(
+        wal.latest_record(),
+        wal.records().last().cloned(),
+        "the two have to agree after a rewritten tail too"
     );
     fs::remove_dir_all(&dir).ok();
 }
