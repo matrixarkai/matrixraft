@@ -382,9 +382,10 @@ fn whole_from_folded(record: &WalRecord, folded: &[LogEntry]) -> WalRecord {
 /// step.
 ///
 /// [`matrixraft_fold_wal_records`] answers "what did the log look like at each
-/// record", and pays a whole-log record per step to do it. Callers that only
-/// want the log as it ends up -- reopening to see what a segment already
-/// covers, for one -- want this instead.
+/// record". This answers only "what does it look like at the end", which is what
+/// compaction needs when it has to turn a delta back into a whole record, and
+/// what a reopen needs to know what the retained records already cover. Both
+/// share one `fold_wal_entries_step`, so the two cannot drift apart.
 ///
 /// Like the record fold, this stops at the first record whose checksum does not
 /// validate, which is where a reader scanning for a valid prefix would stop.
