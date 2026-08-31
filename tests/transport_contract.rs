@@ -793,3 +793,74 @@ fn tcp_transport_batches_mixed_rpc_requests() {
 
     server.shutdown().expect("shutdown server");
 }
+
+/// The wire format changed from number arrays to base64 for entry payloads.
+/// An old sender still emits number arrays, and a new receiver has to accept
+/// them -- that is the direction a rolling upgrade needs.
+#[test]
+fn a_number_array_request_from_an_old_sender_still_decodes() {
+    let legacy = r#"{
+        "rpc": "append_entries",
+        "payload": {
+            "target": 2,
+            "request": {
+                "group_id": 3,
+                "term": 1,
+                "leader_id": 1,
+                "prev_log_id": null,
+                "entries": [{
+                    "log_id": {"term": 1, "index": 1},
+                    "payload": [104, 101, 108, 108, 111],
+                    "is_command": true
+                }],
+                "leader_commit": 1
+            }
+        }
+    }"#;
+    let decoded: TcpRaftTransportRequest =
+        serde_json::from_str(legacy).expect("legacy number-array request decodes");
+    match decoded {
+        TcpRaftTransportRequest::AppendEntries { request, .. } => {
+            assert_eq!(request.entries.len(), 1);
+            assert_eq!(request.entries[0].payload, b"hello");
+        }
+        other => panic!("decoded to the wrong variant: {other:?}"),
+    }
+}
+
+/// And the new encoding is what a new sender emits: base64 text, not an array.
+#[test]
+fn a_new_request_carries_base64_payloads_on_the_wire() {
+    let request = TcpRaftTransportRequest::AppendEntries {
+        target: 2,
+        request: AppendEntriesRequest {
+            group_id: 3,
+            term: 1,
+            leader_id: 1,
+            prev_log_id: None,
+            entries: vec![LogEntry {
+                log_id: LogId { term: 1, index: 1 },
+                payload: b"hello".to_vec(),
+                is_command: true,
+            }],
+            leader_commit: 1,
+            lease_epoch: 0,
+        },
+    };
+    let encoded = serde_json::to_string(&request).expect("encode");
+    assert!(
+        encoded.contains("\"aGVsbG8=\""),
+        "payload should be base64 text: {encoded}"
+    );
+    assert!(
+        !encoded.contains("[104"),
+        "payload must not be a number array: {encoded}"
+    );
+    let round: TcpRaftTransportRequest = serde_json::from_str(&encoded).expect("round trip");
+    match round {
+        TcpRaftTransportRequest::AppendEntries { request, .. } => {
+            assert_eq!(request.entries[0].payload, b"hello");
+        }
+        other => panic!("decoded to the wrong variant: {other:?}"),
+    }
+}
