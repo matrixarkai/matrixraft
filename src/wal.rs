@@ -675,6 +675,47 @@ pub(crate) mod wal_entry_payloads {
     }
 }
 
+/// Base64 for a bare byte-buffer field, with the same legacy tolerance as
+/// [`wal_entry_payloads`]: decode accepts the old number-array form, so data
+/// written before this codec still reads.
+///
+/// Generic over the payload type so it can sit on a generic struct field. The
+/// bounds are the codec's real requirements -- the bytes must be readable to
+/// encode and constructible to decode -- and a payload type that is not
+/// byte-like was never serializable as base64 anyway.
+pub(crate) mod bytes_as_base64 {
+    use serde::de::{Deserializer, Error as DeError};
+    use serde::{Deserialize, Serializer};
+
+    pub(crate) fn serialize<S, P>(data: &P, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        P: AsRef<[u8]>,
+    {
+        serializer.serialize_str(&super::wal_entry_payloads::encode(data.as_ref()))
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BytesIn {
+        Text(String),
+        Numbers(Vec<u8>),
+    }
+
+    pub(crate) fn deserialize<'de, D, P>(deserializer: D) -> Result<P, D::Error>
+    where
+        D: Deserializer<'de>,
+        P: From<Vec<u8>>,
+    {
+        match BytesIn::deserialize(deserializer)? {
+            BytesIn::Text(text) => super::wal_entry_payloads::decode(&text)
+                .map(P::from)
+                .map_err(DeError::custom),
+            BytesIn::Numbers(bytes) => Ok(P::from(bytes)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod wal_entry_payload_codec_tests {
     use super::wal_entry_payloads::{decode, encode};

@@ -864,3 +864,36 @@ fn a_new_request_carries_base64_payloads_on_the_wire() {
         other => panic!("decoded to the wrong variant: {other:?}"),
     }
 }
+
+/// Snapshot chunks changed encoding too. An old sender's number-array chunk
+/// still decodes -- the direction a rolling upgrade needs -- and the new form
+/// is base64 text.
+#[test]
+fn a_number_array_snapshot_chunk_from_an_old_sender_still_decodes() {
+    let legacy = r#"{
+        "meta": {
+            "snapshot_id": "snap-1",
+            "last_log_id": {"term": 1, "index": 100},
+            "membership": [1, 2, 3]
+        },
+        "offset": 0,
+        "data": [104, 101, 108, 108, 111],
+        "done": true
+    }"#;
+    let decoded: SnapshotChunk =
+        serde_json::from_str(legacy).expect("legacy number-array chunk decodes");
+    assert_eq!(decoded.data, b"hello");
+
+    let reencoded = serde_json::to_string(&decoded).expect("encode");
+    assert!(
+        reencoded.contains("\"aGVsbG8=\""),
+        "chunk data should be base64 text: {reencoded}"
+    );
+    assert!(
+        !reencoded.contains("[104"),
+        "chunk data must not be a number array: {reencoded}"
+    );
+    let round: SnapshotChunk = serde_json::from_str(&reencoded).expect("round trip");
+    assert_eq!(round.data, b"hello");
+    assert_eq!(round, decoded);
+}
