@@ -6,23 +6,23 @@
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RaftMembershipOperation {
-    AddNode(RustRaftPeer),
-    AddVoter(RustRaftPeer),
-    AddLearner(RustRaftPeer),
-    AddWitness(RustRaftPeer),
-    Promote(RustRaftNodeId),
-    Remove(RustRaftNodeId),
-    TransferLeader(RustRaftNodeId),
+pub enum MembershipOperation {
+    AddNode(Peer),
+    AddVoter(Peer),
+    AddLearner(Peer),
+    AddWitness(Peer),
+    Promote(NodeId),
+    Remove(NodeId),
+    TransferLeader(NodeId),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftMembershipExecutionReport {
-    pub operation: RaftMembershipOperation,
-    pub before: RaftMembership,
-    pub after: RaftMembership,
-    pub leader_before: Option<RustRaftNodeId>,
-    pub leader_after: Option<RustRaftNodeId>,
+pub struct MembershipExecutionReport {
+    pub operation: MembershipOperation,
+    pub before: Membership,
+    pub after: Membership,
+    pub leader_before: Option<NodeId>,
+    pub leader_after: Option<NodeId>,
     pub success: bool,
     pub reason: String,
     #[serde(default)]
@@ -34,15 +34,15 @@ pub struct RaftMembershipExecutionReport {
     #[serde(default)]
     pub joint_consensus: Option<JointConsensusMembership>,
     #[serde(default)]
-    pub joint_consensus_commit: Option<RustRaftJointConsensusCommitEvidence>,
+    pub joint_consensus_commit: Option<JointConsensusCommitEvidence>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftMembershipExecutor {
-    reports: Vec<RaftMembershipExecutionReport>,
+pub struct MembershipExecutor {
+    reports: Vec<MembershipExecutionReport>,
 }
 
-impl RaftMembershipExecutor {
+impl MembershipExecutor {
     pub fn new() -> Self {
         Self::default()
     }
@@ -50,17 +50,17 @@ impl RaftMembershipExecutor {
     pub fn execute(
         &mut self,
         cluster: &mut RaftCluster,
-        operation: RaftMembershipOperation,
-    ) -> Result<RaftMembershipExecutionReport, RaftError> {
+        operation: MembershipOperation,
+    ) -> Result<MembershipExecutionReport, RaftError> {
         self.execute_inner(cluster, operation, false)
     }
 
     fn execute_inner(
         &mut self,
         cluster: &mut RaftCluster,
-        operation: RaftMembershipOperation,
+        operation: MembershipOperation,
         rollback_on_failure: bool,
-    ) -> Result<RaftMembershipExecutionReport, RaftError> {
+    ) -> Result<MembershipExecutionReport, RaftError> {
         let cluster_before = rollback_on_failure.then(|| cluster.clone());
         let before = cluster.membership();
         let leader_before = cluster.leader_id();
@@ -72,20 +72,20 @@ impl RaftMembershipExecutor {
         } else {
             applied = true;
             match operation.clone() {
-                RaftMembershipOperation::AddNode(peer) => cluster
-                    .apply_committed_membership_operation(RaftMembershipOperation::AddNode(peer))
+                MembershipOperation::AddNode(peer) => cluster
+                    .apply_committed_membership_operation(MembershipOperation::AddNode(peer))
                     .map(|_| ()),
-                RaftMembershipOperation::AddVoter(mut peer) => {
-                    peer.role = RustRaftReplicaRole::Voter;
+                MembershipOperation::AddVoter(mut peer) => {
+                    peer.role = ReplicaRole::Voter;
                     cluster
-                        .apply_committed_membership_operation(RaftMembershipOperation::AddVoter(
+                        .apply_committed_membership_operation(MembershipOperation::AddVoter(
                             peer,
                         ))
                         .map(|_| ())
                 }
-                RaftMembershipOperation::AddLearner(peer) => cluster.add_learner(peer),
-                RaftMembershipOperation::AddWitness(peer) => cluster.add_witness(peer),
-                RaftMembershipOperation::Promote(node_id) => {
+                MembershipOperation::AddLearner(peer) => cluster.add_learner(peer),
+                MembershipOperation::AddWitness(peer) => cluster.add_witness(peer),
+                MembershipOperation::Promote(node_id) => {
                     match cluster.learner_catch_up_loop(node_id) {
                         Ok(catchup) if catchup.caught_up => match cluster.catchup_report(node_id) {
                             Ok(catchup) if catchup.promotable => cluster.promote_peer(node_id),
@@ -102,8 +102,8 @@ impl RaftMembershipExecutor {
                         Err(error) => Err(error),
                     }
                 }
-                RaftMembershipOperation::Remove(node_id) => cluster.remove_peer(node_id),
-                RaftMembershipOperation::TransferLeader(node_id) => {
+                MembershipOperation::Remove(node_id) => cluster.remove_peer(node_id),
+                MembershipOperation::TransferLeader(node_id) => {
                     cluster.transfer_leader(node_id)
                 }
             }
@@ -127,7 +127,7 @@ impl RaftMembershipExecutor {
             .as_ref()
             .filter(|_| success)
             .map(|joint| joint.commit_evidence(joint_acknowledgements(&before, &after)));
-        let report = RaftMembershipExecutionReport {
+        let report = MembershipExecutionReport {
             operation,
             joint_consensus,
             joint_consensus_commit,
@@ -149,9 +149,9 @@ impl RaftMembershipExecutor {
         &mut self,
         cluster: &mut RaftCluster,
         operations: I,
-    ) -> Result<Vec<RaftMembershipExecutionReport>, RaftError>
+    ) -> Result<Vec<MembershipExecutionReport>, RaftError>
     where
-        I: IntoIterator<Item = RaftMembershipOperation>,
+        I: IntoIterator<Item = MembershipOperation>,
     {
         let mut reports = Vec::new();
         for operation in operations {
@@ -164,9 +164,9 @@ impl RaftMembershipExecutor {
         &mut self,
         cluster: &mut RaftCluster,
         operations: I,
-    ) -> Result<Vec<RaftMembershipExecutionReport>, RaftError>
+    ) -> Result<Vec<MembershipExecutionReport>, RaftError>
     where
-        I: IntoIterator<Item = RaftMembershipOperation>,
+        I: IntoIterator<Item = MembershipOperation>,
     {
         let workflow_before = cluster.clone();
         let mut reports = Vec::new();
@@ -193,35 +193,35 @@ impl RaftMembershipExecutor {
     pub fn validate(
         &self,
         cluster: &RaftCluster,
-        operation: &RaftMembershipOperation,
+        operation: &MembershipOperation,
     ) -> Vec<String> {
         let membership = cluster.membership();
         let mut blockers = Vec::new();
         match operation {
-            RaftMembershipOperation::AddNode(peer) => {
-                if !(peer.role == RustRaftReplicaRole::Voter
+            MembershipOperation::AddNode(peer) => {
+                if !(peer.role == ReplicaRole::Voter
                     && membership.learners.contains(&peer.node_id))
                 {
                     validate_peer_absent(&membership, peer.node_id, &mut blockers);
                 }
             }
-            RaftMembershipOperation::AddVoter(peer) => {
+            MembershipOperation::AddVoter(peer) => {
                 if !membership.learners.contains(&peer.node_id) {
                     validate_peer_absent(&membership, peer.node_id, &mut blockers);
                 }
             }
-            RaftMembershipOperation::AddLearner(peer) => {
+            MembershipOperation::AddLearner(peer) => {
                 validate_peer_absent(&membership, peer.node_id, &mut blockers);
             }
-            RaftMembershipOperation::AddWitness(peer) => {
+            MembershipOperation::AddWitness(peer) => {
                 validate_peer_absent(&membership, peer.node_id, &mut blockers);
             }
-            RaftMembershipOperation::Promote(node_id) => {
+            MembershipOperation::Promote(node_id) => {
                 if !membership.learners.contains(node_id) {
                     blockers.push(format!("node_{node_id}_is_not_learner"));
                 }
             }
-            RaftMembershipOperation::Remove(node_id) => {
+            MembershipOperation::Remove(node_id) => {
                 if !membership.voters.contains(node_id)
                     && !membership.learners.contains(node_id)
                     && !membership.witnesses.contains(node_id)
@@ -235,7 +235,7 @@ impl RaftMembershipExecutor {
                     blockers.push("cannot_remove_current_leader_without_transfer".to_string());
                 }
             }
-            RaftMembershipOperation::TransferLeader(node_id) => match cluster.nodes.get(node_id) {
+            MembershipOperation::TransferLeader(node_id) => match cluster.nodes.get(node_id) {
                 Some(node) if !node.replica_role.can_be_leader() => {
                     blockers.push(format!("node_{node_id}_cannot_be_leader"));
                 }
@@ -249,14 +249,14 @@ impl RaftMembershipExecutor {
         blockers
     }
 
-    pub fn reports(&self) -> &[RaftMembershipExecutionReport] {
+    pub fn reports(&self) -> &[MembershipExecutionReport] {
         &self.reports
     }
 }
 
 fn validate_peer_absent(
-    membership: &RaftMembership,
-    node_id: RustRaftNodeId,
+    membership: &Membership,
+    node_id: NodeId,
     blockers: &mut Vec<String>,
 ) {
     if membership.voters.contains(&node_id)
@@ -268,8 +268,8 @@ fn validate_peer_absent(
 }
 
 fn membership_joint_if_voters_changed(
-    before: &RaftMembership,
-    after: &RaftMembership,
+    before: &Membership,
+    after: &Membership,
 ) -> Option<JointConsensusMembership> {
     (before.voters != after.voters).then(|| JointConsensusMembership {
         old_voters: before.voters.clone(),
@@ -278,9 +278,9 @@ fn membership_joint_if_voters_changed(
 }
 
 fn joint_acknowledgements(
-    before: &RaftMembership,
-    after: &RaftMembership,
-) -> Vec<RustRaftNodeId> {
+    before: &Membership,
+    after: &Membership,
+) -> Vec<NodeId> {
     before
         .voters
         .iter()

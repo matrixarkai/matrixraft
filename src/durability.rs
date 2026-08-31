@@ -7,17 +7,17 @@ use crate::{
     matrixraft_validate_apply_snapshot_fence, matrixraft_validate_hard_state_persistence,
     matrixraft_validate_snapshot_floor_log_matching, matrixraft_validate_snapshot_install,
     matrixraft_validate_snapshot_tail_catchup, matrixraft_validate_storage_apply_fence,
-    matrixraft_wal_checksum_valid, RaftSnapshot, RaftWalRecoveryReport,
-    RustRaftDurabilityParityReport, RustRaftLogEntry, RustRaftStorageApplyFence, RustRaftWalRecord,
+    matrixraft_wal_checksum_valid, DurabilityParityReport, LogEntry, RaftSnapshot,
+    StorageApplyFence, WalRecord, WalRecoveryReport,
 };
 
 pub fn matrixraft_durability_parity_report(
-    wal_record: &RustRaftWalRecord,
-    recovery_report: &RaftWalRecoveryReport,
+    wal_record: &WalRecord,
+    recovery_report: &WalRecoveryReport,
     snapshot: Option<&RaftSnapshot>,
-    tail_entries: &[RustRaftLogEntry],
-    storage_fence: &RustRaftStorageApplyFence,
-) -> RustRaftDurabilityParityReport {
+    tail_entries: &[LogEntry],
+    storage_fence: &StorageApplyFence,
+) -> DurabilityParityReport {
     let hard_state_persisted = matrixraft_validate_hard_state_persistence(wal_record).is_ok();
     let wal_record_valid = matrixraft_wal_checksum_valid(wal_record);
     let segmented_wal_recovered = recovery_report.recovered.is_some();
@@ -58,7 +58,7 @@ pub fn matrixraft_durability_parity_report(
         .filter(|&(_name, passed)| !passed)
         .map(|(name, _passed)| name.to_string())
         .collect::<Vec<_>>();
-    RustRaftDurabilityParityReport {
+    DurabilityParityReport {
         ready: blockers.is_empty(),
         hard_state_persisted,
         wal_record_valid,

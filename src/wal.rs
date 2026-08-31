@@ -6,47 +6,47 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::{
-    matrixraft_durability_parity_report, FileRaftWal, LocalRaftWal, PersistentRaftWal,
-    PersistentRaftWalOptions, RaftHardState, RustRaftDurabilityParityReport, RustRaftHardState,
+    matrixraft_durability_parity_report, DurabilityParityReport, FileRaftWal, HardState,
+    LocalRaftWal, PersistentRaftWal, PersistentRaftWalOptions, Term,
 };
 
 use crate::{
-    RustRaftApplySnapshotFence, RustRaftError, RustRaftGroupId, RustRaftLogEntry, RustRaftLogIndex,
-    RustRaftMembership, RustRaftNodeId, RustRaftSnapshotMeta,
+    ApplySnapshotFence, GroupId, LogEntry, LogIndex, Membership, NodeId, RaftError,
+    SnapshotMetadata,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftWalChecksumFormat {
+pub struct WalChecksumFormat {
     pub algorithm: String,
     pub encoding: String,
     pub covered_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftLogRetainedRange {
-    pub first_log_index: RustRaftLogIndex,
-    pub last_log_index: RustRaftLogIndex,
+pub struct LogRetainedRange {
+    pub first_log_index: LogIndex,
+    pub last_log_index: LogIndex,
     pub first_segment_id: u64,
     pub last_segment_id: u64,
     pub record_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftWalSegmentIndex {
+pub struct WalSegmentIndex {
     pub segment_id: u64,
-    pub first_log_index: RustRaftLogIndex,
-    pub last_log_index: RustRaftLogIndex,
+    pub first_log_index: LogIndex,
+    pub last_log_index: LogIndex,
     pub record_count: u64,
     pub sealed: bool,
     pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftWalWriteReport {
+pub struct WalWriteReport {
     pub segment_id: u64,
-    pub log_index: RustRaftLogIndex,
+    pub log_index: LogIndex,
     pub checksum: String,
-    pub checksum_format: RaftWalChecksumFormat,
+    pub checksum_format: WalChecksumFormat,
     pub bytes_written: u64,
     pub fsync_on_append: bool,
     #[serde(default)]
@@ -57,59 +57,64 @@ pub struct RaftWalWriteReport {
     pub slow_fsync_observed: bool,
     pub segment_rolled: bool,
     pub hard_state_persisted: bool,
-    pub retained_range: RaftLogRetainedRange,
+    pub retained_range: LogRetainedRange,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftWalCompactionReport {
-    pub requested_log_index: RustRaftLogIndex,
+pub struct WalCompactionReport {
+    pub requested_log_index: LogIndex,
     pub released_segments: u64,
-    pub retained_range: RaftLogRetainedRange,
+    pub retained_range: LogRetainedRange,
     pub fence_valid: bool,
     pub blocker: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftWalRecord {
-    pub group_id: RustRaftGroupId,
-    pub node_id: RustRaftNodeId,
-    pub hard_state: RustRaftHardState,
-    pub membership: RustRaftMembership,
+pub struct WalRecord {
+    pub group_id: GroupId,
+    pub node_id: NodeId,
+    pub hard_state: HardState,
+    pub membership: Membership,
     #[serde(default)]
-    pub entries: Vec<RustRaftLogEntry>,
+    pub entries: Vec<LogEntry>,
+    /// When true, `entries` carries only what was appended since the previous
+    /// record in the same segment rather than the whole retained log. The first
+    /// record of every segment is always a full one, so a segment can be read
+    /// without reading any other -- which is what lets whole-segment compaction
+    /// stay as simple as it was.
     #[serde(default)]
-    pub installed_snapshot: Option<RustRaftSnapshotMeta>,
-    pub apply_snapshot_fence: RustRaftApplySnapshotFence,
+    pub entries_are_delta: bool,
+    #[serde(default)]
+    pub installed_snapshot: Option<SnapshotMetadata>,
+    pub apply_snapshot_fence: ApplySnapshotFence,
     pub checksum: String,
 }
 
-pub type RaftWalRecord = RustRaftWalRecord;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftWalSegment {
+pub struct WalSegment {
     pub segment_id: u64,
-    pub first_index: RustRaftLogIndex,
-    pub last_index: RustRaftLogIndex,
-    pub records: Vec<RaftWalRecord>,
+    pub first_index: LogIndex,
+    pub last_index: LogIndex,
+    pub records: Vec<WalRecord>,
     pub sealed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftWalRecoveryReport {
-    pub recovered: Option<RaftWalRecord>,
+pub struct WalRecoveryReport {
+    pub recovered: Option<WalRecord>,
     pub truncated_corrupt_tail: bool,
     pub surviving_records: usize,
     pub removed_records: usize,
     #[serde(default)]
     pub segments_scanned: u64,
     #[serde(default)]
-    pub checksum_format: Option<RaftWalChecksumFormat>,
+    pub checksum_format: Option<WalChecksumFormat>,
     #[serde(default)]
-    pub retained_range: Option<RaftLogRetainedRange>,
+    pub retained_range: Option<LogRetainedRange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftWalLifecycleStatus {
+pub struct WalLifecycleStatus {
     pub segment_count: u64,
     pub active_segment_id: u64,
     pub first_retained_segment_id: u64,
@@ -136,7 +141,7 @@ pub struct RustRaftWalLifecycleStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftWalLifecycleEvidence {
+pub struct WalLifecycleEvidence {
     pub segment_lifecycle_present: bool,
     pub retained_range_present: bool,
     pub sequence_range_present: bool,
@@ -148,14 +153,14 @@ pub struct RustRaftWalLifecycleEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftWalLifecycleEvidenceArtifact {
+pub struct WalLifecycleEvidenceArtifact {
     pub schema: String,
-    pub status: RustRaftWalLifecycleStatus,
-    pub evidence: RustRaftWalLifecycleEvidence,
+    pub status: WalLifecycleStatus,
+    pub evidence: WalLifecycleEvidence,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftWalLifecycleEvidenceValidationReport {
+pub struct WalLifecycleEvidenceValidationReport {
     pub valid: bool,
     pub schema_valid: bool,
     pub segment_lifecycle_present: bool,
@@ -170,7 +175,7 @@ pub struct RustRaftWalLifecycleEvidenceValidationReport {
     pub missing: Vec<String>,
 }
 
-pub fn matrixraft_wal_checksum(record: &RaftWalRecord) -> String {
+pub fn matrixraft_wal_checksum(record: &WalRecord) -> String {
     let mut hash = 14_695_981_039_346_656_037_u64;
     let mut mix = |value: u64| {
         for byte in value.to_le_bytes() {
@@ -191,6 +196,11 @@ pub fn matrixraft_wal_checksum(record: &RaftWalRecord) -> String {
         mix(entry.log_id.index);
         mix(entry.payload.len() as u64);
     }
+    if record.entries_are_delta {
+        // Mixed only when set: a full record hashes exactly as it did before
+        // this field existed, so WAL files written earlier still validate.
+        mix(1);
+    }
     if let Some(snapshot) = &record.installed_snapshot {
         mix(snapshot.last_log_id.term);
         mix(snapshot.last_log_id.index);
@@ -202,8 +212,8 @@ pub fn matrixraft_wal_checksum(record: &RaftWalRecord) -> String {
     format!("{hash:016x}")
 }
 
-pub fn matrixraft_wal_checksum_format() -> RaftWalChecksumFormat {
-    RaftWalChecksumFormat {
+pub fn matrixraft_wal_checksum_format() -> WalChecksumFormat {
+    WalChecksumFormat {
         algorithm: "fnv1a64-rustraft-v1".to_string(),
         encoding: "lower_hex_16".to_string(),
         covered_fields: vec![
@@ -214,22 +224,21 @@ pub fn matrixraft_wal_checksum_format() -> RaftWalChecksumFormat {
             "hard_state.committed".to_string(),
             "entries.log_id".to_string(),
             "entries.payload_len".to_string(),
+            "entries_are_delta".to_string(),
             "installed_snapshot.last_log_id".to_string(),
             "apply_snapshot_fence".to_string(),
         ],
     }
 }
 
-pub fn matrixraft_wal_checksum_valid(record: &RaftWalRecord) -> bool {
+pub fn matrixraft_wal_checksum_valid(record: &WalRecord) -> bool {
     record.checksum == matrixraft_wal_checksum(record)
 }
 
-pub fn matrixraft_validate_hard_state_persistence(
-    record: &RustRaftWalRecord,
-) -> Result<(), RustRaftError> {
+pub fn matrixraft_validate_hard_state_persistence(record: &WalRecord) -> Result<(), RaftError> {
     if let Some(committed) = &record.hard_state.committed {
         if committed.term > record.hard_state.current_term {
-            return Err(RustRaftError::Storage(
+            return Err(RaftError::Storage(
                 "committed term is ahead of persisted current term".to_string(),
             ));
         }
@@ -244,7 +253,7 @@ pub fn matrixraft_validate_hard_state_persistence(
             .map(|snapshot| snapshot.last_log_id.index)
             .unwrap_or_default();
         if committed.index > last_entry_index.max(snapshot_index) {
-            return Err(RustRaftError::Storage(
+            return Err(RaftError::Storage(
                 "committed index is ahead of persisted log and snapshot".to_string(),
             ));
         }
@@ -252,9 +261,7 @@ pub fn matrixraft_validate_hard_state_persistence(
     Ok(())
 }
 
-pub fn matrixraft_validate_apply_snapshot_fence(
-    record: &RustRaftWalRecord,
-) -> Result<(), RustRaftError> {
+pub fn matrixraft_validate_apply_snapshot_fence(record: &WalRecord) -> Result<(), RaftError> {
     let fence = &record.apply_snapshot_fence;
     let committed_index = record
         .hard_state
@@ -263,25 +270,25 @@ pub fn matrixraft_validate_apply_snapshot_fence(
         .map(|log_id| log_id.index)
         .unwrap_or_default();
     if fence.applied_index > committed_index {
-        return Err(RustRaftError::Storage(
+        return Err(RaftError::Storage(
             "apply snapshot fence is ahead of committed index".to_string(),
         ));
     }
     if fence.commit_index != committed_index {
-        return Err(RustRaftError::Storage(
+        return Err(RaftError::Storage(
             "apply snapshot fence commit index does not match hard state".to_string(),
         ));
     }
     if let Some(snapshot) = &record.installed_snapshot {
         if fence.installed_snapshot_index != snapshot.last_log_id.index {
-            return Err(RustRaftError::Storage(
+            return Err(RaftError::Storage(
                 "apply snapshot fence does not match installed snapshot".to_string(),
             ));
         }
         if fence.first_retained_log_index > 0
             && fence.first_retained_log_index <= snapshot.last_log_id.index
         {
-            return Err(RustRaftError::Storage(
+            return Err(RaftError::Storage(
                 "first retained log index overlaps installed snapshot".to_string(),
             ));
         }
@@ -289,9 +296,72 @@ pub fn matrixraft_validate_apply_snapshot_fence(
     Ok(())
 }
 
-pub fn matrixraft_recover_latest_wal_record(
-    records: &[RustRaftWalRecord],
-) -> Result<RustRaftWalRecord, RustRaftError> {
+/// Folds stored records back into whole-log records.
+///
+/// Records are stored so that the first one in a segment carries the whole
+/// retained log and the rest carry only what was appended after it. Every
+/// reader upstream of this function expects whole-log records, so folding
+/// happens here, once, on the way out.
+///
+/// Checksums are verified against the bytes as stored, before folding, and the
+/// fold stops at the first record that fails -- the same place a reader
+/// scanning for a valid prefix would have stopped. The folded records are then
+/// re-checksummed so they validate as the whole-log records they now are.
+pub fn matrixraft_fold_wal_records(stored: &[WalRecord]) -> Vec<WalRecord> {
+    let mut folded_entries: Vec<LogEntry> = Vec::new();
+    let mut out = Vec::with_capacity(stored.len());
+    for record in stored {
+        if !matrixraft_wal_checksum_valid(record) {
+            break;
+        }
+        if record.entries_are_delta {
+            if let Some(first) = record.entries.first() {
+                let cut =
+                    folded_entries.partition_point(|entry| entry.log_id.index < first.log_id.index);
+                folded_entries.truncate(cut);
+            }
+            folded_entries.extend(record.entries.iter().cloned());
+        } else {
+            folded_entries.clone_from(&record.entries);
+        }
+        let mut whole = record.clone();
+        whole.entries.clone_from(&folded_entries);
+        whole.entries_are_delta = false;
+        whole.checksum = matrixraft_wal_checksum(&whole);
+        out.push(whole);
+    }
+    out
+}
+
+/// Whether `entries` extends `covered` rather than diverging from it.
+///
+/// A delta is only sound when the record continues the log the segment already
+/// describes. If the log was truncated by a conflict and rewritten, or compacted
+/// so it now starts later than the segment does, the overlap no longer matches
+/// and the record has to be stored whole.
+pub fn matrixraft_wal_delta_base(
+    entries: &[LogEntry],
+    covered_first_index: LogIndex,
+    covered_last_index: LogIndex,
+    covered_last_term: Term,
+) -> Option<usize> {
+    let first = entries.first()?;
+    if first.log_id.index > covered_first_index {
+        // The log was compacted past where this segment starts; folding would
+        // resurrect entries the node no longer holds.
+        return None;
+    }
+    let position = entries
+        .binary_search_by(|entry| entry.log_id.index.cmp(&covered_last_index))
+        .ok()?;
+    if entries[position].log_id.term != covered_last_term {
+        // Same index, different term: the log diverged here.
+        return None;
+    }
+    Some(position + 1)
+}
+
+pub fn matrixraft_recover_latest_wal_record(records: &[WalRecord]) -> Result<WalRecord, RaftError> {
     let valid_records = records
         .iter()
         .take_while(|record| matrixraft_wal_checksum_valid(record))
@@ -311,17 +381,15 @@ pub fn matrixraft_recover_latest_wal_record(
                 .unwrap_or_default()
         })
     else {
-        return Err(RustRaftError::Storage(
+        return Err(RaftError::Storage(
             "no valid WAL record survived recovery".to_string(),
         ));
     };
     Ok(record.clone())
 }
 
-pub fn matrixraft_wal_lifecycle_evidence(
-    status: &RustRaftWalLifecycleStatus,
-) -> RustRaftWalLifecycleEvidence {
-    RustRaftWalLifecycleEvidence {
+pub fn matrixraft_wal_lifecycle_evidence(status: &WalLifecycleStatus) -> WalLifecycleEvidence {
+    WalLifecycleEvidence {
         segment_lifecycle_present: status.segment_count > 0
             && status.active_segment_id >= status.first_retained_segment_id
             && status.last_retained_segment_id >= status.first_retained_segment_id,
@@ -341,10 +409,10 @@ pub fn matrixraft_wal_lifecycle_evidence(
 }
 
 pub fn matrixraft_wal_lifecycle_evidence_artifact(
-    status: RustRaftWalLifecycleStatus,
-) -> RustRaftWalLifecycleEvidenceArtifact {
+    status: WalLifecycleStatus,
+) -> WalLifecycleEvidenceArtifact {
     let evidence = matrixraft_wal_lifecycle_evidence(&status);
-    RustRaftWalLifecycleEvidenceArtifact {
+    WalLifecycleEvidenceArtifact {
         schema: "rustraft.wal_lifecycle_evidence.v1".to_string(),
         status,
         evidence,
@@ -352,8 +420,8 @@ pub fn matrixraft_wal_lifecycle_evidence_artifact(
 }
 
 pub fn matrixraft_validate_wal_lifecycle_evidence_artifact(
-    artifact: &RustRaftWalLifecycleEvidenceArtifact,
-) -> RustRaftWalLifecycleEvidenceValidationReport {
+    artifact: &WalLifecycleEvidenceArtifact,
+) -> WalLifecycleEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.wal_lifecycle_evidence.v1";
     let recomputed = matrixraft_wal_lifecycle_evidence(&artifact.status);
     let segment_lifecycle_present =
@@ -393,7 +461,7 @@ pub fn matrixraft_validate_wal_lifecycle_evidence_artifact(
         }
     }
 
-    RustRaftWalLifecycleEvidenceValidationReport {
+    WalLifecycleEvidenceValidationReport {
         valid: missing.is_empty(),
         schema_valid,
         segment_lifecycle_present,

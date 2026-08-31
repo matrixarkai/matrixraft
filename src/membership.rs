@@ -6,24 +6,22 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::{
-    JointConsensusMembership, RaftLearnerCatchUpReport, RaftMembership,
-    RaftMembershipExecutionReport, RaftMembershipExecutor, RaftMembershipOperation,
-    RustRaftJointConsensusCommitEvidence, RustRaftJointMembership,
-    RustRaftLearnerPromotionDecision, RustRaftMembership, RustRaftMembershipReadinessReport,
-    RustRaftMembershipScope, RustRaftMembershipSemanticsEvidenceArtifact,
-    RustRaftMembershipSemanticsEvidenceValidationReport, RustRaftMembershipTransitionDecision,
-    RustRaftMembershipTransitionEvidence, RustRaftMembershipTransitionKind, RustRaftNodeId,
-    RustRaftPeer, RustRaftPeerStatus, RustRaftReplicaRole, RustRaftRole, RustRaftStatusSnapshot,
+    JointConsensusCommitEvidence, JointConsensusMembership, JointMembership, LearnerCatchUpReport,
+    LearnerPromotionDecision, Membership, MembershipExecutionReport, MembershipExecutor,
+    MembershipOperation, MembershipReadinessReport, MembershipScope,
+    MembershipSemanticsEvidenceArtifact, MembershipSemanticsEvidenceValidationReport,
+    MembershipTransitionDecision, MembershipTransitionEvidence, MembershipTransitionKind, NodeId,
+    Peer, PeerStatus, ReplicaRole, StateRole, StatusSnapshot,
 };
 
-use crate::RustRaftLogIndex;
+use crate::LogIndex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftLearnerCatchUpLoopReport {
-    pub learner_id: RustRaftNodeId,
-    pub leader_commit_index: RustRaftLogIndex,
-    pub learner_match_index_before: RustRaftLogIndex,
-    pub learner_match_index_after: RustRaftLogIndex,
+pub struct LearnerCatchUpLoopReport {
+    pub learner_id: NodeId,
+    pub leader_commit_index: LogIndex,
+    pub learner_match_index_before: LogIndex,
+    pub learner_match_index_after: LogIndex,
     pub rounds: u64,
     pub caught_up: bool,
     pub reason: String,
@@ -32,7 +30,7 @@ pub struct RaftLearnerCatchUpLoopReport {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
-pub enum RaftLearnerAutoPromoteState {
+pub enum LearnerAutoPromoteState {
     #[default]
     Stop,
     Check,
@@ -41,52 +39,49 @@ pub enum RaftLearnerAutoPromoteState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftLearnerAutoPromoteReport {
-    pub learner_id: RustRaftNodeId,
+pub struct LearnerAutoPromoteReport {
+    pub learner_id: NodeId,
     pub auto_promote: bool,
-    pub state_before: RaftLearnerAutoPromoteState,
-    pub state_after: RaftLearnerAutoPromoteState,
-    pub catchup: Option<RaftLearnerCatchUpLoopReport>,
+    pub state_before: LearnerAutoPromoteState,
+    pub state_after: LearnerAutoPromoteState,
+    pub catchup: Option<LearnerCatchUpLoopReport>,
     pub promoted: bool,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftWitnessQuorumReport {
+pub struct WitnessQuorumReport {
     pub required: u64,
     pub acknowledged: u64,
     pub reached: bool,
-    pub voters: Vec<RustRaftNodeId>,
-    pub witnesses: Vec<RustRaftNodeId>,
+    pub voters: Vec<NodeId>,
+    pub witnesses: Vec<NodeId>,
 }
 
 pub fn matrixraft_membership_readiness_report(
-    transitions: &[RustRaftMembershipTransitionEvidence],
-) -> RustRaftMembershipReadinessReport {
+    transitions: &[MembershipTransitionEvidence],
+) -> MembershipReadinessReport {
     let required = [
         (
-            RustRaftMembershipScope::Metaserver,
-            RustRaftMembershipTransitionKind::Failover,
+            MembershipScope::Metaserver,
+            MembershipTransitionKind::Failover,
         ),
         (
-            RustRaftMembershipScope::Metaserver,
-            RustRaftMembershipTransitionKind::ScaleUp,
+            MembershipScope::Metaserver,
+            MembershipTransitionKind::ScaleUp,
         ),
         (
-            RustRaftMembershipScope::Metaserver,
-            RustRaftMembershipTransitionKind::ScaleDown,
+            MembershipScope::Metaserver,
+            MembershipTransitionKind::ScaleDown,
         ),
         (
-            RustRaftMembershipScope::DataNode,
-            RustRaftMembershipTransitionKind::Failover,
+            MembershipScope::DataNode,
+            MembershipTransitionKind::Failover,
         ),
+        (MembershipScope::DataNode, MembershipTransitionKind::ScaleUp),
         (
-            RustRaftMembershipScope::DataNode,
-            RustRaftMembershipTransitionKind::ScaleUp,
-        ),
-        (
-            RustRaftMembershipScope::DataNode,
-            RustRaftMembershipTransitionKind::ScaleDown,
+            MembershipScope::DataNode,
+            MembershipTransitionKind::ScaleDown,
         ),
     ];
     let mut satisfied = Vec::new();
@@ -100,7 +95,7 @@ pub fn matrixraft_membership_readiness_report(
             .find(|item| item.scope == scope && item.transition == transition)
         else {
             missing.push(format!("{id}:evidence_present"));
-            decisions.push(RustRaftMembershipTransitionDecision {
+            decisions.push(MembershipTransitionDecision {
                 scope,
                 transition,
                 ready: false,
@@ -111,7 +106,7 @@ pub fn matrixraft_membership_readiness_report(
         let transition_missing = matrixraft_membership_transition_missing(evidence);
         if transition_missing.is_empty() {
             satisfied.push(id);
-            decisions.push(RustRaftMembershipTransitionDecision {
+            decisions.push(MembershipTransitionDecision {
                 scope,
                 transition,
                 ready: true,
@@ -123,7 +118,7 @@ pub fn matrixraft_membership_readiness_report(
                     .iter()
                     .map(|requirement| format!("{id}:{requirement}")),
             );
-            decisions.push(RustRaftMembershipTransitionDecision {
+            decisions.push(MembershipTransitionDecision {
                 scope,
                 transition,
                 ready: false,
@@ -132,7 +127,7 @@ pub fn matrixraft_membership_readiness_report(
         }
     }
 
-    RustRaftMembershipReadinessReport {
+    MembershipReadinessReport {
         ready: missing.is_empty(),
         satisfied,
         missing,
@@ -141,7 +136,7 @@ pub fn matrixraft_membership_readiness_report(
 }
 
 pub fn matrixraft_membership_transition_missing(
-    evidence: &RustRaftMembershipTransitionEvidence,
+    evidence: &MembershipTransitionEvidence,
 ) -> Vec<String> {
     let mut missing = Vec::new();
     let before_majority = majority_size(evidence.before_voters.len());
@@ -179,13 +174,13 @@ pub fn matrixraft_membership_transition_missing(
     if !evidence.secondary_replication_visible {
         missing.push("secondary_replication_visible".to_string());
     }
-    if matches!(evidence.scope, RustRaftMembershipScope::Metaserver)
+    if matches!(evidence.scope, MembershipScope::Metaserver)
         && !evidence.scheduler_generation_advanced
     {
         missing.push("scheduler_generation_advanced".to_string());
     }
     match evidence.transition {
-        RustRaftMembershipTransitionKind::Failover => {
+        MembershipTransitionKind::Failover => {
             if evidence.leader_before.is_none() || evidence.leader_after.is_none() {
                 missing.push("leader_before_after_present".to_string());
             }
@@ -196,7 +191,7 @@ pub fn matrixraft_membership_transition_missing(
                 missing.push("failed_node_recorded".to_string());
             }
         }
-        RustRaftMembershipTransitionKind::ScaleUp => {
+        MembershipTransitionKind::ScaleUp => {
             if !evidence.joint_consensus_used {
                 missing.push("joint_consensus_used".to_string());
             }
@@ -213,7 +208,7 @@ pub fn matrixraft_membership_transition_missing(
                 missing.push("learner_catchup_observed".to_string());
             }
         }
-        RustRaftMembershipTransitionKind::ScaleDown => {
+        MembershipTransitionKind::ScaleDown => {
             if !evidence.joint_consensus_used {
                 missing.push("joint_consensus_used".to_string());
             }
@@ -237,8 +232,8 @@ pub fn matrixraft_membership_transition_missing(
     missing
 }
 
-fn matrixraft_joint_quorum_commit_proven(evidence: &RustRaftMembershipTransitionEvidence) -> bool {
-    let joint = RustRaftJointMembership {
+fn matrixraft_joint_quorum_commit_proven(evidence: &MembershipTransitionEvidence) -> bool {
+    let joint = JointMembership {
         old_voters: evidence.before_voters.clone(),
         new_voters: evidence.after_voters.clone(),
     };
@@ -251,12 +246,12 @@ fn matrixraft_joint_quorum_commit_proven(evidence: &RustRaftMembershipTransition
 }
 
 pub fn matrixraft_learner_promotion_decision(
-    status: &RustRaftStatusSnapshot,
+    status: &StatusSnapshot,
     learner_id: u64,
     max_lag: u64,
-) -> RustRaftLearnerPromotionDecision {
+) -> LearnerPromotionDecision {
     let Some(peer) = status.peers.iter().find(|peer| peer.node_id == learner_id) else {
-        return RustRaftLearnerPromotionDecision {
+        return LearnerPromotionDecision {
             promotable: false,
             learner_id,
             learner_match_index: 0,
@@ -266,7 +261,7 @@ pub fn matrixraft_learner_promotion_decision(
     };
     let required_match_index = status.commit_index.saturating_sub(max_lag);
     let promotable = peer.learner && peer.healthy && peer.matched >= required_match_index;
-    RustRaftLearnerPromotionDecision {
+    LearnerPromotionDecision {
         promotable,
         learner_id,
         learner_match_index: peer.matched,
@@ -280,11 +275,11 @@ pub fn matrixraft_learner_promotion_decision(
 }
 
 fn matrixraft_membership_semantics_transition(
-    transition: RustRaftMembershipTransitionKind,
-) -> RustRaftMembershipTransitionEvidence {
+    transition: MembershipTransitionKind,
+) -> MembershipTransitionEvidence {
     let (before_voters, after_voters, before_learners, after_learners, added, removed) =
         match transition {
-            RustRaftMembershipTransitionKind::Failover => (
+            MembershipTransitionKind::Failover => (
                 vec![1, 2, 3],
                 vec![1, 2, 3],
                 Vec::new(),
@@ -292,7 +287,7 @@ fn matrixraft_membership_semantics_transition(
                 Vec::new(),
                 Vec::new(),
             ),
-            RustRaftMembershipTransitionKind::ScaleUp => (
+            MembershipTransitionKind::ScaleUp => (
                 vec![1, 2, 3],
                 vec![1, 2, 3, 4],
                 vec![4],
@@ -300,7 +295,7 @@ fn matrixraft_membership_semantics_transition(
                 vec![4],
                 Vec::new(),
             ),
-            RustRaftMembershipTransitionKind::ScaleDown => (
+            MembershipTransitionKind::ScaleDown => (
                 vec![1, 2, 3, 4],
                 vec![1, 2, 3],
                 Vec::new(),
@@ -309,8 +304,8 @@ fn matrixraft_membership_semantics_transition(
                 vec![4],
             ),
         };
-    RustRaftMembershipTransitionEvidence {
-        scope: RustRaftMembershipScope::DataNode,
+    MembershipTransitionEvidence {
+        scope: MembershipScope::DataNode,
         transition,
         before_voters: before_voters.clone(),
         after_voters: after_voters.clone(),
@@ -318,7 +313,7 @@ fn matrixraft_membership_semantics_transition(
         after_learners,
         leader_before: Some(1),
         leader_after: Some(
-            if matches!(transition, RustRaftMembershipTransitionKind::Failover) {
+            if matches!(transition, MembershipTransitionKind::Failover) {
                 2
             } else {
                 1
@@ -333,19 +328,19 @@ fn matrixraft_membership_semantics_transition(
         joint_consensus_used: true,
         old_majority_preserved: true,
         new_majority_reached: true,
-        joint_old_quorum_size: if matches!(transition, RustRaftMembershipTransitionKind::Failover) {
+        joint_old_quorum_size: if matches!(transition, MembershipTransitionKind::Failover) {
             0
         } else {
             majority_size(before_voters.len())
         },
-        joint_new_quorum_size: if matches!(transition, RustRaftMembershipTransitionKind::Failover) {
+        joint_new_quorum_size: if matches!(transition, MembershipTransitionKind::Failover) {
             0
         } else {
             majority_size(after_voters.len())
         },
         joint_acknowledged_voters: if matches!(
             transition,
-            RustRaftMembershipTransitionKind::ScaleUp | RustRaftMembershipTransitionKind::ScaleDown
+            MembershipTransitionKind::ScaleUp | MembershipTransitionKind::ScaleDown
         ) {
             before_voters
                 .iter()
@@ -357,8 +352,8 @@ fn matrixraft_membership_semantics_transition(
         } else {
             Vec::new()
         },
-        joint_old_majority_acked: !matches!(transition, RustRaftMembershipTransitionKind::Failover),
-        joint_new_majority_acked: !matches!(transition, RustRaftMembershipTransitionKind::Failover),
+        joint_old_majority_acked: !matches!(transition, MembershipTransitionKind::Failover),
+        joint_new_majority_acked: !matches!(transition, MembershipTransitionKind::Failover),
         stale_leader_rejected: true,
         read_index_validated_after: true,
         write_validated_after: true,
@@ -369,14 +364,11 @@ fn matrixraft_membership_semantics_transition(
     }
 }
 
-pub fn matrixraft_membership_semantics_evidence_artifact(
-) -> RustRaftMembershipSemanticsEvidenceArtifact {
-    RustRaftMembershipSemanticsEvidenceArtifact {
+pub fn matrixraft_membership_semantics_evidence_artifact() -> MembershipSemanticsEvidenceArtifact {
+    MembershipSemanticsEvidenceArtifact {
         schema: "rustraft.membership_semantics_evidence.v1".to_string(),
-        learner_add: matrixraft_membership_semantics_transition(
-            RustRaftMembershipTransitionKind::ScaleUp,
-        ),
-        learner_catchup: RustRaftLearnerPromotionDecision {
+        learner_add: matrixraft_membership_semantics_transition(MembershipTransitionKind::ScaleUp),
+        learner_catchup: LearnerPromotionDecision {
             promotable: true,
             learner_id: 4,
             learner_match_index: 144,
@@ -384,13 +376,13 @@ pub fn matrixraft_membership_semantics_evidence_artifact(
             reason: "caught_up".to_string(),
         },
         learner_promote: matrixraft_membership_semantics_transition(
-            RustRaftMembershipTransitionKind::ScaleUp,
+            MembershipTransitionKind::ScaleUp,
         ),
         leader_transfer: matrixraft_membership_semantics_transition(
-            RustRaftMembershipTransitionKind::Failover,
+            MembershipTransitionKind::Failover,
         ),
         voter_remove: matrixraft_membership_semantics_transition(
-            RustRaftMembershipTransitionKind::ScaleDown,
+            MembershipTransitionKind::ScaleDown,
         ),
         auto_promote_learner_observed: true,
         auto_promote_blocked_by_pending_joint_observed: true,
@@ -403,8 +395,8 @@ pub fn matrixraft_membership_semantics_evidence_artifact(
 }
 
 pub fn matrixraft_validate_membership_semantics_evidence_artifact(
-    artifact: &RustRaftMembershipSemanticsEvidenceArtifact,
-) -> RustRaftMembershipSemanticsEvidenceValidationReport {
+    artifact: &MembershipSemanticsEvidenceArtifact,
+) -> MembershipSemanticsEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.membership_semantics_evidence.v1";
     let learner_added = artifact
         .learner_add
@@ -489,7 +481,7 @@ pub fn matrixraft_validate_membership_semantics_evidence_artifact(
         }
     }
 
-    RustRaftMembershipSemanticsEvidenceValidationReport {
+    MembershipSemanticsEvidenceValidationReport {
         valid: missing.is_empty(),
         schema_valid,
         learner_added,
@@ -510,8 +502,8 @@ pub fn matrixraft_validate_membership_semantics_evidence_artifact(
 }
 
 fn membership_transition_id(
-    scope: RustRaftMembershipScope,
-    transition: RustRaftMembershipTransitionKind,
+    scope: MembershipScope,
+    transition: MembershipTransitionKind,
 ) -> String {
     format!("{scope:?}:{transition:?}").to_lowercase()
 }

@@ -4,20 +4,18 @@
 use matrixraft::{
     matrixraft_validate_read_index_response, matrixraft_validate_tcp_transport_request,
     matrixraft_validate_vote_request, AppendEntriesRequest, AppendEntriesResponse,
-    AuthenticatedRaftTransport, ClusterRaftTransport, InMemoryRaftTransport,
-    InstallSnapshotRequest, InstallSnapshotResponse, RaftCluster, RaftError, RaftTransport,
-    ReadIndexRequest, ReadIndexResponse, RustRaftAppendEntriesRequest, RustRaftHeartbeatMerger,
-    RustRaftInstallSnapshotRequest, RustRaftLogEntry, RustRaftLogId, RustRaftMessage, RustRaftPeer,
-    RustRaftReplicaRole, RustRaftSnapshotChunk, RustRaftSnapshotMeta, RustRaftSnapshotState,
-    RustRaftTransport, StaticRaftAuthToken, TcpRaftTransport, TcpRaftTransportRequest,
-    TcpRaftTransportServer, VoteRequest, VoteResponse,
+    AuthenticatedRaftTransport, ClusterRaftTransport, HeartbeatMerger, InMemoryRaftTransport,
+    InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogId, Message, Peer, RaftCluster,
+    RaftError, ReadIndexRequest, ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata,
+    SnapshotState, StaticRaftAuthToken, TcpRaftTransport, TcpRaftTransportRequest,
+    TcpRaftTransportServer, Transport, VoteRequest, VoteResponse,
 };
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 7_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 8_000 + node_id),
@@ -29,11 +27,11 @@ fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
 #[derive(Debug, Clone)]
 struct EchoTransport;
 
-impl RustRaftTransport for EchoTransport {
+impl Transport for EchoTransport {
     fn append_entries(
         &self,
         _target: u64,
-        request: RustRaftAppendEntriesRequest,
+        request: AppendEntriesRequest,
     ) -> Result<AppendEntriesResponse, RaftError> {
         Ok(AppendEntriesResponse {
             term: request.term,
@@ -42,7 +40,7 @@ impl RustRaftTransport for EchoTransport {
             rejection_hint: None,
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
@@ -59,7 +57,7 @@ impl RustRaftTransport for EchoTransport {
     fn install_snapshot(
         &self,
         _target: u64,
-        request: RustRaftInstallSnapshotRequest,
+        request: InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse, RaftError> {
         Ok(InstallSnapshotResponse {
             term: request.term,
@@ -84,7 +82,7 @@ impl RustRaftTransport for EchoTransport {
     }
 }
 
-fn assert_raft_transport<T: RaftTransport>(_transport: &T) {}
+fn assert_raft_transport<T: Transport>(_transport: &T) {}
 
 #[test]
 fn transport_aliases_cover_all_rpc_messages() {
@@ -92,7 +90,7 @@ fn transport_aliases_cover_all_rpc_messages() {
         group_id: 3,
         term: 2,
         leader_id: 1,
-        prev_log_id: Some(RustRaftLogId { term: 2, index: 4 }),
+        prev_log_id: Some(LogId { term: 2, index: 4 }),
         entries: Vec::new(),
         leader_commit: 4,
         lease_epoch: 0,
@@ -109,10 +107,10 @@ fn transport_aliases_cover_all_rpc_messages() {
         group_id: 3,
         term: 2,
         leader_id: 1,
-        chunk: RustRaftSnapshotChunk {
-            meta: RustRaftSnapshotMeta {
+        chunk: SnapshotChunk {
+            meta: SnapshotMetadata {
                 snapshot_id: "snap".to_string(),
-                last_log_id: RustRaftLogId { term: 2, index: 4 },
+                last_log_id: LogId { term: 2, index: 4 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
             },
@@ -175,7 +173,7 @@ fn transport_validation_reports_bad_requests_and_responses() {
         group_id: 0,
         term: 1,
         candidate_id: 0,
-        last_log_id: Some(RustRaftLogId { term: 1, index: 0 }),
+        last_log_id: Some(LogId { term: 1, index: 0 }),
         pre_vote: true,
         force: false,
     };
@@ -251,8 +249,8 @@ fn in_memory_transport_forwards_and_validates_all_rpc_messages() {
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 1 },
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 1 },
                     payload: b"x".to_vec(),
                     is_command: true,
                 }],
@@ -270,7 +268,7 @@ fn in_memory_transport_forwards_and_validates_all_rpc_messages() {
                 group_id: 3,
                 term: 2,
                 candidate_id: 2,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                last_log_id: Some(LogId { term: 1, index: 1 }),
                 pre_vote: true,
                 force: true,
             },
@@ -285,10 +283,10 @@ fn in_memory_transport_forwards_and_validates_all_rpc_messages() {
                 group_id: 3,
                 term: 2,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "memory-snap".to_string(),
-                        last_log_id: RustRaftLogId { term: 2, index: 4 },
+                        last_log_id: LogId { term: 2, index: 4 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
                     },
@@ -333,9 +331,9 @@ fn heartbeat_merger_queues_empty_append_heartbeats() {
     resolver.insert((1, 2), "127.0.0.1:7002".to_string());
     resolver.insert((3, 2), "127.0.0.1:7002".to_string());
     resolver.insert((2, 1), "127.0.0.1:7001".to_string());
-    let mut merger = RustRaftHeartbeatMerger::enabled();
+    let mut merger = HeartbeatMerger::enabled();
 
-    let first = RustRaftMessage::AppendEntries {
+    let first = Message::AppendEntries {
         target: 2,
         request: AppendEntriesRequest {
             group_id: 11,
@@ -347,7 +345,7 @@ fn heartbeat_merger_queues_empty_append_heartbeats() {
             lease_epoch: 15,
         },
     };
-    let second = RustRaftMessage::AppendEntries {
+    let second = Message::AppendEntries {
         target: 2,
         request: AppendEntriesRequest {
             group_id: 12,
@@ -366,7 +364,7 @@ fn heartbeat_merger_queues_empty_append_heartbeats() {
         rejection_hint: None,
         rejected_index: None,
         require_snapshot: None,
-        snapshot_state: RustRaftSnapshotState::None,
+        snapshot_state: SnapshotState::None,
         lease_confirmation_epoch: 15,
         lease_duration_ms: 10,
     };
@@ -403,15 +401,15 @@ fn heartbeat_merger_queues_empty_append_heartbeats() {
 #[test]
 fn heartbeat_merger_bypasses_disabled_and_non_heartbeat_appends() {
     let resolver = |from, to| Ok(format!("{from}->{to}"));
-    let request_with_entry = RustRaftMessage::AppendEntries {
+    let request_with_entry = Message::AppendEntries {
         target: 2,
         request: AppendEntriesRequest {
             group_id: 11,
             term: 4,
             leader_id: 1,
             prev_log_id: None,
-            entries: vec![RustRaftLogEntry {
-                log_id: RustRaftLogId { term: 4, index: 1 },
+            entries: vec![LogEntry {
+                log_id: LogId { term: 4, index: 1 },
                 payload: b"not-heartbeat".to_vec(),
                 is_command: true,
             }],
@@ -419,12 +417,12 @@ fn heartbeat_merger_bypasses_disabled_and_non_heartbeat_appends() {
             lease_epoch: 0,
         },
     };
-    let mut enabled = RustRaftHeartbeatMerger::enabled();
+    let mut enabled = HeartbeatMerger::enabled();
     let bypassed = enabled
         .maybe_merge(request_with_entry.clone(), &resolver)
         .expect("non-heartbeat append bypasses");
     assert_eq!(bypassed, Some(request_with_entry.clone()));
-    let append_response = RustRaftMessage::AppendEntriesResponse {
+    let append_response = Message::AppendEntriesResponse {
         local_node_id: 2,
         peer_id: 1,
         response: AppendEntriesResponse {
@@ -434,7 +432,7 @@ fn heartbeat_merger_bypasses_disabled_and_non_heartbeat_appends() {
             rejection_hint: None,
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         },
@@ -446,7 +444,7 @@ fn heartbeat_merger_bypasses_disabled_and_non_heartbeat_appends() {
     assert_eq!(enabled.pending_len(), 0);
     assert_eq!(enabled.stats().bypassed_messages, 2);
 
-    let heartbeat = RustRaftMessage::AppendEntries {
+    let heartbeat = Message::AppendEntries {
         target: 2,
         request: AppendEntriesRequest {
             group_id: 11,
@@ -458,7 +456,7 @@ fn heartbeat_merger_bypasses_disabled_and_non_heartbeat_appends() {
             lease_epoch: 0,
         },
     };
-    let mut disabled = RustRaftHeartbeatMerger::disabled();
+    let mut disabled = HeartbeatMerger::disabled();
     let bypassed = disabled
         .maybe_merge(heartbeat.clone(), &resolver)
         .expect("disabled merger bypasses");
@@ -473,9 +471,9 @@ fn cluster_installs_snapshot_from_chunked_snapshot_rpc() {
         3,
         Default::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("cluster");
@@ -488,10 +486,10 @@ fn cluster_installs_snapshot_from_chunked_snapshot_rpc() {
                 group_id: 3,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "snap-9".to_string(),
-                        last_log_id: RustRaftLogId { term: 1, index: 9 },
+                        last_log_id: LogId { term: 1, index: 9 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
                     },
@@ -513,10 +511,10 @@ fn cluster_installs_snapshot_from_chunked_snapshot_rpc() {
                 group_id: 3,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "snap-8-stale".to_string(),
-                        last_log_id: RustRaftLogId { term: 1, index: 8 },
+                        last_log_id: LogId { term: 1, index: 8 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
                     },
@@ -538,16 +536,16 @@ fn cluster_reassembles_multi_chunk_snapshot_rpc() {
         3,
         Default::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("cluster");
     cluster.start().expect("start");
-    let meta = RustRaftSnapshotMeta {
+    let meta = SnapshotMetadata {
         snapshot_id: "snap-10".to_string(),
-        last_log_id: RustRaftLogId { term: 1, index: 10 },
+        last_log_id: LogId { term: 1, index: 10 },
         membership: vec![1, 2, 3],
         members: Vec::new(),
     };
@@ -559,7 +557,7 @@ fn cluster_reassembles_multi_chunk_snapshot_rpc() {
                 group_id: 3,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
+                chunk: SnapshotChunk {
                     meta: meta.clone(),
                     offset: 0,
                     data: b"state-".to_vec(),
@@ -580,7 +578,7 @@ fn cluster_reassembles_multi_chunk_snapshot_rpc() {
                 group_id: 3,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
+                chunk: SnapshotChunk {
                     meta,
                     offset: 6,
                     data: b"done".to_vec(),
@@ -602,9 +600,9 @@ fn tcp_transport_round_trips_append_snapshot_vote_and_read_index() {
             3,
             Default::default(),
             vec![
-                peer(1, RustRaftReplicaRole::Voter),
-                peer(2, RustRaftReplicaRole::Voter),
-                peer(3, RustRaftReplicaRole::Voter),
+                peer(1, ReplicaRole::Voter),
+                peer(2, ReplicaRole::Voter),
+                peer(3, ReplicaRole::Voter),
             ],
         )
         .expect("cluster"),
@@ -625,8 +623,8 @@ fn tcp_transport_round_trips_append_snapshot_vote_and_read_index() {
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 1 },
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 1 },
                     payload: b"x".to_vec(),
                     is_command: true,
                 }],
@@ -645,7 +643,7 @@ fn tcp_transport_round_trips_append_snapshot_vote_and_read_index() {
                 group_id: 3,
                 term: 2,
                 candidate_id: 2,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                last_log_id: Some(LogId { term: 1, index: 1 }),
                 pre_vote: true,
                 force: true,
             },
@@ -674,10 +672,10 @@ fn tcp_transport_round_trips_append_snapshot_vote_and_read_index() {
                 group_id: 3,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "tcp-snap".to_string(),
-                        last_log_id: RustRaftLogId { term: 1, index: 4 },
+                        last_log_id: LogId { term: 1, index: 4 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
                     },
@@ -709,9 +707,9 @@ fn tcp_transport_batches_mixed_rpc_requests() {
             3,
             Default::default(),
             vec![
-                peer(1, RustRaftReplicaRole::Voter),
-                peer(2, RustRaftReplicaRole::Voter),
-                peer(3, RustRaftReplicaRole::Voter),
+                peer(1, ReplicaRole::Voter),
+                peer(2, ReplicaRole::Voter),
+                peer(3, ReplicaRole::Voter),
             ],
         )
         .expect("cluster"),
@@ -735,8 +733,8 @@ fn tcp_transport_batches_mixed_rpc_requests() {
                         term: 1,
                         leader_id: 1,
                         prev_log_id: None,
-                        entries: vec![RustRaftLogEntry {
-                            log_id: RustRaftLogId { term: 1, index: 1 },
+                        entries: vec![LogEntry {
+                            log_id: LogId { term: 1, index: 1 },
                             payload: b"batched".to_vec(),
                             is_command: true,
                         }],
@@ -750,7 +748,7 @@ fn tcp_transport_batches_mixed_rpc_requests() {
                         group_id: 3,
                         term: 2,
                         candidate_id: 2,
-                        last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                        last_log_id: Some(LogId { term: 1, index: 1 }),
                         pre_vote: true,
                         force: true,
                     },

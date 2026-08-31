@@ -2,46 +2,47 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    snapshot::{matrixraft_validate_snapshot_tail_catchup, RaftSnapshot, RustRaftSnapshotMeta},
-    storage::{matrixraft_validate_storage_apply_fence, RustRaftStorageApplyFence},
+    snapshot::{matrixraft_validate_snapshot_tail_catchup, RaftSnapshot, SnapshotMetadata},
+    storage::{matrixraft_validate_storage_apply_fence, StorageApplyFence},
     wal::{
         matrixraft_durability_parity_report, matrixraft_validate_hard_state_persistence,
-        matrixraft_wal_checksum, LocalRaftWal, RaftWalRecord, RustRaftHardState,
+        matrixraft_wal_checksum, HardState, LocalRaftWal, WalRecord,
     },
-    RaftMembership, RustRaftApplySnapshotFence, RustRaftLogEntry, RustRaftLogId,
+    ApplySnapshotFence, LogEntry, LogId, Membership,
 };
 
-fn snapshot_meta() -> RustRaftSnapshotMeta {
-    RustRaftSnapshotMeta {
+fn snapshot_meta() -> SnapshotMetadata {
+    SnapshotMetadata {
         snapshot_id: "durability-parity-10".to_string(),
-        last_log_id: RustRaftLogId { term: 4, index: 10 },
+        last_log_id: LogId { term: 4, index: 10 },
         membership: vec![1, 2, 3],
         members: Vec::new(),
     }
 }
 
-fn tail_entry(index: u64) -> RustRaftLogEntry {
-    RustRaftLogEntry {
-        log_id: RustRaftLogId { term: 4, index },
+fn tail_entry(index: u64) -> LogEntry {
+    LogEntry {
+        log_id: LogId { term: 4, index },
         payload: format!("tail-{index}").into_bytes(),
         is_command: true,
     }
 }
 
-fn wal_record(committed_index: u64) -> RaftWalRecord {
+fn wal_record(committed_index: u64) -> WalRecord {
     let meta = snapshot_meta();
-    let mut record = RaftWalRecord {
+    let mut record = WalRecord {
+        entries_are_delta: false,
         group_id: 404,
         node_id: 1,
-        hard_state: RustRaftHardState {
+        hard_state: HardState {
             current_term: 4,
             voted_for: Some(1),
-            committed: Some(RustRaftLogId {
+            committed: Some(LogId {
                 term: 4,
                 index: committed_index,
             }),
         },
-        membership: RaftMembership {
+        membership: Membership {
             group_id: 404,
             voters: vec![1, 2, 3],
             learners: Vec::new(),
@@ -50,7 +51,7 @@ fn wal_record(committed_index: u64) -> RaftWalRecord {
         },
         entries: vec![tail_entry(11)],
         installed_snapshot: Some(meta),
-        apply_snapshot_fence: RustRaftApplySnapshotFence {
+        apply_snapshot_fence: ApplySnapshotFence {
             applied_index: committed_index,
             commit_index: committed_index,
             installed_snapshot_index: 10,
@@ -62,8 +63,8 @@ fn wal_record(committed_index: u64) -> RaftWalRecord {
     record
 }
 
-fn storage_fence() -> RustRaftStorageApplyFence {
-    RustRaftStorageApplyFence {
+fn storage_fence() -> StorageApplyFence {
+    StorageApplyFence {
         group_id: 404,
         node_id: 1,
         committed_index: 11,

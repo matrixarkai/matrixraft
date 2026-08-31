@@ -5,8 +5,8 @@
 // Split from src/lib.rs to keep the crate facade small and focused.
 
 pub fn matrixraft_production_readiness_report(
-    input: &RustRaftProductionReadinessInput,
-) -> RustRaftProductionReadinessReport {
+    input: &ProductionReadinessInput,
+) -> ProductionReadinessReport {
     let parity = matrixraft_parity_report(&input.readiness);
     let mut satisfied = parity
         .satisfied
@@ -315,14 +315,14 @@ pub fn matrixraft_production_readiness_report(
     );
 
     let ready = missing.is_empty() && production_blockers.is_empty();
-    RustRaftProductionReadinessReport {
+    ProductionReadinessReport {
         parity,
         public_api: matrixraft_public_api_contract(),
         ready,
         production_status: if ready {
-            RustRaftProductionStatus::ProductionReady
+            ProductionStatus::ProductionReady
         } else {
-            RustRaftProductionStatus::Blocked
+            ProductionStatus::Blocked
         },
         satisfied,
         missing,
@@ -332,7 +332,7 @@ pub fn matrixraft_production_readiness_report(
 }
 
 fn require_baseline_raft_benchmark(
-    benchmark: Option<&RustRaftBaselineRaftBenchmarkEvidence>,
+    benchmark: Option<&BaselineRaftBenchmarkEvidence>,
     satisfied: &mut Vec<String>,
     missing: &mut Vec<String>,
     blockers: &mut Vec<String>,
@@ -532,7 +532,7 @@ fn require_benchmark_blocker_category(
 }
 
 fn require_fault_harness(
-    fault_harness: Option<&fault::RustRaftFaultHarnessReadinessReport>,
+    fault_harness: Option<&fault::FaultHarnessReadinessReport>,
     satisfied: &mut Vec<String>,
     missing: &mut Vec<String>,
     blockers: &mut Vec<String>,
@@ -593,7 +593,7 @@ fn require_fault_harness(
 }
 
 fn require_admin_status_surface(
-    status: Option<&RustRaftAdminStatusSurfaceEvidence>,
+    status: Option<&AdminStatusSurfaceEvidence>,
     satisfied: &mut Vec<String>,
     missing: &mut Vec<String>,
     blockers: &mut Vec<String>,
@@ -687,8 +687,8 @@ fn require_admin_status_surface(
 }
 
 pub fn matrixraft_baseline_raft_runtime_capability_report(
-    input: &RustRaftProductionReadinessInput,
-) -> RustRaftBaselineRaftRuntimeCapabilityReport {
+    input: &ProductionReadinessInput,
+) -> BaselineRaftRuntimeCapabilityReport {
     let data_semantics = input
         .data_node_rollout
         .as_ref()
@@ -702,7 +702,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
     let mut capability_evidence = Vec::new();
     capability_evidence.push(runtime_capability(
         "process_path_rollout_evidence",
-        "RustRaftProductionReadinessInput::{data_node_rollout,metaserver_rollout}",
+        "ProductionReadinessInput::{data_node_rollout,metaserver_rollout}",
         &[
             (
                 input
@@ -766,7 +766,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
     let pipeline = input.peer_pipeline.as_ref();
     capability_evidence.push(runtime_capability(
         "per_peer_replication_pipeline_state",
-        "RustRaftPipelineEvidence",
+        "PipelineEvidence",
         &[
             (
                 pipeline.is_some_and(|evidence| evidence.per_peer_pipeline_state_present),
@@ -792,7 +792,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
     ));
     capability_evidence.push(runtime_capability(
         "reorder_queue_semantics",
-        "RustRaftPipelineEvidence",
+        "PipelineEvidence",
         &[
             (
                 pipeline.is_some_and(|evidence| evidence.reorder_queue_enabled),
@@ -832,7 +832,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
     let snapshot = input.snapshot_lifecycle.as_ref();
     capability_evidence.push(runtime_capability(
         "snapshot_sender_downloader_lifecycle",
-        "RustRaftSnapshotLifecycleEvidence",
+        "SnapshotLifecycleEvidence",
         &[
             (
                 snapshot.is_some_and(|evidence| evidence.sender_lifecycle_present),
@@ -896,7 +896,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
     let wal = input.wal_lifecycle.as_ref();
     capability_evidence.push(runtime_capability(
         "wal_segment_lifecycle",
-        "RustRaftWalLifecycleEvidence",
+        "WalLifecycleEvidence",
         &[
             (
                 wal.is_some_and(|evidence| evidence.segment_lifecycle_present),
@@ -931,7 +931,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
 
     capability_evidence.push(runtime_capability(
         "read_index_and_lease_safety",
-        "RustRaftProcessOperationalSemanticsEvidence",
+        "ProcessOperationalSemanticsEvidence",
         &[
             (
                 all_semantics(data_semantics, meta_semantics, |evidence| {
@@ -988,7 +988,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
 
     capability_evidence.push(runtime_capability(
         "membership_role_semantics",
-        "RustRaftMembershipTransitionEvidence",
+        "MembershipTransitionEvidence",
         &[
             (
                 membership_report.ready,
@@ -1018,7 +1018,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
 
     capability_evidence.push(runtime_capability(
         "fsm_apply_atomicity",
-        "RustRaftProcessOperationalSemanticsEvidence",
+        "ProcessOperationalSemanticsEvidence",
         &[
             (
                 all_semantics(data_semantics, meta_semantics, |evidence| {
@@ -1061,7 +1061,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
 
     capability_evidence.push(runtime_capability(
         "admin_metrics_surface",
-        "RustRaftReadinessSnapshot",
+        "ReadinessSnapshot",
         &[
             (
                 input.readiness.matrixraft_operator_observability_present,
@@ -1102,7 +1102,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
                 .map(move |field| format!("{}:{}", item.capability, field))
         })
         .collect::<Vec<_>>();
-    RustRaftBaselineRaftRuntimeCapabilityReport {
+    BaselineRaftRuntimeCapabilityReport {
         ready: missing.is_empty() && blockers.is_empty(),
         capability_evidence,
         satisfied,
@@ -1112,9 +1112,9 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
 }
 
 pub fn matrixraft_baseline_raft_runtime_capability_prometheus(
-    report: &RustRaftBaselineRaftRuntimeCapabilityReport,
+    report: &BaselineRaftRuntimeCapabilityReport,
     labels: &[(&str, &str)],
-) -> RustRaftPrometheusMetricSet {
+) -> PrometheusMetricSet {
     let mut out = String::new();
     let mut metric_count = 0;
     out.push_str("# HELP rustraft_baseline_raft_ready Whether BaselineRaft-derived runtime capability evidence is complete.\n");
@@ -1198,7 +1198,7 @@ pub fn matrixraft_baseline_raft_runtime_capability_prometheus(
     );
     metric_count += 1;
 
-    RustRaftPrometheusMetricSet {
+    PrometheusMetricSet {
         format: "prometheus_text_v0.0.4".to_string(),
         metric_count,
         text: out,
@@ -1206,9 +1206,9 @@ pub fn matrixraft_baseline_raft_runtime_capability_prometheus(
 }
 
 pub fn matrixraft_cross_plane_process_evidence_prometheus(
-    summary: &RustRaftCrossPlaneProcessEvidenceSummary,
+    summary: &CrossPlaneProcessEvidenceSummary,
     labels: &[(&str, &str)],
-) -> RustRaftPrometheusMetricSet {
+) -> PrometheusMetricSet {
     let mut out = String::new();
     let mut metric_count = 0;
     out.push_str("# HELP rustraft_process_evidence_count Cross-plane process-path evidence counters by plane and evidence kind.\n");
@@ -1341,7 +1341,7 @@ pub fn matrixraft_cross_plane_process_evidence_prometheus(
         metric_count += 1;
     }
 
-    RustRaftPrometheusMetricSet {
+    PrometheusMetricSet {
         format: "prometheus_text_v0.0.4".to_string(),
         metric_count,
         text: out,
@@ -1349,16 +1349,16 @@ pub fn matrixraft_cross_plane_process_evidence_prometheus(
 }
 
 pub fn matrixraft_cross_plane_process_evidence_artifact(
-    data_node_report: &RustRaftDataNodeProcessRolloutReport,
-    metaserver_report: &RustRaftMetaProcessRolloutReport,
+    data_node_report: &DataNodeProcessRolloutReport,
+    metaserver_report: &MetaProcessRolloutReport,
     labels: &[(&str, &str)],
-) -> RustRaftCrossPlaneProcessEvidenceArtifact {
+) -> CrossPlaneProcessEvidenceArtifact {
     let readiness =
         matrixraft_cross_plane_process_readiness_blocker_report(data_node_report, metaserver_report);
     let summary =
         matrixraft_cross_plane_process_evidence_summary(data_node_report, metaserver_report);
     let prometheus = matrixraft_cross_plane_process_evidence_prometheus(&summary, labels);
-    RustRaftCrossPlaneProcessEvidenceArtifact {
+    CrossPlaneProcessEvidenceArtifact {
         schema: "rustraft.cross_plane_process_evidence.v1".to_string(),
         readiness,
         summary,
@@ -1367,8 +1367,8 @@ pub fn matrixraft_cross_plane_process_evidence_artifact(
 }
 
 pub fn matrixraft_validate_cross_plane_process_evidence_artifact(
-    artifact: &RustRaftCrossPlaneProcessEvidenceArtifact,
-) -> RustRaftCrossPlaneProcessEvidenceArtifactValidationReport {
+    artifact: &CrossPlaneProcessEvidenceArtifact,
+) -> CrossPlaneProcessEvidenceArtifactValidationReport {
     let schema_valid = artifact.schema == "rustraft.cross_plane_process_evidence.v1";
     let readiness_ready =
         artifact.readiness.ready && artifact.readiness.remaining_blockers.is_empty();
@@ -1463,7 +1463,7 @@ pub fn matrixraft_validate_cross_plane_process_evidence_artifact(
             "prometheus must include process evidence count and readiness metrics".to_string(),
         );
     }
-    RustRaftCrossPlaneProcessEvidenceArtifactValidationReport {
+    CrossPlaneProcessEvidenceArtifactValidationReport {
         valid: schema_valid && readiness_ready && summary_ready && prometheus_complete,
         schema_valid,
         readiness_ready,
@@ -1474,8 +1474,8 @@ pub fn matrixraft_validate_cross_plane_process_evidence_artifact(
 }
 
 pub fn matrixraft_data_node_process_rollout_readiness_report(
-    rollout: &RustRaftDataNodeProcessRolloutReport,
-) -> RustRaftProcessRolloutReadinessReport {
+    rollout: &DataNodeProcessRolloutReport,
+) -> ProcessRolloutReadinessReport {
     let mut satisfied = Vec::new();
     let mut missing = Vec::new();
     let mut blockers = Vec::new();
@@ -1488,13 +1488,13 @@ pub fn matrixraft_data_node_process_rollout_readiness_report(
         &mut recommended_next_actions,
     );
     let ready = missing.is_empty() && blockers.is_empty();
-    RustRaftProcessRolloutReadinessReport {
+    ProcessRolloutReadinessReport {
         scope: "data_node".to_string(),
         ready,
         production_status: if ready {
-            RustRaftProductionStatus::ProductionReady
+            ProductionStatus::ProductionReady
         } else {
-            RustRaftProductionStatus::Blocked
+            ProductionStatus::Blocked
         },
         satisfied,
         missing,
@@ -1504,8 +1504,8 @@ pub fn matrixraft_data_node_process_rollout_readiness_report(
 }
 
 pub fn matrixraft_meta_process_rollout_readiness_report(
-    rollout: &RustRaftMetaProcessRolloutReport,
-) -> RustRaftProcessRolloutReadinessReport {
+    rollout: &MetaProcessRolloutReport,
+) -> ProcessRolloutReadinessReport {
     let mut satisfied = Vec::new();
     let mut missing = Vec::new();
     let mut blockers = Vec::new();
@@ -1518,13 +1518,13 @@ pub fn matrixraft_meta_process_rollout_readiness_report(
         &mut recommended_next_actions,
     );
     let ready = missing.is_empty() && blockers.is_empty();
-    RustRaftProcessRolloutReadinessReport {
+    ProcessRolloutReadinessReport {
         scope: "metaserver".to_string(),
         ready,
         production_status: if ready {
-            RustRaftProductionStatus::ProductionReady
+            ProductionStatus::ProductionReady
         } else {
-            RustRaftProductionStatus::Blocked
+            ProductionStatus::Blocked
         },
         satisfied,
         missing,
@@ -1534,9 +1534,9 @@ pub fn matrixraft_meta_process_rollout_readiness_report(
 }
 
 pub fn matrixraft_cross_plane_process_readiness_report(
-    data_node_report: &RustRaftDataNodeProcessRolloutReport,
-    metaserver_report: &RustRaftMetaProcessRolloutReport,
-) -> RustRaftCrossPlaneProcessReadinessReport {
+    data_node_report: &DataNodeProcessRolloutReport,
+    metaserver_report: &MetaProcessRolloutReport,
+) -> CrossPlaneProcessReadinessReport {
     let data_process_path = data_node_process_path_ready(data_node_report);
     let meta_process_path = meta_process_path_ready(metaserver_report);
     let multi_process_data_node_and_metaserver_raft = data_process_path && meta_process_path;
@@ -1618,7 +1618,7 @@ pub fn matrixraft_cross_plane_process_readiness_report(
         && snapshot_restart_after_compaction
         && remaining_blockers.is_empty();
 
-    RustRaftCrossPlaneProcessReadinessReport {
+    CrossPlaneProcessReadinessReport {
         ready,
         multi_process_data_node_and_metaserver_raft,
         failover_on_both_planes,
@@ -1630,11 +1630,11 @@ pub fn matrixraft_cross_plane_process_readiness_report(
 }
 
 pub fn matrixraft_cross_plane_process_readiness_blocker_report(
-    data_node_report: &RustRaftDataNodeProcessRolloutReport,
-    metaserver_report: &RustRaftMetaProcessRolloutReport,
-) -> RustRaftCrossPlaneProcessReadinessBlockerReport {
+    data_node_report: &DataNodeProcessRolloutReport,
+    metaserver_report: &MetaProcessRolloutReport,
+) -> CrossPlaneProcessReadinessBlockerReport {
     let report = matrixraft_cross_plane_process_readiness_report(data_node_report, metaserver_report);
-    RustRaftCrossPlaneProcessReadinessBlockerReport {
+    CrossPlaneProcessReadinessBlockerReport {
         ready: report.ready,
         multi_process_data_node_and_metaserver_raft: report
             .multi_process_data_node_and_metaserver_raft,
@@ -1651,10 +1651,10 @@ pub fn matrixraft_cross_plane_process_readiness_blocker_report(
 }
 
 pub fn matrixraft_cross_plane_process_evidence_summary(
-    data_node_report: &RustRaftDataNodeProcessRolloutReport,
-    metaserver_report: &RustRaftMetaProcessRolloutReport,
-) -> RustRaftCrossPlaneProcessEvidenceSummary {
-    RustRaftCrossPlaneProcessEvidenceSummary {
+    data_node_report: &DataNodeProcessRolloutReport,
+    metaserver_report: &MetaProcessRolloutReport,
+) -> CrossPlaneProcessEvidenceSummary {
+    CrossPlaneProcessEvidenceSummary {
         data_node_spawned_process_count: data_node_report.spawned_process_count,
         metaserver_spawned_process_count: metaserver_report.spawned_process_count,
         total_spawned_process_count: data_node_report.spawned_process_count
@@ -1695,8 +1695,8 @@ pub fn matrixraft_cross_plane_process_evidence_summary(
     }
 }
 
-pub fn matrixraft_process_readiness_blocker(evidence_field: &str) -> RustRaftProcessReadinessBlocker {
-    RustRaftProcessReadinessBlocker {
+pub fn matrixraft_process_readiness_blocker(evidence_field: &str) -> ProcessReadinessBlocker {
+    ProcessReadinessBlocker {
         blocker: format!(
             "{}_missing",
             evidence_field.replace(['.', '*', '{', '}', '[', ']', ','], "_")
@@ -1710,14 +1710,14 @@ pub fn matrixraft_named_readiness_blockers<I, S>(
     blocker: &str,
     evidence_field: &str,
     details: I,
-) -> Vec<RustRaftProcessReadinessBlocker>
+) -> Vec<ProcessReadinessBlocker>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
     details
         .into_iter()
-        .map(|detail| RustRaftProcessReadinessBlocker {
+        .map(|detail| ProcessReadinessBlocker {
             blocker: blocker.to_string(),
             evidence_field: evidence_field.to_string(),
             detail: detail.as_ref().to_string(),
@@ -1727,8 +1727,8 @@ where
 
 pub fn matrixraft_data_node_process_rollout_blockers(
     prefix: &str,
-    report: Option<&RustRaftDataNodeProcessRolloutReport>,
-) -> Vec<RustRaftProcessReadinessBlocker> {
+    report: Option<&DataNodeProcessRolloutReport>,
+) -> Vec<ProcessReadinessBlocker> {
     let Some(report) = report else {
         return vec![matrixraft_missing_process_rollout_report_blocker(prefix)];
     };
@@ -1742,8 +1742,8 @@ pub fn matrixraft_data_node_process_rollout_blockers(
 
 pub fn matrixraft_meta_process_rollout_blockers(
     prefix: &str,
-    report: Option<&RustRaftMetaProcessRolloutReport>,
-) -> Vec<RustRaftProcessReadinessBlocker> {
+    report: Option<&MetaProcessRolloutReport>,
+) -> Vec<ProcessReadinessBlocker> {
     let Some(report) = report else {
         return vec![matrixraft_missing_process_rollout_report_blocker(prefix)];
     };
@@ -1757,8 +1757,8 @@ pub fn matrixraft_meta_process_rollout_blockers(
 
 fn matrixraft_missing_process_rollout_report_blocker(
     prefix: &str,
-) -> RustRaftProcessReadinessBlocker {
-    RustRaftProcessReadinessBlocker {
+) -> ProcessReadinessBlocker {
+    ProcessReadinessBlocker {
         blocker: format!("{prefix}_missing"),
         evidence_field: prefix.to_string(),
         detail: "No process-harness report was supplied; local fixtures cannot satisfy production Raft readiness.".to_string(),
@@ -1833,7 +1833,7 @@ pub fn matrixraft_process_readiness_field_detail(evidence_field: &str) -> &'stat
 }
 
 pub fn matrixraft_data_node_strict_process_rollout_validated(
-    report: &RustRaftDataNodeProcessRolloutReport,
+    report: &DataNodeProcessRolloutReport,
 ) -> bool {
     report.ready
         && data_node_process_path_ready(report)
@@ -1854,7 +1854,7 @@ pub fn matrixraft_data_node_strict_process_rollout_validated(
 }
 
 pub fn matrixraft_meta_strict_process_rollout_validated(
-    report: &RustRaftMetaProcessRolloutReport,
+    report: &MetaProcessRolloutReport,
 ) -> bool {
     report.ready
         && meta_process_path_ready(report)
@@ -1873,7 +1873,7 @@ pub fn matrixraft_meta_strict_process_rollout_validated(
         && report.operational_semantics.proves_runtime_semantics()
 }
 
-fn data_node_process_path_ready(report: &RustRaftDataNodeProcessRolloutReport) -> bool {
+fn data_node_process_path_ready(report: &DataNodeProcessRolloutReport) -> bool {
     process_path_proof_is_complete(
         report.spawned_process_count,
         report.independent_wal_dirs,
@@ -1888,7 +1888,7 @@ fn data_node_process_path_ready(report: &RustRaftDataNodeProcessRolloutReport) -
         && nodes_restarted_and_log_checked(&report.nodes)
 }
 
-fn meta_process_path_ready(report: &RustRaftMetaProcessRolloutReport) -> bool {
+fn meta_process_path_ready(report: &MetaProcessRolloutReport) -> bool {
     process_path_proof_is_complete(
         report.spawned_process_count,
         report.independent_wal_dirs,
@@ -1912,7 +1912,7 @@ fn process_path_proof_is_complete(
     read_index_responses_observed: u64,
     restarted_node_count: u64,
     per_node_log_store_inspection_count: u64,
-    nodes: &[RustRaftProcessNodeEvidence],
+    nodes: &[ProcessNodeEvidence],
 ) -> bool {
     let expected = nodes.len() as u64;
     spawned_process_count >= 3
@@ -1929,7 +1929,7 @@ fn process_path_proof_is_complete(
         && unique_non_empty_values(nodes.iter().map(|node| node.snapshot_dir.as_str()))
 }
 
-fn nodes_restarted_and_log_checked(nodes: &[RustRaftProcessNodeEvidence]) -> bool {
+fn nodes_restarted_and_log_checked(nodes: &[ProcessNodeEvidence]) -> bool {
     nodes.iter().all(|node| {
         node.restarted && node.log_store_validated && node.applied_index >= node.commit_index
     })
@@ -1950,7 +1950,7 @@ fn unique_non_empty_values<'a>(values: impl Iterator<Item = &'a str>) -> bool {
 fn append_data_node_process_blockers(
     blockers: &mut Vec<String>,
     prefix: &str,
-    report: &RustRaftDataNodeProcessRolloutReport,
+    report: &DataNodeProcessRolloutReport,
 ) {
     append_common_process_blockers(
         blockers,
@@ -1979,7 +1979,7 @@ fn append_data_node_process_blockers(
 fn append_meta_process_blockers(
     blockers: &mut Vec<String>,
     prefix: &str,
-    report: &RustRaftMetaProcessRolloutReport,
+    report: &MetaProcessRolloutReport,
 ) {
     append_common_process_blockers(
         blockers,
@@ -2017,7 +2017,7 @@ fn append_common_process_blockers(
     read_index_responses_observed: u64,
     restarted_node_count: u64,
     per_node_log_store_inspection_count: u64,
-    nodes: &[RustRaftProcessNodeEvidence],
+    nodes: &[ProcessNodeEvidence],
     process_api_observed: bool,
     snapshot_install_validated: bool,
     restart_recovery_validated: bool,
@@ -2026,7 +2026,7 @@ fn append_common_process_blockers(
     membership_change_validated: bool,
     follower_lag_validated: bool,
     secondary_read_validated: bool,
-    operational_semantics: &RustRaftProcessOperationalSemanticsEvidence,
+    operational_semantics: &ProcessOperationalSemanticsEvidence,
 ) {
     push_missing(blockers, ready, &format!("{prefix}.ready"));
     push_missing(
@@ -2183,7 +2183,7 @@ fn runtime_capability(
     capability: &str,
     source_reference: &str,
     fields: &[(bool, &str)],
-) -> RaftCapabilityEvidence {
+) -> CapabilityEvidence {
     matrixraft_capability_evidence_from_fields(
         capability,
         source_reference,
@@ -2192,9 +2192,9 @@ fn runtime_capability(
 }
 
 fn all_semantics(
-    data_node: Option<&RustRaftProcessOperationalSemanticsEvidence>,
-    metaserver: Option<&RustRaftProcessOperationalSemanticsEvidence>,
-    predicate: impl Fn(&RustRaftProcessOperationalSemanticsEvidence) -> bool,
+    data_node: Option<&ProcessOperationalSemanticsEvidence>,
+    metaserver: Option<&ProcessOperationalSemanticsEvidence>,
+    predicate: impl Fn(&ProcessOperationalSemanticsEvidence) -> bool,
 ) -> bool {
     match (data_node, metaserver) {
         (Some(data_node), Some(metaserver)) => predicate(data_node) && predicate(metaserver),
@@ -2235,7 +2235,7 @@ fn escape_prometheus_label_value(value: &str) -> String {
 }
 
 fn require_data_node_rollout(
-    rollout: Option<&RustRaftDataNodeProcessRolloutReport>,
+    rollout: Option<&DataNodeProcessRolloutReport>,
     satisfied: &mut Vec<String>,
     missing: &mut Vec<String>,
     blockers: &mut Vec<String>,
@@ -2373,7 +2373,7 @@ fn require_data_node_rollout(
 }
 
 fn require_meta_rollout(
-    rollout: Option<&RustRaftMetaProcessRolloutReport>,
+    rollout: Option<&MetaProcessRolloutReport>,
     satisfied: &mut Vec<String>,
     missing: &mut Vec<String>,
     blockers: &mut Vec<String>,
@@ -2518,7 +2518,7 @@ fn require_meta_rollout(
 }
 
 fn require_membership_transitions(
-    transitions: &[RustRaftMembershipTransitionEvidence],
+    transitions: &[MembershipTransitionEvidence],
     satisfied: &mut Vec<String>,
     missing: &mut Vec<String>,
     blockers: &mut Vec<String>,

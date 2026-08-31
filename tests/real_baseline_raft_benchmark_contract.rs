@@ -8,10 +8,10 @@ use matrixraft::benchmark::{
     matrixraft_baseline_raft_benchmark_failure_summary, matrixraft_find_baseline_raft_harness,
     matrixraft_find_or_build_baseline_raft_harness,
     matrixraft_probe_baseline_raft_native_benchmark, matrixraft_run_baseline_raft_parity_benchmark,
-    matrixraft_validate_production_baseline_raft_benchmark_options, RustRaftBenchmarkEngine,
-    RustRaftBenchmarkEngineSource, RustRaftBenchmarkHarnessKind, RustRaftBenchmarkOptions,
-    RustRaftBenchmarkRunner, RustRaftBenchmarkWorkload, RustRaftExternalBaselineRaftRunner,
-    RustRaftRuntimeBenchmarkRunner, MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT,
+    matrixraft_validate_production_baseline_raft_benchmark_options, BenchmarkEngine,
+    BenchmarkEngineSource, BenchmarkHarnessKind, BenchmarkOptions, BenchmarkRunner,
+    BenchmarkWorkload, ExternalBaselineRaftRunner, RuntimeBenchmarkRunner,
+    MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT,
     MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
     MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES,
 };
@@ -38,15 +38,15 @@ fn benchmark_artifact_verifier_rejects_debug_benchmark_environment() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     assert!(report
@@ -612,7 +612,7 @@ fn benchmark_artifact_verifier_script_rejects_non_file_artifacts() {
 
 #[test]
 fn production_benchmark_options_validator_rejects_non_release_scale_inputs() {
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         node_count: 3,
         iterations_per_workload: 0,
         batch_size: 1,
@@ -1392,15 +1392,15 @@ fn real_baseline_raft_runner_uses_external_harness_and_production_sources() {
         fake_bin
     );
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     let debug_error = matrixraft_assert_production_baseline_raft_parity(&report)
@@ -1424,8 +1424,8 @@ fn real_baseline_raft_runner_uses_external_harness_and_production_sources() {
     assert!(evidence.performance_within_threshold);
     assert!(evidence.blockers.is_empty());
     assert!(report.comparisons.iter().all(|comparison| {
-        comparison.baseline_raft.engine_source == RustRaftBenchmarkEngineSource::RealBaselineRaft
-            && comparison.rustraft.engine_source == RustRaftBenchmarkEngineSource::RustRaftRuntime
+        comparison.baseline_raft.engine_source == BenchmarkEngineSource::RealBaselineRaft
+            && comparison.rustraft.engine_source == BenchmarkEngineSource::RustRaftRuntime
     }));
     let captured_args = fs::read_to_string(root.join("bin/last_args.txt")).expect("captured args");
     assert!(captured_args.contains("node_count=5"));
@@ -1447,15 +1447,15 @@ fn production_benchmark_rejects_stale_report_and_summary_timestamps() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: 2,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.generated_at_unix_ms = 1;
@@ -1479,15 +1479,15 @@ fn benchmark_reports_use_unique_process_scoped_run_ids() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let first =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     let second =
@@ -1527,7 +1527,7 @@ fn production_benchmark_rejects_non_finite_pass_tolerance() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: 2,
         batch_size: 2,
         payload_size_bytes: 4096,
@@ -1535,8 +1535,8 @@ fn production_benchmark_rejects_non_finite_pass_tolerance() {
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
 
@@ -1554,7 +1554,7 @@ fn production_benchmark_rejects_loose_pass_tolerance() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
@@ -1562,8 +1562,8 @@ fn production_benchmark_rejects_loose_pass_tolerance() {
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
 
@@ -1586,15 +1586,15 @@ fn production_benchmark_rejects_tiny_iteration_count() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: 2,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
 
@@ -1617,15 +1617,15 @@ fn production_benchmark_rejects_unbatched_batch_size() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 1,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
 
@@ -1648,15 +1648,15 @@ fn production_benchmark_rejects_tiny_payload_size() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES - 1,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
 
@@ -1679,7 +1679,7 @@ fn production_benchmark_rejects_below_scale_node_count() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         node_count: 3,
         iterations_per_workload: 2,
         batch_size: 2,
@@ -1687,8 +1687,8 @@ fn production_benchmark_rejects_below_scale_node_count() {
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
 
@@ -1711,20 +1711,20 @@ fn production_benchmark_rejects_non_runtime_rustraft_harness() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
         "os=linux;arch=x86_64;target=x86_64-unknown-linux-gnu;debug_assertions=false".to_string();
-    report.comparisons[0].rustraft.harness_kind = RustRaftBenchmarkHarnessKind::Model;
+    report.comparisons[0].rustraft.harness_kind = BenchmarkHarnessKind::Model;
 
     let error = matrixraft_assert_production_baseline_raft_parity(&report)
         .expect_err("non-runtime rustraft harness must not satisfy production parity");
@@ -1743,20 +1743,20 @@ fn production_benchmark_rejects_sample_engine_mismatch() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
         "os=linux;arch=x86_64;target=x86_64-unknown-linux-gnu;debug_assertions=false".to_string();
-    report.comparisons[0].rustraft.engine = RustRaftBenchmarkEngine::BaselineRaft;
+    report.comparisons[0].rustraft.engine = BenchmarkEngine::BaselineRaft;
 
     let error = matrixraft_assert_production_baseline_raft_parity(&report)
         .expect_err("sample engine mismatch must not satisfy production parity");
@@ -1775,20 +1775,20 @@ fn production_benchmark_rejects_sample_engine_source_mismatch() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
         "os=linux;arch=x86_64;target=x86_64-unknown-linux-gnu;debug_assertions=false".to_string();
-    report.comparisons[0].rustraft.engine_source = RustRaftBenchmarkEngineSource::Model;
+    report.comparisons[0].rustraft.engine_source = BenchmarkEngineSource::Model;
 
     let error = matrixraft_assert_production_baseline_raft_parity(&report)
         .expect_err("sample engine source mismatch must not satisfy production parity");
@@ -1807,15 +1807,15 @@ fn production_benchmark_rejects_nonexistent_binary_provenance() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -1853,15 +1853,15 @@ fn production_benchmark_rejects_non_executable_binary_provenance() {
     let non_executable = root.join("rustraft-benchmark-not-executable");
     fs::write(&non_executable, b"not executable").expect("write non-executable binary fixture");
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -1905,15 +1905,15 @@ fn production_benchmark_rejects_relative_binary_provenance() {
     }
     write_executable(&relative_binary, "#!/usr/bin/env bash\nexit 0\n");
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -1946,15 +1946,15 @@ fn production_benchmark_rejects_binary_path_collision() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -1988,15 +1988,15 @@ fn benchmark_evidence_classifies_operation_count_pair_mismatch_as_correctness() 
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.comparisons[0]
@@ -2021,15 +2021,15 @@ fn benchmark_evidence_classifies_inconsistent_comparison_status_as_correctness()
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.comparisons[0].passed = true;
@@ -2064,15 +2064,15 @@ fn production_summary_rejects_inconsistent_workload_status() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2109,15 +2109,15 @@ fn production_benchmark_rejects_mismatched_timed_iteration_count() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2151,15 +2151,15 @@ fn production_benchmark_rejects_mismatched_operations_per_timed_iteration() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2167,7 +2167,7 @@ fn production_benchmark_rejects_mismatched_operations_per_timed_iteration() {
     let batched = report
         .comparisons
         .iter_mut()
-        .find(|comparison| comparison.workload == RustRaftBenchmarkWorkload::BatchedWrites)
+        .find(|comparison| comparison.workload == BenchmarkWorkload::BatchedWrites)
         .expect("batched writes comparison");
     batched.rustraft.operations_per_timed_iteration = 1;
 
@@ -2198,15 +2198,15 @@ fn production_benchmark_rejects_required_workload_manifest_mismatch() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2238,15 +2238,15 @@ fn production_benchmark_rejects_required_workload_order_mismatch() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2278,15 +2278,15 @@ fn production_benchmark_rejects_nonfinite_comparison_ratios() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2310,15 +2310,15 @@ fn production_summary_rejects_nonfinite_workload_ratios() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2343,15 +2343,15 @@ fn production_benchmark_rejects_sample_run_id_pair_mismatch() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2383,15 +2383,15 @@ fn production_benchmark_rejects_throughput_duration_mismatch() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2425,15 +2425,15 @@ fn production_benchmark_rejects_latency_exceeding_total_duration() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2467,15 +2467,15 @@ fn production_benchmark_reports_missing_regression_blocker_from_ratios() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2519,15 +2519,15 @@ fn production_benchmark_rejects_invalid_git_revision_provenance() {
     make_fake_baseline_raft_harness(&root);
     make_fake_git_checkout(&root);
 
-    let options = RustRaftBenchmarkOptions {
+    let options = BenchmarkOptions {
         iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
         batch_size: 2,
         payload_size_bytes: 4096,
         ..Default::default()
     };
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new("release");
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
     let mut report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     report.environment_fingerprint =
@@ -2569,10 +2569,10 @@ exit 17
     );
 
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "fake-failure").expect("runner");
+        ExternalBaselineRaftRunner::from_root(&root, "fake-failure").expect("runner");
     let sample = baseline_raft.run_workload(
-        RustRaftBenchmarkWorkload::SingleKeyWrites,
-        &RustRaftBenchmarkOptions {
+        BenchmarkWorkload::SingleKeyWrites,
+        &BenchmarkOptions {
             iterations_per_workload: 1,
             ..Default::default()
         },
@@ -2580,7 +2580,7 @@ exit 17
 
     assert_eq!(
         sample.engine_source,
-        RustRaftBenchmarkEngineSource::RealBaselineRaft
+        BenchmarkEngineSource::RealBaselineRaft
     );
     assert!(!sample.correctness_passed);
     assert_eq!(sample.operation_count, 1);
@@ -2598,9 +2598,8 @@ fn real_baseline_raft_runner_rejects_non_executable_harness_before_spawn() {
     let harness = bin_dir.join("baseline_raft_parity_benchmark");
     fs::write(&harness, "#!/usr/bin/env bash\necho should-not-run\n").expect("write harness");
 
-    let error =
-        RustRaftExternalBaselineRaftRunner::new(&harness, Some(&root), "fake-non-executable")
-            .expect_err("non-executable harness must be rejected");
+    let error = ExternalBaselineRaftRunner::new(&harness, Some(&root), "fake-non-executable")
+        .expect_err("non-executable harness must be rejected");
     assert!(error.contains("benchmark:real_baseline_raft_harness_not_executable"));
     let _ = fs::remove_dir_all(root);
 }
@@ -2636,10 +2635,10 @@ echo "not-json"
     );
 
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "fake-invalid-json").expect("runner");
+        ExternalBaselineRaftRunner::from_root(&root, "fake-invalid-json").expect("runner");
     let sample = baseline_raft.run_workload(
-        RustRaftBenchmarkWorkload::SnapshotStreaming,
-        &RustRaftBenchmarkOptions {
+        BenchmarkWorkload::SnapshotStreaming,
+        &BenchmarkOptions {
             iterations_per_workload: 1,
             ..Default::default()
         },
@@ -2647,7 +2646,7 @@ echo "not-json"
 
     assert_eq!(
         sample.engine_source,
-        RustRaftBenchmarkEngineSource::RealBaselineRaft
+        BenchmarkEngineSource::RealBaselineRaft
     );
     assert!(!sample.correctness_passed);
     assert_eq!(sample.operation_count, 1);
@@ -2691,11 +2690,10 @@ JSON
     );
     make_fake_git_checkout(&root);
 
-    let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "debug").expect("runner");
+    let mut baseline_raft = ExternalBaselineRaftRunner::from_root(&root, "debug").expect("runner");
     let sample = baseline_raft.run_workload(
-        RustRaftBenchmarkWorkload::SingleKeyWrites,
-        &RustRaftBenchmarkOptions {
+        BenchmarkWorkload::SingleKeyWrites,
+        &BenchmarkOptions {
             iterations_per_workload: 1,
             ..Default::default()
         },
@@ -2756,10 +2754,10 @@ JSON
     );
 
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "fake-test").expect("runner");
+        ExternalBaselineRaftRunner::from_root(&root, "fake-test").expect("runner");
     let sample = baseline_raft.run_workload(
-        RustRaftBenchmarkWorkload::SingleKeyWrites,
-        &RustRaftBenchmarkOptions {
+        BenchmarkWorkload::SingleKeyWrites,
+        &BenchmarkOptions {
             iterations_per_workload: 1,
             batch_size: 16,
             ..Default::default()
@@ -2813,10 +2811,10 @@ JSON
     );
 
     let mut baseline_raft =
-        RustRaftExternalBaselineRaftRunner::from_root(&root, "fake-test").expect("runner");
+        ExternalBaselineRaftRunner::from_root(&root, "fake-test").expect("runner");
     let sample = baseline_raft.run_workload(
-        RustRaftBenchmarkWorkload::BatchedWrites,
-        &RustRaftBenchmarkOptions {
+        BenchmarkWorkload::BatchedWrites,
+        &BenchmarkOptions {
             iterations_per_workload: 2,
             batch_size: 2,
             ..Default::default()

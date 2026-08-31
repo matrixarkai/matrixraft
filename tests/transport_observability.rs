@@ -15,24 +15,22 @@ use matrixraft::{
     },
     readiness::{
         matrixraft_baseline_raft_parity_surface, matrixraft_parity_report,
-        matrixraft_public_api_contract, RustRaftReadinessSnapshot,
+        matrixraft_public_api_contract, ReadinessSnapshot,
     },
     status::{
-        matrixraft_fatal_blocker_report, RustRaftBlockerSeverity, RustRaftDiagnosticLogEntry,
-        RustRaftDiagnosticSeverity, RustRaftOptimizationHint, RustRaftOptimizationHintSeverity,
-        RustRaftOptimizationReport,
+        matrixraft_fatal_blocker_report, BlockerSeverity, DiagnosticLogEntry, DiagnosticSeverity,
+        OptimizationHint, OptimizationHintSeverity, OptimizationReport,
     },
     transport::{
         AppendEntriesRequest, InstallSnapshotRequest, PreVoteRequest, PreVoteResponse,
-        ReadIndexRequest, RustRaftSnapshotChunk, VoteRequest,
+        ReadIndexRequest, SnapshotChunk, VoteRequest,
     },
-    RustRaftDebugBundleValidationReport, RustRaftInstallSnapshotResponse, RustRaftLogId,
-    RustRaftSnapshotMeta,
+    DebugBundleValidationReport, InstallSnapshotResponse, LogId, SnapshotMetadata,
 };
 use serde_json::Value;
 
-fn ready_snapshot() -> RustRaftReadinessSnapshot {
-    RustRaftReadinessSnapshot {
+fn ready_snapshot() -> ReadinessSnapshot {
+    ReadinessSnapshot {
         matrixraft_leader_write_authority_present: true,
         matrixraft_operator_observability_present: true,
         matrixraft_rpc_transport_contract_present: true,
@@ -54,7 +52,7 @@ fn transport_contract_names_owned_rpc_types_including_prevote_and_snapshot_chunk
         group_id: 9,
         term: 4,
         leader_id: 1,
-        prev_log_id: Some(RustRaftLogId { term: 4, index: 9 }),
+        prev_log_id: Some(LogId { term: 4, index: 9 }),
         entries: Vec::new(),
         leader_commit: 9,
         lease_epoch: 0,
@@ -84,10 +82,10 @@ fn transport_contract_names_owned_rpc_types_including_prevote_and_snapshot_chunk
     };
     assert!(pre_vote_response.vote_granted);
 
-    let chunk = RustRaftSnapshotChunk {
-        meta: RustRaftSnapshotMeta {
+    let chunk = SnapshotChunk {
+        meta: SnapshotMetadata {
             snapshot_id: "transport-observability".to_string(),
-            last_log_id: RustRaftLogId { term: 4, index: 10 },
+            last_log_id: LogId { term: 4, index: 10 },
             membership: vec![1, 2, 3],
             members: Vec::new(),
         },
@@ -102,7 +100,7 @@ fn transport_contract_names_owned_rpc_types_including_prevote_and_snapshot_chunk
         chunk,
     };
     assert!(install.chunk.done);
-    let install_response = RustRaftInstallSnapshotResponse {
+    let install_response = InstallSnapshotResponse {
         term: 4,
         accepted: true,
         next_offset: 5,
@@ -235,12 +233,10 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     let api = matrixraft_public_api_contract();
     assert!(api.rpc_messages.contains(&"PreVoteRequest".to_string()));
     assert!(api.rpc_messages.contains(&"PreVoteResponse".to_string()));
+    assert!(api.rpc_messages.contains(&"SnapshotChunk".to_string()));
     assert!(api
         .rpc_messages
-        .contains(&"RustRaftSnapshotChunk".to_string()));
-    assert!(api
-        .rpc_messages
-        .contains(&"RustRaftTransportValidationReport".to_string()));
+        .contains(&"TransportValidationReport".to_string()));
     assert!(api
         .rpc_messages
         .contains(&"InMemoryRaftTransport".to_string()));
@@ -288,7 +284,7 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
             .find(|blocker| blocker.id == "wal_corrupt")
             .expect("fatal blocker")
             .severity,
-        RustRaftBlockerSeverity::Fatal
+        BlockerSeverity::Fatal
     );
 }
 
@@ -1055,7 +1051,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         .issues
         .contains(&"observability_dashboard_metric_not_advertised".to_string()));
 
-    let escaped_issue_validation = RustRaftDebugBundleValidationReport {
+    let escaped_issue_validation = DebugBundleValidationReport {
         ready: false,
         issue_count: 1,
         issues: vec!["issue\"with\\escape".to_string()],
@@ -1130,23 +1126,23 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
 
 #[test]
 fn optimization_report_prometheus_exports_hint_metrics() {
-    let report = RustRaftOptimizationReport {
+    let report = OptimizationReport {
         ready: false,
         hint_count: 2,
         critical_count: 1,
         warning_count: 1,
         hints: vec![
-            RustRaftOptimizationHint {
+            OptimizationHint {
                 id: "wal_commit_range_missing".to_string(),
-                severity: RustRaftOptimizationHintSeverity::Critical,
+                severity: OptimizationHintSeverity::Critical,
                 component: "wal".to_string(),
                 recommendation: "recover WAL range".to_string(),
                 observed_value: 9,
                 threshold: 10,
             },
-            RustRaftOptimizationHint {
+            OptimizationHint {
                 id: "append_queue_saturated".to_string(),
-                severity: RustRaftOptimizationHintSeverity::Warning,
+                severity: OptimizationHintSeverity::Warning,
                 component: "replication_pipeline".to_string(),
                 recommendation: "raise append queue capacity".to_string(),
                 observed_value: 1,
@@ -1252,15 +1248,15 @@ fn optimization_report_prometheus_exports_hint_metrics() {
     ));
 
     let diagnostics = vec![
-        RustRaftDiagnosticLogEntry {
+        DiagnosticLogEntry {
             target: "rustraft.quorum".to_string(),
-            severity: RustRaftDiagnosticSeverity::Error,
+            severity: DiagnosticSeverity::Error,
             message: "quorum_not_observed".to_string(),
             fields: vec![("observed".to_string(), "1".to_string())],
         },
-        RustRaftDiagnosticLogEntry {
+        DiagnosticLogEntry {
             target: "rustraft.pipeline".to_string(),
-            severity: RustRaftDiagnosticSeverity::Warn,
+            severity: DiagnosticSeverity::Warn,
             message: "append_queue_pressure".to_string(),
             fields: vec![("depth".to_string(), "9".to_string())],
         },

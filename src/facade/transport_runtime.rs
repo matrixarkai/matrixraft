@@ -10,9 +10,9 @@ pub struct AuthenticatedRaftRpc<M, A = String> {
     pub message: M,
 }
 
-pub trait RaftAuthPolicy<A = String> {
-    fn token_for(&self, target: RustRaftNodeId) -> A;
-    fn validate(&self, target: RustRaftNodeId, auth: &A) -> Result<(), RaftError>;
+pub trait AuthPolicy<A = String> {
+    fn token_for(&self, target: NodeId) -> A;
+    fn validate(&self, target: NodeId, auth: &A) -> Result<(), RaftError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,12 +28,12 @@ impl StaticRaftAuthToken {
     }
 }
 
-impl RaftAuthPolicy<String> for StaticRaftAuthToken {
-    fn token_for(&self, _target: RustRaftNodeId) -> String {
+impl AuthPolicy<String> for StaticRaftAuthToken {
+    fn token_for(&self, _target: NodeId) -> String {
         self.token.clone()
     }
 
-    fn validate(&self, _target: RustRaftNodeId, auth: &String) -> Result<(), RaftError> {
+    fn validate(&self, _target: NodeId, auth: &String) -> Result<(), RaftError> {
         if auth == &self.token {
             Ok(())
         } else {
@@ -53,7 +53,7 @@ pub struct AuthenticatedRaftTransport<T, A = String, P = StaticRaftAuthToken> {
 
 impl<T, A, P> AuthenticatedRaftTransport<T, A, P>
 where
-    P: RaftAuthPolicy<A>,
+    P: AuthPolicy<A>,
 {
     pub fn new(inner: T, policy: P) -> Self {
         Self {
@@ -73,7 +73,7 @@ where
 
     pub fn wrap_request<M>(
         &self,
-        target: RustRaftNodeId,
+        target: NodeId,
         message: M,
     ) -> AuthenticatedRaftRpc<M, A> {
         AuthenticatedRaftRpc {
@@ -85,12 +85,12 @@ where
 
 impl<T, A, P> AuthenticatedRaftTransport<T, A, P>
 where
-    T: RustRaftTransport,
-    P: RaftAuthPolicy<A>,
+    T: Transport,
+    P: AuthPolicy<A>,
 {
     pub fn append_entries_authenticated(
         &self,
-        target: RustRaftNodeId,
+        target: NodeId,
         request: AuthenticatedRaftRpc<AppendEntriesRequest, A>,
     ) -> Result<AppendEntriesResponse, RaftError> {
         self.policy.validate(target, &request.auth)?;
@@ -99,7 +99,7 @@ where
 
     pub fn vote_authenticated(
         &self,
-        target: RustRaftNodeId,
+        target: NodeId,
         request: AuthenticatedRaftRpc<VoteRequest, A>,
     ) -> Result<VoteResponse, RaftError> {
         self.policy.validate(target, &request.auth)?;
@@ -108,7 +108,7 @@ where
 
     pub fn install_snapshot_authenticated(
         &self,
-        target: RustRaftNodeId,
+        target: NodeId,
         request: AuthenticatedRaftRpc<InstallSnapshotRequest, A>,
     ) -> Result<InstallSnapshotResponse, RaftError> {
         self.policy.validate(target, &request.auth)?;
@@ -117,7 +117,7 @@ where
 
     pub fn read_index_authenticated(
         &self,
-        target: RustRaftNodeId,
+        target: NodeId,
         request: AuthenticatedRaftRpc<ReadIndexRequest, A>,
     ) -> Result<ReadIndexResponse, RaftError> {
         self.policy.validate(target, &request.auth)?;
@@ -125,47 +125,47 @@ where
     }
 }
 
-impl<T, A, P> RustRaftTransport for AuthenticatedRaftTransport<T, A, P>
+impl<T, A, P> Transport for AuthenticatedRaftTransport<T, A, P>
 where
-    T: RustRaftTransport,
-    P: RaftAuthPolicy<A>,
+    T: Transport,
+    P: AuthPolicy<A>,
 {
     fn append_entries(
         &self,
         target: u64,
-        request: RustRaftAppendEntriesRequest,
-    ) -> Result<RustRaftAppendEntriesResponse, RustRaftError> {
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, RaftError> {
         self.inner.append_entries(target, request)
     }
 
     fn vote(
         &self,
         target: u64,
-        request: RustRaftVoteRequest,
-    ) -> Result<RustRaftVoteResponse, RustRaftError> {
+        request: VoteRequest,
+    ) -> Result<VoteResponse, RaftError> {
         self.inner.vote(target, request)
     }
 
     fn install_snapshot(
         &self,
         target: u64,
-        request: RustRaftInstallSnapshotRequest,
-    ) -> Result<RustRaftInstallSnapshotResponse, RustRaftError> {
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse, RaftError> {
         self.inner.install_snapshot(target, request)
     }
 
     fn read_index(
         &self,
         target: u64,
-        request: RustRaftReadIndexRequest,
-    ) -> Result<RustRaftReadIndexResponse, RustRaftError> {
+        request: ReadIndexRequest,
+    ) -> Result<ReadIndexResponse, RaftError> {
         self.inner.read_index(target, request)
     }
 }
 
 #[derive(Clone, Default)]
 pub struct InMemoryRaftTransport {
-    peers: Arc<Mutex<BTreeMap<RustRaftNodeId, Arc<dyn RustRaftTransport + Send + Sync>>>>,
+    peers: Arc<Mutex<BTreeMap<NodeId, Arc<dyn Transport + Send + Sync>>>>,
     validate_messages: bool,
 }
 
@@ -190,17 +190,17 @@ impl InMemoryRaftTransport {
         }
     }
 
-    pub fn register<T>(&self, node_id: RustRaftNodeId, handler: T) -> Result<(), RaftError>
+    pub fn register<T>(&self, node_id: NodeId, handler: T) -> Result<(), RaftError>
     where
-        T: RustRaftTransport + Send + Sync + 'static,
+        T: Transport + Send + Sync + 'static,
     {
         self.register_handler(node_id, Arc::new(handler))
     }
 
     pub fn register_handler(
         &self,
-        node_id: RustRaftNodeId,
-        handler: Arc<dyn RustRaftTransport + Send + Sync>,
+        node_id: NodeId,
+        handler: Arc<dyn Transport + Send + Sync>,
     ) -> Result<(), RaftError> {
         if node_id == 0 {
             return Err(RaftError::InvalidRequest(
@@ -216,7 +216,7 @@ impl InMemoryRaftTransport {
         Ok(())
     }
 
-    pub fn unregister(&self, node_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn unregister(&self, node_id: NodeId) -> Result<(), RaftError> {
         self.peers
             .lock()
             .map_err(|_| {
@@ -228,8 +228,8 @@ impl InMemoryRaftTransport {
 
     fn handler(
         &self,
-        target: RustRaftNodeId,
-    ) -> Result<Arc<dyn RustRaftTransport + Send + Sync>, RaftError> {
+        target: NodeId,
+    ) -> Result<Arc<dyn Transport + Send + Sync>, RaftError> {
         if target == 0 {
             return Err(RaftError::InvalidRequest(
                 "in-memory raft transport target must be greater than zero".to_string(),
@@ -250,12 +250,12 @@ impl InMemoryRaftTransport {
     }
 }
 
-impl RustRaftTransport for InMemoryRaftTransport {
+impl Transport for InMemoryRaftTransport {
     fn append_entries(
         &self,
         target: u64,
-        request: RustRaftAppendEntriesRequest,
-    ) -> Result<RustRaftAppendEntriesResponse, RustRaftError> {
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, RaftError> {
         if self.validate_messages {
             require_transport_validation(matrixraft_validate_append_entries_request(&request))?;
         }
@@ -269,8 +269,8 @@ impl RustRaftTransport for InMemoryRaftTransport {
     fn vote(
         &self,
         target: u64,
-        request: RustRaftVoteRequest,
-    ) -> Result<RustRaftVoteResponse, RustRaftError> {
+        request: VoteRequest,
+    ) -> Result<VoteResponse, RaftError> {
         if self.validate_messages {
             require_transport_validation(matrixraft_validate_vote_request(&request))?;
         }
@@ -284,8 +284,8 @@ impl RustRaftTransport for InMemoryRaftTransport {
     fn install_snapshot(
         &self,
         target: u64,
-        request: RustRaftInstallSnapshotRequest,
-    ) -> Result<RustRaftInstallSnapshotResponse, RustRaftError> {
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse, RaftError> {
         if self.validate_messages {
             require_transport_validation(matrixraft_validate_install_snapshot_request(&request))?;
         }
@@ -299,8 +299,8 @@ impl RustRaftTransport for InMemoryRaftTransport {
     fn read_index(
         &self,
         target: u64,
-        request: RustRaftReadIndexRequest,
-    ) -> Result<RustRaftReadIndexResponse, RustRaftError> {
+        request: ReadIndexRequest,
+    ) -> Result<ReadIndexResponse, RaftError> {
         if self.validate_messages {
             require_transport_validation(matrixraft_validate_read_index_request(&request))?;
         }
@@ -316,19 +316,19 @@ impl RustRaftTransport for InMemoryRaftTransport {
 #[serde(tag = "rpc", content = "payload", rename_all = "snake_case")]
 pub enum TcpRaftTransportRequest {
     AppendEntries {
-        target: RustRaftNodeId,
+        target: NodeId,
         request: AppendEntriesRequest,
     },
     Vote {
-        target: RustRaftNodeId,
+        target: NodeId,
         request: VoteRequest,
     },
     InstallSnapshot {
-        target: RustRaftNodeId,
+        target: NodeId,
         request: InstallSnapshotRequest,
     },
     ReadIndex {
-        target: RustRaftNodeId,
+        target: NodeId,
         request: ReadIndexRequest,
     },
     Batch {
@@ -375,21 +375,21 @@ pub enum TcpRaftTransportResponse {
 
 #[derive(Debug, Clone, Default)]
 pub struct TcpRaftTransport {
-    peers: BTreeMap<RustRaftNodeId, String>,
+    peers: BTreeMap<NodeId, String>,
 }
 
 impl TcpRaftTransport {
-    pub fn new(peers: BTreeMap<RustRaftNodeId, String>) -> Self {
+    pub fn new(peers: BTreeMap<NodeId, String>) -> Self {
         Self { peers }
     }
 
-    pub fn set_peer_addr(&mut self, node_id: RustRaftNodeId, addr: impl Into<String>) {
+    pub fn set_peer_addr(&mut self, node_id: NodeId, addr: impl Into<String>) {
         self.peers.insert(node_id, addr.into());
     }
 
     fn send_rpc(
         &self,
-        target: RustRaftNodeId,
+        target: NodeId,
         request: TcpRaftTransportRequest,
     ) -> Result<TcpRaftTransportResponse, RaftError> {
         let addr = self.peers.get(&target).ok_or_else(|| {
@@ -413,7 +413,7 @@ impl TcpRaftTransport {
 
     pub fn send_batch_rpc(
         &self,
-        target: RustRaftNodeId,
+        target: NodeId,
         requests: Vec<TcpRaftTransportRequest>,
     ) -> Result<Vec<TcpRaftTransportResponse>, RaftError> {
         if requests.is_empty() {
@@ -431,12 +431,12 @@ impl TcpRaftTransport {
     }
 }
 
-impl RustRaftTransport for TcpRaftTransport {
+impl Transport for TcpRaftTransport {
     fn append_entries(
         &self,
         target: u64,
-        request: RustRaftAppendEntriesRequest,
-    ) -> Result<RustRaftAppendEntriesResponse, RustRaftError> {
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, RaftError> {
         require_transport_validation(matrixraft_validate_append_entries_request(&request))?;
         match self.send_rpc(
             target,
@@ -456,8 +456,8 @@ impl RustRaftTransport for TcpRaftTransport {
     fn vote(
         &self,
         target: u64,
-        request: RustRaftVoteRequest,
-    ) -> Result<RustRaftVoteResponse, RustRaftError> {
+        request: VoteRequest,
+    ) -> Result<VoteResponse, RaftError> {
         require_transport_validation(matrixraft_validate_vote_request(&request))?;
         match self.send_rpc(target, TcpRaftTransportRequest::Vote { target, request })? {
             TcpRaftTransportResponse::Vote(response) => {
@@ -474,8 +474,8 @@ impl RustRaftTransport for TcpRaftTransport {
     fn install_snapshot(
         &self,
         target: u64,
-        request: RustRaftInstallSnapshotRequest,
-    ) -> Result<RustRaftInstallSnapshotResponse, RustRaftError> {
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse, RaftError> {
         require_transport_validation(matrixraft_validate_install_snapshot_request(&request))?;
         match self.send_rpc(
             target,
@@ -497,8 +497,8 @@ impl RustRaftTransport for TcpRaftTransport {
     fn read_index(
         &self,
         target: u64,
-        request: RustRaftReadIndexRequest,
-    ) -> Result<RustRaftReadIndexResponse, RustRaftError> {
+        request: ReadIndexRequest,
+    ) -> Result<ReadIndexResponse, RaftError> {
         require_transport_validation(matrixraft_validate_read_index_request(&request))?;
         match self.send_rpc(
             target,
@@ -525,7 +525,7 @@ pub struct TcpRaftTransportServer {
 impl TcpRaftTransportServer {
     pub fn start<T>(addr: impl Into<String>, handler: Arc<T>) -> Result<Self, RaftError>
     where
-        T: RustRaftTransport + Send + Sync + 'static,
+        T: Transport + Send + Sync + 'static,
     {
         let listener = TcpListener::bind(addr.into()).map_err(|err| {
             RaftError::Transport(format!("failed to bind raft TCP server: {err}"))
@@ -588,7 +588,7 @@ impl Drop for TcpRaftTransportServer {
 
 fn handle_tcp_raft_stream<T>(stream: TcpStream, handler: &T) -> Result<(), RaftError>
 where
-    T: RustRaftTransport + ?Sized,
+    T: Transport + ?Sized,
 {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -618,7 +618,7 @@ fn handle_tcp_raft_request<T>(
     handler: &T,
 ) -> TcpRaftTransportResponse
 where
-    T: RustRaftTransport + ?Sized,
+    T: Transport + ?Sized,
 {
     match request {
         TcpRaftTransportRequest::AppendEntries { target, request } => {
@@ -659,12 +659,12 @@ impl ClusterRaftTransport {
     }
 }
 
-impl RustRaftTransport for ClusterRaftTransport {
+impl Transport for ClusterRaftTransport {
     fn append_entries(
         &self,
         target: u64,
-        request: RustRaftAppendEntriesRequest,
-    ) -> Result<RustRaftAppendEntriesResponse, RustRaftError> {
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, RaftError> {
         self.cluster
             .lock()
             .map_err(|_| RaftError::Transport("raft cluster transport lock poisoned".to_string()))?
@@ -674,8 +674,8 @@ impl RustRaftTransport for ClusterRaftTransport {
     fn vote(
         &self,
         target: u64,
-        request: RustRaftVoteRequest,
-    ) -> Result<RustRaftVoteResponse, RustRaftError> {
+        request: VoteRequest,
+    ) -> Result<VoteResponse, RaftError> {
         self.cluster
             .lock()
             .map_err(|_| RaftError::Transport("raft cluster transport lock poisoned".to_string()))?
@@ -685,8 +685,8 @@ impl RustRaftTransport for ClusterRaftTransport {
     fn install_snapshot(
         &self,
         target: u64,
-        request: RustRaftInstallSnapshotRequest,
-    ) -> Result<RustRaftInstallSnapshotResponse, RustRaftError> {
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse, RaftError> {
         self.cluster
             .lock()
             .map_err(|_| RaftError::Transport("raft cluster transport lock poisoned".to_string()))?
@@ -696,8 +696,8 @@ impl RustRaftTransport for ClusterRaftTransport {
     fn read_index(
         &self,
         _target: u64,
-        request: RustRaftReadIndexRequest,
-    ) -> Result<RustRaftReadIndexResponse, RustRaftError> {
+        request: ReadIndexRequest,
+    ) -> Result<ReadIndexResponse, RaftError> {
         self.cluster
             .lock()
             .map_err(|_| RaftError::Transport("raft cluster transport lock poisoned".to_string()))?

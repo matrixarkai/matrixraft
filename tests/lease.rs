@@ -1,31 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
-use matrixraft::{
-    RustRaftFollowerLease, RustRaftLeaderLease, RustRaftLeasePeer, RustRaftReplicaRole,
-};
+use matrixraft::{FollowerLease, LeaderLease, LeasePeer, ReplicaRole};
 
-fn voters(ids: &[u64]) -> Vec<RustRaftLeasePeer> {
+fn voters(ids: &[u64]) -> Vec<LeasePeer> {
     ids.iter()
         .copied()
-        .map(|node_id| RustRaftLeasePeer {
+        .map(|node_id| LeasePeer {
             node_id,
-            role: RustRaftReplicaRole::Voter,
+            role: ReplicaRole::Voter,
         })
         .collect()
 }
 
-fn peers_with_roles(items: &[(u64, RustRaftReplicaRole)]) -> Vec<RustRaftLeasePeer> {
+fn peers_with_roles(items: &[(u64, ReplicaRole)]) -> Vec<LeasePeer> {
     items
         .iter()
         .copied()
-        .map(|(node_id, role)| RustRaftLeasePeer { node_id, role })
+        .map(|(node_id, role)| LeasePeer { node_id, role })
         .collect()
 }
 
 #[test]
 fn leader_lease_renews_from_quorum_confirmations() {
-    let mut lease = RustRaftLeaderLease::new(1, 50);
+    let mut lease = LeaderLease::new(1, 50);
     lease.update_members(voters(&[1, 2, 3]));
     lease.reset(1);
 
@@ -48,7 +46,7 @@ fn leader_lease_renews_from_quorum_confirmations() {
 
 #[test]
 fn leader_lease_keeps_reduced_follower_duration_from_rewinding() {
-    let mut lease = RustRaftLeaderLease::new(1, 100);
+    let mut lease = LeaderLease::new(1, 100);
     lease.update_members(voters(&[1, 2, 3]));
     lease.reset(1);
 
@@ -68,7 +66,7 @@ fn leader_lease_keeps_reduced_follower_duration_from_rewinding() {
 
 #[test]
 fn leader_lease_ignores_unknown_and_stale_confirmations() {
-    let mut lease = RustRaftLeaderLease::new(1, 100);
+    let mut lease = LeaderLease::new(1, 100);
     lease.update_members(voters(&[1, 2, 3]));
     lease.reset(1);
 
@@ -85,7 +83,7 @@ fn leader_lease_ignores_unknown_and_stale_confirmations() {
 
 #[test]
 fn leader_lease_quorum_math_tracks_membership_changes() {
-    let mut lease = RustRaftLeaderLease::new(1, 100);
+    let mut lease = LeaderLease::new(1, 100);
     lease.reset(1);
 
     lease.update_members(voters(&[1]));
@@ -110,11 +108,11 @@ fn leader_lease_quorum_math_tracks_membership_changes() {
 
 #[test]
 fn leader_lease_excludes_learners_and_resets_promoted_learner_state() {
-    let mut lease = RustRaftLeaderLease::new(1, 100);
+    let mut lease = LeaderLease::new(1, 100);
     lease.update_members(peers_with_roles(&[
-        (1, RustRaftReplicaRole::Voter),
-        (2, RustRaftReplicaRole::Voter),
-        (3, RustRaftReplicaRole::Learner),
+        (1, ReplicaRole::Voter),
+        (2, ReplicaRole::Voter),
+        (3, ReplicaRole::Learner),
     ]));
     lease.reset(1);
 
@@ -125,16 +123,16 @@ fn leader_lease_excludes_learners_and_resets_promoted_learner_state() {
     assert_eq!(lease.status(1, 100).voting_peer_count, 2);
 
     lease.update_members(peers_with_roles(&[
-        (1, RustRaftReplicaRole::Voter),
-        (2, RustRaftReplicaRole::Voter),
-        (3, RustRaftReplicaRole::Voter),
+        (1, ReplicaRole::Voter),
+        (2, ReplicaRole::Voter),
+        (3, ReplicaRole::Voter),
     ]));
     assert!(lease.on_recv_lease_confirm(1, 3, 90, 1_000));
 }
 
 #[test]
 fn follower_lease_tracks_epoch_monotonicity_and_restart_forbidden_window() {
-    let mut lease = RustRaftFollowerLease::new(2, 100, 0, 10);
+    let mut lease = FollowerLease::new(2, 100, 0, 10);
     lease.reset(1);
     assert!(!lease.in_lease(1, 10));
 
@@ -151,8 +149,64 @@ fn follower_lease_tracks_epoch_monotonicity_and_restart_forbidden_window() {
     assert!(!lease.on_recv_lease_item(2, 4, 140));
     assert_eq!(lease.received_lease_end_ms(), Some(230));
 
-    let mut restarted = RustRaftFollowerLease::new(2, 100, 100, 500);
+    let mut restarted = FollowerLease::new(2, 100, 100, 500);
     restarted.reset(3);
     assert!(restarted.in_lease(3, 599));
     assert!(!restarted.in_lease(3, 600));
+}
+
+#[test]
+fn leader_lease_rejects_a_stale_term_instead_of_aborting() {
+    let mut lease = LeaderLease::new(1, 50);
+    lease.update_members(voters(&[1, 2, 3]));
+    lease.reset(7);
+
+    // Establish a real lease in the current term so the rejections below are
+    // distinguishable from "there was never a lease".
+    assert!(lease.on_recv_lease_confirm(7, 2, 95, 50));
+    assert!(lease.in_lease(7, 100));
+
+    // A confirmation from a term we have moved past is dropped, exactly as a
+    // confirmation from an unknown peer already was.
+    assert!(!lease.on_recv_lease_confirm(6, 3, 115, 50));
+    assert!(!lease.on_recv_lease_confirm(8, 3, 115, 50));
+    assert!(!lease.on_recv_lease_confirm(7, 99, 115, 50));
+
+    // A leader must not confirm its own lease; that is a drop, not a crash.
+    assert!(!lease.on_recv_lease_confirm(7, 1, 115, 50));
+
+    // Querying with a stale term reports "no lease", and says why.
+    assert!(!lease.in_lease(6, 100));
+    let stale = lease.status(6, 100);
+    assert!(!stale.in_lease);
+    assert_eq!(stale.lease_end_ms, None);
+    assert_eq!(stale.reason, "term_mismatch");
+    assert_eq!(stale.voting_peer_count, 3);
+    assert_eq!(stale.quorum_size, 2);
+
+    // None of that disturbed the lease actually held for the current term.
+    assert!(lease.in_lease(7, 100));
+    assert_eq!(lease.status(7, 100).reason, "active");
+}
+
+#[test]
+fn follower_lease_rejects_a_stale_term_instead_of_aborting() {
+    let mut lease = FollowerLease::new(2, 50, 0, 0);
+    lease.reset(7);
+
+    assert!(lease.on_recv_lease_item(7, 90, 100));
+    assert!(lease.in_lease(7, 120));
+    assert_eq!(lease.max_met_epoch_id(7), 90);
+
+    // Stale and future terms are both rejected rather than fatal.
+    assert!(!lease.on_recv_lease_item(6, 200, 120));
+    assert!(!lease.on_recv_lease_item(8, 200, 120));
+
+    // A query in another term is simply "no lease", and nothing was met there.
+    assert!(!lease.in_lease(6, 120));
+    assert_eq!(lease.max_met_epoch_id(6), 0);
+
+    // The current term is untouched by any of it.
+    assert!(lease.in_lease(7, 120));
+    assert_eq!(lease.max_met_epoch_id(7), 90);
 }

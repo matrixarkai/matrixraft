@@ -11,12 +11,12 @@ use serde::{Deserialize, Serialize};
 pub use crate::matrixraft_baseline_raft_runtime_capability_prometheus;
 use crate::status::{
     matrixraft_admin_diagnostic_log_entries, matrixraft_optimization_report,
-    RaftRuntimeAdminReport, RustRaftAdminStatusSurfaceInput, RustRaftDiagnosticLogEntry,
-    RustRaftDiagnosticSeverity, RustRaftOptimizationHintSeverity, RustRaftOptimizationReport,
+    AdminStatusSurfaceInput, DiagnosticLogEntry, DiagnosticSeverity, OptimizationHintSeverity,
+    OptimizationReport, RuntimeAdminReport,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftMetricNames {
+pub struct MetricNames {
     pub ready: String,
     pub append_latency_ms: String,
     pub vote_latency_ms: String,
@@ -68,25 +68,25 @@ pub struct RustRaftMetricNames {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftPrometheusMetricSet {
+pub struct PrometheusMetricSet {
     pub format: String,
     pub metric_count: u64,
     pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftGrafanaDashboard {
+pub struct GrafanaDashboard {
     pub title: String,
     pub uid: String,
     pub timezone: String,
     pub schema_version: u32,
     pub refresh: String,
     pub tags: Vec<String>,
-    pub panels: Vec<RustRaftGrafanaPanel>,
+    pub panels: Vec<GrafanaPanel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftGrafanaPanel {
+pub struct GrafanaPanel {
     pub id: u32,
     pub title: String,
     #[serde(rename = "type")]
@@ -97,7 +97,7 @@ pub struct RustRaftGrafanaPanel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftAlertRule {
+pub struct AlertRule {
     pub alert: String,
     pub expr: String,
     pub duration: String,
@@ -106,22 +106,22 @@ pub struct RustRaftAlertRule {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftObservabilityProvisioning {
+pub struct ObservabilityProvisioning {
     pub service: String,
     pub prometheus_format: String,
     pub required_metric_names: Vec<String>,
     pub validation_metric_names: Vec<String>,
     pub debug_artifact_names: Vec<String>,
     pub prometheus_artifact_names: Vec<String>,
-    pub dashboard: RustRaftGrafanaDashboard,
-    pub alert_rules: Vec<RustRaftAlertRule>,
-    pub runbook_steps: Vec<RustRaftOperatorRunbookStep>,
-    pub debug_bundle_contract: RustRaftDebugBundleContract,
+    pub dashboard: GrafanaDashboard,
+    pub alert_rules: Vec<AlertRule>,
+    pub runbook_steps: Vec<OperatorRunbookStep>,
+    pub debug_bundle_contract: DebugBundleContract,
     pub sample_artifact_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftOperatorTriageSummary {
+pub struct OperatorTriageSummary {
     pub status: String,
     pub severity: String,
     pub first_action: String,
@@ -137,7 +137,7 @@ pub struct RustRaftOperatorTriageSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftOperatorRunbookStep {
+pub struct OperatorRunbookStep {
     pub id: String,
     pub severity: String,
     pub target: String,
@@ -146,7 +146,7 @@ pub struct RustRaftOperatorRunbookStep {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftDebugBundleContract {
+pub struct DebugBundleContract {
     pub name: String,
     pub version: u32,
     pub producer: String,
@@ -154,30 +154,30 @@ pub struct RustRaftDebugBundleContract {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftDebugBundleValidationReport {
+pub struct DebugBundleValidationReport {
     pub ready: bool,
     pub issue_count: usize,
     pub issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftDebugSnapshot {
-    pub contract: RustRaftDebugBundleContract,
+pub struct DebugSnapshot {
+    pub contract: DebugBundleContract,
     pub generated_at_unix_ms: u64,
-    pub admin_report: RaftRuntimeAdminReport,
-    pub diagnostics: Vec<RustRaftDiagnosticLogEntry>,
-    pub diagnostic_prometheus: RustRaftPrometheusMetricSet,
-    pub optimization: RustRaftOptimizationReport,
-    pub optimization_prometheus: RustRaftPrometheusMetricSet,
-    pub grafana: RustRaftGrafanaDashboard,
-    pub alerts: Vec<RustRaftAlertRule>,
-    pub triage: RustRaftOperatorTriageSummary,
-    pub runbook_prometheus: RustRaftPrometheusMetricSet,
-    pub runbook_steps: Vec<RustRaftOperatorRunbookStep>,
+    pub admin_report: RuntimeAdminReport,
+    pub diagnostics: Vec<DiagnosticLogEntry>,
+    pub diagnostic_prometheus: PrometheusMetricSet,
+    pub optimization: OptimizationReport,
+    pub optimization_prometheus: PrometheusMetricSet,
+    pub grafana: GrafanaDashboard,
+    pub alerts: Vec<AlertRule>,
+    pub triage: OperatorTriageSummary,
+    pub runbook_prometheus: PrometheusMetricSet,
+    pub runbook_steps: Vec<OperatorRunbookStep>,
 }
 
-pub fn matrixraft_metric_names() -> RustRaftMetricNames {
-    RustRaftMetricNames {
+pub fn matrixraft_metric_names() -> MetricNames {
+    MetricNames {
         ready: "rustraft_ready".to_string(),
         append_latency_ms: "rustraft_append_latency_ms".to_string(),
         vote_latency_ms: "rustraft_vote_latency_ms".to_string(),
@@ -242,10 +242,10 @@ pub fn matrixraft_metric_names() -> RustRaftMetricNames {
     }
 }
 
-pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
+pub fn matrixraft_alert_rules() -> Vec<AlertRule> {
     let metrics = matrixraft_metric_names();
     vec![
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftOptimizationNotReady".to_string(),
             expr: format!("{} == 0", metrics.optimization_ready),
             duration: "5m".to_string(),
@@ -254,7 +254,7 @@ pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
                 "RustRaft optimization readiness is not passing; follow resolve_critical_optimization_hints."
                     .to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftOptimizationCriticalHints".to_string(),
             expr: format!("{} > 0", metrics.optimization_critical_total),
             duration: "5m".to_string(),
@@ -263,7 +263,7 @@ pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
                 "RustRaft has critical optimization hints; follow resolve_critical_optimization_hints before rollout."
                     .to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftOptimizationWarningHints".to_string(),
             expr: format!("{} > 0", metrics.optimization_warning_total),
             duration: "10m".to_string(),
@@ -271,14 +271,14 @@ pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
             summary: "RustRaft has warning optimization hints to review before rollout."
                 .to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftFatalEvents".to_string(),
             expr: format!("{} > 0", metrics.fatal_total),
             duration: "1m".to_string(),
             severity: "critical".to_string(),
             summary: "RustRaft fatal blocker events are present.".to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftDiagnosticErrors".to_string(),
             expr: format!("{}{{severity=\"error\"}} > 0", metrics.diagnostic_log_total),
             duration: "1m".to_string(),
@@ -287,21 +287,21 @@ pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
                 "RustRaft diagnostic errors are present; follow inspect_error_diagnostics."
                     .to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftBlockersPresent".to_string(),
             expr: format!("{} > 0", metrics.blocker_total),
             duration: "5m".to_string(),
             severity: "warning".to_string(),
             summary: "RustRaft readiness blockers are present.".to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftOperatorTriageWatch".to_string(),
             expr: format!("{}{{status=\"watch\"}} > 0", metrics.operator_triage_status),
             duration: "5m".to_string(),
             severity: "warning".to_string(),
             summary: "RustRaft operator triage is in watch status.".to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftOperatorTriageNeedsAttention".to_string(),
             expr: format!(
                 "{}{{status=\"needs_attention\"}} > 0",
@@ -311,7 +311,7 @@ pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
             severity: "critical".to_string(),
             summary: "RustRaft operator triage needs attention.".to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftRunbookCriticalSteps".to_string(),
             expr: format!(
                 "{}{{severity=\"critical\"}} > 0",
@@ -322,14 +322,14 @@ pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
             summary: "RustRaft critical runbook steps are active; inspect operator_runbook_first_step for the first action."
                 .to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftDebugBundleValidationFailed".to_string(),
             expr: format!("{} == 0", metrics.debug_bundle_validation_ready),
             duration: "5m".to_string(),
             severity: "warning".to_string(),
             summary: "RustRaft debug bundle validation is not passing.".to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftSupportEnvelopeValidationFailed".to_string(),
             expr: format!(
                 "{}{{artifact=\"support_envelope\"}} == 0",
@@ -343,7 +343,7 @@ pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
                 metrics.debug_bundle_validation_issue
             ),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftSupportEnvelopeCritical".to_string(),
             expr: format!(
                 "{}{{artifact=\"support_envelope\",support_envelope_severity=\"critical\"}} == 0",
@@ -356,7 +356,7 @@ pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
                 metrics.debug_bundle_validation_first_issue
             ),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftDebugSnapshotStale".to_string(),
             expr: format!(
                 "{} > {}",
@@ -367,7 +367,7 @@ pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
             summary: "RustRaft debug snapshot metadata is older than the configured freshness window."
                 .to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftDebugSnapshotFreshnessLow".to_string(),
             expr: format!("{} == 0", metrics.debug_snapshot_low_fresh),
             duration: "5m".to_string(),
@@ -375,14 +375,14 @@ pub fn matrixraft_alert_rules() -> Vec<RustRaftAlertRule> {
             summary: "RustRaft debug snapshot has less than five minutes before the freshness window expires."
                 .to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftDebugSnapshotFreshnessLost".to_string(),
             expr: format!("{} == 0", metrics.debug_snapshot_fresh),
             duration: "5m".to_string(),
             severity: "warning".to_string(),
             summary: "RustRaft debug snapshot freshness flag is not passing.".to_string(),
         },
-        RustRaftAlertRule {
+        AlertRule {
             alert: "RustRaftObservabilityProvisioningValidationFailed".to_string(),
             expr: format!(
                 "{} == 0",
@@ -400,9 +400,9 @@ pub fn matrixraft_alert_rules_json() -> String {
         .expect("RustRaft alert rules must serialize")
 }
 
-pub fn matrixraft_observability_provisioning() -> RustRaftObservabilityProvisioning {
+pub fn matrixraft_observability_provisioning() -> ObservabilityProvisioning {
     let metrics = matrixraft_metric_names();
-    RustRaftObservabilityProvisioning {
+    ObservabilityProvisioning {
         service: "rustraft".to_string(),
         prometheus_format: "prometheus_text_v0.0.4".to_string(),
         required_metric_names: vec![
@@ -497,8 +497,8 @@ pub fn matrixraft_observability_provisioning() -> RustRaftObservabilityProvision
     }
 }
 
-pub fn matrixraft_observability_provisioning_runbook_steps() -> Vec<RustRaftOperatorRunbookStep> {
-    let triage = RustRaftOperatorTriageSummary {
+pub fn matrixraft_observability_provisioning_runbook_steps() -> Vec<OperatorRunbookStep> {
+    let triage = OperatorTriageSummary {
         status: "needs_attention".to_string(),
         severity: "critical".to_string(),
         first_action: "Inspect error diagnostics and critical optimization hints first."
@@ -513,7 +513,7 @@ pub fn matrixraft_observability_provisioning_runbook_steps() -> Vec<RustRaftOper
         top_alert: Some("RustRaftOperatorTriageNeedsAttention".to_string()),
         top_optimization_hint: Some("critical_observability_contract".to_string()),
     };
-    let optimization = RustRaftOptimizationReport {
+    let optimization = OptimizationReport {
         ready: false,
         critical_count: 1,
         warning_count: 1,
@@ -545,8 +545,8 @@ pub fn matrixraft_observability_provisioning_json() -> String {
 }
 
 pub fn matrixraft_validate_observability_provisioning(
-    provisioning: &RustRaftObservabilityProvisioning,
-) -> RustRaftDebugBundleValidationReport {
+    provisioning: &ObservabilityProvisioning,
+) -> DebugBundleValidationReport {
     let expected = matrixraft_observability_provisioning();
     let mut issues = Vec::new();
 
@@ -597,7 +597,7 @@ pub fn matrixraft_validate_observability_provisioning(
 }
 
 fn matrixraft_alert_rules_have_unadvertised_metrics(
-    provisioning: &RustRaftObservabilityProvisioning,
+    provisioning: &ObservabilityProvisioning,
 ) -> bool {
     let advertised_metrics: BTreeSet<&str> = provisioning
         .required_metric_names
@@ -612,9 +612,7 @@ fn matrixraft_alert_rules_have_unadvertised_metrics(
     })
 }
 
-fn matrixraft_dashboard_has_unadvertised_metrics(
-    provisioning: &RustRaftObservabilityProvisioning,
-) -> bool {
+fn matrixraft_dashboard_has_unadvertised_metrics(provisioning: &ObservabilityProvisioning) -> bool {
     let advertised_metrics: BTreeSet<&str> = provisioning
         .required_metric_names
         .iter()
@@ -660,8 +658,8 @@ fn matrixraft_alert_expr_metric_name(expr: &str) -> Option<&str> {
 
 pub fn matrixraft_validate_observability_provisioning_json(
     json: &str,
-) -> RustRaftDebugBundleValidationReport {
-    match serde_json::from_str::<RustRaftObservabilityProvisioning>(json) {
+) -> DebugBundleValidationReport {
+    match serde_json::from_str::<ObservabilityProvisioning>(json) {
         Ok(provisioning) => matrixraft_validate_observability_provisioning(&provisioning),
         Err(_) => matrixraft_debug_bundle_validation_report(vec![
             "observability_provisioning_json_parse_error".to_string(),
@@ -670,9 +668,9 @@ pub fn matrixraft_validate_observability_provisioning_json(
 }
 
 pub fn matrixraft_observability_provisioning_validation_prometheus(
-    report: &RustRaftDebugBundleValidationReport,
+    report: &DebugBundleValidationReport,
     labels: &[(&str, &str)],
-) -> RustRaftPrometheusMetricSet {
+) -> PrometheusMetricSet {
     let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut metric_count = 0_u64;
@@ -715,15 +713,15 @@ pub fn matrixraft_observability_provisioning_validation_prometheus(
         metric_count += 1;
     }
 
-    RustRaftPrometheusMetricSet {
+    PrometheusMetricSet {
         format: "prometheus_text_v0.0.4".to_string(),
         metric_count,
         text,
     }
 }
 
-pub fn matrixraft_debug_bundle_contract() -> RustRaftDebugBundleContract {
-    RustRaftDebugBundleContract {
+pub fn matrixraft_debug_bundle_contract() -> DebugBundleContract {
+    DebugBundleContract {
         name: "matrixraft_debug_snapshot".to_string(),
         version: 1,
         producer: "matrixraft".to_string(),
@@ -731,9 +729,7 @@ pub fn matrixraft_debug_bundle_contract() -> RustRaftDebugBundleContract {
     }
 }
 
-pub fn matrixraft_validate_debug_snapshot(
-    snapshot: &RustRaftDebugSnapshot,
-) -> RustRaftDebugBundleValidationReport {
+pub fn matrixraft_validate_debug_snapshot(snapshot: &DebugSnapshot) -> DebugBundleValidationReport {
     let expected = matrixraft_debug_bundle_contract();
     let mut issues = Vec::new();
 
@@ -903,13 +899,13 @@ pub fn matrixraft_validate_debug_snapshot(
         .optimization
         .hints
         .iter()
-        .filter(|hint| hint.severity == RustRaftOptimizationHintSeverity::Critical)
+        .filter(|hint| hint.severity == OptimizationHintSeverity::Critical)
         .count() as u64;
     let optimization_warning_count = snapshot
         .optimization
         .hints
         .iter()
-        .filter(|hint| hint.severity == RustRaftOptimizationHintSeverity::Warning)
+        .filter(|hint| hint.severity == OptimizationHintSeverity::Warning)
         .count() as u64;
     if snapshot.optimization.hint_count != optimization_hint_count {
         issues.push("optimization_hint_count_mismatch".to_string());
@@ -926,12 +922,12 @@ pub fn matrixraft_validate_debug_snapshot(
     let diagnostic_error_count = snapshot
         .diagnostics
         .iter()
-        .filter(|entry| entry.severity == RustRaftDiagnosticSeverity::Error)
+        .filter(|entry| entry.severity == DiagnosticSeverity::Error)
         .count();
     let diagnostic_warning_count = snapshot
         .diagnostics
         .iter()
-        .filter(|entry| entry.severity == RustRaftDiagnosticSeverity::Warn)
+        .filter(|entry| entry.severity == DiagnosticSeverity::Warn)
         .count();
     if snapshot.triage.diagnostic_error_count != diagnostic_error_count {
         issues.push("triage_diagnostic_error_count_mismatch".to_string());
@@ -1128,17 +1124,17 @@ pub fn matrixraft_validate_debug_snapshot(
     matrixraft_debug_bundle_validation_report(issues)
 }
 
-pub fn matrixraft_validate_debug_snapshot_json(json: &str) -> RustRaftDebugBundleValidationReport {
-    match serde_json::from_str::<RustRaftDebugSnapshot>(json) {
+pub fn matrixraft_validate_debug_snapshot_json(json: &str) -> DebugBundleValidationReport {
+    match serde_json::from_str::<DebugSnapshot>(json) {
         Ok(snapshot) => matrixraft_validate_debug_snapshot(&snapshot),
         Err(_) => matrixraft_debug_bundle_validation_report(vec!["json_parse_failed".to_string()]),
     }
 }
 
 pub fn matrixraft_debug_bundle_validation_prometheus(
-    report: &RustRaftDebugBundleValidationReport,
+    report: &DebugBundleValidationReport,
     labels: &[(&str, &str)],
-) -> RustRaftPrometheusMetricSet {
+) -> PrometheusMetricSet {
     let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut metric_count = 0_u64;
@@ -1181,17 +1177,15 @@ pub fn matrixraft_debug_bundle_validation_prometheus(
         metric_count += 1;
     }
 
-    RustRaftPrometheusMetricSet {
+    PrometheusMetricSet {
         format: "prometheus_text_v0.0.4".to_string(),
         metric_count,
         text,
     }
 }
 
-fn matrixraft_debug_bundle_validation_report(
-    issues: Vec<String>,
-) -> RustRaftDebugBundleValidationReport {
-    RustRaftDebugBundleValidationReport {
+fn matrixraft_debug_bundle_validation_report(issues: Vec<String>) -> DebugBundleValidationReport {
+    DebugBundleValidationReport {
         ready: issues.is_empty(),
         issue_count: issues.len(),
         issues,
@@ -1206,17 +1200,17 @@ fn matrixraft_debug_snapshot_now_unix_ms() -> u64 {
 }
 
 pub fn matrixraft_operator_triage_summary(
-    diagnostics: &[RustRaftDiagnosticLogEntry],
-    optimization: &RustRaftOptimizationReport,
-    alerts: &[RustRaftAlertRule],
-) -> RustRaftOperatorTriageSummary {
+    diagnostics: &[DiagnosticLogEntry],
+    optimization: &OptimizationReport,
+    alerts: &[AlertRule],
+) -> OperatorTriageSummary {
     let diagnostic_error_count = diagnostics
         .iter()
-        .filter(|entry| entry.severity == RustRaftDiagnosticSeverity::Error)
+        .filter(|entry| entry.severity == DiagnosticSeverity::Error)
         .count();
     let diagnostic_warning_count = diagnostics
         .iter()
-        .filter(|entry| entry.severity == RustRaftDiagnosticSeverity::Warn)
+        .filter(|entry| entry.severity == DiagnosticSeverity::Warn)
         .count();
     let top_alert = alerts
         .iter()
@@ -1225,22 +1219,22 @@ pub fn matrixraft_operator_triage_summary(
         .map(|rule| rule.alert.clone());
     let top_diagnostic = diagnostics
         .iter()
-        .find(|entry| entry.severity == RustRaftDiagnosticSeverity::Error)
+        .find(|entry| entry.severity == DiagnosticSeverity::Error)
         .or_else(|| {
             diagnostics
                 .iter()
-                .find(|entry| entry.severity == RustRaftDiagnosticSeverity::Warn)
+                .find(|entry| entry.severity == DiagnosticSeverity::Warn)
         })
         .or_else(|| diagnostics.first());
     let top_optimization_hint = optimization
         .hints
         .iter()
-        .find(|hint| hint.severity == RustRaftOptimizationHintSeverity::Critical)
+        .find(|hint| hint.severity == OptimizationHintSeverity::Critical)
         .or_else(|| {
             optimization
                 .hints
                 .iter()
-                .find(|hint| hint.severity == RustRaftOptimizationHintSeverity::Warning)
+                .find(|hint| hint.severity == OptimizationHintSeverity::Warning)
         })
         .map(|hint| hint.id.clone());
 
@@ -1261,7 +1255,7 @@ pub fn matrixraft_operator_triage_summary(
             ("ready", "info", "No immediate operator action is required.")
         };
 
-    RustRaftOperatorTriageSummary {
+    OperatorTriageSummary {
         status: status.to_string(),
         severity: severity.to_string(),
         first_action: first_action.to_string(),
@@ -1278,9 +1272,9 @@ pub fn matrixraft_operator_triage_summary(
 }
 
 pub fn matrixraft_operator_triage_prometheus(
-    triage: &RustRaftOperatorTriageSummary,
+    triage: &OperatorTriageSummary,
     labels: &[(&str, &str)],
-) -> RustRaftPrometheusMetricSet {
+) -> PrometheusMetricSet {
     let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut status_labels = labels.to_vec();
@@ -1376,7 +1370,7 @@ pub fn matrixraft_operator_triage_prometheus(
         metric_count += 1;
     }
 
-    RustRaftPrometheusMetricSet {
+    PrometheusMetricSet {
         format: "prometheus_text_v0.0.4".to_string(),
         metric_count,
         text,
@@ -1384,9 +1378,9 @@ pub fn matrixraft_operator_triage_prometheus(
 }
 
 pub fn matrixraft_diagnostic_log_prometheus(
-    diagnostics: &[RustRaftDiagnosticLogEntry],
+    diagnostics: &[DiagnosticLogEntry],
     labels: &[(&str, &str)],
-) -> RustRaftPrometheusMetricSet {
+) -> PrometheusMetricSet {
     let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut metric_count = 0_u64;
@@ -1424,26 +1418,26 @@ pub fn matrixraft_diagnostic_log_prometheus(
         metric_count += 1;
     }
 
-    RustRaftPrometheusMetricSet {
+    PrometheusMetricSet {
         format: "prometheus_text_v0.0.4".to_string(),
         metric_count,
         text,
     }
 }
 
-fn matrixraft_diagnostic_severity_label(severity: RustRaftDiagnosticSeverity) -> &'static str {
+fn matrixraft_diagnostic_severity_label(severity: DiagnosticSeverity) -> &'static str {
     match severity {
-        RustRaftDiagnosticSeverity::Info => "info",
-        RustRaftDiagnosticSeverity::Warn => "warn",
-        RustRaftDiagnosticSeverity::Error => "error",
+        DiagnosticSeverity::Info => "info",
+        DiagnosticSeverity::Warn => "warn",
+        DiagnosticSeverity::Error => "error",
     }
 }
 
 pub fn matrixraft_operator_runbook_steps(
-    triage: &RustRaftOperatorTriageSummary,
-    optimization: &RustRaftOptimizationReport,
-    alerts: &[RustRaftAlertRule],
-) -> Vec<RustRaftOperatorRunbookStep> {
+    triage: &OperatorTriageSummary,
+    optimization: &OptimizationReport,
+    alerts: &[AlertRule],
+) -> Vec<OperatorRunbookStep> {
     let mut steps = Vec::new();
 
     if triage.diagnostic_error_count > 0 {
@@ -1496,9 +1490,9 @@ pub fn matrixraft_operator_runbook_steps(
 }
 
 pub fn matrixraft_operator_runbook_prometheus(
-    steps: &[RustRaftOperatorRunbookStep],
+    steps: &[OperatorRunbookStep],
     labels: &[(&str, &str)],
-) -> RustRaftPrometheusMetricSet {
+) -> PrometheusMetricSet {
     let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut metric_count = 0_u64;
@@ -1542,7 +1536,7 @@ pub fn matrixraft_operator_runbook_prometheus(
         metric_count += 1;
     }
 
-    RustRaftPrometheusMetricSet {
+    PrometheusMetricSet {
         format: "prometheus_text_v0.0.4".to_string(),
         metric_count,
         text,
@@ -1550,7 +1544,7 @@ pub fn matrixraft_operator_runbook_prometheus(
 }
 
 fn matrixraft_runbook_step_counts(
-    steps: &[RustRaftOperatorRunbookStep],
+    steps: &[OperatorRunbookStep],
 ) -> BTreeMap<(String, String), u64> {
     let mut counts = BTreeMap::new();
     for step in steps {
@@ -1567,8 +1561,8 @@ fn matrixraft_runbook_step(
     target: &str,
     action: &str,
     validation: &str,
-) -> RustRaftOperatorRunbookStep {
-    RustRaftOperatorRunbookStep {
+) -> OperatorRunbookStep {
+    OperatorRunbookStep {
         id: id.to_string(),
         severity: severity.to_string(),
         target: target.to_string(),
@@ -1578,9 +1572,9 @@ fn matrixraft_runbook_step(
 }
 
 pub fn matrixraft_optimization_report_prometheus(
-    report: &RustRaftOptimizationReport,
+    report: &OptimizationReport,
     labels: &[(&str, &str)],
-) -> RustRaftPrometheusMetricSet {
+) -> PrometheusMetricSet {
     let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let mut metric_count = 0_u64;
@@ -1609,9 +1603,9 @@ pub fn matrixraft_optimization_report_prometheus(
 
     for hint in &report.hints {
         let severity = match hint.severity {
-            RustRaftOptimizationHintSeverity::Info => "info",
-            RustRaftOptimizationHintSeverity::Warning => "warning",
-            RustRaftOptimizationHintSeverity::Critical => "critical",
+            OptimizationHintSeverity::Info => "info",
+            OptimizationHintSeverity::Warning => "warning",
+            OptimizationHintSeverity::Critical => "critical",
         };
         let mut hint_labels = labels.to_vec();
         hint_labels.push(("hint", hint.id.as_str()));
@@ -1633,7 +1627,7 @@ pub fn matrixraft_optimization_report_prometheus(
         metric_count += 1;
     }
 
-    RustRaftPrometheusMetricSet {
+    PrometheusMetricSet {
         format: "prometheus_text_v0.0.4".to_string(),
         metric_count,
         text,
@@ -1641,14 +1635,14 @@ pub fn matrixraft_optimization_report_prometheus(
 }
 
 fn matrixraft_optimization_component_hint_counts(
-    report: &RustRaftOptimizationReport,
+    report: &OptimizationReport,
 ) -> BTreeMap<(String, String), u64> {
     let mut counts = BTreeMap::new();
     for hint in &report.hints {
         let severity = match hint.severity {
-            RustRaftOptimizationHintSeverity::Info => "info",
-            RustRaftOptimizationHintSeverity::Warning => "warning",
-            RustRaftOptimizationHintSeverity::Critical => "critical",
+            OptimizationHintSeverity::Info => "info",
+            OptimizationHintSeverity::Warning => "warning",
+            OptimizationHintSeverity::Critical => "critical",
         };
         *counts
             .entry((hint.component.clone(), severity.to_string()))
@@ -1658,10 +1652,10 @@ fn matrixraft_optimization_component_hint_counts(
 }
 
 pub fn matrixraft_debug_snapshot(
-    admin_report: &RaftRuntimeAdminReport,
-    status_surface: &RustRaftAdminStatusSurfaceInput,
+    admin_report: &RuntimeAdminReport,
+    status_surface: &AdminStatusSurfaceInput,
     labels: &[(&str, &str)],
-) -> RustRaftDebugSnapshot {
+) -> DebugSnapshot {
     let optimization = matrixraft_optimization_report(status_surface);
     let diagnostics = matrixraft_admin_diagnostic_log_entries(admin_report);
     let diagnostic_prometheus = matrixraft_diagnostic_log_prometheus(&diagnostics, labels);
@@ -1669,7 +1663,7 @@ pub fn matrixraft_debug_snapshot(
     let triage = matrixraft_operator_triage_summary(&diagnostics, &optimization, &alerts);
     let runbook_steps = matrixraft_operator_runbook_steps(&triage, &optimization, &alerts);
     let runbook_prometheus = matrixraft_operator_runbook_prometheus(&runbook_steps, labels);
-    RustRaftDebugSnapshot {
+    DebugSnapshot {
         contract: matrixraft_debug_bundle_contract(),
         generated_at_unix_ms: matrixraft_debug_snapshot_now_unix_ms(),
         admin_report: admin_report.clone(),
@@ -1686,8 +1680,8 @@ pub fn matrixraft_debug_snapshot(
 }
 
 pub fn matrixraft_debug_snapshot_json(
-    admin_report: &RaftRuntimeAdminReport,
-    status_surface: &RustRaftAdminStatusSurfaceInput,
+    admin_report: &RuntimeAdminReport,
+    status_surface: &AdminStatusSurfaceInput,
     labels: &[(&str, &str)],
 ) -> String {
     serde_json::to_string_pretty(&matrixraft_debug_snapshot(
@@ -1699,9 +1693,9 @@ pub fn matrixraft_debug_snapshot_json(
 }
 
 pub fn matrixraft_debug_snapshot_metadata_prometheus(
-    snapshot: &RustRaftDebugSnapshot,
+    snapshot: &DebugSnapshot,
     labels: &[(&str, &str)],
-) -> RustRaftPrometheusMetricSet {
+) -> PrometheusMetricSet {
     let metrics = matrixraft_metric_names();
     let mut text = String::new();
     let generated_at_unix_ms = snapshot.generated_at_unix_ms;
@@ -1750,16 +1744,16 @@ pub fn matrixraft_debug_snapshot_metadata_prometheus(
         low_fresh,
     );
     push_metric(&mut text, &metrics.debug_snapshot_fresh, labels, fresh);
-    RustRaftPrometheusMetricSet {
+    PrometheusMetricSet {
         format: "prometheus_text_v0.0.4".to_string(),
         metric_count: 8,
         text,
     }
 }
 
-pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
+pub fn matrixraft_grafana_dashboard() -> GrafanaDashboard {
     let metrics = matrixraft_metric_names();
-    RustRaftGrafanaDashboard {
+    GrafanaDashboard {
         title: "RustRaft Runtime Overview".to_string(),
         uid: "rustraft-runtime-overview".to_string(),
         timezone: "browser".to_string(),
@@ -1771,7 +1765,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
             "grafana".to_string(),
         ],
         panels: vec![
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 1,
                 title: "Raft Ready".to_string(),
                 panel_type: "stat".to_string(),
@@ -1779,7 +1773,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "bool".to_string(),
                 description: "Cluster-level RustRaft readiness gauge.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 2,
                 title: "Append Latency".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1787,7 +1781,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "ms".to_string(),
                 description: "p99 append RPC latency from RustRaft metrics.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 3,
                 title: "Vote Latency".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1795,7 +1789,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "ms".to_string(),
                 description: "p99 vote RPC latency from RustRaft metrics.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 4,
                 title: "Pre-Vote Latency".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1803,7 +1797,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "ms".to_string(),
                 description: "p99 pre-vote RPC latency from RustRaft metrics.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 5,
                 title: "Read Index Latency".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1811,7 +1805,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "ms".to_string(),
                 description: "p99 read-index and lease-read latency.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 6,
                 title: "Snapshot Install Latency".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1819,7 +1813,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "ms".to_string(),
                 description: "p99 snapshot install latency.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 7,
                 title: "Peer Append Queue Depth".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1827,7 +1821,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "short".to_string(),
                 description: "Per-peer append pipeline queue depth.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 8,
                 title: "Peer Reorder Queue Depth".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1835,7 +1829,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "short".to_string(),
                 description: "Per-peer message reorder queue depth.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 9,
                 title: "Peer Snapshot Installed Index".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1843,7 +1837,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "short".to_string(),
                 description: "Installed snapshot index by peer.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 10,
                 title: "WAL Segment Count".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1851,7 +1845,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "short".to_string(),
                 description: "WAL segment count for retention and compaction tracking.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 11,
                 title: "Blockers".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1859,7 +1853,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "short".to_string(),
                 description: "Active blocker totals grouped by blocker label.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 12,
                 title: "Fatal Events".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1867,7 +1861,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "short".to_string(),
                 description: "Fatal blocker totals grouped by blocker label.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 13,
                 title: "Diagnostic Log Entries".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1877,7 +1871,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Structured RustRaft diagnostic log entries grouped by severity; follow inspect_error_diagnostics when errors appear."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 14,
                 title: "Diagnostic Log Entry Detail".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1890,7 +1884,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Structured RustRaft diagnostic log entries grouped by target, severity, and message for inspect_error_diagnostics."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 15,
                 title: "Optimization Ready".to_string(),
                 panel_type: "stat".to_string(),
@@ -1900,7 +1894,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Optimization readiness gauge; 1 means no critical hints. When it drops to 0, follow resolve_critical_optimization_hints."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 16,
                 title: "Optimization Critical Hints".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1910,7 +1904,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Critical optimization hints exported by RustRaft status evidence; drive resolve_critical_optimization_hints before rollout."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 17,
                 title: "Optimization Warning Hints".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1919,7 +1913,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Warning optimization hints exported by RustRaft status evidence."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 18,
                 title: "Optimization Hint Detail".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1931,7 +1925,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Optimization hints grouped by hint, component, and severity."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 19,
                 title: "Optimization Component Hints".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1942,7 +1936,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "short".to_string(),
                 description: "Optimization hints grouped by component and severity.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 20,
                 title: "Operator Triage Status".to_string(),
                 panel_type: "stat".to_string(),
@@ -1951,7 +1945,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Current operator triage status labeled by status and severity."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 21,
                 title: "Triage Diagnostic Errors".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1960,7 +1954,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Diagnostic error count from the operator triage summary."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 22,
                 title: "Triage Diagnostic Warnings".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1969,7 +1963,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Diagnostic warning count from the operator triage summary."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 23,
                 title: "Triage Critical Optimizations".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1978,7 +1972,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Critical optimization count from the operator triage summary."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 24,
                 title: "Triage Warning Optimizations".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -1987,7 +1981,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Warning optimization count from the operator triage summary."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 25,
                 title: "Triage First Action".to_string(),
                 panel_type: "stat".to_string(),
@@ -1995,7 +1989,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "short".to_string(),
                 description: "First operator action selected by the triage summary.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 26,
                 title: "Triage Alert Rules".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2003,7 +1997,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "short".to_string(),
                 description: "Alert rule count from the operator triage summary.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 27,
                 title: "Triage Top Diagnostic".to_string(),
                 panel_type: "stat".to_string(),
@@ -2013,7 +2007,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Top diagnostic entry selected by the operator triage summary for inspect_error_diagnostics."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 28,
                 title: "Triage Top Alert".to_string(),
                 panel_type: "stat".to_string(),
@@ -2021,7 +2015,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 unit: "short".to_string(),
                 description: "Top alert selected by the operator triage summary.".to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 29,
                 title: "Triage Top Optimization Hint".to_string(),
                 panel_type: "stat".to_string(),
@@ -2031,7 +2025,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Top optimization hint selected by the operator triage summary for resolve_critical_optimization_hints."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 30,
                 title: "Runbook Steps".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2043,7 +2037,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Active operator runbook steps grouped by severity and target."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 31,
                 title: "Runbook Step Presence".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2055,7 +2049,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Active operator runbook steps grouped by step, severity, and target."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 32,
                 title: "Runbook First Step".to_string(),
                 panel_type: "stat".to_string(),
@@ -2064,7 +2058,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "First active operator runbook step selected for remediation."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 33,
                 title: "Debug Snapshot Generated At".to_string(),
                 panel_type: "stat".to_string(),
@@ -2073,7 +2067,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Debug snapshot generation timestamp in Unix milliseconds."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 34,
                 title: "Debug Snapshot Age".to_string(),
                 panel_type: "stat".to_string(),
@@ -2082,7 +2076,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Debug snapshot age in milliseconds when metadata metrics are exported."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 35,
                 title: "Debug Snapshot Stale After".to_string(),
                 panel_type: "stat".to_string(),
@@ -2091,7 +2085,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Unix millisecond timestamp when the debug snapshot crosses the stale threshold; refresh the debug artifact before this deadline."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 36,
                 title: "Debug Snapshot Remaining Fresh".to_string(),
                 panel_type: "stat".to_string(),
@@ -2101,7 +2095,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Milliseconds remaining before RustRaftDebugSnapshotFreshnessLost can fire; RustRaftDebugSnapshotFreshnessLow warns below the low-fresh threshold and refresh_debug_snapshot expects this above rustraft_debug_snapshot_low_fresh_ms."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 37,
                 title: "Debug Snapshot Fresh".to_string(),
                 panel_type: "stat".to_string(),
@@ -2111,7 +2105,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Debug snapshot freshness; RustRaftDebugSnapshotFreshnessLost fires when this drops to 0."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 38,
                 title: "Debug Bundle Validation Ready".to_string(),
                 panel_type: "stat".to_string(),
@@ -2121,7 +2115,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Support bundle validator readiness; 1 means bundle contract checks pass."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 39,
                 title: "Debug Bundle Validation Issues".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2130,7 +2124,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Total support bundle validation issues emitted by RustRaft tooling."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 40,
                 title: "Debug Bundle Issue Breakdown".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2139,7 +2133,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Support bundle validation issues grouped by issue label."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 41,
                 title: "Debug Bundle First Issue".to_string(),
                 panel_type: "stat".to_string(),
@@ -2148,7 +2142,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "First support bundle validation issue selected for operator triage."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 42,
                 title: "Support Envelope Validation Ready".to_string(),
                 panel_type: "stat".to_string(),
@@ -2160,7 +2154,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Support envelope self-validation readiness; 1 means advertised artifacts and scrape payloads match the emitted bundle."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 43,
                 title: "Support Envelope Validation Issues".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2172,7 +2166,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Total support envelope validation issues emitted by RustRaft tooling."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 44,
                 title: "Support Envelope Issue Breakdown".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2184,7 +2178,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Support envelope validation issues grouped by issue label."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 45,
                 title: "Support Envelope First Issue".to_string(),
                 panel_type: "stat".to_string(),
@@ -2196,7 +2190,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "First support envelope validation issue selected for operator triage."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 46,
                 title: "Provisioning Validation Ready".to_string(),
                 panel_type: "stat".to_string(),
@@ -2207,7 +2201,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Observability provisioning validation readiness; 1 means dashboard and alert contracts match."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 47,
                 title: "Provisioning First Issue".to_string(),
                 panel_type: "stat".to_string(),
@@ -2218,7 +2212,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "First observability provisioning validation issue selected for operator triage."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 48,
                 title: "Provisioning Validation Issues".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2229,7 +2223,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Total observability provisioning validation issues emitted by RustRaft tooling."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 49,
                 title: "Provisioning Issue Breakdown".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2241,7 +2235,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Observability provisioning validation issues grouped by issue label."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 50,
                 title: "Debug Snapshot Max Age".to_string(),
                 panel_type: "stat".to_string(),
@@ -2251,7 +2245,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Configured freshness window for debug snapshots; stale and freshness alerts compare age against this threshold."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 51,
                 title: "Debug Snapshot Low Fresh Threshold".to_string(),
                 panel_type: "stat".to_string(),
@@ -2261,7 +2255,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Configured runway threshold for RustRaftDebugSnapshotFreshnessLow before the freshness window expires."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 52,
                 title: "Debug Snapshot Low Fresh".to_string(),
                 panel_type: "stat".to_string(),
@@ -2271,7 +2265,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                     "Debug snapshot early-warning freshness; 1 means remaining freshness is above rustraft_debug_snapshot_low_fresh_ms."
                         .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 53,
                 title: "Support Envelope Freshness Status".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2283,7 +2277,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Support envelope readiness grouped by debug snapshot freshness_status label."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 54,
                 title: "Support Envelope Status".to_string(),
                 panel_type: "timeseries".to_string(),
@@ -2295,7 +2289,7 @@ pub fn matrixraft_grafana_dashboard() -> RustRaftGrafanaDashboard {
                 description: "Support envelope readiness grouped by derived support_envelope_status label."
                     .to_string(),
             },
-            RustRaftGrafanaPanel {
+            GrafanaPanel {
                 id: 55,
                 title: "Support Envelope Severity".to_string(),
                 panel_type: "timeseries".to_string(),

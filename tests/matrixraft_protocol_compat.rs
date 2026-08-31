@@ -2,21 +2,20 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    AppendEntriesRequest, InstallSnapshotRequest, MatrixRaftAdminCommand,
-    MatrixRaftAdminCommandType, MatrixRaftAdminStatus, MatrixRaftAppendEntriesRequest,
-    MatrixRaftAppendEntriesResponse, MatrixRaftConfState, MatrixRaftEntry, MatrixRaftEntryType,
-    MatrixRaftHardState, MatrixRaftLeaseRequest, MatrixRaftLeaseResponse, MatrixRaftMemberId,
-    MatrixRaftMessage, MatrixRaftMessageType, MatrixRaftMetadata, MatrixRaftOldSnapshotFinish,
+    AppendEntriesRequest, AppendEntriesResponse, HardState, InstallSnapshotRequest,
+    InstallSnapshotResponse, LogEntry, LogId, MatrixRaftAdminCommand, MatrixRaftAdminCommandType,
+    MatrixRaftAdminStatus, MatrixRaftAppendEntriesRequest, MatrixRaftAppendEntriesResponse,
+    MatrixRaftConfState, MatrixRaftEntry, MatrixRaftEntryType, MatrixRaftHardState,
+    MatrixRaftLeaseRequest, MatrixRaftLeaseResponse, MatrixRaftMemberId, MatrixRaftMessage,
+    MatrixRaftMessageType, MatrixRaftMetadata, MatrixRaftOldSnapshotFinish,
     MatrixRaftOldSnapshotFinishState, MatrixRaftPropose, MatrixRaftRequireSnapshot,
-    MatrixRaftSnapshotDesc, MatrixRaftSnapshotProgress, RaftMembership, RaftMembershipOperation,
-    RustRaftAppendEntriesResponse, RustRaftHardState, RustRaftInstallSnapshotResponse,
-    RustRaftLogEntry, RustRaftLogId, RustRaftPeer, RustRaftReadIndexRequest, RustRaftReplicaRole,
-    RustRaftSnapshotChunk, RustRaftSnapshotMeta, RustRaftSnapshotState, RustRaftStorageApplyFence,
-    VoteResponse,
+    MatrixRaftSnapshotDesc, MatrixRaftSnapshotProgress, Membership, MembershipOperation, Peer,
+    ReadIndexRequest, ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState,
+    StorageApplyFence, VoteResponse,
 };
 
-fn peer(node_id: u64, role: RustRaftReplicaRole, auto_promote: bool) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole, auto_promote: bool) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 71_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 72_000 + node_id),
@@ -27,9 +26,9 @@ fn peer(node_id: u64, role: RustRaftReplicaRole, auto_promote: bool) -> RustRaft
 
 #[test]
 fn matrixraft_protocol_metadata_shapes_round_trip_to_matrixraft_types() {
-    let voter = peer(1, RustRaftReplicaRole::Voter, false);
-    let learner = peer(2, RustRaftReplicaRole::Learner, true);
-    let witness = peer(3, RustRaftReplicaRole::Witness, false);
+    let voter = peer(1, ReplicaRole::Voter, false);
+    let learner = peer(2, ReplicaRole::Learner, true);
+    let witness = peer(3, ReplicaRole::Witness, false);
 
     let voter_member = MatrixRaftMemberId::from(&voter);
     assert_eq!(voter_member.conf_state, MatrixRaftConfState::Voter);
@@ -42,9 +41,9 @@ fn matrixraft_protocol_metadata_shapes_round_trip_to_matrixraft_types() {
         MatrixRaftConfState::Witness
     );
 
-    let snapshot_meta = RustRaftSnapshotMeta {
+    let snapshot_meta = SnapshotMetadata {
         snapshot_id: "snap-9".to_string(),
-        last_log_id: RustRaftLogId { term: 4, index: 9 },
+        last_log_id: LogId { term: 4, index: 9 },
         membership: vec![1, 2, 3],
         members: vec![voter.clone(), learner.clone(), witness.clone()],
     };
@@ -55,10 +54,10 @@ fn matrixraft_protocol_metadata_shapes_round_trip_to_matrixraft_types() {
     assert_eq!(desc.version, 1);
     assert_eq!(desc.to_snapshot_meta("snap-9"), snapshot_meta);
 
-    let hard_state = RustRaftHardState {
+    let hard_state = HardState {
         current_term: 4,
         voted_for: Some(1),
-        committed: Some(RustRaftLogId { term: 4, index: 9 }),
+        committed: Some(LogId { term: 4, index: 9 }),
     };
     let matrixraft_hard = MatrixRaftHardState::from(&hard_state);
     assert_eq!(matrixraft_hard.current_term, 4);
@@ -66,7 +65,7 @@ fn matrixraft_protocol_metadata_shapes_round_trip_to_matrixraft_types() {
 
     let metadata = MatrixRaftMetadata::from_hard_state_and_membership(
         &hard_state,
-        &RaftMembership {
+        &Membership {
             group_id: 44,
             voters: vec![1],
             learners: vec![2],
@@ -88,13 +87,13 @@ fn matrixraft_protocol_metadata_shapes_round_trip_to_matrixraft_types() {
 #[test]
 fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_payloads() {
     let entries = vec![
-        RustRaftLogEntry {
-            log_id: RustRaftLogId { term: 5, index: 10 },
+        LogEntry {
+            log_id: LogId { term: 5, index: 10 },
             payload: b"set-a".to_vec(),
             is_command: true,
         },
-        RustRaftLogEntry {
-            log_id: RustRaftLogId { term: 5, index: 11 },
+        LogEntry {
+            log_id: LogId { term: 5, index: 11 },
             payload: b"meta".to_vec(),
             is_command: false,
         },
@@ -103,7 +102,7 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
         group_id: 99,
         term: 5,
         leader_id: 1,
-        prev_log_id: Some(RustRaftLogId { term: 4, index: 9 }),
+        prev_log_id: Some(LogId { term: 4, index: 9 }),
         entries: entries.clone(),
         leader_commit: 11,
         lease_epoch: 77,
@@ -224,14 +223,14 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
     assert!(pre_vote_message.vote_request.is_none());
     assert!(pre_vote_message.vote_response.is_none());
 
-    let response = RustRaftAppendEntriesResponse {
+    let response = AppendEntriesResponse {
         term: 5,
         success: false,
         match_index: 0,
         rejection_hint: Some(8),
         rejected_index: Some(10),
         require_snapshot: Some(7),
-        snapshot_state: RustRaftSnapshotState::NotReady,
+        snapshot_state: SnapshotState::NotReady,
         lease_confirmation_epoch: 0,
         lease_duration_ms: 0,
     };
@@ -269,7 +268,7 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
         response_message
             .snapshot_state
             .expect("snapshot state on response"),
-        RustRaftSnapshotState::NotReady
+        SnapshotState::NotReady
     );
     let lease_response_message = MatrixRaftMessage::append_entries_lease_response(
         2,
@@ -302,7 +301,7 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
     );
     assert!(lease_response_message.append_entries_response.is_some());
 
-    let install_response = RustRaftInstallSnapshotResponse {
+    let install_response = InstallSnapshotResponse {
         term: 6,
         accepted: true,
         next_offset: 4096,
@@ -331,10 +330,10 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
         group_id: 99,
         term: 6,
         leader_id: 1,
-        chunk: RustRaftSnapshotChunk {
-            meta: RustRaftSnapshotMeta {
+        chunk: SnapshotChunk {
+            meta: SnapshotMetadata {
                 snapshot_id: "snap-12".to_string(),
-                last_log_id: RustRaftLogId { term: 6, index: 12 },
+                last_log_id: LogId { term: 6, index: 12 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
             },
@@ -361,7 +360,7 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
         &install_request
     );
 
-    let read_index_request = RustRaftReadIndexRequest {
+    let read_index_request = ReadIndexRequest {
         group_id: 99,
         requester_id: 2,
         min_commit_index: 11,
@@ -537,8 +536,7 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
     assert_eq!(config_change.conf_state, MatrixRaftConfState::Learner);
     assert!(config_change.auto_promote);
 
-    let membership_operation =
-        RaftMembershipOperation::AddVoter(peer(8, RustRaftReplicaRole::Learner, true));
+    let membership_operation = MembershipOperation::AddVoter(peer(8, ReplicaRole::Learner, true));
     let membership_operation_message =
         MatrixRaftMessage::membership_operation(1, 2, membership_operation.clone());
     assert_eq!(
@@ -582,7 +580,7 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
             success: true,
             tips: b"ok".to_vec(),
         }),
-        snapshot_state: Some(RustRaftSnapshotState::Received),
+        snapshot_state: Some(SnapshotState::Received),
         snapshot_id: Some("snapshot-12".to_string()),
         applied_index: Some(11),
         log_index: Some(10),
@@ -612,7 +610,7 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
         snapshot_total_chunks: Some(4),
         snapshot_bytes: Some(1024),
         snapshot_done: false,
-        storage_fence: Some(RustRaftStorageApplyFence {
+        storage_fence: Some(StorageApplyFence {
             group_id: 77,
             node_id: 1,
             committed_index: 11,
@@ -888,7 +886,7 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
     );
     assert_eq!(compact.log_index, Some(8));
 
-    let fence = RustRaftStorageApplyFence {
+    let fence = StorageApplyFence {
         group_id: 77,
         node_id: 1,
         committed_index: 12,

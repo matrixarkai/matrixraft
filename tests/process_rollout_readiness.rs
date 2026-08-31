@@ -6,14 +6,13 @@ use matrixraft::{
         matrixraft_data_node_process_rollout_readiness_report,
         matrixraft_meta_process_rollout_readiness_report,
     },
-    RustRaftDataNodeProcessRolloutReport, RustRaftMetaProcessRolloutReport,
-    RustRaftProcessNodeEvidence, RustRaftProcessOperationalSemanticsEvidence,
-    RustRaftProductionStatus,
+    DataNodeProcessRolloutReport, MetaProcessRolloutReport, ProcessNodeEvidence,
+    ProcessOperationalSemanticsEvidence, ProductionStatus,
 };
 
-fn ready_process_nodes() -> Vec<RustRaftProcessNodeEvidence> {
+fn ready_process_nodes() -> Vec<ProcessNodeEvidence> {
     vec![
-        RustRaftProcessNodeEvidence {
+        ProcessNodeEvidence {
             node_id: 1,
             addr: "127.0.0.1:7001".to_string(),
             wal_dir: "/tmp/rustraft-node-1/wal".to_string(),
@@ -24,7 +23,7 @@ fn ready_process_nodes() -> Vec<RustRaftProcessNodeEvidence> {
             restarted: true,
             log_store_validated: true,
         },
-        RustRaftProcessNodeEvidence {
+        ProcessNodeEvidence {
             node_id: 2,
             addr: "127.0.0.1:7002".to_string(),
             wal_dir: "/tmp/rustraft-node-2/wal".to_string(),
@@ -35,7 +34,7 @@ fn ready_process_nodes() -> Vec<RustRaftProcessNodeEvidence> {
             restarted: true,
             log_store_validated: true,
         },
-        RustRaftProcessNodeEvidence {
+        ProcessNodeEvidence {
             node_id: 3,
             addr: "127.0.0.1:7003".to_string(),
             wal_dir: "/tmp/rustraft-node-3/wal".to_string(),
@@ -49,8 +48,8 @@ fn ready_process_nodes() -> Vec<RustRaftProcessNodeEvidence> {
     ]
 }
 
-fn ready_semantics() -> RustRaftProcessOperationalSemanticsEvidence {
-    RustRaftProcessOperationalSemanticsEvidence {
+fn ready_semantics() -> ProcessOperationalSemanticsEvidence {
+    ProcessOperationalSemanticsEvidence {
         api_presence_only_rejected: true,
         process_path_validated: true,
         read_index_validated: true,
@@ -82,8 +81,8 @@ fn ready_semantics() -> RustRaftProcessOperationalSemanticsEvidence {
     }
 }
 
-fn ready_data_rollout() -> RustRaftDataNodeProcessRolloutReport {
-    RustRaftDataNodeProcessRolloutReport {
+fn ready_data_rollout() -> DataNodeProcessRolloutReport {
+    DataNodeProcessRolloutReport {
         shard_id: 9,
         voters: vec![1, 2, 3],
         learners: vec![4],
@@ -124,8 +123,8 @@ fn ready_data_rollout() -> RustRaftDataNodeProcessRolloutReport {
     }
 }
 
-fn ready_meta_rollout() -> RustRaftMetaProcessRolloutReport {
-    RustRaftMetaProcessRolloutReport {
+fn ready_meta_rollout() -> MetaProcessRolloutReport {
+    MetaProcessRolloutReport {
         voters: vec![1, 2, 3],
         learners: vec![4],
         nodes: ready_process_nodes(),
@@ -174,7 +173,7 @@ fn data_node_process_rollout_report_fails_closed_on_missing_process_proof() {
 
     let report = matrixraft_data_node_process_rollout_readiness_report(&rollout);
     assert!(!report.ready);
-    assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+    assert_eq!(report.production_status, ProductionStatus::Blocked);
     assert!(report
         .missing
         .contains(&"data_node:independent_wal_dirs".to_string()));
@@ -187,10 +186,7 @@ fn data_node_process_rollout_report_fails_closed_on_missing_process_proof() {
 fn data_node_process_rollout_report_accepts_complete_process_evidence() {
     let report = matrixraft_data_node_process_rollout_readiness_report(&ready_data_rollout());
     assert!(report.ready, "{report:#?}");
-    assert_eq!(
-        report.production_status,
-        RustRaftProductionStatus::ProductionReady
-    );
+    assert_eq!(report.production_status, ProductionStatus::ProductionReady);
     assert!(report.missing.is_empty());
     assert!(report
         .satisfied

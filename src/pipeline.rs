@@ -7,24 +7,21 @@ use std::collections::{BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    RaftError, RustRaftAppendEntriesResponse, RustRaftLogEntry, RustRaftLogId, RustRaftLogIndex,
-    RustRaftNodeId, RustRaftSnapshotId,
-};
+use crate::{AppendEntriesResponse, LogEntry, LogId, LogIndex, NodeId, RaftError, SnapshotId};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftPeerProgressState {
+pub enum ProgressState {
     #[default]
     Probe,
     Replicate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftPeerPipelineStatus {
+pub struct PeerProgress {
     pub peer_id: u64,
     #[serde(default)]
-    pub progress_state: RustRaftPeerProgressState,
+    pub progress_state: ProgressState,
     #[serde(default)]
     pub paused: bool,
     #[serde(default)]
@@ -85,9 +82,9 @@ pub struct RustRaftPeerPipelineStatus {
     #[serde(default)]
     pub snapshot_send_timeouts: u64,
     #[serde(default)]
-    pub required_snapshot_index: RustRaftLogIndex,
+    pub required_snapshot_index: LogIndex,
     #[serde(default)]
-    pub acked_snapshot_index: RustRaftLogIndex,
+    pub acked_snapshot_index: LogIndex,
     pub snapshot_during_membership_change: bool,
     pub snapshot_rejoin_after_compacted_log: bool,
     pub transfer_leader_target: bool,
@@ -97,7 +94,7 @@ pub struct RustRaftPeerPipelineStatus {
     pub offline_timeout_reached: bool,
     pub offline_timeout_rejections: u64,
     #[serde(default)]
-    pub follower_lag: RustRaftLogIndex,
+    pub follower_lag: LogIndex,
     #[serde(default)]
     pub learner_catchup_rounds: u64,
     #[serde(default)]
@@ -111,12 +108,12 @@ pub struct RustRaftPeerPipelineStatus {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftObservedPeerPipeline {
-    pub peer_id: RustRaftNodeId,
+pub struct ObservedPeerPipeline {
+    pub peer_id: NodeId,
     #[serde(default)]
-    pub match_index: RustRaftLogIndex,
+    pub match_index: LogIndex,
     #[serde(default)]
-    pub next_index: RustRaftLogIndex,
+    pub next_index: LogIndex,
     #[serde(default)]
     pub append_requests: u64,
     #[serde(default)]
@@ -172,7 +169,7 @@ pub struct RustRaftObservedPeerPipeline {
     #[serde(default)]
     pub snapshot_installing: bool,
     #[serde(default)]
-    pub snapshot_installed_index: RustRaftLogIndex,
+    pub snapshot_installed_index: LogIndex,
     #[serde(default)]
     pub snapshot_send_attempts: u64,
     #[serde(default)]
@@ -213,20 +210,18 @@ pub struct RustRaftObservedPeerPipeline {
     pub witness_quorum_acked: u64,
 }
 
-pub type RaftPeerPipelineState = RustRaftPeerPipelineStatus;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftInflightAppend {
-    pub first_log_id: RustRaftLogId,
-    pub last_log_id: RustRaftLogId,
+pub struct InflightAppend {
+    pub first_log_id: LogId,
+    pub last_log_id: LogId,
     pub entry_count: u64,
     pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftSnapshotTransferState {
-    pub snapshot_id: RustRaftSnapshotId,
-    pub snapshot_index: RustRaftLogIndex,
+pub struct SnapshotTransferState {
+    pub snapshot_id: SnapshotId,
+    pub snapshot_index: LogIndex,
     pub total_chunks: u64,
     pub acknowledged_chunks: u64,
     pub bytes_sent: u64,
@@ -236,35 +231,35 @@ pub struct RaftSnapshotTransferState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftApplyInflightTask {
-    pub applied_index: RustRaftLogIndex,
+pub struct ApplyInflightTask {
+    pub applied_index: LogIndex,
     pub batch_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftApplyBatchStatus {
+pub enum ApplyBatchStatus {
     Applied,
     NotReady,
     Rejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftApplyBatchOutcome {
-    pub status: RustRaftApplyBatchStatus,
-    pub first_log_id: Option<RustRaftLogId>,
-    pub last_log_id: Option<RustRaftLogId>,
-    pub applied_through: RustRaftLogIndex,
-    pub next_index: RustRaftLogIndex,
-    pub applied_entries: Vec<RustRaftLogEntry>,
-    pub pending_entries: Vec<RustRaftLogEntry>,
+pub struct ApplyBatchOutcome {
+    pub status: ApplyBatchStatus,
+    pub first_log_id: Option<LogId>,
+    pub last_log_id: Option<LogId>,
+    pub applied_through: LogIndex,
+    pub next_index: LogIndex,
+    pub applied_entries: Vec<LogEntry>,
+    pub pending_entries: Vec<LogEntry>,
 }
 
 pub fn matrixraft_apply_batch_outcome(
-    entries: &[RustRaftLogEntry],
+    entries: &[LogEntry],
     applied_count: usize,
-    status: RustRaftApplyBatchStatus,
-) -> RustRaftApplyBatchOutcome {
+    status: ApplyBatchStatus,
+) -> ApplyBatchOutcome {
     let applied_count = applied_count.min(entries.len());
     let applied_entries = entries[..applied_count].to_vec();
     let pending_entries = entries[applied_count..].to_vec();
@@ -284,7 +279,7 @@ pub fn matrixraft_apply_batch_outcome(
         })
         .unwrap_or(0);
 
-    RustRaftApplyBatchOutcome {
+    ApplyBatchOutcome {
         status,
         first_log_id,
         last_log_id,
@@ -299,34 +294,30 @@ pub fn matrixraft_apply_batch_outcome(
 /// the log and how much it weighs. The payload itself stays in the log, so
 /// queueing an entry for N peers no longer copies it N times.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct RaftQueuedAppend {
-    log_id: RustRaftLogId,
+struct QueuedAppend {
+    log_id: LogId,
     bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftReplicationPipeline {
-    peer_id: RustRaftNodeId,
-    limits: RustRaftPipelineLimits,
-    status: RustRaftPeerPipelineStatus,
-    append_queue: VecDeque<RaftQueuedAppend>,
+pub struct ReplicationPipeline {
+    peer_id: NodeId,
+    limits: PipelineLimits,
+    status: PeerProgress,
+    append_queue: VecDeque<QueuedAppend>,
     append_queue_bytes: u64,
-    inflight: VecDeque<RaftInflightAppend>,
-    apply_inflight: VecDeque<RaftApplyInflightTask>,
-    reorder_queue: BTreeSet<RustRaftLogIndex>,
-    snapshot_transfer: Option<RaftSnapshotTransferState>,
+    inflight: VecDeque<InflightAppend>,
+    apply_inflight: VecDeque<ApplyInflightTask>,
+    reorder_queue: BTreeSet<LogIndex>,
+    snapshot_transfer: Option<SnapshotTransferState>,
 }
 
-impl RaftReplicationPipeline {
-    pub fn new(
-        peer_id: RustRaftNodeId,
-        next_index: RustRaftLogIndex,
-        limits: RustRaftPipelineLimits,
-    ) -> Self {
+impl ReplicationPipeline {
+    pub fn new(peer_id: NodeId, next_index: LogIndex, limits: PipelineLimits) -> Self {
         Self {
             peer_id,
             limits,
-            status: RustRaftPeerPipelineStatus::new(peer_id, next_index, limits),
+            status: PeerProgress::new(peer_id, next_index, limits),
             append_queue: VecDeque::new(),
             append_queue_bytes: 0,
             inflight: VecDeque::new(),
@@ -338,11 +329,11 @@ impl RaftReplicationPipeline {
 
     pub fn reset_for_leader_transition(
         &mut self,
-        match_index: RustRaftLogIndex,
-        next_index: RustRaftLogIndex,
-        progress_state: RustRaftPeerProgressState,
+        match_index: LogIndex,
+        next_index: LogIndex,
+        progress_state: ProgressState,
     ) {
-        self.status = RustRaftPeerPipelineStatus::new(self.peer_id, next_index, self.limits);
+        self.status = PeerProgress::new(self.peer_id, next_index, self.limits);
         self.status.match_index = match_index;
         self.status.next_index = next_index;
         self.status.progress_state = progress_state;
@@ -354,19 +345,19 @@ impl RaftReplicationPipeline {
         self.snapshot_transfer = None;
     }
 
-    pub fn peer_id(&self) -> RustRaftNodeId {
+    pub fn peer_id(&self) -> NodeId {
         self.peer_id
     }
 
-    pub fn status(&self) -> RustRaftPeerPipelineStatus {
+    pub fn status(&self) -> PeerProgress {
         self.status.clone()
     }
 
-    pub fn progress_state(&self) -> RustRaftPeerProgressState {
+    pub fn progress_state(&self) -> ProgressState {
         self.status.progress_state
     }
 
-    pub fn set_progress_state(&mut self, progress_state: RustRaftPeerProgressState) {
+    pub fn set_progress_state(&mut self, progress_state: ProgressState) {
         self.status.progress_state = progress_state;
         self.status.paused = false;
     }
@@ -377,10 +368,10 @@ impl RaftReplicationPipeline {
 
     pub fn resume(&mut self) {
         match self.status.progress_state {
-            RustRaftPeerProgressState::Probe => {
+            ProgressState::Probe => {
                 self.status.paused = false;
             }
-            RustRaftPeerProgressState::Replicate => {
+            ProgressState::Replicate => {
                 if self.inflight_is_full() {
                     self.free_first_inflight();
                     self.status.old_paused = true;
@@ -391,15 +382,15 @@ impl RaftReplicationPipeline {
 
     pub fn is_paused(&self) -> bool {
         match self.status.progress_state {
-            RustRaftPeerProgressState::Probe => self.status.paused,
-            RustRaftPeerProgressState::Replicate => self.inflight_is_full(),
+            ProgressState::Probe => self.status.paused,
+            ProgressState::Replicate => self.inflight_is_full(),
         }
     }
 
-    pub fn no_inflights(&self) -> bool {
+    pub fn inflight_is_empty(&self) -> bool {
         match self.status.progress_state {
-            RustRaftPeerProgressState::Probe => false,
-            RustRaftPeerProgressState::Replicate => self.inflight.is_empty(),
+            ProgressState::Probe => false,
+            ProgressState::Replicate => self.inflight.is_empty(),
         }
     }
 
@@ -408,7 +399,7 @@ impl RaftReplicationPipeline {
     }
 
     pub fn take_empty_append_due_to_old_pause(&mut self) -> bool {
-        if self.status.old_paused && self.no_inflights() {
+        if self.status.old_paused && self.inflight_is_empty() {
             self.status.old_paused = false;
             true
         } else {
@@ -416,7 +407,7 @@ impl RaftReplicationPipeline {
         }
     }
 
-    pub fn queue_append(&mut self, entry: &RustRaftLogEntry) -> Result<(), RaftError> {
+    pub fn queue_append(&mut self, entry: &LogEntry) -> Result<(), RaftError> {
         let bytes = entry.payload.len() as u64;
         if bytes > self.limits.max_apply_batch_bytes {
             self.status.oversized_log_rejections += 1;
@@ -438,7 +429,7 @@ impl RaftReplicationPipeline {
                 "replication memory backpressure limit reached".to_string(),
             ));
         }
-        self.append_queue.push_back(RaftQueuedAppend {
+        self.append_queue.push_back(QueuedAppend {
             log_id: entry.log_id.clone(),
             bytes,
         });
@@ -451,17 +442,13 @@ impl RaftReplicationPipeline {
         Ok(())
     }
 
-    pub fn flush_append_window(&mut self) -> Vec<RaftInflightAppend> {
+    pub fn flush_append_window(&mut self) -> Vec<InflightAppend> {
         self.flush_append_batch(1, self.limits.max_apply_batch_bytes)
     }
 
-    pub fn flush_append_batch(
-        &mut self,
-        max_entries: u64,
-        max_bytes: u64,
-    ) -> Vec<RaftInflightAppend> {
+    pub fn flush_append_batch(&mut self, max_entries: u64, max_bytes: u64) -> Vec<InflightAppend> {
         let mut flushed = Vec::new();
-        let max_entries = if self.status.progress_state == RustRaftPeerProgressState::Probe {
+        let max_entries = if self.status.progress_state == ProgressState::Probe {
             1
         } else {
             max_entries.max(1)
@@ -503,7 +490,7 @@ impl RaftReplicationPipeline {
                 self.status.memory_backpressure_rejections += 1;
                 break;
             }
-            let inflight = RaftInflightAppend {
+            let inflight = InflightAppend {
                 first_log_id,
                 last_log_id,
                 entry_count,
@@ -521,7 +508,7 @@ impl RaftReplicationPipeline {
             self.status.inflight_bytes += inflight.bytes;
             self.inflight.push_back(inflight.clone());
             flushed.push(inflight);
-            if self.status.progress_state == RustRaftPeerProgressState::Probe {
+            if self.status.progress_state == ProgressState::Probe {
                 self.pause();
                 break;
             }
@@ -532,7 +519,7 @@ impl RaftReplicationPipeline {
 
     pub fn handle_append_response(
         &mut self,
-        response: &RustRaftAppendEntriesResponse,
+        response: &AppendEntriesResponse,
     ) -> Result<(), RaftError> {
         if response.term == 0 {
             self.status.stale_term_rejections += 1;
@@ -545,13 +532,13 @@ impl RaftReplicationPipeline {
             self.status.next_index = self.status.match_index + 1;
             if self.status.match_index > previous_match_index {
                 match self.status.progress_state {
-                    RustRaftPeerProgressState::Probe => {
+                    ProgressState::Probe => {
                         self.resume();
-                        self.status.progress_state = RustRaftPeerProgressState::Replicate;
+                        self.status.progress_state = ProgressState::Replicate;
                         self.reset_inflight_window();
                         self.status.next_index = self.status.match_index + 1;
                     }
-                    RustRaftPeerProgressState::Replicate => {
+                    ProgressState::Replicate => {
                         self.release_inflight_through(response.match_index);
                     }
                 }
@@ -576,7 +563,7 @@ impl RaftReplicationPipeline {
             {
                 return Ok(());
             }
-            if self.status.progress_state == RustRaftPeerProgressState::Probe
+            if self.status.progress_state == ProgressState::Probe
                 && response
                     .rejected_index
                     .is_some_and(|rejected| rejected != self.status.next_index)
@@ -587,10 +574,9 @@ impl RaftReplicationPipeline {
             self.status.retry_attempts += 1;
             self.status.backoff_ms = next_backoff_ms(self.status.retry_attempts);
             self.status.next_retry_after_ms = self.status.backoff_ms;
-            let was_replicating =
-                self.status.progress_state == RustRaftPeerProgressState::Replicate;
-            if self.status.progress_state == RustRaftPeerProgressState::Replicate {
-                self.status.progress_state = RustRaftPeerProgressState::Probe;
+            let was_replicating = self.status.progress_state == ProgressState::Replicate;
+            if self.status.progress_state == ProgressState::Replicate {
+                self.status.progress_state = ProgressState::Probe;
                 self.status.paused = false;
             } else {
                 self.resume();
@@ -626,11 +612,11 @@ impl RaftReplicationPipeline {
 
     pub fn record_network_error(&mut self) -> bool {
         self.status.packet_loss_events = self.status.packet_loss_events.saturating_add(1);
-        let was_replicating = self.status.progress_state == RustRaftPeerProgressState::Replicate;
+        let was_replicating = self.status.progress_state == ProgressState::Replicate;
         if !was_replicating {
             return false;
         }
-        self.status.progress_state = RustRaftPeerProgressState::Probe;
+        self.status.progress_state = ProgressState::Probe;
         self.status.paused = false;
         self.reset_inflight_window();
         self.status.next_index = self.status.match_index + 1;
@@ -648,15 +634,12 @@ impl RaftReplicationPipeline {
         }
     }
 
-    pub fn update_follower_lag(
-        &mut self,
-        leader_commit_index: RustRaftLogIndex,
-    ) -> RustRaftLogIndex {
+    pub fn update_follower_lag(&mut self, leader_commit_index: LogIndex) -> LogIndex {
         self.status.follower_lag = leader_commit_index.saturating_sub(self.status.match_index);
         self.status.follower_lag
     }
 
-    pub fn record_learner_catchup_round(&mut self, leader_commit_index: RustRaftLogIndex) -> bool {
+    pub fn record_learner_catchup_round(&mut self, leader_commit_index: LogIndex) -> bool {
         self.status.learner_catchup_rounds += 1;
         self.update_follower_lag(leader_commit_index);
         self.status.learner_caught_up = self.status.match_index >= leader_commit_index;
@@ -680,7 +663,7 @@ impl RaftReplicationPipeline {
 
     pub fn begin_apply_task(
         &mut self,
-        applied_index: RustRaftLogIndex,
+        applied_index: LogIndex,
         batch_bytes: u64,
     ) -> Result<(), RaftError> {
         if batch_bytes > self.limits.max_apply_batch_bytes {
@@ -695,7 +678,7 @@ impl RaftReplicationPipeline {
                 "apply inflight task limit reached".to_string(),
             ));
         }
-        self.apply_inflight.push_back(RaftApplyInflightTask {
+        self.apply_inflight.push_back(ApplyInflightTask {
             applied_index,
             batch_bytes,
         });
@@ -708,7 +691,7 @@ impl RaftReplicationPipeline {
         Ok(())
     }
 
-    pub fn complete_apply_through(&mut self, safety_applied_index: RustRaftLogIndex) -> u64 {
+    pub fn complete_apply_through(&mut self, safety_applied_index: LogIndex) -> u64 {
         let mut completed = 0_u64;
         while self
             .apply_inflight
@@ -736,7 +719,7 @@ impl RaftReplicationPipeline {
         self.status.offline_timeout_reached = true;
     }
 
-    pub fn receive_out_of_order(&mut self, entry: &RustRaftLogEntry) -> Result<(), RaftError> {
+    pub fn receive_out_of_order(&mut self, entry: &LogEntry) -> Result<(), RaftError> {
         if entry.log_id.index < self.status.next_index {
             self.status.out_of_order_append_rejections += 1;
             return Err(RaftError::InvalidRequest(
@@ -780,7 +763,7 @@ impl RaftReplicationPipeline {
     pub fn begin_snapshot_send(
         &mut self,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<(), RaftError> {
         if self.status.snapshot_sending || self.status.snapshot_installing {
@@ -793,7 +776,7 @@ impl RaftReplicationPipeline {
         self.status.snapshot_send_attempts += 1;
         self.status.snapshot_install_total_chunks = total_chunks;
         self.status.snapshot_install_progress_per_mille = 0;
-        self.snapshot_transfer = Some(RaftSnapshotTransferState {
+        self.snapshot_transfer = Some(SnapshotTransferState {
             snapshot_id: snapshot_id.into(),
             snapshot_index,
             total_chunks,
@@ -805,7 +788,7 @@ impl RaftReplicationPipeline {
         Ok(())
     }
 
-    pub fn maybe_require_snapshot(&mut self, required_index: RustRaftLogIndex) -> bool {
+    pub fn maybe_require_snapshot(&mut self, required_index: LogIndex) -> bool {
         if self.status.required_snapshot_index >= required_index {
             return false;
         }
@@ -862,7 +845,7 @@ impl RaftReplicationPipeline {
     pub fn handle_snapshot_finish(
         &mut self,
         accepted: bool,
-        committed_index: RustRaftLogIndex,
+        committed_index: LogIndex,
     ) -> Result<(), RaftError> {
         let transfer = self.snapshot_transfer.take().ok_or_else(|| {
             RaftError::InvalidRequest("snapshot transfer is not active".to_string())
@@ -929,7 +912,7 @@ impl RaftReplicationPipeline {
     pub fn begin_snapshot_install(
         &mut self,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<(), RaftError> {
         if self.status.snapshot_sending || self.status.snapshot_installing {
@@ -941,7 +924,7 @@ impl RaftReplicationPipeline {
         self.status.snapshot_installing = true;
         self.status.snapshot_install_total_chunks = total_chunks;
         self.status.snapshot_install_progress_per_mille = 0;
-        self.snapshot_transfer = Some(RaftSnapshotTransferState {
+        self.snapshot_transfer = Some(SnapshotTransferState {
             snapshot_id: snapshot_id.into(),
             snapshot_index,
             total_chunks,
@@ -979,7 +962,7 @@ impl RaftReplicationPipeline {
         self.status.snapshot_rejoin_after_compacted_log = true;
     }
 
-    fn release_inflight_through(&mut self, match_index: RustRaftLogIndex) {
+    fn release_inflight_through(&mut self, match_index: LogIndex) {
         while self
             .inflight
             .front()
@@ -1055,7 +1038,7 @@ fn next_backoff_ms(retry_attempts: u64) -> u64 {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftPipelineLimits {
+pub struct PipelineLimits {
     pub max_inflights_replicate: u64,
     pub max_memory_replicate_log_bytes: u64,
     pub max_inflights_apply_task: u64,
@@ -1066,7 +1049,7 @@ pub struct RustRaftPipelineLimits {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftPipelineEvidence {
+pub struct PipelineEvidence {
     pub per_peer_pipeline_state_present: bool,
     pub append_backpressure_enforced: bool,
     pub apply_backpressure_enforced: bool,
@@ -1086,15 +1069,15 @@ pub struct RustRaftPipelineEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftReplicationPipelineEvidenceArtifact {
+pub struct ReplicationPipelineEvidenceArtifact {
     pub schema: String,
-    pub limits: RustRaftPipelineLimits,
-    pub peers: Vec<RustRaftPeerPipelineStatus>,
-    pub evidence: RustRaftPipelineEvidence,
+    pub limits: PipelineLimits,
+    pub peers: Vec<PeerProgress>,
+    pub evidence: PipelineEvidence,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftReplicationPipelineEvidenceValidationReport {
+pub struct ReplicationPipelineEvidenceValidationReport {
     pub valid: bool,
     pub schema_valid: bool,
     pub peer_state_present: bool,
@@ -1115,7 +1098,7 @@ pub struct RustRaftReplicationPipelineEvidenceValidationReport {
     pub missing: Vec<String>,
 }
 
-impl RustRaftPipelineLimits {
+impl PipelineLimits {
     pub fn production_default() -> Self {
         Self {
             max_inflights_replicate: 256,
@@ -1129,21 +1112,17 @@ impl RustRaftPipelineLimits {
     }
 }
 
-impl Default for RustRaftPipelineLimits {
+impl Default for PipelineLimits {
     fn default() -> Self {
         Self::production_default()
     }
 }
 
-impl RustRaftPeerPipelineStatus {
-    pub fn new(
-        peer_id: RustRaftNodeId,
-        next_index: RustRaftLogIndex,
-        limits: RustRaftPipelineLimits,
-    ) -> Self {
+impl PeerProgress {
+    pub fn new(peer_id: NodeId, next_index: LogIndex, limits: PipelineLimits) -> Self {
         Self {
             peer_id,
-            progress_state: RustRaftPeerProgressState::Probe,
+            progress_state: ProgressState::Probe,
             paused: false,
             old_paused: false,
             match_index: next_index.saturating_sub(1),
@@ -1211,16 +1190,16 @@ impl RustRaftPeerPipelineStatus {
 }
 
 pub fn matrixraft_peer_pipeline_status_from_observed(
-    observed: &RustRaftObservedPeerPipeline,
-) -> RustRaftPeerPipelineStatus {
-    RustRaftPeerPipelineStatus {
+    observed: &ObservedPeerPipeline,
+) -> PeerProgress {
+    PeerProgress {
         peer_id: observed.peer_id,
         progress_state: if observed.append_accepted > observed.append_rejected
             || observed.match_index.saturating_add(1) >= observed.next_index
         {
-            RustRaftPeerProgressState::Replicate
+            ProgressState::Replicate
         } else {
-            RustRaftPeerProgressState::Probe
+            ProgressState::Probe
         },
         paused: observed.append_queue_depth >= observed.append_queue_limit
             && observed.append_queue_limit > 0,
@@ -1297,10 +1276,10 @@ pub fn matrixraft_peer_pipeline_status_from_observed(
 }
 
 pub fn matrixraft_pipeline_evidence(
-    peers: &[RustRaftPeerPipelineStatus],
-    limits: RustRaftPipelineLimits,
-) -> RustRaftPipelineEvidence {
-    RustRaftPipelineEvidence {
+    peers: &[PeerProgress],
+    limits: PipelineLimits,
+) -> PipelineEvidence {
+    PipelineEvidence {
         per_peer_pipeline_state_present: !peers.is_empty(),
         append_backpressure_enforced: peers.iter().any(|peer| {
             peer.append_queue_limit == limits.max_inflights_replicate
@@ -1364,11 +1343,11 @@ pub fn matrixraft_pipeline_evidence(
 }
 
 pub fn matrixraft_replication_pipeline_evidence_artifact(
-    peers: Vec<RustRaftPeerPipelineStatus>,
-    limits: RustRaftPipelineLimits,
-) -> RustRaftReplicationPipelineEvidenceArtifact {
+    peers: Vec<PeerProgress>,
+    limits: PipelineLimits,
+) -> ReplicationPipelineEvidenceArtifact {
     let evidence = matrixraft_pipeline_evidence(&peers, limits);
-    RustRaftReplicationPipelineEvidenceArtifact {
+    ReplicationPipelineEvidenceArtifact {
         schema: "rustraft.replication_pipeline_evidence.v1".to_string(),
         limits,
         peers,
@@ -1377,8 +1356,8 @@ pub fn matrixraft_replication_pipeline_evidence_artifact(
 }
 
 pub fn matrixraft_validate_replication_pipeline_evidence_artifact(
-    artifact: &RustRaftReplicationPipelineEvidenceArtifact,
-) -> RustRaftReplicationPipelineEvidenceValidationReport {
+    artifact: &ReplicationPipelineEvidenceArtifact,
+) -> ReplicationPipelineEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.replication_pipeline_evidence.v1";
     let recomputed = matrixraft_pipeline_evidence(&artifact.peers, artifact.limits);
     let peer_state_present =
@@ -1444,7 +1423,7 @@ pub fn matrixraft_validate_replication_pipeline_evidence_artifact(
         }
     }
 
-    RustRaftReplicationPipelineEvidenceValidationReport {
+    ReplicationPipelineEvidenceValidationReport {
         valid: missing.is_empty(),
         schema_valid,
         peer_state_present,

@@ -2,12 +2,10 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    matrixraft_snapshot_lifecycle_evidence, PersistentRaftSnapshotStore,
-    PersistentRaftSnapshotStoreOptions, RaftAdminCommand, RaftCluster, RaftSnapshot,
-    RaftSnapshotLifecycle, RaftSnapshotLifecycleConfig, RustRaftApplySnapshotFence,
-    RustRaftByteQuotaLimiter, RustRaftInstallSnapshotResponse, RustRaftLogEntry, RustRaftLogId,
-    RustRaftMessage, RustRaftPeer, RustRaftRateLimiter, RustRaftReplicaRole, RustRaftSnapshotMeta,
-    RustRaftStepResult,
+    matrixraft_snapshot_lifecycle_evidence, AdminCommand, ApplySnapshotFence, ByteQuotaLimiter,
+    InstallSnapshotResponse, LogEntry, LogId, Message, Peer, PersistentRaftSnapshotStore,
+    PersistentRaftSnapshotStoreOptions, RaftCluster, RaftSnapshot, RateLimiter, ReplicaRole,
+    SnapshotLifecycle, SnapshotLifecycleConfig, SnapshotMetadata, StepResult,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -24,12 +22,12 @@ fn temp_snapshot_dir(name: &str) -> PathBuf {
     ))
 }
 
-fn peer(node_id: u64) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 16_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 17_000 + node_id),
-        role: RustRaftReplicaRole::Voter,
+        role: ReplicaRole::Voter,
         auto_promote: false,
     }
 }
@@ -37,9 +35,9 @@ fn peer(node_id: u64) -> RustRaftPeer {
 fn snapshot(index: u64, payload: &[u8]) -> RaftSnapshot {
     RaftSnapshot {
         group_id: 55,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: format!("snap-{index}"),
-            last_log_id: RustRaftLogId { term: 2, index },
+            last_log_id: LogId { term: 2, index },
             membership: vec![1, 2, 3],
             members: Vec::new(),
         },
@@ -47,9 +45,9 @@ fn snapshot(index: u64, payload: &[u8]) -> RaftSnapshot {
     }
 }
 
-fn tail_entry(index: u64) -> RustRaftLogEntry {
-    RustRaftLogEntry {
-        log_id: RustRaftLogId { term: 2, index },
+fn tail_entry(index: u64) -> LogEntry {
+    LogEntry {
+        log_id: LogId { term: 2, index },
         payload: format!("tail-{index}").into_bytes(),
         is_command: true,
     }
@@ -58,7 +56,7 @@ fn tail_entry(index: u64) -> RustRaftLogEntry {
 #[test]
 fn snapshot_lifecycle_throttles_retries_and_rolls_back_install() {
     let snap = snapshot(10, b"abcdefghijklmnopqrstuvwxyz");
-    let mut lifecycle = RaftSnapshotLifecycle::new(RaftSnapshotLifecycleConfig {
+    let mut lifecycle = SnapshotLifecycle::new(SnapshotLifecycleConfig {
         chunk_size: 3,
         max_chunks_per_tick: 4,
         max_bytes_per_tick: 4,
@@ -72,7 +70,7 @@ fn snapshot_lifecycle_throttles_retries_and_rolls_back_install() {
     assert!(lifecycle.status().throttled_ticks > 0);
 
     lifecycle
-        .record_send_response(&RustRaftInstallSnapshotResponse {
+        .record_send_response(&InstallSnapshotResponse {
             term: 2,
             accepted: false,
             next_offset: 0,
@@ -84,7 +82,7 @@ fn snapshot_lifecycle_throttles_retries_and_rolls_back_install() {
     let resent = lifecycle.poll_send_requests().expect("retry tick");
     assert_eq!(resent[0].chunk.offset, 0);
 
-    let mut installer = RaftSnapshotLifecycle::new(Default::default()).expect("installer");
+    let mut installer = SnapshotLifecycle::new(Default::default()).expect("installer");
     assert!(installer
         .install_request(first[0].clone())
         .expect("partial")
@@ -98,14 +96,14 @@ fn snapshot_lifecycle_throttles_retries_and_rolls_back_install() {
 #[test]
 fn snapshot_lifecycle_uses_baseline_raft_style_transfer_quota_without_advancing_on_rejection() {
     let snap = snapshot(11, b"abcdefghijkl");
-    let mut lifecycle = RaftSnapshotLifecycle::new(RaftSnapshotLifecycleConfig {
+    let mut lifecycle = SnapshotLifecycle::new(SnapshotLifecycleConfig {
         chunk_size: 4,
         max_chunks_per_tick: 1,
         max_bytes_per_tick: 64,
         max_retry_attempts: 2,
     })
     .expect("lifecycle");
-    let mut limiter = RustRaftByteQuotaLimiter::with_available(8, 4);
+    let mut limiter = ByteQuotaLimiter::with_available(8, 4);
 
     lifecycle.begin_send(&snap, 2, 1).expect("begin send");
     let first = lifecycle
@@ -133,14 +131,14 @@ fn snapshot_lifecycle_uses_baseline_raft_style_transfer_quota_without_advancing_
 #[test]
 fn snapshot_lifecycle_splits_chunks_on_partial_rate_quota() {
     let snap = snapshot(12, b"abcdefghijkl");
-    let mut lifecycle = RaftSnapshotLifecycle::new(RaftSnapshotLifecycleConfig {
+    let mut lifecycle = SnapshotLifecycle::new(SnapshotLifecycleConfig {
         chunk_size: 6,
         max_chunks_per_tick: 1,
         max_bytes_per_tick: 64,
         max_retry_attempts: 2,
     })
     .expect("lifecycle");
-    let mut limiter = RustRaftByteQuotaLimiter::with_available(10, 4);
+    let mut limiter = ByteQuotaLimiter::with_available(10, 4);
 
     lifecycle.begin_send(&snap, 2, 1).expect("begin send");
     let partial = lifecycle
@@ -174,15 +172,15 @@ fn snapshot_lifecycle_splits_chunks_on_partial_rate_quota() {
 #[test]
 fn snapshot_lifecycle_sustains_sender_and_downloader_under_quota_pressure() {
     let snap = snapshot(13, b"abcdefghijklmnopqrstuvwxyz012345");
-    let mut sender = RaftSnapshotLifecycle::new(RaftSnapshotLifecycleConfig {
+    let mut sender = SnapshotLifecycle::new(SnapshotLifecycleConfig {
         chunk_size: 4,
         max_chunks_per_tick: 2,
         max_bytes_per_tick: 8,
         max_retry_attempts: 3,
     })
     .expect("sender lifecycle");
-    let mut downloader = RaftSnapshotLifecycle::new(Default::default()).expect("downloader");
-    let mut limiter = RustRaftByteQuotaLimiter::with_available(4, 4);
+    let mut downloader = SnapshotLifecycle::new(Default::default()).expect("downloader");
+    let mut limiter = ByteQuotaLimiter::with_available(4, 4);
 
     sender
         .begin_send(&snap, 2, 1)
@@ -202,7 +200,7 @@ fn snapshot_lifecycle_sustains_sender_and_downloader_under_quota_pressure() {
                 .install_request(request)
                 .expect("downloader accepts sustained chunk");
             sender
-                .record_send_response(&RustRaftInstallSnapshotResponse {
+                .record_send_response(&InstallSnapshotResponse {
                     term: 2,
                     accepted: true,
                     next_offset: downloader.status().received_chunks * 4,
@@ -276,14 +274,14 @@ fn cluster_installs_snapshot_with_lifecycle_then_catches_up_tail_after_compactio
     cluster.set_node_healthy(3, true).expect("restore peer");
 
     let snap = snapshot(4, b"checkpoint-through-four");
-    let mut sender = RaftSnapshotLifecycle::new(RaftSnapshotLifecycleConfig {
+    let mut sender = SnapshotLifecycle::new(SnapshotLifecycleConfig {
         chunk_size: 5,
         max_chunks_per_tick: 2,
         max_bytes_per_tick: 10,
         max_retry_attempts: 3,
     })
     .expect("sender");
-    let mut receiver = RaftSnapshotLifecycle::new(Default::default()).expect("receiver");
+    let mut receiver = SnapshotLifecycle::new(Default::default()).expect("receiver");
     sender.begin_send(&snap, 2, 1).expect("begin send");
 
     while sender.status().sending {
@@ -303,7 +301,7 @@ fn cluster_installs_snapshot_with_lifecycle_then_catches_up_tail_after_compactio
         .install_snapshot_with_tail_to(
             3,
             snap,
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 4,
                 commit_index: 4,
                 installed_snapshot_index: 4,
@@ -340,7 +338,7 @@ fn snapshot_finish_catches_up_tail() {
         .install_snapshot_to(
             3,
             snap,
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 4,
                 commit_index: 4,
                 installed_snapshot_index: 4,
@@ -354,7 +352,7 @@ fn snapshot_finish_catches_up_tail() {
             .expect("follower wal")
             .hard_state
             .committed,
-        Some(RustRaftLogId { term: 2, index: 4 })
+        Some(LogId { term: 2, index: 4 })
     );
     cluster
         .begin_snapshot_send_to(3, "snap-4", 4, 1)
@@ -417,15 +415,15 @@ fn failed_replication_task_sends_snapshot_or_triggers_one() {
             1,
             RaftSnapshot {
                 group_id: 57,
-                meta: RustRaftSnapshotMeta {
+                meta: SnapshotMetadata {
                     snapshot_id: "leader-snap-4".to_string(),
-                    last_log_id: RustRaftLogId { term: 1, index: 4 },
+                    last_log_id: LogId { term: 1, index: 4 },
                     membership: vec![1, 2, 3],
                     members: Vec::new(),
                 },
                 payload: b"leader snapshot".to_vec(),
             },
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 4,
                 commit_index: 4,
                 installed_snapshot_index: 4,
@@ -446,13 +444,13 @@ fn failed_replication_task_sends_snapshot_or_triggers_one() {
         RaftCluster::new(58, Default::default(), vec![peer(1), peer(2), peer(3)]).expect("cluster");
     trigger.start().expect("start");
     let triggered = trigger
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::Replicated {
+        .step(Message::Admin {
+            command: AdminCommand::Replicated {
                 peer_id: 2,
                 success: false,
             },
         })
         .expect("broken replication triggers snapshot through step");
-    assert_eq!(triggered, RustRaftStepResult::Handled);
+    assert_eq!(triggered, StepResult::Handled);
     assert!(trigger.snapshot_trigger_status().in_progress);
 }

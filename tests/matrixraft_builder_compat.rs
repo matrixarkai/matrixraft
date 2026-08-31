@@ -2,9 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    MatrixRaftGroupContextBuilder, MatrixRaftNodeCreatorBuilder, MatrixRaftOptions,
-    MatrixRaftRateLimiterConfig, MatrixRaftTransportBuilder, RaftConfig, RustRaftPeer,
-    RustRaftReplicaRole,
+    Config, MatrixRaftGroupContextBuilder, MatrixRaftNodeCreatorBuilder, MatrixRaftOptions,
+    MatrixRaftRateLimiterConfig, MatrixRaftTransportBuilder, Peer, ReplicaRole,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -21,8 +20,8 @@ fn temp_dir(name: &str) -> PathBuf {
     ))
 }
 
-fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 61_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 62_000 + node_id),
@@ -155,11 +154,11 @@ fn matrixraft_builders_capture_node_group_transport_and_option_shape() {
         wal_dir: wal_dir.display().to_string(),
         snapshot_dir: snapshot_dir.display().to_string(),
         peers: vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
-        role: RustRaftReplicaRole::Voter,
+        role: ReplicaRole::Voter,
         wal_sync: true,
         election_cycle_tick: 5,
         transfer_timeout_tick: 3,
@@ -187,7 +186,7 @@ fn matrixraft_builders_capture_node_group_transport_and_option_shape() {
     let config = options.to_raft_config();
     assert_eq!(
         config,
-        RaftConfig {
+        Config {
             election_timeout_ms: 500,
             heartbeat_interval_ms: 100,
             leader_lease_ms: 250,

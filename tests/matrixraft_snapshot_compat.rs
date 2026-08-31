@@ -2,17 +2,17 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    MatrixRaftOldSnapshotFinishState, MatrixRaftSnapshotCreator, MatrixRaftSnapshotDownloader,
-    MatrixRaftSnapshotLoader, MatrixRaftSnapshotSender, RaftSnapshot, RaftSnapshotInstallState,
-    RaftSnapshotLifecycleConfig, RustRaftLogId, RustRaftSnapshotMeta,
+    LogId, MatrixRaftOldSnapshotFinishState, MatrixRaftSnapshotCreator,
+    MatrixRaftSnapshotDownloader, MatrixRaftSnapshotLoader, MatrixRaftSnapshotSender, RaftSnapshot,
+    SnapshotInstallState, SnapshotLifecycleConfig, SnapshotMetadata,
 };
 
 fn snapshot(index: u64, payload: Vec<u8>) -> RaftSnapshot {
     RaftSnapshot {
         group_id: 77,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: format!("matrixraft-snapshot-{index}"),
-            last_log_id: RustRaftLogId { term: 3, index },
+            last_log_id: LogId { term: 3, index },
             membership: vec![1, 2, 3],
             members: Vec::new(),
         },
@@ -23,7 +23,7 @@ fn snapshot(index: u64, payload: Vec<u8>) -> RaftSnapshot {
 #[test]
 fn matrixraft_snapshot_sender_downloader_cover_chunk_flow_and_finish_state() {
     let snapshot = snapshot(12, b"snapshot-payload-for-matrixraft".to_vec());
-    let config = RaftSnapshotLifecycleConfig {
+    let config = SnapshotLifecycleConfig {
         chunk_size: 8,
         max_chunks_per_tick: 1,
         max_bytes_per_tick: 8,
@@ -84,7 +84,7 @@ fn matrixraft_snapshot_creator_and_loader_expose_checkpoint_and_chunk_install_ro
     assert!(chunks.len() > 1);
 
     let loader = MatrixRaftSnapshotLoader::new(10, 1);
-    let mut install = RaftSnapshotInstallState::new(snapshot.meta.clone());
+    let mut install = SnapshotInstallState::new(snapshot.meta.clone());
     for chunk in chunks {
         loader
             .install_chunk(&mut install, chunk)

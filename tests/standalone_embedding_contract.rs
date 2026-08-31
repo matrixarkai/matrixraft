@@ -3,14 +3,12 @@
 
 use matrixraft::{
     metrics::matrixraft_metric_names, readiness::matrixraft_standalone_readiness_report,
-    snapshot::PersistentRaftSnapshotStore, AppendEntriesRequest, InstallSnapshotRequest,
+    snapshot::PersistentRaftSnapshotStore, AppendEntriesRequest, ApplySnapshotFence, Config,
+    HardState, InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogId, Membership,
+    MembershipExecutor, MembershipOperation, NodeOptions, NodeRuntime, NodeRuntimeState, Peer,
     PersistentRaftSnapshotStoreOptions, PersistentRaftWal, PersistentRaftWalOptions, RaftCluster,
-    RaftConfig, RaftMembershipExecutor, RaftMembershipOperation, RaftNodeRuntime,
-    RaftNodeRuntimeState, RaftSnapshot, RaftSnapshotLifecycle, RaftSnapshotLifecycleConfig,
-    ReadIndexRequest, RustRaftApplySnapshotFence, RustRaftHardState,
-    RustRaftInstallSnapshotResponse, RustRaftLogEntry, RustRaftLogId, RustRaftMembership,
-    RustRaftNodeOptions, RustRaftPeer, RustRaftReadIndexRequest, RustRaftReplicaRole,
-    RustRaftSnapshotMeta, RustRaftWalRecord, VoteRequest,
+    RaftSnapshot, ReadIndexRequest, ReplicaRole, SnapshotLifecycle, SnapshotLifecycleConfig,
+    SnapshotMetadata, VoteRequest, WalRecord,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -27,8 +25,8 @@ fn temp_dir(name: &str) -> PathBuf {
     ))
 }
 
-fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 31_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 32_000 + node_id),
@@ -40,11 +38,11 @@ fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
 fn cluster() -> RaftCluster {
     RaftCluster::new(
         909,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("cluster")
@@ -53,9 +51,9 @@ fn cluster() -> RaftCluster {
 fn snapshot(index: u64, membership: Vec<u64>) -> RaftSnapshot {
     RaftSnapshot {
         group_id: 909,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: format!("standalone-snapshot-{index}"),
-            last_log_id: RustRaftLogId { term: 1, index },
+            last_log_id: LogId { term: 1, index },
             membership,
             members: Vec::new(),
         },
@@ -63,24 +61,25 @@ fn snapshot(index: u64, membership: Vec<u64>) -> RaftSnapshot {
     }
 }
 
-fn tail_entry(index: u64) -> RustRaftLogEntry {
-    RustRaftLogEntry {
-        log_id: RustRaftLogId { term: 1, index },
+fn tail_entry(index: u64) -> LogEntry {
+    LogEntry {
+        log_id: LogId { term: 1, index },
         payload: format!("tail-{index}").into_bytes(),
         is_command: true,
     }
 }
 
-fn wal_record(index: u64) -> RustRaftWalRecord {
-    RustRaftWalRecord {
+fn wal_record(index: u64) -> WalRecord {
+    WalRecord {
+        entries_are_delta: false,
         group_id: 909,
         node_id: 1,
-        hard_state: RustRaftHardState {
+        hard_state: HardState {
             current_term: 1,
             voted_for: Some(1),
-            committed: Some(RustRaftLogId { term: 1, index }),
+            committed: Some(LogId { term: 1, index }),
         },
-        membership: RustRaftMembership {
+        membership: Membership {
             group_id: 909,
             voters: vec![1, 2, 3],
             learners: Vec::new(),
@@ -89,7 +88,7 @@ fn wal_record(index: u64) -> RustRaftWalRecord {
         },
         entries: vec![tail_entry(index)],
         installed_snapshot: None,
-        apply_snapshot_fence: RustRaftApplySnapshotFence {
+        apply_snapshot_fence: ApplySnapshotFence {
             applied_index: index,
             commit_index: index,
             installed_snapshot_index: 0,
@@ -103,24 +102,28 @@ fn wal_record(index: u64) -> RustRaftWalRecord {
 fn pass_1_non_temporalstore_app_can_drive_node_lifecycle() {
     let wal_dir = temp_dir("runtime-wal");
     let snapshot_dir = temp_dir("runtime-snapshot");
-    let mut runtime = RaftNodeRuntime::create(RustRaftNodeOptions {
+    let mut runtime = NodeRuntime::create(NodeOptions {
         group_id: 909,
         node_id: 1,
         raft_addr: "127.0.0.1:31001".to_string(),
         snapshot_addr: "127.0.0.1:32001".to_string(),
         wal_dir: wal_dir.display().to_string(),
         snapshot_dir: snapshot_dir.display().to_string(),
-        role: RustRaftReplicaRole::Voter,
-        config: RaftConfig {
-            heartbeat_interval_ms: 5,
-            election_timeout_ms: 20,
-            leader_lease_ms: 10,
+        role: ReplicaRole::Voter,
+        // Intervals far longer than this test suppress the runtime's automatic
+        // tick, which fires from the timeout arm of its command loop and
+        // advances the lease clocks by an amount the scheduler decides. The one
+        // expiry this test actually needs is driven explicitly below.
+        config: Config {
+            heartbeat_interval_ms: 10_000,
+            election_timeout_ms: 20_000,
+            leader_lease_ms: 5_000,
             ..Default::default()
         },
         peers: vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     })
     .expect("create runtime");
@@ -128,7 +131,7 @@ fn pass_1_non_temporalstore_app_can_drive_node_lifecycle() {
     runtime.start().expect("start");
     assert_eq!(
         runtime.status().expect("status").state,
-        RaftNodeRuntimeState::Running
+        NodeRuntimeState::Running
     );
     assert_eq!(
         runtime
@@ -142,6 +145,16 @@ fn pass_1_non_temporalstore_app_can_drive_node_lifecycle() {
     assert!(read.lease_read);
     let snapshot = runtime.trigger_snapshot().expect("trigger snapshot");
     assert_eq!(snapshot.last_log_id.index, 2);
+    // Both of the next two lines need the follower lease to have lapsed -- a
+    // node inside one neither grants itself a pre-vote nor campaigns. This used
+    // to rely on the automatic tick having expired it by now, which is exactly
+    // why the two lines could disagree: `pre_vote` succeeded, then a tick
+    // renewed the lease before `campaign` ran, which failed with
+    // `InvalidRequest("follower is still in leader lease")` about 8 runs in 60
+    // under 2x CPU load. Expire it once, explicitly, and both are settled.
+    runtime
+        .tick_follower_lease(60_000)
+        .expect("expire follower lease before pre-vote and campaign");
     assert!(runtime.pre_vote().expect("pre vote").vote_granted);
     runtime.campaign(false).expect("campaign");
     runtime.transfer_leader(2).expect("transfer");
@@ -156,15 +169,15 @@ fn pass_1_non_temporalstore_app_can_drive_node_lifecycle() {
 
     runtime.restart().expect("restart");
     let restarted = runtime.status().expect("restarted status");
-    assert_eq!(restarted.state, RaftNodeRuntimeState::Running);
+    assert_eq!(restarted.state, NodeRuntimeState::Running);
     assert_eq!(restarted.restart_count, 1);
     runtime.stop().expect("stop");
     assert_eq!(
         runtime.status().expect("stopped status").state,
-        RaftNodeRuntimeState::Stopped
+        NodeRuntimeState::Stopped
     );
     runtime.shutdown().expect("shutdown");
-    assert_eq!(runtime.state(), RaftNodeRuntimeState::Shutdown);
+    assert_eq!(runtime.state(), NodeRuntimeState::Shutdown);
 
     let _ = fs::remove_dir_all(wal_dir);
     let _ = fs::remove_dir_all(snapshot_dir);
@@ -194,7 +207,7 @@ fn pass_2_non_temporalstore_app_gets_replication_and_read_safety() {
         .expect("mark follower down");
     cluster.set_leader_lease_valid(false);
     let no_quorum = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 909,
             requester_id: 1,
             min_commit_index: 4,
@@ -208,7 +221,7 @@ fn pass_2_non_temporalstore_app_gets_replication_and_read_safety() {
     cluster.set_node_healthy(3, true).expect("restore quorum");
     let stale_lease = cluster
         .read_path_report(
-            RustRaftReadIndexRequest {
+            ReadIndexRequest {
                 group_id: 909,
                 requester_id: 1,
                 min_commit_index: 4,
@@ -233,25 +246,25 @@ fn pass_3_non_temporalstore_app_gets_membership_executor_workflow() {
             .expect("propose");
     }
 
-    let mut executor = RaftMembershipExecutor::new();
+    let mut executor = MembershipExecutor::new();
     executor
         .execute(
             &mut cluster,
-            RaftMembershipOperation::AddLearner(peer(4, RustRaftReplicaRole::Learner)),
+            MembershipOperation::AddLearner(peer(4, ReplicaRole::Learner)),
         )
         .expect("add learner");
-    let blockers = executor.validate(&cluster, &RaftMembershipOperation::Promote(4));
+    let blockers = executor.validate(&cluster, &MembershipOperation::Promote(4));
     assert!(blockers.is_empty());
     executor
-        .execute(&mut cluster, RaftMembershipOperation::Promote(4))
+        .execute(&mut cluster, MembershipOperation::Promote(4))
         .expect("promotion catches up learner");
     assert!(cluster.membership().voters.contains(&4));
 
     let failed = executor.execute_all_with_rollback(
         &mut cluster,
         vec![
-            RaftMembershipOperation::AddWitness(peer(5, RustRaftReplicaRole::Witness)),
-            RaftMembershipOperation::Remove(99),
+            MembershipOperation::AddWitness(peer(5, ReplicaRole::Witness)),
+            MembershipOperation::Remove(99),
         ],
     );
     assert!(failed.is_err());
@@ -261,9 +274,9 @@ fn pass_3_non_temporalstore_app_gets_membership_executor_workflow() {
         .execute_all(
             &mut cluster,
             vec![
-                RaftMembershipOperation::AddWitness(peer(5, RustRaftReplicaRole::Witness)),
-                RaftMembershipOperation::TransferLeader(2),
-                RaftMembershipOperation::Remove(1),
+                MembershipOperation::AddWitness(peer(5, ReplicaRole::Witness)),
+                MembershipOperation::TransferLeader(2),
+                MembershipOperation::Remove(1),
             ],
         )
         .expect("membership workflow");
@@ -323,20 +336,20 @@ fn pass_4_non_temporalstore_app_gets_wal_snapshot_recovery_and_fences() {
         .expect("checkpoint chunks");
     assert!(chunks.len() > 1);
 
-    let mut sender = RaftSnapshotLifecycle::new(RaftSnapshotLifecycleConfig {
+    let mut sender = SnapshotLifecycle::new(SnapshotLifecycleConfig {
         chunk_size: 4,
         max_chunks_per_tick: 1,
         max_bytes_per_tick: 4,
         max_retry_attempts: 2,
     })
     .expect("sender lifecycle");
-    let mut receiver = RaftSnapshotLifecycle::new(Default::default()).expect("receiver lifecycle");
+    let mut receiver = SnapshotLifecycle::new(Default::default()).expect("receiver lifecycle");
     sender.begin_send(&snap, 1, 1).expect("begin send");
     while sender.status().sending {
         for request in sender.poll_send_requests().expect("poll send") {
             let installed = receiver.install_request(request).expect("install chunk");
             sender
-                .record_send_response(&RustRaftInstallSnapshotResponse {
+                .record_send_response(&InstallSnapshotResponse {
                     term: 1,
                     accepted: true,
                     next_offset: receiver.status().received_chunks,

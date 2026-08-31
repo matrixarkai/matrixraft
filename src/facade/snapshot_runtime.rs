@@ -5,51 +5,49 @@
 // Split from src/lib.rs to keep the crate facade small and focused.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftSnapshotMeta {
-    pub snapshot_id: RustRaftSnapshotId,
-    pub last_log_id: RustRaftLogId,
-    pub membership: Vec<RustRaftNodeId>,
+pub struct SnapshotMetadata {
+    pub snapshot_id: SnapshotId,
+    pub last_log_id: LogId,
+    pub membership: Vec<NodeId>,
     #[serde(default)]
-    pub members: Vec<RustRaftPeer>,
+    pub members: Vec<Peer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftSnapshotChunk {
-    pub meta: RustRaftSnapshotMeta,
+pub struct SnapshotChunk {
+    pub meta: SnapshotMetadata,
     pub offset: u64,
-    pub data: RustRaftSnapshotPayload,
+    pub data: SnapshotPayload,
     pub done: bool,
 }
 
-pub type SnapshotChunk = RustRaftSnapshotChunk;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftGenericSnapshot<G = RustRaftGroupId, P = RustRaftSnapshotPayload> {
+pub struct GenericSnapshot<G = GroupId, P = SnapshotPayload> {
     pub group_id: G,
-    pub meta: RustRaftSnapshotMeta,
+    pub meta: SnapshotMetadata,
     pub payload: P,
 }
 
-pub type RaftSnapshot = RustRaftGenericSnapshot<RustRaftGroupId, RustRaftSnapshotPayload>;
+pub type RaftSnapshot = GenericSnapshot<GroupId, SnapshotPayload>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftGenericSnapshotChunk<P = RustRaftSnapshotPayload> {
-    pub meta: RustRaftSnapshotMeta,
+pub struct GenericSnapshotChunk<P = SnapshotPayload> {
+    pub meta: SnapshotMetadata,
     pub offset: u64,
     pub data: P,
     pub done: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftSnapshotInstallState {
-    pub meta: RustRaftSnapshotMeta,
-    pub bytes: RustRaftSnapshotPayload,
+pub struct SnapshotInstallState {
+    pub meta: SnapshotMetadata,
+    pub bytes: SnapshotPayload,
     pub next_offset: u64,
     pub complete: bool,
 }
 
-impl RaftSnapshotInstallState {
-    pub fn new(meta: RustRaftSnapshotMeta) -> Self {
+impl SnapshotInstallState {
+    pub fn new(meta: SnapshotMetadata) -> Self {
         Self {
             meta,
             bytes: Vec::new(),
@@ -58,7 +56,7 @@ impl RaftSnapshotInstallState {
         }
     }
 
-    pub fn install_chunk(&mut self, chunk: RustRaftSnapshotChunk) -> Result<(), RaftError> {
+    pub fn install_chunk(&mut self, chunk: SnapshotChunk) -> Result<(), RaftError> {
         if chunk.meta != self.meta {
             return Err(RaftError::InvalidRequest(
                 "snapshot chunk metadata changed during install".to_string(),
@@ -76,7 +74,7 @@ impl RaftSnapshotInstallState {
         Ok(())
     }
 
-    pub fn finish(self, group_id: RustRaftGroupId) -> Result<RaftSnapshot, RaftError> {
+    pub fn finish(self, group_id: GroupId) -> Result<RaftSnapshot, RaftError> {
         if !self.complete {
             return Err(RaftError::InvalidRequest(
                 "snapshot install is incomplete".to_string(),
@@ -91,14 +89,14 @@ impl RaftSnapshotInstallState {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftSnapshotLifecycleConfig {
+pub struct SnapshotLifecycleConfig {
     pub chunk_size: u64,
     pub max_chunks_per_tick: u64,
     pub max_bytes_per_tick: u64,
     pub max_retry_attempts: u64,
 }
 
-impl Default for RaftSnapshotLifecycleConfig {
+impl Default for SnapshotLifecycleConfig {
     fn default() -> Self {
         Self {
             chunk_size: 64 * 1024,
@@ -109,7 +107,7 @@ impl Default for RaftSnapshotLifecycleConfig {
     }
 }
 
-impl RaftSnapshotLifecycleConfig {
+impl SnapshotLifecycleConfig {
     pub fn validate(&self) -> Result<(), RaftError> {
         if self.chunk_size == 0 {
             return Err(RaftError::InvalidRequest(
@@ -131,8 +129,8 @@ impl RaftSnapshotLifecycleConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftSnapshotLifecycleStatus {
-    pub snapshot_id: Option<RustRaftSnapshotId>,
+pub struct SnapshotLifecycleStatus {
+    pub snapshot_id: Option<SnapshotId>,
     pub sending: bool,
     pub installing: bool,
     pub total_chunks: u64,
@@ -143,36 +141,36 @@ pub struct RaftSnapshotLifecycleStatus {
     pub rate_limited_ticks: u64,
     pub rolled_back: u64,
     pub completed: bool,
-    pub installed_index: RustRaftLogIndex,
+    pub installed_index: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftSnapshotSendState {
-    pub group_id: RustRaftGroupId,
-    pub term: RustRaftTerm,
-    pub leader_id: RustRaftNodeId,
-    pub chunks: Vec<RustRaftSnapshotChunk>,
+pub struct SnapshotSendState {
+    pub group_id: GroupId,
+    pub term: Term,
+    pub leader_id: NodeId,
+    pub chunks: Vec<SnapshotChunk>,
     pub next_chunk: usize,
     pub accepted_chunks: u64,
     pub retry_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftSnapshotLifecycle {
-    config: RaftSnapshotLifecycleConfig,
-    sender: Option<RaftSnapshotSendState>,
-    installer: Option<RaftSnapshotInstallState>,
-    status: RaftSnapshotLifecycleStatus,
+pub struct SnapshotLifecycle {
+    config: SnapshotLifecycleConfig,
+    sender: Option<SnapshotSendState>,
+    installer: Option<SnapshotInstallState>,
+    status: SnapshotLifecycleStatus,
 }
 
-impl RaftSnapshotLifecycle {
-    pub fn new(config: RaftSnapshotLifecycleConfig) -> Result<Self, RaftError> {
+impl SnapshotLifecycle {
+    pub fn new(config: SnapshotLifecycleConfig) -> Result<Self, RaftError> {
         config.validate()?;
         Ok(Self {
             config,
             sender: None,
             installer: None,
-            status: RaftSnapshotLifecycleStatus {
+            status: SnapshotLifecycleStatus {
                 snapshot_id: None,
                 sending: false,
                 installing: false,
@@ -192,7 +190,7 @@ impl RaftSnapshotLifecycle {
     pub fn checkpoint(
         snapshot: &RaftSnapshot,
         chunk_size: u64,
-    ) -> Result<Vec<RustRaftSnapshotChunk>, RaftError> {
+    ) -> Result<Vec<SnapshotChunk>, RaftError> {
         if chunk_size == 0 {
             return Err(RaftError::InvalidRequest(
                 "snapshot chunk_size must be greater than zero".to_string(),
@@ -202,7 +200,7 @@ impl RaftSnapshotLifecycle {
         let mut offset = 0;
         while offset < snapshot.payload.len() {
             let end = (offset + chunk_size as usize).min(snapshot.payload.len());
-            chunks.push(RustRaftSnapshotChunk {
+            chunks.push(SnapshotChunk {
                 meta: snapshot.meta.clone(),
                 offset: offset as u64,
                 data: snapshot.payload[offset..end].to_vec(),
@@ -211,7 +209,7 @@ impl RaftSnapshotLifecycle {
             offset = end;
         }
         if chunks.is_empty() {
-            chunks.push(RustRaftSnapshotChunk {
+            chunks.push(SnapshotChunk {
                 meta: snapshot.meta.clone(),
                 offset: 0,
                 data: Vec::new(),
@@ -224,8 +222,8 @@ impl RaftSnapshotLifecycle {
     pub fn begin_send(
         &mut self,
         snapshot: &RaftSnapshot,
-        term: RustRaftTerm,
-        leader_id: RustRaftNodeId,
+        term: Term,
+        leader_id: NodeId,
     ) -> Result<(), RaftError> {
         if self.sender.is_some() || self.installer.is_some() {
             return Err(RaftError::InvalidRequest(
@@ -233,7 +231,7 @@ impl RaftSnapshotLifecycle {
             ));
         }
         let chunks = Self::checkpoint(snapshot, self.config.chunk_size)?;
-        self.status = RaftSnapshotLifecycleStatus {
+        self.status = SnapshotLifecycleStatus {
             snapshot_id: Some(snapshot.meta.snapshot_id.clone()),
             sending: true,
             installing: false,
@@ -247,7 +245,7 @@ impl RaftSnapshotLifecycle {
             completed: false,
             installed_index: 0,
         };
-        self.sender = Some(RaftSnapshotSendState {
+        self.sender = Some(SnapshotSendState {
             group_id: snapshot.group_id,
             term,
             leader_id,
@@ -293,7 +291,7 @@ impl RaftSnapshotLifecycle {
 
     pub fn poll_send_requests_with_limiter(
         &mut self,
-        limiter: &mut impl RustRaftRateLimiter,
+        limiter: &mut impl RateLimiter,
     ) -> Result<Vec<InstallSnapshotRequest>, RaftError> {
         let sender = self
             .sender
@@ -320,7 +318,7 @@ impl RaftSnapshotLifecycle {
             let granted_bytes = decision.granted_bytes as usize;
             if granted_bytes < chunk.data.len() {
                 let remaining = chunk.data.split_off(granted_bytes);
-                let remaining_chunk = RustRaftSnapshotChunk {
+                let remaining_chunk = SnapshotChunk {
                     meta: chunk.meta.clone(),
                     offset: chunk.offset + decision.granted_bytes,
                     data: remaining,
@@ -421,7 +419,7 @@ impl RaftSnapshotLifecycle {
             self.status.completed = false;
             self.status.received_chunks = 0;
             self.status.total_chunks = 0;
-            self.installer = Some(RaftSnapshotInstallState::new(request.chunk.meta.clone()));
+            self.installer = Some(SnapshotInstallState::new(request.chunk.meta.clone()));
         }
         let installer = self.installer.as_mut().expect("installer exists");
         if request.chunk.offset == 0 && installer.meta != request.chunk.meta {
@@ -447,7 +445,7 @@ impl RaftSnapshotLifecycle {
         self.status.rolled_back += 1;
     }
 
-    pub fn status(&self) -> RaftSnapshotLifecycleStatus {
+    pub fn status(&self) -> SnapshotLifecycleStatus {
         self.status.clone()
     }
 }
@@ -521,9 +519,9 @@ impl PersistentRaftSnapshotStore {
     pub fn checkpoint_chunks(
         &self,
         snapshot_id: &str,
-    ) -> Result<Vec<RustRaftSnapshotChunk>, RaftError> {
+    ) -> Result<Vec<SnapshotChunk>, RaftError> {
         let snapshot = self.load_checkpoint(snapshot_id)?;
-        RaftSnapshotLifecycle::checkpoint(&snapshot, self.options.chunk_size)
+        SnapshotLifecycle::checkpoint(&snapshot, self.options.chunk_size)
     }
 
     fn snapshot_path(&self, snapshot_id: &str) -> PathBuf {
@@ -532,43 +530,36 @@ impl PersistentRaftSnapshotStore {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftInstallSnapshotRequest {
-    pub group_id: RustRaftGroupId,
-    pub term: RustRaftTerm,
-    pub leader_id: RustRaftNodeId,
-    pub chunk: RustRaftSnapshotChunk,
+pub struct InstallSnapshotRequest {
+    pub group_id: GroupId,
+    pub term: Term,
+    pub leader_id: NodeId,
+    pub chunk: SnapshotChunk,
 }
 
-pub type InstallSnapshotRequest = RustRaftInstallSnapshotRequest;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftInstallSnapshotResponse {
-    pub term: RustRaftTerm,
+pub struct InstallSnapshotResponse {
+    pub term: Term,
     pub accepted: bool,
     pub next_offset: u64,
     #[serde(default)]
-    pub committed_index: RustRaftLogIndex,
+    pub committed_index: LogIndex,
     pub reason: String,
 }
 
-pub type InstallSnapshotResponse = RustRaftInstallSnapshotResponse;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftReadIndexRequest {
-    pub group_id: RustRaftGroupId,
-    pub requester_id: RustRaftNodeId,
-    pub min_commit_index: RustRaftLogIndex,
+pub struct ReadIndexRequest {
+    pub group_id: GroupId,
+    pub requester_id: NodeId,
+    pub min_commit_index: LogIndex,
     pub allow_lease_read: bool,
 }
 
-pub type ReadIndexRequest = RustRaftReadIndexRequest;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftReadIndexResponse {
+pub struct ReadIndexResponse {
     pub safe: bool,
-    pub read_index: RustRaftLogIndex,
+    pub read_index: LogIndex,
     pub lease_read: bool,
     pub reason: String,
 }
 
-pub type ReadIndexResponse = RustRaftReadIndexResponse;

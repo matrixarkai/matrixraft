@@ -2,8 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    RaftApply, RaftApplyRequest, RaftApplyResponse, RaftFsmAdapter, RaftLogEntry, RaftStateMachine,
-    RustRaftLogId,
+    FsmAdapter, LogId, RaftApply, RaftApplyRequest, RaftApplyResponse, RaftLogEntry,
+    RaftStateMachine,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -42,7 +42,7 @@ impl RaftStateMachine<u64, Vec<u8>> for CountingFsm {
 
 fn entry(term: u64, index: u64, payload: &[u8]) -> RaftLogEntry<Vec<u8>> {
     RaftLogEntry {
-        log_id: RustRaftLogId { term, index },
+        log_id: LogId { term, index },
         payload: payload.to_vec(),
         is_command: true,
     }
@@ -50,7 +50,7 @@ fn entry(term: u64, index: u64, payload: &[u8]) -> RaftLogEntry<Vec<u8>> {
 
 fn noop(term: u64, index: u64) -> RaftLogEntry<Vec<u8>> {
     RaftLogEntry {
-        log_id: RustRaftLogId { term, index },
+        log_id: LogId { term, index },
         payload: Vec::new(),
         is_command: false,
     }
@@ -58,7 +58,7 @@ fn noop(term: u64, index: u64) -> RaftLogEntry<Vec<u8>> {
 
 #[test]
 fn fsm_adapter_applies_duplicate_log_id_idempotently() {
-    let mut adapter = RaftFsmAdapter::new(7, CountingFsm::default());
+    let mut adapter = FsmAdapter::new(7, CountingFsm::default());
 
     let first = adapter
         .apply_entry(entry(1, 1, b"set-a"))
@@ -78,7 +78,7 @@ fn fsm_adapter_applies_duplicate_log_id_idempotently() {
 
 #[test]
 fn fsm_adapter_rejects_conflicting_replay_at_same_index() {
-    let mut adapter = RaftFsmAdapter::new(7, CountingFsm::default());
+    let mut adapter = FsmAdapter::new(7, CountingFsm::default());
     adapter
         .apply_entry(entry(1, 1, b"term-one"))
         .expect("first apply");
@@ -92,7 +92,7 @@ fn fsm_adapter_rejects_conflicting_replay_at_same_index() {
 
 #[test]
 fn fsm_adapter_replay_report_tracks_applied_and_skipped_entries() {
-    let mut adapter = RaftFsmAdapter::new(7, CountingFsm::default());
+    let mut adapter = FsmAdapter::new(7, CountingFsm::default());
     let report = adapter
         .replay_entries(vec![
             entry(1, 1, b"a"),
@@ -112,7 +112,7 @@ fn fsm_adapter_replay_report_tracks_applied_and_skipped_entries() {
 
 #[test]
 fn fsm_adapter_batch_apply_skips_noops_and_defers_suffix() {
-    let mut adapter = RaftFsmAdapter::new(7, CountingFsm::default());
+    let mut adapter = FsmAdapter::new(7, CountingFsm::default());
 
     let report = adapter
         .apply_batch(
@@ -145,7 +145,7 @@ fn fsm_adapter_batch_apply_skips_noops_and_defers_suffix() {
 
 #[test]
 fn fsm_adapter_batch_apply_replays_noop_idempotently() {
-    let mut adapter = RaftFsmAdapter::new(7, CountingFsm::default());
+    let mut adapter = FsmAdapter::new(7, CountingFsm::default());
 
     adapter
         .apply_batch(&[noop(1, 1), entry(1, 2, b"set-a")], 16)
@@ -166,7 +166,7 @@ fn fsm_adapter_batch_apply_replays_noop_idempotently() {
 
 #[test]
 fn fsm_adapter_checkpoints_and_loads_state_machine_snapshot() {
-    let mut adapter = RaftFsmAdapter::new(7, CountingFsm::default());
+    let mut adapter = FsmAdapter::new(7, CountingFsm::default());
     adapter
         .replay_entries(vec![entry(1, 1, b"a"), entry(1, 2, b"b")])
         .expect("initial replay");
@@ -176,7 +176,7 @@ fn fsm_adapter_checkpoints_and_loads_state_machine_snapshot() {
     assert_eq!(checkpoint.applied_log_ids.len(), 2);
     assert_eq!(checkpoint.snapshot.len(), 2);
 
-    let mut restored = RaftFsmAdapter::new(7, CountingFsm::default());
+    let mut restored = FsmAdapter::new(7, CountingFsm::default());
     restored
         .install_checkpoint(checkpoint)
         .expect("install checkpoint");

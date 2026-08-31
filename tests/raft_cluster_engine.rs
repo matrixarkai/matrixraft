@@ -2,18 +2,16 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    InstallSnapshotRequest, RaftCluster, RaftConfig, RaftConfigError, RaftLearnerAutoPromoteState,
-    RaftMembershipOperation, RaftSnapshot, RustRaftAdminCommand, RustRaftAppendEntriesRequest,
-    RustRaftAppendEntriesResponse, RustRaftApplySnapshotFence, RustRaftConfig, RustRaftConsensus,
-    RustRaftError, RustRaftInstallSnapshotResponse, RustRaftLogEntry, RustRaftLogId,
-    RustRaftMessage, RustRaftPeer, RustRaftPeerProgressState, RustRaftProposeOptions,
-    RustRaftReadIndexRequest, RustRaftReplicaRole, RustRaftRole, RustRaftSnapshotChunk,
-    RustRaftSnapshotMeta, RustRaftSnapshotState, RustRaftStepResult, RustRaftVoteRequest,
-    RustRaftVoteResponse,
+    AdminCommand, AppendEntriesRequest, AppendEntriesResponse, ApplySnapshotFence, Config,
+    ConfigError, Consensus, InstallSnapshotRequest, InstallSnapshotResponse,
+    LearnerAutoPromoteState, LogEntry, LogId, MembershipOperation, Message, Peer, ProgressState,
+    ProposeOptions, RaftCluster, RaftError, RaftSnapshot, ReadIndexRequest, ReplicaRole,
+    SnapshotChunk, SnapshotMetadata, SnapshotState, StateRole, StepResult, VoteRequest,
+    VoteResponse,
 };
 
-fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 9_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 10_000 + node_id),
@@ -25,11 +23,11 @@ fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
 fn three_node_cluster() -> RaftCluster {
     RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("valid cluster")
@@ -38,13 +36,13 @@ fn three_node_cluster() -> RaftCluster {
 fn five_node_cluster() -> RaftCluster {
     RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Voter),
-            peer(5, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Voter),
+            peer(5, ReplicaRole::Voter),
         ],
     )
     .expect("valid five-node cluster")
@@ -52,27 +50,24 @@ fn five_node_cluster() -> RaftCluster {
 
 #[test]
 fn raft_config_validates_timing_and_capacity() {
-    let mut config = RustRaftConfig::default();
+    let mut config = Config::default();
     config.heartbeat_interval_ms = config.election_timeout_ms;
 
     assert_eq!(
         config.validate(),
-        Err(RaftConfigError::HeartbeatNotLessThanElection {
+        Err(ConfigError::HeartbeatNotLessThanElection {
             heartbeat_interval_ms: 1_000,
             election_timeout_ms: 1_000,
         })
     );
 
-    config = RustRaftConfig::default();
+    config = Config::default();
     config.max_payload_bytes = 0;
-    assert_eq!(config.validate(), Err(RaftConfigError::ZeroMaxPayloadBytes));
+    assert_eq!(config.validate(), Err(ConfigError::ZeroMaxPayloadBytes));
 
-    config = RustRaftConfig::default();
+    config = Config::default();
     config.max_log_buffer_bytes = 0;
-    assert_eq!(
-        config.validate(),
-        Err(RaftConfigError::ZeroMaxLogBufferBytes)
-    );
+    assert_eq!(config.validate(), Err(ConfigError::ZeroMaxLogBufferBytes));
 }
 
 #[test]
@@ -83,7 +78,7 @@ fn cluster_start_campaigns_and_tracks_leader_term() {
     assert_eq!(cluster.leader_id(), Some(1));
 
     let leader_status = cluster.status(1).expect("leader status");
-    assert_eq!(leader_status.role, RustRaftRole::Leader);
+    assert_eq!(leader_status.role, StateRole::Leader);
     assert_eq!(leader_status.term, 1);
 
     cluster.campaign(2, false).expect("campaign to node 2");
@@ -102,10 +97,7 @@ fn initial_campaign_appends_noop() {
         .expect("leader wal after start");
 
     assert_eq!(leader_record.entries.len(), 1);
-    assert_eq!(
-        leader_record.entries[0].log_id,
-        RustRaftLogId { term: 1, index: 1 }
-    );
+    assert_eq!(leader_record.entries[0].log_id, LogId { term: 1, index: 1 });
     assert_eq!(leader_record.entries[0].payload, b"no-op".to_vec());
     assert_eq!(
         cluster.status(leader).expect("leader status").commit_index,
@@ -178,11 +170,11 @@ fn prohibits_election_does_not_reject_remote_votes() {
     let pre_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: true,
                 force: false,
             },
@@ -195,11 +187,11 @@ fn prohibits_election_does_not_reject_remote_votes() {
     let vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: false,
                 force: false,
             },
@@ -222,7 +214,7 @@ fn timeout_now_campaigns_only_followers_like_baseline_raft() {
     assert_eq!(follower_timeout.reason, "timeout_now_campaign");
     assert_eq!(cluster.leader_id(), Some(2));
 
-    let mut learner = peer(4, RustRaftReplicaRole::Learner);
+    let mut learner = peer(4, ReplicaRole::Learner);
     learner.auto_promote = false;
     cluster.add_learner(learner).expect("add learner");
     let learner_term = cluster.status(4).expect("learner status").term;
@@ -230,11 +222,11 @@ fn timeout_now_campaigns_only_followers_like_baseline_raft() {
     assert!(!learner_timeout.campaigned);
     assert_eq!(learner_timeout.reason, "timeout_now_ignored_Learner");
     let learner_status = cluster.status(4).expect("learner status after timeout");
-    assert_eq!(learner_status.role, RustRaftRole::Learner);
+    assert_eq!(learner_status.role, StateRole::Learner);
     assert_eq!(learner_status.term, learner_term);
 
     cluster
-        .add_witness(peer(5, RustRaftReplicaRole::Witness))
+        .add_witness(peer(5, ReplicaRole::Witness))
         .expect("add witness");
     let witness_term = cluster.status(5).expect("witness status").term;
     let witness_timeout = cluster.timeout_now(2, 5).expect("timeout-now witness");
@@ -256,7 +248,7 @@ fn added_peer_catches_up_immediately() {
     cluster.propose(b"before-add".to_vec()).expect("propose");
 
     cluster
-        .add_learner(peer(4, RustRaftReplicaRole::Learner))
+        .add_learner(peer(4, ReplicaRole::Learner))
         .expect("add learner");
     let learner = cluster.status(4).expect("learner status");
     assert_eq!(learner.last_log_index, 2);
@@ -270,7 +262,7 @@ fn added_peer_catches_up_immediately() {
     );
 
     cluster
-        .add_witness(peer(5, RustRaftReplicaRole::Witness))
+        .add_witness(peer(5, ReplicaRole::Witness))
         .expect("add witness");
     let witness = cluster.status(5).expect("witness status");
     assert_eq!(witness.last_log_index, 2);
@@ -295,13 +287,13 @@ fn commit_quorum_counts_stored_match_from_unhealthy_peer() {
         cluster
             .append_entries_to(
                 target,
-                RustRaftAppendEntriesRequest {
+                AppendEntriesRequest {
                     group_id: 7,
                     term,
                     leader_id: leader,
                     prev_log_id: None,
-                    entries: vec![RustRaftLogEntry {
-                        log_id: RustRaftLogId { term, index: 1 },
+                    entries: vec![LogEntry {
+                        log_id: LogId { term, index: 1 },
                         payload: b"stored-quorum".to_vec(),
                         is_command: true,
                     }],
@@ -333,7 +325,7 @@ fn propose_replicates_to_quorum_and_advances_commit_and_apply() {
     cluster.start().expect("cluster starts");
 
     let log_id = cluster.propose(b"set a=1".to_vec()).expect("propose");
-    assert_eq!(log_id, RustRaftLogId { term: 1, index: 2 });
+    assert_eq!(log_id, LogId { term: 1, index: 2 });
 
     for node_id in [1, 2, 3] {
         let status = cluster.status(node_id).expect("node status");
@@ -347,12 +339,12 @@ fn propose_replicates_to_quorum_and_advances_commit_and_apply() {
 fn propose_preserves_command_entry_flag() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Witness),
         ],
     )
     .expect("cluster with witness");
@@ -361,7 +353,7 @@ fn propose_preserves_command_entry_flag() {
     cluster
         .propose_with_options(
             b"opaque-entry".to_vec(),
-            RustRaftProposeOptions {
+            ProposeOptions {
                 expected_term: Some(1),
                 is_command: false,
                 ..Default::default()
@@ -373,10 +365,7 @@ fn propose_preserves_command_entry_flag() {
         let record = cluster.wal_record_for(node_id).expect("node wal");
         assert_eq!(record.entries.len(), 2);
         assert_eq!(record.entries[0].payload, b"no-op".to_vec());
-        assert_eq!(
-            record.entries[1].log_id,
-            RustRaftLogId { term: 1, index: 2 }
-        );
+        assert_eq!(record.entries[1].log_id, LogId { term: 1, index: 2 });
         assert!(!record.entries[1].is_command);
         assert_eq!(record.entries[1].payload, b"opaque-entry".to_vec());
     }
@@ -392,12 +381,12 @@ fn propose_preserves_command_entry_flag() {
 fn membership_proposal_downgrades_second_unapplied_change() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Witness),
         ],
     )
     .expect("cluster with witness");
@@ -406,7 +395,7 @@ fn membership_proposal_downgrades_second_unapplied_change() {
     let first = cluster
         .propose_with_options(
             b"add-peer-5".to_vec(),
-            RustRaftProposeOptions {
+            ProposeOptions {
                 is_membership_change: true,
                 ..Default::default()
             },
@@ -421,7 +410,7 @@ fn membership_proposal_downgrades_second_unapplied_change() {
     let second = cluster
         .propose_with_options(
             b"add-peer-6".to_vec(),
-            RustRaftProposeOptions {
+            ProposeOptions {
                 is_membership_change: true,
                 ..Default::default()
             },
@@ -453,7 +442,7 @@ fn membership_proposal_downgrades_second_unapplied_change() {
     let third = cluster
         .propose_with_options(
             b"add-peer-7".to_vec(),
-            RustRaftProposeOptions {
+            ProposeOptions {
                 is_membership_change: true,
                 ..Default::default()
             },
@@ -467,12 +456,12 @@ fn membership_proposal_downgrades_second_unapplied_change() {
 fn witness_append_entries_store_command_entries_as_metadata_without_payload() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Witness),
         ],
     )
     .expect("cluster with witness");
@@ -481,13 +470,13 @@ fn witness_append_entries_store_command_entries_as_metadata_without_payload() {
     let response = cluster
         .append_entries_to(
             4,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 2 },
+                prev_log_id: Some(LogId { term: 1, index: 1 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 2 },
                     payload: b"user-command".to_vec(),
                     is_command: true,
                 }],
@@ -503,7 +492,7 @@ fn witness_append_entries_store_command_entries_as_metadata_without_payload() {
     assert_eq!(witness_record.entries.len(), 2);
     assert_eq!(
         witness_record.entries[1].log_id,
-        RustRaftLogId { term: 1, index: 2 }
+        LogId { term: 1, index: 2 }
     );
     assert!(!witness_record.entries[1].is_command);
     assert!(witness_record.entries[1].payload.is_empty());
@@ -517,7 +506,7 @@ fn membership_proposal_ignores_stale_expected_term_config_change() {
     let stale_normal = cluster
         .propose_with_options(
             b"normal-stale-term".to_vec(),
-            RustRaftProposeOptions {
+            ProposeOptions {
                 expected_term: Some(0),
                 ..Default::default()
             },
@@ -530,14 +519,14 @@ fn membership_proposal_ignores_stale_expected_term_config_change() {
     let membership = cluster
         .propose_with_options(
             b"config-change-stale-term".to_vec(),
-            RustRaftProposeOptions {
+            ProposeOptions {
                 expected_term: Some(0),
                 is_membership_change: true,
                 ..Default::default()
             },
         )
         .expect("membership proposal stamps current term like MatrixRaft");
-    assert_eq!(membership, RustRaftLogId { term: 1, index: 2 });
+    assert_eq!(membership, LogId { term: 1, index: 2 });
     assert_eq!(cluster.pending_membership_change_index(), Some(2));
 
     let leader_record = cluster.wal_record_for(1).expect("leader wal");
@@ -556,15 +545,15 @@ fn rejected_apply_result_blocks_apply_until_snapshot() {
         2,
         RaftSnapshot {
             group_id: 7,
-            meta: RustRaftSnapshotMeta {
+            meta: SnapshotMetadata {
                 snapshot_id: "already-committed".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 2 },
+                last_log_id: LogId { term: 1, index: 2 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
             },
             payload: b"stale-committed-snapshot".to_vec(),
         },
-        RustRaftApplySnapshotFence {
+        ApplySnapshotFence {
             applied_index: 2,
             commit_index: 2,
             installed_snapshot_index: 2,
@@ -586,7 +575,7 @@ fn rejected_apply_result_blocks_apply_until_snapshot() {
     let require_snapshot = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
@@ -603,15 +592,15 @@ fn rejected_apply_result_blocks_apply_until_snapshot() {
         2,
         RaftSnapshot {
             group_id: 7,
-            meta: RustRaftSnapshotMeta {
+            meta: SnapshotMetadata {
                 snapshot_id: "apply-recovery-too-old".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 2 },
+                last_log_id: LogId { term: 1, index: 2 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
             },
             payload: b"stale-snapshot".to_vec(),
         },
-        RustRaftApplySnapshotFence {
+        ApplySnapshotFence {
             applied_index: 2,
             commit_index: 2,
             installed_snapshot_index: 2,
@@ -637,15 +626,15 @@ fn rejected_apply_result_blocks_apply_until_snapshot() {
             2,
             RaftSnapshot {
                 group_id: 7,
-                meta: RustRaftSnapshotMeta {
+                meta: SnapshotMetadata {
                     snapshot_id: "apply-recovery-2".to_string(),
-                    last_log_id: RustRaftLogId { term: 1, index: 3 },
+                    last_log_id: LogId { term: 1, index: 3 },
                     membership: vec![1, 2, 3],
                     members: Vec::new(),
                 },
                 payload: b"snapshot".to_vec(),
             },
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 3,
                 commit_index: 3,
                 installed_snapshot_index: 3,
@@ -673,15 +662,15 @@ fn rejected_apply_result_blocks_apply_until_snapshot() {
         2,
         RaftSnapshot {
             group_id: 7,
-            meta: RustRaftSnapshotMeta {
+            meta: SnapshotMetadata {
                 snapshot_id: "blocked-by-unapplied-entries".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 4 },
+                last_log_id: LogId { term: 1, index: 4 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
             },
             payload: b"snapshot".to_vec(),
         },
-        RustRaftApplySnapshotFence {
+        ApplySnapshotFence {
             applied_index: 4,
             commit_index: 4,
             installed_snapshot_index: 4,
@@ -704,15 +693,15 @@ fn rejected_apply_result_blocks_apply_until_snapshot() {
             2,
             RaftSnapshot {
                 group_id: 7,
-                meta: RustRaftSnapshotMeta {
+                meta: SnapshotMetadata {
                     snapshot_id: "loaded-after-apply-drains".to_string(),
-                    last_log_id: RustRaftLogId { term: 1, index: 4 },
+                    last_log_id: LogId { term: 1, index: 4 },
                     membership: vec![1, 2, 3],
                     members: Vec::new(),
                 },
                 payload: b"snapshot".to_vec(),
             },
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 4,
                 commit_index: 4,
                 installed_snapshot_index: 4,
@@ -737,15 +726,15 @@ fn rejected_apply_result_blocks_apply_until_snapshot() {
         2,
         RaftSnapshot {
             group_id: 7,
-            meta: RustRaftSnapshotMeta {
+            meta: SnapshotMetadata {
                 snapshot_id: "blocked-by-inflight-apply".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 6 },
+                last_log_id: LogId { term: 1, index: 6 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
             },
             payload: b"snapshot".to_vec(),
         },
-        RustRaftApplySnapshotFence {
+        ApplySnapshotFence {
             applied_index: 6,
             commit_index: 6,
             installed_snapshot_index: 6,
@@ -765,15 +754,15 @@ fn rejected_apply_result_blocks_apply_until_snapshot() {
             2,
             RaftSnapshot {
                 group_id: 7,
-                meta: RustRaftSnapshotMeta {
+                meta: SnapshotMetadata {
                     snapshot_id: "loaded-after-inflight-apply".to_string(),
-                    last_log_id: RustRaftLogId { term: 1, index: 6 },
+                    last_log_id: LogId { term: 1, index: 6 },
                     membership: vec![1, 2, 3],
                     members: Vec::new(),
                 },
                 payload: b"snapshot".to_vec(),
             },
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 6,
                 commit_index: 6,
                 installed_snapshot_index: 6,
@@ -803,18 +792,15 @@ fn snapshot_install_resets_membership_and_preserves_receiver() {
             2,
             RaftSnapshot {
                 group_id: 7,
-                meta: RustRaftSnapshotMeta {
+                meta: SnapshotMetadata {
                     snapshot_id: "membership-reset".to_string(),
-                    last_log_id: RustRaftLogId { term: 1, index: 3 },
+                    last_log_id: LogId { term: 1, index: 3 },
                     membership: vec![1, 4, 5],
-                    members: vec![
-                        peer(4, RustRaftReplicaRole::Learner),
-                        peer(5, RustRaftReplicaRole::Witness),
-                    ],
+                    members: vec![peer(4, ReplicaRole::Learner), peer(5, ReplicaRole::Witness)],
                 },
                 payload: b"snapshot-with-membership".to_vec(),
             },
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 3,
                 commit_index: 3,
                 installed_snapshot_index: 3,
@@ -830,7 +816,7 @@ fn snapshot_install_resets_membership_and_preserves_receiver() {
     assert!(!cluster.node_ids().contains(&3));
     assert_eq!(
         cluster.status(4).expect("learner from snapshot").role,
-        RustRaftRole::Learner
+        StateRole::Learner
     );
     assert!(cluster.status(5).is_ok());
     assert_eq!(
@@ -855,10 +841,10 @@ fn stale_snapshot_rpc_is_acknowledged_without_install() {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "already-committed-rpc".to_string(),
-                        last_log_id: RustRaftLogId { term: 1, index: 2 },
+                        last_log_id: LogId { term: 1, index: 2 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
                     },
@@ -884,10 +870,10 @@ fn stale_snapshot_rpc_is_acknowledged_without_install() {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "below-recovery-floor-rpc".to_string(),
-                        last_log_id: RustRaftLogId { term: 1, index: 2 },
+                        last_log_id: LogId { term: 1, index: 2 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
                     },
@@ -927,10 +913,10 @@ fn snapshot_rpc_waits_for_apply_drain() {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "pending-unapplied-rpc".to_string(),
-                        last_log_id: RustRaftLogId { term: 1, index: 3 },
+                        last_log_id: LogId { term: 1, index: 3 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
                     },
@@ -970,22 +956,22 @@ fn compaction_waits_for_safe_apply_index() {
     cluster.propose(b"second".to_vec()).expect("second propose");
 
     let inflight = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::ApplyTaskInflight {
+        .step(Message::Admin {
+            command: AdminCommand::ApplyTaskInflight {
                 node_id: 2,
                 applied_index: 3,
             },
         })
         .expect("follower apply task inflight through admin step");
-    assert_eq!(inflight, RustRaftStepResult::Handled);
+    assert_eq!(inflight, StepResult::Handled);
     assert_eq!(cluster.safety_applied_index(2).expect("safe apply"), 2);
 
     let compacted = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::CompactLogsThrough { log_index: 3 },
+        .step(Message::Admin {
+            command: AdminCommand::CompactLogsThrough { log_index: 3 },
         })
         .expect("compact through admin step");
-    let RustRaftStepResult::CompactedLogs(released) = compacted else {
+    let StepResult::CompactedLogs(released) = compacted else {
         panic!("unexpected compaction step response: {compacted:?}");
     };
     assert!(released > 0);
@@ -1082,7 +1068,7 @@ fn compaction_waits_for_safe_apply_index() {
 
 #[test]
 fn busy_propose_releases_safe_memory() {
-    let config = RaftConfig {
+    let config = Config {
         max_log_buffer_bytes: 9,
         ..Default::default()
     };
@@ -1090,9 +1076,9 @@ fn busy_propose_releases_safe_memory() {
         7,
         config,
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("valid cluster");
@@ -1127,7 +1113,7 @@ fn busy_propose_releases_safe_memory() {
 
 #[test]
 fn high_watermark_propose_releases_safe_memory_before_hard_busy() {
-    let config = RaftConfig {
+    let config = Config {
         max_log_buffer_bytes: 9,
         ..Default::default()
     };
@@ -1135,9 +1121,9 @@ fn high_watermark_propose_releases_safe_memory_before_hard_busy() {
         7,
         config,
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("valid cluster");
@@ -1201,14 +1187,14 @@ fn local_stabled_result_does_not_commit_without_quorum() {
         .handle_append_entries_response(
             1,
             2,
-            RustRaftAppendEntriesResponse {
+            AppendEntriesResponse {
                 term: 1,
                 success: true,
                 match_index: 2,
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
@@ -1223,7 +1209,7 @@ fn local_stabled_result_does_not_commit_without_quorum() {
 
 #[test]
 fn busy_follower_append_caps_batch() {
-    let config = RaftConfig {
+    let config = Config {
         max_log_buffer_bytes: 1,
         ..Default::default()
     };
@@ -1231,9 +1217,9 @@ fn busy_follower_append_caps_batch() {
         7,
         config,
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("valid cluster");
@@ -1242,13 +1228,13 @@ fn busy_follower_append_caps_batch() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 1 },
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 1 },
                     payload: b"seed".to_vec(),
                     is_command: true,
                 }],
@@ -1263,19 +1249,19 @@ fn busy_follower_append_caps_batch() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                prev_log_id: Some(LogId { term: 1, index: 1 }),
                 entries: vec![
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 2 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 2 },
                         payload: b"first".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 3 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 3 },
                         payload: b"second".to_vec(),
                         is_command: true,
                     },
@@ -1316,7 +1302,7 @@ fn leader_apply_rejection_transfers_to_closest_follower() {
     );
     assert_eq!(
         cluster.status(old_leader).expect("old leader").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
 }
 
@@ -1328,11 +1314,11 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 8 }),
+                prev_log_id: Some(LogId { term: 1, index: 8 }),
                 entries: vec![],
                 leader_commit: 8,
                 lease_epoch: 0,
@@ -1344,13 +1330,13 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 1 },
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 1 },
                     payload: b"x".to_vec(),
                     is_command: true,
                 }],
@@ -1365,13 +1351,13 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 99, index: 1 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 2 },
+                prev_log_id: Some(LogId { term: 99, index: 1 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 2 },
                     payload: b"bad-prev-term".to_vec(),
                     is_command: true,
                 }],
@@ -1388,13 +1374,13 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 2 },
+                prev_log_id: Some(LogId { term: 1, index: 1 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 2 },
                     payload: b"advance-floor".to_vec(),
                     is_command: true,
                 }],
@@ -1409,7 +1395,7 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
@@ -1427,13 +1413,13 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 4 },
+                prev_log_id: Some(LogId { term: 1, index: 2 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 4 },
                     payload: b"gap-entry".to_vec(),
                     is_command: true,
                 }],
@@ -1449,11 +1435,11 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 99, index: 1 }),
+                prev_log_id: Some(LogId { term: 99, index: 1 }),
                 entries: vec![],
                 leader_commit: 2,
                 lease_epoch: 0,
@@ -1467,13 +1453,13 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 1 },
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 1 },
                     payload: b"below-commit-floor".to_vec(),
                     is_command: true,
                 }],
@@ -1492,7 +1478,7 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let stale_term_response = cluster
         .append_entries_to(
             3,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: node_2_leader_term.saturating_sub(1),
                 leader_id: 1,
@@ -1510,11 +1496,11 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let same_term_claim = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: node_2_leader_term,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId {
+                prev_log_id: Some(LogId {
                     term: node_2_leader_term,
                     index: 99,
                 }),
@@ -1529,7 +1515,7 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     assert_eq!(cluster.leader_id(), Some(1));
     assert_eq!(
         cluster.status(2).expect("node 2 status after claim").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
 
     cluster.campaign(2, true).expect("make node 2 leader again");
@@ -1538,11 +1524,11 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: high_term,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId {
+                prev_log_id: Some(LogId {
                     term: high_term,
                     index: 99,
                 }),
@@ -1557,11 +1543,11 @@ fn append_entries_updates_follower_commit_and_rejects_missing_prev_log() {
     assert_eq!(cluster.leader_id(), Some(1));
     assert_eq!(
         cluster.status(1).expect("node 1 status").role,
-        RustRaftRole::Leader
+        StateRole::Leader
     );
     let node_2_status = cluster.status(2).expect("node 2 status");
     assert_eq!(node_2_status.term, high_term);
-    assert_eq!(node_2_status.role, RustRaftRole::Follower);
+    assert_eq!(node_2_status.role, StateRole::Follower);
 }
 
 #[test]
@@ -1572,13 +1558,13 @@ fn append_entries_caps_commit_to_matched_boundary() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 1 },
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 1 },
                     payload: b"cap-commit".to_vec(),
                     is_command: true,
                 }],
@@ -1601,24 +1587,24 @@ fn append_entries_preserves_matching_suffix_like_baseline_raft() {
     cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
                 entries: vec![
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 1 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 1 },
                         payload: b"one".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 2 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 2 },
                         payload: b"two".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 3 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 3 },
                         payload: b"three".to_vec(),
                         is_command: true,
                     },
@@ -1632,13 +1618,13 @@ fn append_entries_preserves_matching_suffix_like_baseline_raft() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 2 },
+                prev_log_id: Some(LogId { term: 1, index: 1 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 2 },
                     payload: b"two-again".to_vec(),
                     is_command: true,
                 }],
@@ -1666,13 +1652,13 @@ fn append_entries_reorder_queue_drains_adjacent_batches() {
     let base = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 1 },
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 1 },
                     payload: b"one".to_vec(),
                     is_command: true,
                 }],
@@ -1686,13 +1672,13 @@ fn append_entries_reorder_queue_drains_adjacent_batches() {
     let out_of_order = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 3 },
+                prev_log_id: Some(LogId { term: 1, index: 2 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 3 },
                     payload: b"three".to_vec(),
                     is_command: true,
                 }],
@@ -1707,13 +1693,13 @@ fn append_entries_reorder_queue_drains_adjacent_batches() {
     let gap_fill = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 2 },
+                prev_log_id: Some(LogId { term: 1, index: 1 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 2 },
                     payload: b"two".to_vec(),
                     is_command: true,
                 }],
@@ -1736,13 +1722,13 @@ fn append_entries_reorder_queue_is_cleared_on_leader_change() {
     let base = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 1 },
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 1 },
                     payload: b"one".to_vec(),
                     is_command: true,
                 }],
@@ -1756,13 +1742,13 @@ fn append_entries_reorder_queue_is_cleared_on_leader_change() {
     let queued = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 3 },
+                prev_log_id: Some(LogId { term: 1, index: 2 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 3 },
                     payload: b"stale-three".to_vec(),
                     is_command: true,
                 }],
@@ -1776,13 +1762,13 @@ fn append_entries_reorder_queue_is_cleared_on_leader_change() {
     let new_leader_append = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 3,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 2 },
+                prev_log_id: Some(LogId { term: 1, index: 1 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 1, index: 2 },
                     payload: b"new-leader-two".to_vec(),
                     is_command: true,
                 }],
@@ -1805,24 +1791,24 @@ fn append_entries_conflict_hint_skips_local_term_run_like_baseline_raft() {
     cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 2,
                 leader_id: 1,
                 prev_log_id: None,
                 entries: vec![
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 1 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 1 },
                         payload: b"one".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 2, index: 2 },
+                    LogEntry {
+                        log_id: LogId { term: 2, index: 2 },
                         payload: b"two".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 2, index: 3 },
+                    LogEntry {
+                        log_id: LogId { term: 2, index: 3 },
                         payload: b"three".to_vec(),
                         is_command: true,
                     },
@@ -1836,11 +1822,11 @@ fn append_entries_conflict_hint_skips_local_term_run_like_baseline_raft() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 2,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 9, index: 3 }),
+                prev_log_id: Some(LogId { term: 9, index: 3 }),
                 entries: vec![],
                 leader_commit: 1,
                 lease_epoch: 0,
@@ -1861,24 +1847,24 @@ fn duplicate_append_response_reports_packet_match_range() {
     cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 2,
                 leader_id: 1,
                 prev_log_id: None,
                 entries: vec![
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 1 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 1 },
                         payload: b"one".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 2, index: 2 },
+                    LogEntry {
+                        log_id: LogId { term: 2, index: 2 },
                         payload: b"two".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 2, index: 3 },
+                    LogEntry {
+                        log_id: LogId { term: 2, index: 3 },
                         payload: b"three".to_vec(),
                         is_command: true,
                     },
@@ -1892,13 +1878,13 @@ fn duplicate_append_response_reports_packet_match_range() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 2,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 2, index: 2 },
+                prev_log_id: Some(LogId { term: 1, index: 1 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 2, index: 2 },
                     payload: b"two".to_vec(),
                     is_command: true,
                 }],
@@ -1919,24 +1905,24 @@ fn conflict_truncation_clamps_read_index_current_term_floor() {
     cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
                 entries: vec![
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 1 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 1 },
                         payload: b"one".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 2 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 2 },
                         payload: b"two".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 3 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 3 },
                         payload: b"three".to_vec(),
                         is_command: true,
                     },
@@ -1952,13 +1938,13 @@ fn conflict_truncation_clamps_read_index_current_term_floor() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term,
                 leader_id: 2,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term, index: 2 },
+                prev_log_id: Some(LogId { term: 1, index: 1 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term, index: 2 },
                     payload: b"replacement-two".to_vec(),
                     is_command: true,
                 }],
@@ -1970,7 +1956,7 @@ fn conflict_truncation_clamps_read_index_current_term_floor() {
     assert!(response.success);
 
     let read = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 2,
             min_commit_index: 2,
@@ -1989,39 +1975,39 @@ fn append_entries_conflict_truncation_resets_pending_membership_change_like_base
     cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 5,
                 leader_id: 1,
                 prev_log_id: None,
                 entries: vec![
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 1 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 1 },
                         payload: b"one".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 2 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 2 },
                         payload: b"two".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 3 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 3 },
                         payload: b"three".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 2, index: 4 },
+                    LogEntry {
+                        log_id: LogId { term: 2, index: 4 },
                         payload: b"four".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 3, index: 5 },
+                    LogEntry {
+                        log_id: LogId { term: 3, index: 5 },
                         payload: b"membership-change".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 5, index: 6 },
+                    LogEntry {
+                        log_id: LogId { term: 5, index: 6 },
                         payload: b"six".to_vec(),
                         is_command: true,
                     },
@@ -2038,13 +2024,13 @@ fn append_entries_conflict_truncation_resets_pending_membership_change_like_base
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 10,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 2, index: 4 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 6, index: 5 },
+                prev_log_id: Some(LogId { term: 2, index: 4 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 6, index: 5 },
                     payload: b"replacement".to_vec(),
                     is_command: true,
                 }],
@@ -2066,39 +2052,39 @@ fn append_entries_conflict_truncation_restores_surviving_membership_change() {
     cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 5,
                 leader_id: 1,
                 prev_log_id: None,
                 entries: vec![
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 1 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 1 },
                         payload: b"one".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 2 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 2 },
                         payload: b"two".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 3 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 3 },
                         payload: b"three".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 2, index: 4 },
+                    LogEntry {
+                        log_id: LogId { term: 2, index: 4 },
                         payload: b"four".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 3, index: 5 },
+                    LogEntry {
+                        log_id: LogId { term: 3, index: 5 },
                         payload: b"membership-five".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 4, index: 6 },
+                    LogEntry {
+                        log_id: LogId { term: 4, index: 6 },
                         payload: b"membership-six".to_vec(),
                         is_command: true,
                     },
@@ -2119,13 +2105,13 @@ fn append_entries_conflict_truncation_restores_surviving_membership_change() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 10,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 3, index: 5 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 10, index: 6 },
+                prev_log_id: Some(LogId { term: 3, index: 5 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 10, index: 6 },
                     payload: b"replacement-six".to_vec(),
                     is_command: true,
                 }],
@@ -2150,13 +2136,13 @@ fn append_entries_rejects_second_unapplied_membership_change() {
     let rejected = cluster
         .append_entries_with_membership_change_indexes_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 2,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 2, index: 1 },
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 2, index: 1 },
                     payload: b"second-membership-change".to_vec(),
                     is_command: true,
                 }],
@@ -2172,19 +2158,19 @@ fn append_entries_rejects_second_unapplied_membership_change() {
     let partial = cluster
         .append_entries_with_membership_change_indexes_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 2,
                 leader_id: 1,
                 prev_log_id: None,
                 entries: vec![
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 2, index: 1 },
+                    LogEntry {
+                        log_id: LogId { term: 2, index: 1 },
                         payload: b"normal-before-config".to_vec(),
                         is_command: true,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 2, index: 2 },
+                    LogEntry {
+                        log_id: LogId { term: 2, index: 2 },
                         payload: b"blocked-membership-change".to_vec(),
                         is_command: true,
                     },
@@ -2218,13 +2204,13 @@ fn append_entries_rejects_second_unapplied_membership_change() {
     let inflight_rejected = cluster
         .append_entries_with_membership_change_indexes_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 2,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 6 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 2, index: 7 },
+                prev_log_id: Some(LogId { term: 1, index: 6 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 2, index: 7 },
                     payload: b"second-config-while-inflight".to_vec(),
                     is_command: true,
                 }],
@@ -2243,13 +2229,13 @@ fn append_entries_rejects_second_unapplied_membership_change() {
     let accepted_after_safe_apply = cluster
         .append_entries_with_membership_change_indexes_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 2,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId { term: 1, index: 6 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 2, index: 7 },
+                prev_log_id: Some(LogId { term: 1, index: 6 }),
+                entries: vec![LogEntry {
+                    log_id: LogId { term: 2, index: 7 },
                     payload: b"second-config-after-safe-apply".to_vec(),
                     is_command: true,
                 }],
@@ -2267,12 +2253,12 @@ fn append_entries_rejects_second_unapplied_membership_change() {
 fn witness_preserves_membership_change_payload() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Witness),
         ],
     )
     .expect("cluster with witness");
@@ -2281,19 +2267,19 @@ fn witness_preserves_membership_change_payload() {
     let response = cluster
         .append_entries_with_membership_change_indexes_to(
             4,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
                 entries: vec![
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 1 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 1 },
                         payload: b"ordinary-meta".to_vec(),
                         is_command: false,
                     },
-                    RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 2 },
+                    LogEntry {
+                        log_id: LogId { term: 1, index: 2 },
                         payload: b"add-node-5".to_vec(),
                         is_command: false,
                     },
@@ -2325,13 +2311,13 @@ fn append_entries_does_not_mutate_log_while_snapshot_is_installing() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: before.term + 1,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId {
+                entries: vec![LogEntry {
+                    log_id: LogId {
                         term: before.term + 1,
                         index: before.last_log_index + 1,
                     },
@@ -2361,11 +2347,11 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     let observed_candidate = cluster
         .vote_to(
             1,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: true,
                 force: false,
             },
@@ -2374,17 +2360,17 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     assert!(!observed_candidate.vote_granted);
     assert_eq!(
         cluster.status(3).expect("observed candidate").role,
-        RustRaftRole::PreCandidate
+        StateRole::PreCandidate
     );
 
     let stale_pre_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 1,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: true,
                 force: false,
             },
@@ -2396,11 +2382,11 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     let stale_log_pre_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 0, index: 99 }),
+                last_log_id: Some(LogId { term: 0, index: 99 }),
                 pre_vote: true,
                 force: false,
             },
@@ -2413,11 +2399,11 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     let stale_log_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 1,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 0, index: 99 }),
+                last_log_id: Some(LogId { term: 0, index: 99 }),
                 pre_vote: false,
                 force: false,
             },
@@ -2429,11 +2415,11 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     let known_leader_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 1,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: false,
                 force: false,
             },
@@ -2446,11 +2432,11 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     let high_term_stale_log_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 0, index: 99 }),
+                last_log_id: Some(LogId { term: 0, index: 99 }),
                 pre_vote: false,
                 force: true,
             },
@@ -2466,11 +2452,11 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     let in_lease_pre_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 3,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: true,
                 force: false,
             },
@@ -2484,11 +2470,11 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     let in_lease_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 4,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: false,
                 force: false,
             },
@@ -2499,24 +2485,24 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     assert_eq!(in_lease_vote.term, 2);
     assert_eq!(cluster.status(2).expect("node 2 status").term, 2);
 
-    assert!(cluster.follower_lease_valid());
+    assert!(cluster.is_follower_lease_valid());
     let expired = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::TickFollowerLease {
+        .step(Message::Admin {
+            command: AdminCommand::TickFollowerLease {
                 elapsed_ms: cluster.config.leader_lease_ms,
             },
         })
         .expect("tick follower lease through admin step");
-    assert_eq!(expired, RustRaftStepResult::FollowerLeaseExpired(true));
-    assert!(!cluster.follower_lease_valid());
+    assert_eq!(expired, StepResult::FollowerLeaseExpired(true));
+    assert!(!cluster.is_follower_lease_valid());
     let expired_lease_pre_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 3,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: true,
                 force: false,
             },
@@ -2525,49 +2511,49 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     assert!(expired_lease_pre_vote.vote_granted);
 
     let received = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::ReceiveFollowerLease { epoch: 10 },
+        .step(Message::Admin {
+            command: AdminCommand::ReceiveFollowerLease { epoch: 10 },
         })
         .expect("receive follower lease through admin step");
-    assert_eq!(received, RustRaftStepResult::FollowerLeaseReceived(true));
+    assert_eq!(received, StepResult::FollowerLeaseReceived(true));
     let stale = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::ReceiveFollowerLease { epoch: 9 },
+        .step(Message::Admin {
+            command: AdminCommand::ReceiveFollowerLease { epoch: 9 },
         })
         .expect("reject stale follower lease through admin step");
-    assert_eq!(stale, RustRaftStepResult::FollowerLeaseReceived(false));
+    assert_eq!(stale, StepResult::FollowerLeaseReceived(false));
     let expired = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::TickFollowerLease {
+        .step(Message::Admin {
+            command: AdminCommand::TickFollowerLease {
                 elapsed_ms: cluster.config.leader_lease_ms,
             },
         })
         .expect("expire follower lease through admin step");
-    assert_eq!(expired, RustRaftStepResult::FollowerLeaseExpired(true));
-    assert!(!cluster.follower_lease_valid());
+    assert_eq!(expired, StepResult::FollowerLeaseExpired(true));
+    assert!(!cluster.is_follower_lease_valid());
     let stale = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::ReceiveFollowerLease { epoch: 9 },
+        .step(Message::Admin {
+            command: AdminCommand::ReceiveFollowerLease { epoch: 9 },
         })
         .expect("reject stale expired follower lease through admin step");
-    assert_eq!(stale, RustRaftStepResult::FollowerLeaseReceived(false));
+    assert_eq!(stale, StepResult::FollowerLeaseReceived(false));
     let received = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::ReceiveFollowerLease { epoch: 11 },
+        .step(Message::Admin {
+            command: AdminCommand::ReceiveFollowerLease { epoch: 11 },
         })
         .expect("receive newer follower lease through admin step");
-    assert_eq!(received, RustRaftStepResult::FollowerLeaseReceived(true));
-    assert!(cluster.follower_lease_valid());
+    assert_eq!(received, StepResult::FollowerLeaseReceived(true));
+    assert!(cluster.is_follower_lease_valid());
 
     cluster.set_follower_lease_valid(true);
     let forced_pre_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 3,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: true,
                 force: true,
             },
@@ -2578,11 +2564,11 @@ fn vote_and_pre_vote_require_higher_term_and_fresh_log() {
     let higher_term_forced_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 3,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: false,
                 force: true,
             },
@@ -2606,11 +2592,11 @@ fn vote_requests_do_not_require_local_live_quorum() {
     let pre_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                last_log_id: Some(LogId { term: 1, index: 1 }),
                 pre_vote: true,
                 force: false,
             },
@@ -2622,11 +2608,11 @@ fn vote_requests_do_not_require_local_live_quorum() {
     let vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                last_log_id: Some(LogId { term: 1, index: 1 }),
                 pre_vote: false,
                 force: false,
             },
@@ -2640,7 +2626,7 @@ fn vote_requests_do_not_require_local_live_quorum() {
 
 #[test]
 fn startup_follower_lease_blocks_pre_vote_until_carried_duration_expires() {
-    let config = RaftConfig {
+    let config = Config {
         last_follower_lease_ms: 25,
         ..Default::default()
     };
@@ -2648,9 +2634,9 @@ fn startup_follower_lease_blocks_pre_vote_until_carried_duration_expires() {
         7,
         config,
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("valid cluster");
@@ -2658,7 +2644,7 @@ fn startup_follower_lease_blocks_pre_vote_until_carried_duration_expires() {
     let blocked = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 1,
                 candidate_id: 3,
@@ -2672,14 +2658,14 @@ fn startup_follower_lease_blocks_pre_vote_until_carried_duration_expires() {
     assert_eq!(blocked.reason, "in_lease");
 
     assert!(!cluster.tick_follower_lease(24));
-    assert!(cluster.follower_lease_valid());
+    assert!(cluster.is_follower_lease_valid());
     assert!(cluster.tick_follower_lease(1));
-    assert!(!cluster.follower_lease_valid());
+    assert!(!cluster.is_follower_lease_valid());
 
     let granted = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 1,
                 candidate_id: 3,
@@ -2699,20 +2685,20 @@ fn learners_do_not_vote_but_witnesses_do() {
     cluster.propose(b"base".to_vec()).expect("base append");
 
     cluster
-        .add_learner(peer(4, RustRaftReplicaRole::Learner))
+        .add_learner(peer(4, ReplicaRole::Learner))
         .expect("add learner");
     cluster
-        .add_witness(peer(5, RustRaftReplicaRole::Witness))
+        .add_witness(peer(5, ReplicaRole::Witness))
         .expect("add witness");
 
     let learner_pre_vote = cluster
         .vote_to(
             4,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: true,
                 force: true,
             },
@@ -2724,11 +2710,11 @@ fn learners_do_not_vote_but_witnesses_do() {
     let learner_vote = cluster
         .vote_to(
             4,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: false,
                 force: true,
             },
@@ -2740,11 +2726,11 @@ fn learners_do_not_vote_but_witnesses_do() {
     let witness_pre_vote = cluster
         .vote_to(
             5,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: true,
                 force: true,
             },
@@ -2766,11 +2752,11 @@ fn removed_peer_cannot_collect_votes_or_step_down_leader() {
     let removed_pre_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: leader_term + 1,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                last_log_id: Some(LogId { term: 1, index: 1 }),
                 pre_vote: true,
                 force: true,
             },
@@ -2782,11 +2768,11 @@ fn removed_peer_cannot_collect_votes_or_step_down_leader() {
     let removed_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: leader_term + 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                last_log_id: Some(LogId { term: 1, index: 1 }),
                 pre_vote: false,
                 force: true,
             },
@@ -2800,7 +2786,7 @@ fn removed_peer_cannot_collect_votes_or_step_down_leader() {
     let removed_append = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: leader_term + 3,
                 leader_id: 3,
@@ -2822,10 +2808,10 @@ fn removed_peer_cannot_collect_votes_or_step_down_leader() {
                 group_id: 7,
                 term: leader_term + 4,
                 leader_id: 3,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "removed-leader-snapshot".to_string(),
-                        last_log_id: RustRaftLogId {
+                        last_log_id: LogId {
                             term: leader_term + 4,
                             index: 8,
                         },
@@ -2849,12 +2835,12 @@ fn removed_peer_cannot_collect_votes_or_step_down_leader() {
 fn removing_peer_drops_stale_vote_responses() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Voter),
         ],
     )
     .expect("four voter cluster");
@@ -2864,7 +2850,7 @@ fn removing_peer_drops_stale_vote_responses() {
         .handle_vote_response_from(
             2,
             1,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: true,
                 reason: "pre_vote_granted".to_string(),
@@ -2876,7 +2862,7 @@ fn removing_peer_drops_stale_vote_responses() {
         .handle_vote_response_from(
             2,
             3,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: true,
                 reason: "pre_vote_granted".to_string(),
@@ -2886,14 +2872,14 @@ fn removing_peer_drops_stale_vote_responses() {
         .expect("pre-vote quorum starts real vote");
     assert_eq!(
         cluster.status(2).expect("candidate status").role,
-        RustRaftRole::Candidate
+        StateRole::Candidate
     );
 
     cluster
         .handle_vote_response_from(
             2,
             4,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: false,
                 reason: "removed_peer_rejected".to_string(),
@@ -2907,7 +2893,7 @@ fn removing_peer_drops_stale_vote_responses() {
         .handle_vote_response_from(
             2,
             3,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: false,
                 reason: "one_remaining_voter_rejected".to_string(),
@@ -2917,7 +2903,7 @@ fn removing_peer_drops_stale_vote_responses() {
         .expect("single retained rejection does not include removed peer");
     assert_eq!(
         cluster.status(2).expect("candidate status").role,
-        RustRaftRole::Candidate
+        StateRole::Candidate
     );
 }
 
@@ -2934,7 +2920,7 @@ fn stopped_leader_cannot_drive_append_or_snapshot() {
     let stopped_append = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: leader_term + 1,
                 leader_id: 1,
@@ -2956,10 +2942,10 @@ fn stopped_leader_cannot_drive_append_or_snapshot() {
                 group_id: 7,
                 term: leader_term + 2,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "stopped-leader-snapshot".to_string(),
-                        last_log_id: RustRaftLogId {
+                        last_log_id: LogId {
                             term: leader_term + 2,
                             index: 8,
                         },
@@ -2990,11 +2976,11 @@ fn remove_and_readd_peer_drops_partial_snapshot_install_state() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
-        .add_peer(peer(4, RustRaftReplicaRole::Voter))
+        .add_peer(peer(4, ReplicaRole::Voter))
         .expect("add peer 4");
-    let meta = RustRaftSnapshotMeta {
+    let meta = SnapshotMetadata {
         snapshot_id: "snap-readd-4".to_string(),
-        last_log_id: RustRaftLogId { term: 1, index: 5 },
+        last_log_id: LogId { term: 1, index: 5 },
         membership: vec![1, 2, 3, 4],
         members: Vec::new(),
     };
@@ -3006,7 +2992,7 @@ fn remove_and_readd_peer_drops_partial_snapshot_install_state() {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
+                chunk: SnapshotChunk {
                     meta: meta.clone(),
                     offset: 0,
                     data: b"part-a".to_vec(),
@@ -3019,7 +3005,7 @@ fn remove_and_readd_peer_drops_partial_snapshot_install_state() {
 
     cluster.remove_peer(4).expect("remove peer 4");
     cluster
-        .add_peer(peer(4, RustRaftReplicaRole::Voter))
+        .add_peer(peer(4, ReplicaRole::Voter))
         .expect("re-add peer 4");
 
     let stale_tail = cluster
@@ -3029,7 +3015,7 @@ fn remove_and_readd_peer_drops_partial_snapshot_install_state() {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
+                chunk: SnapshotChunk {
                     meta: meta.clone(),
                     offset: 6,
                     data: b"part-b".to_vec(),
@@ -3047,7 +3033,7 @@ fn remove_and_readd_peer_drops_partial_snapshot_install_state() {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
+                chunk: SnapshotChunk {
                     meta,
                     offset: 0,
                     data: b"fresh-state".to_vec(),
@@ -3065,7 +3051,7 @@ fn remove_and_readd_peer_drops_pending_snapshot_install_state() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
-        .add_peer(peer(4, RustRaftReplicaRole::Voter))
+        .add_peer(peer(4, ReplicaRole::Voter))
         .expect("add peer 4");
     cluster.propose(b"first".to_vec()).expect("first propose");
     cluster.propose(b"second".to_vec()).expect("second propose");
@@ -3084,10 +3070,10 @@ fn remove_and_readd_peer_drops_pending_snapshot_install_state() {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "pending-before-readd-4".to_string(),
-                        last_log_id: RustRaftLogId { term: 1, index: 3 },
+                        last_log_id: LogId { term: 1, index: 3 },
                         membership: vec![1, 2, 3, 4],
                         members: Vec::new(),
                     },
@@ -3109,7 +3095,7 @@ fn remove_and_readd_peer_drops_pending_snapshot_install_state() {
 
     cluster.remove_peer(4).expect("remove peer 4");
     cluster
-        .add_peer(peer(4, RustRaftReplicaRole::Voter))
+        .add_peer(peer(4, ReplicaRole::Voter))
         .expect("re-add peer 4");
     let readded = cluster.status(4).expect("re-added status");
     assert_eq!(readded.last_snapshot_index, 0);
@@ -3140,16 +3126,16 @@ fn remove_and_readd_peer_drops_reordered_append_state() {
     let queued = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: leader_term,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId {
+                prev_log_id: Some(LogId {
                     term: leader_term,
                     index: 3,
                 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId {
+                entries: vec![LogEntry {
+                    log_id: LogId {
                         term: leader_term,
                         index: 4,
                     },
@@ -3165,22 +3151,22 @@ fn remove_and_readd_peer_drops_reordered_append_state() {
 
     cluster.remove_peer(2).expect("remove peer 2");
     cluster
-        .add_peer(peer(2, RustRaftReplicaRole::Voter))
+        .add_peer(peer(2, ReplicaRole::Voter))
         .expect("re-add peer 2");
 
     let gap_fill = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: leader_term,
                 leader_id: 1,
-                prev_log_id: Some(RustRaftLogId {
+                prev_log_id: Some(LogId {
                     term: leader_term,
                     index: 1,
                 }),
-                entries: vec![RustRaftLogEntry {
-                    log_id: RustRaftLogId {
+                entries: vec![LogEntry {
+                    log_id: LogId {
                         term: leader_term,
                         index: 2,
                     },
@@ -3202,15 +3188,15 @@ fn remove_and_readd_peer_drops_reordered_append_state() {
 fn snapshot_install_in_progress_ignores_new_snapshot() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
-    let first_meta = RustRaftSnapshotMeta {
+    let first_meta = SnapshotMetadata {
         snapshot_id: "snap-first".to_string(),
-        last_log_id: RustRaftLogId { term: 1, index: 8 },
+        last_log_id: LogId { term: 1, index: 8 },
         membership: vec![1, 2, 3],
         members: Vec::new(),
     };
-    let second_meta = RustRaftSnapshotMeta {
+    let second_meta = SnapshotMetadata {
         snapshot_id: "snap-second".to_string(),
-        last_log_id: RustRaftLogId { term: 1, index: 9 },
+        last_log_id: LogId { term: 1, index: 9 },
         membership: vec![1, 2, 3],
         members: Vec::new(),
     };
@@ -3222,7 +3208,7 @@ fn snapshot_install_in_progress_ignores_new_snapshot() {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
+                chunk: SnapshotChunk {
                     meta: first_meta.clone(),
                     offset: 0,
                     data: b"first-".to_vec(),
@@ -3240,7 +3226,7 @@ fn snapshot_install_in_progress_ignores_new_snapshot() {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
+                chunk: SnapshotChunk {
                     meta: second_meta,
                     offset: 0,
                     data: b"second".to_vec(),
@@ -3260,7 +3246,7 @@ fn snapshot_install_in_progress_ignores_new_snapshot() {
                 group_id: 7,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
+                chunk: SnapshotChunk {
                     meta: first_meta,
                     offset: 6,
                     data: b"done".to_vec(),
@@ -3283,7 +3269,7 @@ fn high_term_vote_responses_step_down() {
     cluster
         .handle_vote_response(
             2,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: leader_term + 1,
                 vote_granted: true,
                 reason: "pre_vote_granted".to_string(),
@@ -3297,7 +3283,7 @@ fn high_term_vote_responses_step_down() {
     cluster
         .handle_vote_response(
             2,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: leader_term + 2,
                 vote_granted: false,
                 reason: "pre_vote_rejected".to_string(),
@@ -3311,7 +3297,7 @@ fn high_term_vote_responses_step_down() {
     );
     assert_eq!(
         cluster.status(2).expect("node 2 status").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
     assert_eq!(cluster.leader_id(), None);
 
@@ -3320,7 +3306,7 @@ fn high_term_vote_responses_step_down() {
     cluster
         .handle_vote_response(
             2,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: leader_term + 1,
                 vote_granted: true,
                 reason: "vote_granted".to_string(),
@@ -3334,7 +3320,7 @@ fn high_term_vote_responses_step_down() {
     );
     assert_eq!(
         cluster.status(2).expect("node 2 status").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
     assert_eq!(cluster.leader_id(), None);
 }
@@ -3347,11 +3333,11 @@ fn vote_response_quorum_promotes_candidate_without_extra_term() {
     let self_vote = cluster
         .vote_to(
             2,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 2,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                last_log_id: Some(LogId { term: 1, index: 1 }),
                 pre_vote: false,
                 force: true,
             },
@@ -3365,7 +3351,7 @@ fn vote_response_quorum_promotes_candidate_without_extra_term() {
         .handle_vote_response_from(
             2,
             1,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: true,
                 reason: "vote_granted".to_string(),
@@ -3378,7 +3364,7 @@ fn vote_response_quorum_promotes_candidate_without_extra_term() {
     assert_eq!(cluster.status(2).expect("leader status").term, 2);
     assert_eq!(
         cluster.status(2).expect("leader status").role,
-        RustRaftRole::Leader
+        StateRole::Leader
     );
 }
 
@@ -3391,7 +3377,7 @@ fn pre_vote_quorum_starts_real_vote_before_leader() {
         .handle_vote_response_from(
             2,
             1,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: true,
                 reason: "pre_vote_granted".to_string(),
@@ -3404,14 +3390,14 @@ fn pre_vote_quorum_starts_real_vote_before_leader() {
     assert_eq!(cluster.status(2).expect("candidate status").term, 2);
     assert_eq!(
         cluster.status(2).expect("candidate status").role,
-        RustRaftRole::Candidate
+        StateRole::Candidate
     );
 
     cluster
         .handle_vote_response_from(
             2,
             1,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: true,
                 reason: "vote_granted".to_string(),
@@ -3423,7 +3409,7 @@ fn pre_vote_quorum_starts_real_vote_before_leader() {
     assert_eq!(cluster.leader_id(), Some(2));
     assert_eq!(
         cluster.status(2).expect("leader status").role,
-        RustRaftRole::Leader
+        StateRole::Leader
     );
 }
 
@@ -3431,13 +3417,13 @@ fn pre_vote_quorum_starts_real_vote_before_leader() {
 fn ignore_witness_drops_stale_witness_vote_responses() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Voter),
-            peer(5, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Voter),
+            peer(5, ReplicaRole::Witness),
         ],
     )
     .expect("cluster with witness");
@@ -3447,7 +3433,7 @@ fn ignore_witness_drops_stale_witness_vote_responses() {
         .handle_vote_response_from(
             2,
             1,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: true,
                 reason: "pre_vote_granted".to_string(),
@@ -3459,7 +3445,7 @@ fn ignore_witness_drops_stale_witness_vote_responses() {
         .handle_vote_response_from(
             2,
             3,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: true,
                 reason: "pre_vote_granted".to_string(),
@@ -3469,14 +3455,14 @@ fn ignore_witness_drops_stale_witness_vote_responses() {
         .expect("pre-vote quorum starts real vote");
     assert_eq!(
         cluster.status(2).expect("candidate status").role,
-        RustRaftRole::Candidate
+        StateRole::Candidate
     );
 
     cluster
         .handle_vote_response_from(
             2,
             5,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: false,
                 reason: "witness_rejected".to_string(),
@@ -3490,7 +3476,7 @@ fn ignore_witness_drops_stale_witness_vote_responses() {
         .handle_vote_response_from(
             2,
             4,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: false,
                 reason: "voter_rejected".to_string(),
@@ -3501,7 +3487,7 @@ fn ignore_witness_drops_stale_witness_vote_responses() {
 
     assert_eq!(
         cluster.status(2).expect("candidate status").role,
-        RustRaftRole::Candidate
+        StateRole::Candidate
     );
     assert_eq!(cluster.leader_id(), None);
 }
@@ -3510,11 +3496,11 @@ fn ignore_witness_drops_stale_witness_vote_responses() {
 fn ignore_witness_keeps_matrixraft_rejection_threshold() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Witness),
         ],
     )
     .expect("cluster with witness");
@@ -3525,7 +3511,7 @@ fn ignore_witness_keeps_matrixraft_rejection_threshold() {
         .handle_vote_response_from(
             2,
             1,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 1,
                 vote_granted: true,
                 reason: "pre_vote_granted".to_string(),
@@ -3535,14 +3521,14 @@ fn ignore_witness_keeps_matrixraft_rejection_threshold() {
         .expect("pre-vote quorum starts real vote");
     assert_eq!(
         cluster.status(2).expect("candidate status").role,
-        RustRaftRole::Candidate
+        StateRole::Candidate
     );
 
     cluster
         .handle_vote_response_from(
             2,
             1,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: 2,
                 vote_granted: false,
                 reason: "voter_rejected".to_string(),
@@ -3553,7 +3539,7 @@ fn ignore_witness_keeps_matrixraft_rejection_threshold() {
 
     assert_eq!(
         cluster.status(2).expect("candidate status").role,
-        RustRaftRole::Candidate
+        StateRole::Candidate
     );
     assert_eq!(cluster.leader_id(), None);
 }
@@ -3569,14 +3555,14 @@ fn high_term_append_entries_responses_step_down() {
         .handle_append_entries_response(
             2,
             1,
-            RustRaftAppendEntriesResponse {
+            AppendEntriesResponse {
                 term: leader_term,
                 success: true,
                 match_index: 1,
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
@@ -3589,14 +3575,14 @@ fn high_term_append_entries_responses_step_down() {
         .handle_append_entries_response(
             2,
             1,
-            RustRaftAppendEntriesResponse {
+            AppendEntriesResponse {
                 term: leader_term + 1,
                 success: false,
                 match_index: 1,
                 rejection_hint: Some(1),
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
@@ -3610,7 +3596,7 @@ fn high_term_append_entries_responses_step_down() {
     );
     assert_eq!(
         cluster.status(2).expect("node 2 status").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
 }
 
@@ -3618,11 +3604,11 @@ fn high_term_append_entries_responses_step_down() {
 fn heartbeat_append_response_carries_snapshot_progress() {
     let mut cluster = RaftCluster::new(
         7,
-        RustRaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("valid cluster");
@@ -3636,7 +3622,7 @@ fn heartbeat_append_response_carries_snapshot_progress() {
     let receiving = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term: leader_term,
                 leader_id: 1,
@@ -3647,7 +3633,7 @@ fn heartbeat_append_response_carries_snapshot_progress() {
             },
         )
         .expect("heartbeat response");
-    assert_eq!(receiving.snapshot_state, RustRaftSnapshotState::Receiving);
+    assert_eq!(receiving.snapshot_state, SnapshotState::Receiving);
     cluster
         .rollback_snapshot_install_from(2)
         .expect("clear follower install state");
@@ -3659,14 +3645,14 @@ fn heartbeat_append_response_carries_snapshot_progress() {
         .handle_append_entries_response(
             1,
             2,
-            RustRaftAppendEntriesResponse {
+            AppendEntriesResponse {
                 term: leader_term,
                 success: true,
                 match_index: 1,
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::Receiving,
+                snapshot_state: SnapshotState::Receiving,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
@@ -3684,14 +3670,14 @@ fn heartbeat_append_response_carries_snapshot_progress() {
             .handle_append_entries_response(
                 1,
                 2,
-                RustRaftAppendEntriesResponse {
+                AppendEntriesResponse {
                     term: leader_term,
                     success: true,
                     match_index: 1,
                     rejection_hint: None,
                     rejected_index: None,
                     require_snapshot: None,
-                    snapshot_state: RustRaftSnapshotState::None,
+                    snapshot_state: SnapshotState::None,
                     lease_confirmation_epoch: 0,
                     lease_duration_ms: 0,
                 },
@@ -3726,14 +3712,14 @@ fn leader_transition_resets_peer_pipelines() {
     assert!(!former_snapshot_target.snapshot_sending);
     assert_eq!(
         former_snapshot_target.progress_state,
-        RustRaftPeerProgressState::Replicate
+        ProgressState::Replicate
     );
     assert_eq!(former_snapshot_target.match_index, last_before_campaign);
     assert_eq!(former_snapshot_target.next_index, last_before_campaign + 1);
     assert_eq!(former_snapshot_target.inflight_entries, 0);
 
     let follower = cluster.peer_pipeline_status(1).expect("node 1 pipeline");
-    assert_eq!(follower.progress_state, RustRaftPeerProgressState::Probe);
+    assert_eq!(follower.progress_state, ProgressState::Probe);
     assert_eq!(follower.match_index, 0);
     assert_eq!(follower.next_index, last_before_campaign + 1);
     assert_eq!(follower.inflight_entries, 0);
@@ -3754,10 +3740,10 @@ fn high_term_snapshot_request_updates_leader() {
                 group_id: 7,
                 term: leader_term + 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "high-term-snapshot-leader".to_string(),
-                        last_log_id: RustRaftLogId {
+                        last_log_id: LogId {
                             term: leader_term + 1,
                             index: 2,
                         },
@@ -3777,11 +3763,11 @@ fn high_term_snapshot_request_updates_leader() {
     assert_eq!(cluster.leader_id(), Some(1));
     assert_eq!(
         cluster.status(2).expect("old leader status").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
     assert_eq!(
         cluster.status(1).expect("snapshot leader status").role,
-        RustRaftRole::Leader
+        StateRole::Leader
     );
 }
 
@@ -3799,10 +3785,10 @@ fn stale_term_snapshot_request_is_rejected() {
                 group_id: 7,
                 term: leader_term - 1,
                 leader_id: 2,
-                chunk: RustRaftSnapshotChunk {
-                    meta: RustRaftSnapshotMeta {
+                chunk: SnapshotChunk {
+                    meta: SnapshotMetadata {
                         snapshot_id: "stale-term-snapshot".to_string(),
-                        last_log_id: RustRaftLogId {
+                        last_log_id: LogId {
                             term: leader_term - 1,
                             index: 4,
                         },
@@ -3840,7 +3826,7 @@ fn high_term_snapshot_responses_step_down() {
         .handle_install_snapshot_response(
             2,
             1,
-            RustRaftInstallSnapshotResponse {
+            InstallSnapshotResponse {
                 term: leader_term,
                 accepted: true,
                 next_offset: 0,
@@ -3855,7 +3841,7 @@ fn high_term_snapshot_responses_step_down() {
         .handle_install_snapshot_response(
             2,
             1,
-            RustRaftInstallSnapshotResponse {
+            InstallSnapshotResponse {
                 term: leader_term + 1,
                 accepted: false,
                 next_offset: 0,
@@ -3872,7 +3858,7 @@ fn high_term_snapshot_responses_step_down() {
     );
     assert_eq!(
         cluster.status(2).expect("node 2 status").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
 }
 
@@ -3890,7 +3876,7 @@ fn rejected_snapshot_response_triggers_fresh_snapshot() {
         .handle_install_snapshot_response(
             1,
             2,
-            RustRaftInstallSnapshotResponse {
+            InstallSnapshotResponse {
                 term: leader_term,
                 accepted: false,
                 next_offset: 0,
@@ -3943,7 +3929,7 @@ fn same_term_snapshot_response_finishes_send_and_resumes_catchup() {
         .handle_install_snapshot_response(
             1,
             2,
-            RustRaftInstallSnapshotResponse {
+            InstallSnapshotResponse {
                 term: leader_term,
                 accepted: true,
                 next_offset: 0,
@@ -3976,7 +3962,7 @@ fn stopped_peer_responses_do_not_step_down_leader() {
         .handle_vote_response_from(
             leader,
             2,
-            RustRaftVoteResponse {
+            VoteResponse {
                 term: leader_term + 1,
                 vote_granted: false,
                 reason: "stopped_peer".to_string(),
@@ -3994,14 +3980,14 @@ fn stopped_peer_responses_do_not_step_down_leader() {
         .handle_append_entries_response(
             leader,
             2,
-            RustRaftAppendEntriesResponse {
+            AppendEntriesResponse {
                 term: leader_term + 2,
                 success: false,
                 match_index: 0,
                 rejection_hint: Some(0),
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
@@ -4017,7 +4003,7 @@ fn stopped_peer_responses_do_not_step_down_leader() {
         .handle_install_snapshot_response(
             leader,
             2,
-            RustRaftInstallSnapshotResponse {
+            InstallSnapshotResponse {
                 term: leader_term + 3,
                 accepted: false,
                 next_offset: 0,
@@ -4039,7 +4025,7 @@ fn read_index_and_lease_read_follow_leader_lease_and_apply_floor() {
     cluster.start().expect("cluster starts");
 
     let initial_read = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 0,
@@ -4055,7 +4041,7 @@ fn read_index_and_lease_read_follow_leader_lease_and_apply_floor() {
         .mark_apply_task_inflight(1, 2)
         .expect("leader apply is inflight");
     let inflight_read = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 2,
@@ -4069,7 +4055,7 @@ fn read_index_and_lease_read_follow_leader_lease_and_apply_floor() {
         .expect("leader apply completes");
 
     let lease = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 2,
@@ -4081,7 +4067,7 @@ fn read_index_and_lease_read_follow_leader_lease_and_apply_floor() {
 
     cluster.set_leader_lease_valid(false);
     let read_index = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 2,
@@ -4104,7 +4090,7 @@ fn read_index_and_lease_read_follow_leader_lease_and_apply_floor() {
     assert!(cluster.lease_read_eligible(1, 1).expect("lease eligible"));
 
     let unsafe_read = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 3,
@@ -4131,7 +4117,7 @@ fn append_entries_piggybacks_lease_epoch() {
     let response = cluster
         .append_entries_to(
             2,
-            RustRaftAppendEntriesRequest {
+            AppendEntriesRequest {
                 group_id: 7,
                 term,
                 leader_id: 1,
@@ -4164,33 +4150,33 @@ fn leader_lease_confirmation_duration_bounds_quorum() {
     cluster.set_leader_lease_valid(false);
 
     let confirmed = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::ReceiveLeaderLeaseConfirmation {
+        .step(Message::Admin {
+            command: AdminCommand::ReceiveLeaderLeaseConfirmation {
                 node_id: 2,
                 confirmation_epoch: 90,
                 duration_ms: Some(5),
             },
         })
         .expect("leader lease confirmation through admin step");
-    assert_eq!(confirmed, RustRaftStepResult::LeaderLeaseConfirmed(true));
+    assert_eq!(confirmed, StepResult::LeaderLeaseConfirmed(true));
     assert!(cluster
         .lease_read_eligible(1, 1)
         .expect("short confirmation restores quorum lease"));
     let still_valid = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::TickLeaderLease { elapsed_ms: 4 },
+        .step(Message::Admin {
+            command: AdminCommand::TickLeaderLease { elapsed_ms: 4 },
         })
         .expect("tick leader lease through admin step");
-    assert_eq!(still_valid, RustRaftStepResult::LeaderLeaseExpired(false));
+    assert_eq!(still_valid, StepResult::LeaderLeaseExpired(false));
     assert!(cluster
         .lease_read_eligible(1, 1)
         .expect("confirmation still in duration"));
     let expired = cluster
-        .step(RustRaftMessage::Admin {
-            command: RustRaftAdminCommand::TickLeaderLease { elapsed_ms: 1 },
+        .step(Message::Admin {
+            command: AdminCommand::TickLeaderLease { elapsed_ms: 1 },
         })
         .expect("expire leader lease through admin step");
-    assert_eq!(expired, RustRaftStepResult::LeaderLeaseExpired(true));
+    assert_eq!(expired, StepResult::LeaderLeaseExpired(true));
     assert!(!cluster
         .lease_read_eligible(1, 1)
         .expect("expired confirmation no longer counts"));
@@ -4237,14 +4223,14 @@ fn legacy_append_entries_response_renews_leader_lease() {
         .handle_append_entries_response(
             1,
             2,
-            RustRaftAppendEntriesResponse {
+            AppendEntriesResponse {
                 term,
                 success: true,
                 match_index: 0,
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
@@ -4260,12 +4246,12 @@ fn legacy_append_entries_response_renews_leader_lease() {
 fn ignore_witness_preserves_voter_backed_leader_lease() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Witness),
         ],
     )
     .expect("cluster with witness");
@@ -4310,14 +4296,14 @@ fn append_entries_response_marks_peer_healthy() {
         .handle_append_entries_response(
             1,
             2,
-            RustRaftAppendEntriesResponse {
+            AppendEntriesResponse {
                 term,
                 success: true,
                 match_index: 0,
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
@@ -4343,7 +4329,7 @@ fn added_caught_up_auto_promote_learner_becomes_voter() {
     cluster.campaign(1, true).expect("make node 1 leader");
     cluster.propose(b"entry".to_vec()).expect("propose");
 
-    let mut learner = peer(4, RustRaftReplicaRole::Learner);
+    let mut learner = peer(4, ReplicaRole::Learner);
     learner.auto_promote = true;
     cluster.add_learner(learner).expect("add learner");
 
@@ -4352,7 +4338,7 @@ fn added_caught_up_auto_promote_learner_becomes_voter() {
     assert!(!membership.learners.contains(&4));
     assert_eq!(
         cluster.status(4).expect("promoted learner status").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
 }
 
@@ -4360,13 +4346,13 @@ fn added_caught_up_auto_promote_learner_becomes_voter() {
 fn auto_promote_learner_waits_for_pending_membership_change() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
             {
-                let mut learner = peer(4, RustRaftReplicaRole::Learner);
+                let mut learner = peer(4, ReplicaRole::Learner);
                 learner.auto_promote = true;
                 learner
             },
@@ -4389,8 +4375,8 @@ fn auto_promote_learner_waits_for_pending_membership_change() {
         .auto_promote_learner(4)
         .expect("manual auto promote observes pending fence");
     assert!(!blocked.promoted);
-    assert_eq!(blocked.state_before, RaftLearnerAutoPromoteState::Promoting);
-    assert_eq!(blocked.state_after, RaftLearnerAutoPromoteState::Promoting);
+    assert_eq!(blocked.state_before, LearnerAutoPromoteState::Promoting);
+    assert_eq!(blocked.state_after, LearnerAutoPromoteState::Promoting);
     assert_eq!(blocked.reason, "membership_change_pending");
 
     cluster.mark_membership_change_applied(5);
@@ -4405,13 +4391,13 @@ fn auto_promote_learner_waits_for_pending_membership_change() {
 fn auto_promote_learner_uses_leader_noop_as_first_matched_log() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
             {
-                let mut learner = peer(4, RustRaftReplicaRole::Learner);
+                let mut learner = peer(4, ReplicaRole::Learner);
                 learner.auto_promote = true;
                 learner
             },
@@ -4427,11 +4413,11 @@ fn auto_promote_learner_uses_leader_noop_as_first_matched_log() {
     assert!(promoted_from_noop.promoted);
     assert_eq!(
         promoted_from_noop.state_before,
-        RaftLearnerAutoPromoteState::Stop
+        LearnerAutoPromoteState::Stop
     );
     assert_eq!(
         promoted_from_noop.state_after,
-        RaftLearnerAutoPromoteState::Promoted
+        LearnerAutoPromoteState::Promoted
     );
     assert_eq!(promoted_from_noop.reason, "learner_promoted");
     assert!(cluster.membership().voters.contains(&4));
@@ -4441,13 +4427,13 @@ fn auto_promote_learner_uses_leader_noop_as_first_matched_log() {
 fn auto_promote_learner_waits_one_check_turn_when_lagging() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
             {
-                let mut learner = peer(4, RustRaftReplicaRole::Learner);
+                let mut learner = peer(4, ReplicaRole::Learner);
                 learner.auto_promote = true;
                 learner
             },
@@ -4461,15 +4447,15 @@ fn auto_promote_learner_waits_one_check_turn_when_lagging() {
             4,
             RaftSnapshot {
                 group_id: 7,
-                meta: RustRaftSnapshotMeta {
+                meta: SnapshotMetadata {
                     snapshot_id: "learner-baseline".to_string(),
-                    last_log_id: RustRaftLogId { term: 1, index: 1 },
+                    last_log_id: LogId { term: 1, index: 1 },
                     membership: vec![1, 2, 3, 4],
                     members: Vec::new(),
                 },
                 payload: b"baseline".to_vec(),
             },
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 1,
                 commit_index: 1,
                 installed_snapshot_index: 1,
@@ -4489,8 +4475,8 @@ fn auto_promote_learner_waits_one_check_turn_when_lagging() {
         .auto_promote_learner(4)
         .expect("lagging learner starts check turn");
     assert!(!checking.promoted);
-    assert_eq!(checking.state_before, RaftLearnerAutoPromoteState::Stop);
-    assert_eq!(checking.state_after, RaftLearnerAutoPromoteState::Check);
+    assert_eq!(checking.state_before, LearnerAutoPromoteState::Stop);
+    assert_eq!(checking.state_after, LearnerAutoPromoteState::Check);
     assert_eq!(checking.reason, "learner_check_turn_started");
     assert!(cluster.membership().learners.contains(&4));
     assert_eq!(
@@ -4514,12 +4500,12 @@ fn read_index_waits_for_first_current_term_entry_after_leader_change() {
     cluster.campaign(2, true).expect("new leader");
     let leader_wal = cluster.wal_record_for(2).expect("leader WAL");
     let noop = leader_wal.entries.last().expect("leader no-op");
-    assert_eq!(noop.log_id, RustRaftLogId { term: 2, index: 3 });
+    assert_eq!(noop.log_id, LogId { term: 2, index: 3 });
     assert_eq!(noop.payload, b"no-op".to_vec());
     assert_eq!(cluster.status(2).expect("leader status").commit_index, 2);
 
     let read = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 2,
             min_commit_index: 1,
@@ -4538,7 +4524,7 @@ fn read_index_rejects_until_first_current_term_entry_is_applied() {
     cluster.start().expect("cluster starts");
 
     let read = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 0,
@@ -4560,7 +4546,7 @@ fn read_index_rejects_follower_requester_like_baseline_raft() {
         .expect("propose");
 
     let read = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 2,
             min_commit_index: 1,
@@ -4582,7 +4568,7 @@ fn read_path_report_tracks_quorum_lease_fence_and_bounded_stale() {
     cluster.set_leader_lease_valid(false);
     let stale_lease = cluster
         .read_path_report(
-            RustRaftReadIndexRequest {
+            ReadIndexRequest {
                 group_id: 7,
                 requester_id: 1,
                 min_commit_index: 1,
@@ -4604,7 +4590,7 @@ fn read_path_report_tracks_quorum_lease_fence_and_bounded_stale() {
 
     let fenced = cluster
         .read_path_report(
-            RustRaftReadIndexRequest {
+            ReadIndexRequest {
                 group_id: 7,
                 requester_id: 1,
                 min_commit_index: 3,
@@ -4630,7 +4616,7 @@ fn read_path_report_tracks_quorum_lease_fence_and_bounded_stale() {
 
     let bounded = cluster
         .read_path_report(
-            RustRaftReadIndexRequest {
+            ReadIndexRequest {
                 group_id: 7,
                 requester_id: 3,
                 min_commit_index: 1,
@@ -4646,7 +4632,7 @@ fn read_path_report_tracks_quorum_lease_fence_and_bounded_stale() {
 
     let too_stale = cluster
         .read_path_report(
-            RustRaftReadIndexRequest {
+            ReadIndexRequest {
                 group_id: 7,
                 requester_id: 3,
                 min_commit_index: 1,
@@ -4677,7 +4663,7 @@ fn lost_quorum_leader_steps_down_after_lease_expires() {
     assert_eq!(cluster.leader_id(), Some(leader));
 
     let lease = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: leader,
             min_commit_index: 0,
@@ -4690,7 +4676,7 @@ fn lost_quorum_leader_steps_down_after_lease_expires() {
 
     assert!(cluster.tick_leader_lease(cluster.config.leader_lease_ms));
     let no_quorum = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: leader,
             min_commit_index: 0,
@@ -4719,7 +4705,7 @@ fn liveness_timeout_preserves_confirmed_leader_lease_until_duration() {
     assert!(!cluster.step_down_leader_if_lost_quorum());
 
     let lease = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: leader,
             min_commit_index: 0,
@@ -4744,7 +4730,7 @@ fn read_index_rejects_when_live_quorum_is_lost() {
     cluster.set_leader_lease_valid(false);
 
     let read = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 1,
@@ -4760,11 +4746,11 @@ fn read_index_rejects_when_live_quorum_is_lost() {
 fn ignore_witness_recomputes_quorum_and_commit_index() {
     let mut dynamic_witness_cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Witness),
         ],
     )
     .expect("cluster with witness");
@@ -4804,12 +4790,12 @@ fn ignore_witness_recomputes_quorum_and_commit_index() {
 
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Witness),
         ],
     )
     .expect("cluster with witness");
@@ -4821,7 +4807,7 @@ fn ignore_witness_recomputes_quorum_and_commit_index() {
     let witness_status = cluster.status(4).expect("witness status");
     assert_eq!(witness_status.last_log_index, 2);
     assert_eq!(witness_status.applied_index, 2);
-    assert_eq!(witness_status.role, RustRaftRole::Follower);
+    assert_eq!(witness_status.role, StateRole::Follower);
     assert_eq!(
         cluster
             .wal_record_for(4)
@@ -4845,11 +4831,11 @@ fn ignore_witness_recomputes_quorum_and_commit_index() {
     let pre_vote = cluster
         .vote_to(
             1,
-            RustRaftVoteRequest {
+            VoteRequest {
                 group_id: 7,
                 term: 2,
                 candidate_id: 2,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 2 }),
+                last_log_id: Some(LogId { term: 1, index: 2 }),
                 pre_vote: true,
                 force: true,
             },
@@ -4870,12 +4856,12 @@ fn ignore_witness_recomputes_quorum_and_commit_index() {
 fn removing_down_voter_recomputes_commit() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Voter),
         ],
     )
     .expect("cluster with four voters");
@@ -4913,10 +4899,10 @@ fn removing_current_leader_transfers_to_closest_follower() {
     assert_eq!(cluster.leader_id(), Some(2));
     assert_eq!(
         cluster.status(2).expect("new leader status").role,
-        RustRaftRole::Leader
+        StateRole::Leader
     );
     let read = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 7,
             requester_id: 2,
             min_commit_index: 2,
@@ -4931,7 +4917,7 @@ fn removing_current_leader_transfers_to_closest_follower() {
 #[test]
 fn leader_transfer_requires_a_caught_up_voter() {
     let mut no_leader = three_node_cluster();
-    assert_eq!(no_leader.transfer_leader(2), Err(RustRaftError::NoLeader));
+    assert_eq!(no_leader.transfer_leader(2), Err(RaftError::NoLeader));
 
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
@@ -4952,7 +4938,7 @@ fn leader_transfer_requires_a_caught_up_voter() {
     assert_eq!(cluster.leader_id(), Some(2));
     assert_eq!(
         cluster.status(2).expect("node 2 status").role,
-        RustRaftRole::Leader
+        StateRole::Leader
     );
 
     let leader_after_valid_transfer = cluster.leader_id();
@@ -4961,7 +4947,7 @@ fn leader_transfer_requires_a_caught_up_voter() {
         .expect("unknown transferee is ignored like MatrixRaft");
     assert_eq!(cluster.leader_id(), leader_after_valid_transfer);
 
-    let mut learner = peer(4, RustRaftReplicaRole::Learner);
+    let mut learner = peer(4, ReplicaRole::Learner);
     learner.auto_promote = false;
     cluster.add_learner(learner).expect("add learner");
     cluster
@@ -4970,7 +4956,7 @@ fn leader_transfer_requires_a_caught_up_voter() {
     assert_eq!(cluster.leader_id(), leader_after_valid_transfer);
 
     cluster
-        .add_witness(peer(5, RustRaftReplicaRole::Witness))
+        .add_witness(peer(5, ReplicaRole::Witness))
         .expect("add witness");
     cluster
         .transfer_leader(5)
@@ -4983,7 +4969,7 @@ fn promote_rejects_witness() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");
     cluster
-        .add_witness(peer(5, RustRaftReplicaRole::Witness))
+        .add_witness(peer(5, ReplicaRole::Witness))
         .expect("add witness");
 
     let err = cluster
@@ -4993,7 +4979,7 @@ fn promote_rejects_witness() {
     assert!(cluster.membership().witnesses.contains(&5));
 
     let err = cluster
-        .apply_committed_membership_operation(RaftMembershipOperation::Promote(5))
+        .apply_committed_membership_operation(MembershipOperation::Promote(5))
         .expect_err("committed witness promotion is invalid");
     assert!(err.to_string().contains("node 5 is not a learner"));
     assert!(cluster.membership().witnesses.contains(&5));
@@ -5022,7 +5008,7 @@ fn step_down_transfers_to_closest_healthy_follower() {
     assert_eq!(cluster.leader_id(), None);
     assert_eq!(
         cluster.status(2).expect("resigned leader status").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
     assert!(!cluster
         .resign_leader("already_resigned")
@@ -5191,14 +5177,14 @@ fn append_response_completes_caught_up_leader_transfer() {
         .handle_append_entries_response(
             leader,
             2,
-            RustRaftAppendEntriesResponse {
+            AppendEntriesResponse {
                 term: cluster.status(leader).expect("leader status").term,
                 success: true,
                 match_index: leader_last_index,
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
@@ -5232,7 +5218,7 @@ fn heartbeat_skips_snapshot_transfer_peer() {
     );
     assert_eq!(
         cluster.status(3).expect("peer 3 status").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
 }
 
@@ -5306,14 +5292,14 @@ fn heartbeat_response_resumes_paused_peer() {
         .handle_append_entries_response(
             1,
             2,
-            RustRaftAppendEntriesResponse {
+            AppendEntriesResponse {
                 term,
                 success: false,
                 match_index: 0,
                 rejection_hint: Some(next_index),
                 rejected_index: Some(next_index),
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
@@ -5364,14 +5350,14 @@ fn append_rejection_retries_catchup_immediately() {
         .handle_append_entries_response(
             1,
             2,
-            RustRaftAppendEntriesResponse {
+            AppendEntriesResponse {
                 term,
                 success: false,
                 match_index: 0,
                 rejection_hint: Some(1),
                 rejected_index: Some(2),
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
@@ -5400,14 +5386,14 @@ fn required_snapshot_above_leader_snapshot_triggers_new_snapshot() {
     let rejected = cluster.handle_append_entries_response(
         leader,
         2,
-        RustRaftAppendEntriesResponse {
+        AppendEntriesResponse {
             term,
             success: false,
             match_index: 1,
             rejection_hint: Some(1),
             rejected_index: None,
             require_snapshot: Some(2),
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         },
@@ -5434,12 +5420,57 @@ fn required_snapshot_above_leader_snapshot_triggers_new_snapshot() {
 #[test]
 fn raft_cluster_implements_consensus_trait_surface() {
     let mut cluster = three_node_cluster();
-    RustRaftConsensus::start(&mut cluster).expect("trait start");
-    let log_id = RustRaftConsensus::propose(&mut cluster, b"x".to_vec(), Default::default())
-        .expect("trait propose");
+    Consensus::start(&mut cluster).expect("trait start");
+    let log_id =
+        Consensus::propose(&mut cluster, b"x".to_vec(), Default::default()).expect("trait propose");
     assert_eq!(log_id.index, 2);
 
-    let read = RustRaftConsensus::read_index(&cluster, 1).expect("trait read index");
+    let read = Consensus::read_index(&cluster, 1).expect("trait read index");
     assert!(read.safe);
     assert_eq!(read.read_index, 2);
+}
+
+#[test]
+fn wal_record_for_coverage_copies_only_the_tail_the_wal_lacks() {
+    let mut cluster = three_node_cluster();
+    cluster.start().expect("start");
+    cluster.campaign(1, true).expect("campaign");
+    for index in 0..5 {
+        cluster
+            .propose(format!("entry-{index}").into_bytes())
+            .expect("propose");
+    }
+
+    let whole = cluster
+        .wal_record_for_coverage(1, None)
+        .expect("whole record");
+    assert!(!whole.entries_are_delta);
+    let entry_count = whole.entries.len();
+    let first = whole.entries.first().expect("a log").log_id.index;
+    let last = whole.entries.last().expect("a log").log_id.clone();
+
+    // Coverage that matches the log exactly: nothing left to carry.
+    let caught_up = cluster
+        .wal_record_for_coverage(1, Some((first, last.index, last.term)))
+        .expect("delta record");
+    assert!(caught_up.entries_are_delta);
+    assert!(caught_up.entries.is_empty());
+
+    // Two more proposals: the delta carries exactly those two, not the log.
+    cluster.propose(b"six".to_vec()).expect("propose");
+    cluster.propose(b"seven".to_vec()).expect("propose");
+    let delta = cluster
+        .wal_record_for_coverage(1, Some((first, last.index, last.term)))
+        .expect("delta record");
+    assert!(delta.entries_are_delta);
+    assert_eq!(delta.entries.len(), 2);
+    assert_eq!(delta.entries[0].log_id.index, last.index + 1);
+
+    // A different term at the overlap means the log diverged, so the whole log
+    // has to be carried instead.
+    let diverged = cluster
+        .wal_record_for_coverage(1, Some((first, last.index, last.term + 1)))
+        .expect("whole record");
+    assert!(!diverged.entries_are_delta);
+    assert_eq!(diverged.entries.len(), entry_count + 2);
 }

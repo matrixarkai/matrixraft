@@ -10,28 +10,44 @@ for Raft semantic requirements, readiness evidence, and parity reports, while
 TemporalStore owns the storage runtime, data-node integration, and metaserver
 integration.
 
-The Cargo crate is named `matrixraft`. Existing exported Rust symbols keep their
-`RustRaft*` and `rustraft_*` names for source compatibility with current
-TemporalStore consumers.
+The Cargo crate is named `matrixraft`, and the naming follows from that:
+
+- **Types are unprefixed** — `Storage`, `Message`, `Config`, not
+  `MatrixRaftStorage`. The module path already says which crate they belong to,
+  which is the shape `raft-rs` uses for `raft::Storage`. Where a concept has an
+  established upstream name, that name is used: `StateRole`, `ProgressState`,
+  `SnapshotMetadata`.
+- **Free functions carry the crate name** — `matrixraft_parity_report`,
+  `matrixraft_production_readiness_report` — because they are imported into a
+  consumer's namespace, where a bare name would not say where it came from.
+- **The compatibility facade keeps its `MatrixRaft*` prefix**, because those
+  types mirror the reference implementation's API rather than this crate's, and
+  several are genuinely distinct from the like-named type here: `NodeId` is a
+  `u64` alias while `MatrixRaftNodeId` is a struct of a peer id and two
+  addresses.
+- **Emitted strings are not identifiers.** Prometheus metric names, alert rule
+  names and evidence keys keep their `rustraft_*` / `RustRaft*` spelling. They
+  are a published interface that dashboards and alert rules are built from, so
+  renaming them is an operational change rather than a tidy-up.
 
 License: Apache-2.0.
 
 ## What This Crate Provides
 
-- `RustRaftSemanticRequirement`
-- `RustRaftParityContract`
-- `RustRaftParityReport`
-- `RustRaftProductionReadinessInput`
-- `RustRaftProductionReadinessReport`
-- `RustRaftProcessRolloutReadinessReport`
-- `RustRaftProductionStatus`
-- `RustRaftStorage`
-- `RustRaftTransport`
+- `SemanticRequirement`
+- `ParityContract`
+- `ParityReport`
+- `ProductionReadinessInput`
+- `ProductionReadinessReport`
+- `ProcessRolloutReadinessReport`
+- `ProductionStatus`
+- `Storage`
+- `Transport`
 - `InMemoryRaftTransport`
-- `RustRaftTransportValidationReport`
-- `RustRaftStatusSnapshot`
-- `RustRaftMetricNames`
-- `RustRaftFaultScenario`
+- `TransportValidationReport`
+- `StatusSnapshot`
+- `MetricNames`
+- `FaultScenario`
 - `matrixraft_fault_harness_readiness_report`
 - `matrixraft_read_safety_decision`
 - `matrixraft_applied_index_fence_report`
@@ -39,8 +55,8 @@ License: Apache-2.0.
 - `matrixraft_bounded_stale_read_report`
 - `matrixraft_learner_promotion_decision`
 - `matrixraft_append_safety_decision`
-- `RustRaftReadinessEvidence`
-- `RustRaftReadinessSnapshot`
+- `ReadinessEvidence`
+- `ReadinessSnapshot`
 - `matrixraft_parity_contract`
 - `matrixraft_parity_report`
 - `matrixraft_production_readiness_report`
@@ -85,8 +101,8 @@ Prometheus text, runbook Prometheus text, Grafana dashboard JSON, alert-rule
 JSON, validation report, and validation Prometheus series in one envelope.
 
 The crate is OpenRaft-free and independent of OpenRaft types. TemporalStore
-converts its internal readiness evidence into `RustRaftReadinessSnapshot` or
-implements `RustRaftReadinessEvidence`, then asks this crate to build a
+converts its internal readiness evidence into `ReadinessSnapshot` or
+implements `ReadinessEvidence`, then asks this crate to build a
 conservative parity report.
 
 ## Production Readiness Status
@@ -255,7 +271,7 @@ The intended TemporalStore adapter shape is:
 
 ```rust
 struct TemporalRaftConsensusBackend {
-    node: rustraft::node::RaftNodeRuntime<TemporalStoreStateMachine, TemporalTransport>,
+    node: rustraft::node::NodeRuntime<TemporalStoreStateMachine, TemporalTransport>,
     codec: TemporalCommandCodec,
     engine: TemporalEngine,
 }

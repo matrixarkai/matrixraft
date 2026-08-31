@@ -14,12 +14,12 @@ pub const MATRIXRAFT_UNIQUE_ID_TIMESTAMP_MASK: u64 =
 pub const MATRIXRAFT_UNIQUE_ID_MEMBER_MASK: u64 = (1u64 << MATRIXRAFT_UNIQUE_ID_MEMBER_BITS) - 1;
 
 #[derive(Debug)]
-pub struct RustRaftUniqueIdGenerator {
+pub struct UniqueIdGenerator {
     member_prefix: u64,
     timestamp_and_counter: AtomicU64,
 }
 
-impl RustRaftUniqueIdGenerator {
+impl UniqueIdGenerator {
     pub fn new(member_id: u64, time_millis: u64) -> Self {
         let member_prefix = (member_id & MATRIXRAFT_UNIQUE_ID_MEMBER_MASK)
             << (MATRIXRAFT_UNIQUE_ID_TIMESTAMP_BITS + MATRIXRAFT_UNIQUE_ID_COUNTER_BITS);
@@ -31,7 +31,10 @@ impl RustRaftUniqueIdGenerator {
         }
     }
 
-    pub fn next(&self) -> u64 {
+    /// Allocates the next id. Named `next_id` rather than `next` because it is
+    /// not `Iterator::next` -- it takes `&self`, never yields `None`, and the
+    /// generator is not a sequence.
+    pub fn next_id(&self) -> u64 {
         let timestamp_and_counter = self.timestamp_and_counter.fetch_add(1, Ordering::SeqCst) + 1;
         self.member_prefix
             | low_bits(
@@ -40,8 +43,8 @@ impl RustRaftUniqueIdGenerator {
             )
     }
 
-    pub fn decode(id: u64) -> RustRaftUniqueIdParts {
-        RustRaftUniqueIdParts {
+    pub fn decode(id: u64) -> UniqueIdParts {
+        UniqueIdParts {
             member_id: (id
                 >> (MATRIXRAFT_UNIQUE_ID_TIMESTAMP_BITS + MATRIXRAFT_UNIQUE_ID_COUNTER_BITS))
                 & MATRIXRAFT_UNIQUE_ID_MEMBER_MASK,
@@ -53,7 +56,7 @@ impl RustRaftUniqueIdGenerator {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RustRaftUniqueIdParts {
+pub struct UniqueIdParts {
     pub member_id: u64,
     pub timestamp_millis: u64,
     pub counter: u64,

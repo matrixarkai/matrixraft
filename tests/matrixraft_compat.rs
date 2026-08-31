@@ -2,10 +2,9 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    MatrixRaftAttribute, MatrixRaftConfState, MatrixRaftNode, MatrixRaftNodeId,
-    MatrixRaftProposeOptions, MatrixRaftReadIndexMode, MatrixRaftReadIndexOptions, RaftConfig,
-    RaftError, RaftLearnerAutoPromoteState, RaftNodeRuntimeState, RustRaftNodeOptions,
-    RustRaftPeer, RustRaftReplicaRole,
+    Config, LearnerAutoPromoteState, MatrixRaftAttribute, MatrixRaftConfState, MatrixRaftNode,
+    MatrixRaftNodeId, MatrixRaftProposeOptions, MatrixRaftReadIndexMode,
+    MatrixRaftReadIndexOptions, NodeOptions, NodeRuntimeState, Peer, RaftError, ReplicaRole,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -22,8 +21,8 @@ fn temp_dir(name: &str) -> PathBuf {
     ))
 }
 
-fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 41_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 42_000 + node_id),
@@ -51,7 +50,7 @@ fn assert_invalid_request_contains(result: Result<(), RaftError>, expected: &str
 }
 
 fn assert_propose_invalid_request_contains(
-    result: Result<matrixraft::RustRaftLogId, RaftError>,
+    result: Result<matrixraft::LogId, RaftError>,
     expected: &str,
 ) {
     match result {
@@ -67,24 +66,24 @@ fn assert_propose_invalid_request_contains(
 fn matrixraft_facade_exposes_step_down_and_resign_admin_shape() {
     let wal_dir = temp_dir("step-down-wal");
     let snapshot_dir = temp_dir("step-down-snapshot");
-    let options = RustRaftNodeOptions {
+    let options = NodeOptions {
         group_id: 504,
         node_id: 1,
         raft_addr: "127.0.0.1:41001".to_string(),
         snapshot_addr: "127.0.0.1:42001".to_string(),
         wal_dir: wal_dir.display().to_string(),
         snapshot_dir: snapshot_dir.display().to_string(),
-        role: RustRaftReplicaRole::Voter,
-        config: RaftConfig {
+        role: ReplicaRole::Voter,
+        config: Config {
             heartbeat_interval_ms: 5,
             election_timeout_ms: 20,
             leader_lease_ms: 10,
             ..Default::default()
         },
         peers: vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     };
 
@@ -121,24 +120,24 @@ fn matrixraft_facade_exposes_step_down_and_resign_admin_shape() {
 fn matrixraft_facade_exposes_snapshot_peer_lifecycle_shape() {
     let wal_dir = temp_dir("snapshot-peer-wal");
     let snapshot_dir = temp_dir("snapshot-peer-snapshot");
-    let options = RustRaftNodeOptions {
+    let options = NodeOptions {
         group_id: 505,
         node_id: 1,
         raft_addr: "127.0.0.1:41001".to_string(),
         snapshot_addr: "127.0.0.1:42001".to_string(),
         wal_dir: wal_dir.display().to_string(),
         snapshot_dir: snapshot_dir.display().to_string(),
-        role: RustRaftReplicaRole::Voter,
-        config: RaftConfig {
+        role: ReplicaRole::Voter,
+        config: Config {
             heartbeat_interval_ms: 5,
             election_timeout_ms: 20,
             leader_lease_ms: 10,
             ..Default::default()
         },
         peers: vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     };
 
@@ -188,24 +187,31 @@ fn matrixraft_facade_exposes_snapshot_peer_lifecycle_shape() {
 fn matrixraft_facade_exposes_node_lifecycle_and_admin_shape() {
     let wal_dir = temp_dir("wal");
     let snapshot_dir = temp_dir("snapshot");
-    let options = RustRaftNodeOptions {
+    let options = NodeOptions {
         group_id: 501,
         node_id: 1,
         raft_addr: "127.0.0.1:41001".to_string(),
         snapshot_addr: "127.0.0.1:42001".to_string(),
         wal_dir: wal_dir.display().to_string(),
         snapshot_dir: snapshot_dir.display().to_string(),
-        role: RustRaftReplicaRole::Voter,
-        config: RaftConfig {
-            heartbeat_interval_ms: 5,
-            election_timeout_ms: 20,
-            leader_lease_ms: 10,
+        role: ReplicaRole::Voter,
+        // Intervals far longer than this test suppress the runtime's automatic
+        // tick, which fires from the timeout arm of its command loop. With a
+        // 5ms heartbeat, a tick could land between `set_leader_lease_valid(false)`
+        // and the status read that checks it took effect, renewing the lease and
+        // failing the assertion -- roughly once in eighty runs under 2x CPU
+        // load. This test drives every state change it asserts on, so it does
+        // not need the automatic tick at all.
+        config: Config {
+            heartbeat_interval_ms: 10_000,
+            election_timeout_ms: 20_000,
+            leader_lease_ms: 5_000,
             ..Default::default()
         },
         peers: vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     };
 
@@ -215,7 +221,7 @@ fn matrixraft_facade_exposes_node_lifecycle_and_admin_shape() {
     assert_eq!(node.start_index(), 9);
     assert_eq!(
         node.get_local_status().expect("local status").state,
-        RaftNodeRuntimeState::Running
+        NodeRuntimeState::Running
     );
 
     assert_eq!(node.leader().expect("leader"), Some(1));
@@ -266,6 +272,15 @@ fn matrixraft_facade_exposes_node_lifecycle_and_admin_shape() {
     assert!(explicit_quorum.safe);
     assert!(!explicit_quorum.lease_read);
 
+    // A node inside a follower lease refuses to campaign:
+    // `InvalidRequest("follower is still in leader lease")`. That lease used to
+    // be left to lapse on its own, so this line depended on how many automatic
+    // ticks the runtime had managed to fire -- and the automatic tick only
+    // fires when the command channel has been idle for a heartbeat interval, so
+    // a test issuing commands back to back starves it. Under 2x CPU load this
+    // failed about once in twenty runs. Expire the lease explicitly instead.
+    node.tick_follower_lease(1_000)
+        .expect("expire follower lease before campaign");
     node.campaign().expect("campaign");
     node.forced_campaign().expect("forced campaign");
     node.transfer_leader(2).expect("transfer leader");
@@ -301,10 +316,7 @@ fn matrixraft_facade_exposes_node_lifecycle_and_admin_shape() {
     assert_eq!(auto_promoted.learner_id, 6);
     assert!(auto_promoted.auto_promote);
     assert!(auto_promoted.promoted);
-    assert_eq!(
-        auto_promoted.state_after,
-        RaftLearnerAutoPromoteState::Promoted
-    );
+    assert_eq!(auto_promoted.state_after, LearnerAutoPromoteState::Promoted);
     assert_eq!(auto_promoted.reason, "learner_promoted");
     assert_eq!(
         node.get_membership_members()
@@ -349,7 +361,7 @@ fn matrixraft_facade_exposes_node_lifecycle_and_admin_shape() {
     assert!(node.recover_fsm_from_snapshot());
     assert_eq!(
         node.get_local_status().expect("restarted").state,
-        RaftNodeRuntimeState::Running
+        NodeRuntimeState::Running
     );
     node.stop().expect("stop");
     node.shutdown().expect("shutdown");
@@ -362,25 +374,25 @@ fn matrixraft_facade_exposes_node_lifecycle_and_admin_shape() {
 fn matrixraft_facade_enforces_witness_and_learner_semantic_edges() {
     let wal_dir = temp_dir("semantic-wal");
     let snapshot_dir = temp_dir("semantic-snapshot");
-    let options = RustRaftNodeOptions {
+    let options = NodeOptions {
         group_id: 502,
         node_id: 1,
         raft_addr: "127.0.0.1:41001".to_string(),
         snapshot_addr: "127.0.0.1:42001".to_string(),
         wal_dir: wal_dir.display().to_string(),
         snapshot_dir: snapshot_dir.display().to_string(),
-        role: RustRaftReplicaRole::Voter,
-        config: RaftConfig {
+        role: ReplicaRole::Voter,
+        config: Config {
             heartbeat_interval_ms: 5,
             election_timeout_ms: 20,
             leader_lease_ms: 10,
             ..Default::default()
         },
         peers: vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Learner),
-            peer(4, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Learner),
+            peer(4, ReplicaRole::Witness),
         ],
     };
 
@@ -415,25 +427,25 @@ fn matrixraft_facade_enforces_witness_and_learner_semantic_edges() {
 
     let witness_wal_dir = temp_dir("witness-wal");
     let witness_snapshot_dir = temp_dir("witness-snapshot");
-    let witness_options = RustRaftNodeOptions {
+    let witness_options = NodeOptions {
         group_id: 503,
         node_id: 4,
         raft_addr: "127.0.0.1:41004".to_string(),
         snapshot_addr: "127.0.0.1:42004".to_string(),
         wal_dir: witness_wal_dir.display().to_string(),
         snapshot_dir: witness_snapshot_dir.display().to_string(),
-        role: RustRaftReplicaRole::Witness,
-        config: RaftConfig {
+        role: ReplicaRole::Witness,
+        config: Config {
             heartbeat_interval_ms: 5,
             election_timeout_ms: 20,
             leader_lease_ms: 10,
             ..Default::default()
         },
         peers: vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
-            peer(4, RustRaftReplicaRole::Witness),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Witness),
         ],
     };
 

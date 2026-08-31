@@ -7,13 +7,13 @@
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftNodeId {
-    pub peer_id: RustRaftNodeId,
+    pub peer_id: NodeId,
     pub raft_addr: String,
     pub snapshot_addr: String,
 }
 
-impl From<&RustRaftPeer> for MatrixRaftNodeId {
-    fn from(peer: &RustRaftPeer) -> Self {
+impl From<&Peer> for MatrixRaftNodeId {
+    fn from(peer: &Peer) -> Self {
         Self {
             peer_id: peer.node_id,
             raft_addr: peer.raft_addr.clone(),
@@ -25,12 +25,12 @@ impl From<&RustRaftPeer> for MatrixRaftNodeId {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[derive(Default)]
 pub struct MatrixRaftProposeOptions {
-    pub with_term: Option<RustRaftTerm>,
+    pub with_term: Option<Term>,
     pub is_command: bool,
 }
 
 
-impl From<MatrixRaftProposeOptions> for RustRaftProposeOptions {
+impl From<MatrixRaftProposeOptions> for ProposeOptions {
     fn from(options: MatrixRaftProposeOptions) -> Self {
         Self {
             expected_term: options.with_term,
@@ -49,19 +49,19 @@ pub enum MatrixRaftReadIndexMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftReadIndexOptions {
-    pub min_commit_index: RustRaftLogIndex,
+    pub min_commit_index: LogIndex,
     pub mode: MatrixRaftReadIndexMode,
 }
 
 impl MatrixRaftReadIndexOptions {
-    pub fn lease_read(min_commit_index: RustRaftLogIndex) -> Self {
+    pub fn lease_read(min_commit_index: LogIndex) -> Self {
         Self {
             min_commit_index,
             mode: MatrixRaftReadIndexMode::LeaseRead,
         }
     }
 
-    pub fn quorum_read(min_commit_index: RustRaftLogIndex) -> Self {
+    pub fn quorum_read(min_commit_index: LogIndex) -> Self {
         Self {
             min_commit_index,
             mode: MatrixRaftReadIndexMode::QuorumRead,
@@ -72,10 +72,10 @@ impl MatrixRaftReadIndexOptions {
         self.mode == MatrixRaftReadIndexMode::LeaseRead
     }
 
-    pub fn to_request(
+    pub fn into_request(
         self,
-        group_id: RustRaftGroupId,
-        requester_id: RustRaftNodeId,
+        group_id: GroupId,
+        requester_id: NodeId,
     ) -> ReadIndexRequest {
         ReadIndexRequest {
             group_id,
@@ -88,14 +88,14 @@ impl MatrixRaftReadIndexOptions {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftBoundedStaleReadOptions {
-    pub min_commit_index: RustRaftLogIndex,
-    pub max_stale_index_lag: RustRaftLogIndex,
+    pub min_commit_index: LogIndex,
+    pub max_stale_index_lag: LogIndex,
 }
 
 impl MatrixRaftBoundedStaleReadOptions {
     pub fn new(
-        min_commit_index: RustRaftLogIndex,
-        max_stale_index_lag: RustRaftLogIndex,
+        min_commit_index: LogIndex,
+        max_stale_index_lag: LogIndex,
     ) -> Self {
         Self {
             min_commit_index,
@@ -113,41 +113,41 @@ pub enum MatrixRaftAttribute {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftStatus {
-    pub node_id: RustRaftNodeId,
-    pub group_id: RustRaftGroupId,
-    pub role: RustRaftRole,
-    pub term: RustRaftTerm,
-    pub leader_id: Option<RustRaftNodeId>,
+    pub node_id: NodeId,
+    pub group_id: GroupId,
+    pub role: StateRole,
+    pub term: Term,
+    pub leader_id: Option<NodeId>,
     pub leader_lease_valid: bool,
-    pub commit_index: RustRaftLogIndex,
-    pub applied_index: RustRaftLogIndex,
-    pub last_log_index: RustRaftLogIndex,
-    pub membership: RaftMembership,
+    pub commit_index: LogIndex,
+    pub applied_index: LogIndex,
+    pub last_log_index: LogIndex,
+    pub membership: Membership,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftLocalStatus {
-    pub node_id: RustRaftNodeId,
-    pub group_id: RustRaftGroupId,
-    pub state: RaftNodeRuntimeState,
+    pub node_id: NodeId,
+    pub group_id: GroupId,
+    pub state: NodeRuntimeState,
     pub restart_count: u64,
     pub worker_running: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftFatalEvent {
-    pub node_id: Option<RustRaftNodeId>,
+    pub node_id: Option<NodeId>,
     pub reason: String,
     pub raw_id: String,
 }
 
-impl From<RustRaftBlocker> for MatrixRaftFatalEvent {
-    fn from(blocker: RustRaftBlocker) -> Self {
+impl From<Blocker> for MatrixRaftFatalEvent {
+    fn from(blocker: Blocker) -> Self {
         let mut parts = blocker.id.splitn(3, ':');
         let event_type = parts.next();
         let node_id = parts
             .next()
-            .and_then(|node| node.parse::<RustRaftNodeId>().ok());
+            .and_then(|node| node.parse::<NodeId>().ok());
         let reason = parts.next().unwrap_or(&blocker.id).to_string();
         if event_type == Some("fatal_event") {
             Self {
@@ -167,43 +167,43 @@ impl From<RustRaftBlocker> for MatrixRaftFatalEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftPromoteReport {
-    pub learner_id: RustRaftNodeId,
-    pub catch_up: RaftLearnerCatchUpLoopReport,
-    pub membership: RaftMembershipExecutionReport,
+    pub learner_id: NodeId,
+    pub catch_up: LearnerCatchUpLoopReport,
+    pub membership: MembershipExecutionReport,
     pub promoted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftRemoveReport {
-    pub removed_id: RustRaftNodeId,
+    pub removed_id: NodeId,
     #[serde(default)]
     pub removed_node: Option<MatrixRaftNodeId>,
     #[serde(default)]
     pub removed_conf_state: Option<MatrixRaftConfState>,
-    pub membership: RaftMembershipExecutionReport,
+    pub membership: MembershipExecutionReport,
     pub removed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftTransferLeaderReport {
-    pub transferee_id: RustRaftNodeId,
+    pub transferee_id: NodeId,
     #[serde(default)]
     pub transferee_node: Option<MatrixRaftNodeId>,
     #[serde(default)]
-    pub state: Option<RaftLeaderTransferState>,
+    pub state: Option<LeaderTransferState>,
     pub transferred: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftStepDownReport {
     #[serde(default)]
-    pub requested_transferee_id: Option<RustRaftNodeId>,
+    pub requested_transferee_id: Option<NodeId>,
     #[serde(default)]
-    pub transferee_id: Option<RustRaftNodeId>,
+    pub transferee_id: Option<NodeId>,
     #[serde(default)]
     pub transferee_node: Option<MatrixRaftNodeId>,
     #[serde(default)]
-    pub state: Option<RaftLeaderTransferState>,
+    pub state: Option<LeaderTransferState>,
     pub stepped_down: bool,
 }
 
@@ -211,9 +211,9 @@ pub struct MatrixRaftStepDownReport {
 pub struct MatrixRaftResignReport {
     pub reason: String,
     #[serde(default)]
-    pub leader_before: Option<RustRaftNodeId>,
+    pub leader_before: Option<NodeId>,
     #[serde(default)]
-    pub leader_after: Option<RustRaftNodeId>,
+    pub leader_after: Option<NodeId>,
     pub resigned: bool,
 }
 
@@ -252,7 +252,7 @@ pub struct MatrixRaftAsyncResult {
     pub timed_out: bool,
     pub timeout_ms: u64,
     #[serde(default)]
-    pub node_id: Option<RustRaftNodeId>,
+    pub node_id: Option<NodeId>,
     #[serde(default)]
     pub request_id: Option<u64>,
     #[serde(default)]
@@ -260,15 +260,15 @@ pub struct MatrixRaftAsyncResult {
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]
-    pub log_id: Option<RustRaftLogId>,
+    pub log_id: Option<LogId>,
     #[serde(default)]
     pub read_index: Option<ReadIndexResponse>,
     #[serde(default)]
-    pub membership: Option<RaftMembershipExecutionReport>,
+    pub membership: Option<MembershipExecutionReport>,
     #[serde(default)]
-    pub snapshot: Option<RustRaftSnapshotMeta>,
+    pub snapshot: Option<SnapshotMetadata>,
     #[serde(default)]
-    pub auto_promote: Option<RaftLearnerAutoPromoteReport>,
+    pub auto_promote: Option<LearnerAutoPromoteReport>,
     #[serde(default)]
     pub remove: Option<MatrixRaftRemoveReport>,
     #[serde(default)]
@@ -355,7 +355,7 @@ impl MatrixRaftAsyncResult {
         }
     }
 
-    pub fn with_timer_task(mut self, task: &RustRaftTimerTask, operation: MatrixRaftAsyncOperation) -> Self {
+    pub fn with_timer_task(mut self, task: &TimerTask, operation: MatrixRaftAsyncOperation) -> Self {
         self.operation = operation;
         self.node_id = Some(task.node_id);
         self.request_id = Some(task.request_id);
@@ -386,23 +386,23 @@ impl MatrixRaftAsyncResult {
         self.status() == MatrixRaftAsyncResultStatus::TimedOut
     }
 
-    pub fn node_id_presence(&self) -> bool {
+    pub fn has_node_id(&self) -> bool {
         self.node_id.is_some()
     }
 
-    pub fn request_id_presence(&self) -> bool {
+    pub fn has_request_id(&self) -> bool {
         self.request_id.is_some()
     }
 
-    pub fn deadline_presence(&self) -> bool {
+    pub fn has_deadline(&self) -> bool {
         self.deadline_ms.is_some()
     }
 
-    pub fn error_presence(&self) -> bool {
+    pub fn has_error(&self) -> bool {
         self.error.is_some()
     }
 
-    pub fn log_id_presence(&self) -> bool {
+    pub fn has_log_id(&self) -> bool {
         self.log_id.is_some()
     }
 
@@ -445,15 +445,15 @@ impl MatrixRaftAsyncResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftAsyncGroupSummary {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub result_count: usize,
     pub ok_count: usize,
     pub error_count: usize,
     pub timed_out_count: usize,
-    pub node_ids: Vec<Option<RustRaftNodeId>>,
-    pub ok_node_ids: Vec<Option<RustRaftNodeId>>,
-    pub error_node_ids: Vec<Option<RustRaftNodeId>>,
-    pub timed_out_node_ids: Vec<Option<RustRaftNodeId>>,
+    pub node_ids: Vec<Option<NodeId>>,
+    pub ok_node_ids: Vec<Option<NodeId>>,
+    pub error_node_ids: Vec<Option<NodeId>>,
+    pub timed_out_node_ids: Vec<Option<NodeId>>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub ok_route_keys: Vec<MatrixRaftRouteKey>,
     pub error_route_keys: Vec<MatrixRaftRouteKey>,
@@ -469,18 +469,18 @@ pub struct MatrixRaftAsyncGroupSummary {
     pub timed_out_request_ids: Vec<Option<u64>>,
     pub deadline_ms: Vec<Option<u64>>,
     pub timeout_ms: Vec<u64>,
-    pub proposed_log_ids: Vec<Option<RustRaftLogId>>,
+    pub proposed_log_ids: Vec<Option<LogId>>,
     pub read_index_present: Vec<bool>,
     pub request_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<u64>)>,
     pub deadlines_by_route_key: Vec<(MatrixRaftRouteKey, Option<u64>)>,
     pub timeouts_by_route_key: Vec<(MatrixRaftRouteKey, u64)>,
-    pub log_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftLogId>)>,
+    pub log_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<LogId>)>,
     pub read_index_presence_by_route_key: Vec<(MatrixRaftRouteKey, bool)>,
     #[serde(default)]
     pub read_index_responses_by_route_key:
         Vec<(MatrixRaftRouteKey, Option<ReadIndexResponse>)>,
     #[serde(default)]
-    pub read_indices_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)>,
+    pub read_indices_by_route_key: Vec<(MatrixRaftRouteKey, Option<LogIndex>)>,
     #[serde(default)]
     pub read_index_safe_by_route_key: Vec<(MatrixRaftRouteKey, Option<bool>)>,
     #[serde(default)]
@@ -504,7 +504,7 @@ pub struct MatrixRaftAsyncGroupSummary {
     #[serde(default)]
     pub resign_presence_by_route_key: Vec<(MatrixRaftRouteKey, bool)>,
     #[serde(default)]
-    pub removed_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)>,
+    pub removed_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<NodeId>)>,
     #[serde(default)]
     pub removed_conf_states_by_route_key: Vec<(MatrixRaftRouteKey, Option<MatrixRaftConfState>)>,
     #[serde(default)]
@@ -516,41 +516,41 @@ pub struct MatrixRaftAsyncGroupSummary {
     #[serde(default)]
     pub membership_reasons_by_route_key: Vec<(MatrixRaftRouteKey, Option<String>)>,
     #[serde(default)]
-    pub snapshot_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)>,
+    pub snapshot_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<SnapshotId>)>,
     #[serde(default)]
-    pub snapshot_indices_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)>,
+    pub snapshot_indices_by_route_key: Vec<(MatrixRaftRouteKey, Option<LogIndex>)>,
     #[serde(default)]
-    pub auto_promote_learner_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)>,
+    pub auto_promote_learner_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<NodeId>)>,
     #[serde(default)]
     pub auto_promote_enabled_by_route_key: Vec<(MatrixRaftRouteKey, Option<bool>)>,
     #[serde(default)]
     pub auto_promote_promoted_by_route_key: Vec<(MatrixRaftRouteKey, Option<bool>)>,
     #[serde(default)]
     pub transfer_leader_transferee_ids_by_route_key:
-        Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)>,
+        Vec<(MatrixRaftRouteKey, Option<NodeId>)>,
     #[serde(default)]
     pub transfer_leader_transferred_by_route_key: Vec<(MatrixRaftRouteKey, Option<bool>)>,
     #[serde(default)]
     pub timeout_now_responses_by_route_key:
         Vec<(MatrixRaftRouteKey, Option<TimeoutNowResponse>)>,
     #[serde(default)]
-    pub timeout_now_node_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)>,
+    pub timeout_now_node_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<NodeId>)>,
     #[serde(default)]
-    pub timeout_now_from_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)>,
+    pub timeout_now_from_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<NodeId>)>,
     #[serde(default)]
     pub timeout_now_campaigned_by_route_key: Vec<(MatrixRaftRouteKey, Option<bool>)>,
     #[serde(default)]
-    pub timeout_now_terms_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)>,
+    pub timeout_now_terms_by_route_key: Vec<(MatrixRaftRouteKey, Option<Term>)>,
     #[serde(default)]
-    pub timeout_now_leader_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)>,
+    pub timeout_now_leader_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<NodeId>)>,
     #[serde(default)]
     pub timeout_now_reasons_by_route_key: Vec<(MatrixRaftRouteKey, Option<String>)>,
     #[serde(default)]
     pub step_down_requested_transferee_ids_by_route_key:
-        Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)>,
+        Vec<(MatrixRaftRouteKey, Option<NodeId>)>,
     #[serde(default)]
     pub step_down_transferee_ids_by_route_key:
-        Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)>,
+        Vec<(MatrixRaftRouteKey, Option<NodeId>)>,
     #[serde(default)]
     pub step_down_stepped_down_by_route_key: Vec<(MatrixRaftRouteKey, Option<bool>)>,
     #[serde(default)]
@@ -565,7 +565,7 @@ pub struct MatrixRaftAsyncGroupSummary {
 
 impl MatrixRaftAsyncGroupSummary {
     pub fn from_results(
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         results: &[(MatrixRaftRouteKey, MatrixRaftAsyncResult)],
     ) -> Self {
         let mut node_ids = Vec::with_capacity(results.len());
@@ -952,7 +952,7 @@ impl MatrixRaftAsyncGroupSummary {
     }
 
     pub fn from_grouped_results(
-        groups: &[(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)],
+        groups: &[(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)],
     ) -> Vec<Self> {
         groups
             .iter()
@@ -1030,7 +1030,7 @@ impl MatrixRaftAsyncGroupSummary {
         )
     }
 
-    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.route_keys
             .iter()
             .zip(self.node_ids.iter())
@@ -1038,7 +1038,7 @@ impl MatrixRaftAsyncGroupSummary {
             .collect()
     }
 
-    pub fn ok_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    pub fn ok_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.ok_route_keys
             .iter()
             .zip(self.ok_node_ids.iter())
@@ -1048,7 +1048,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn error_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.error_route_keys
             .iter()
             .zip(self.error_node_ids.iter())
@@ -1058,7 +1058,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timed_out_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.timed_out_route_keys
             .iter()
             .zip(self.timed_out_node_ids.iter())
@@ -1191,13 +1191,13 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn read_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.read_indices_by_route_key.clone()
     }
 
     pub fn ok_read_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.status_values_by_route_key(
             &self.read_indices_by_route_key,
             MatrixRaftAsyncResultStatus::Ok,
@@ -1206,7 +1206,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn error_read_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.status_values_by_route_key(
             &self.read_indices_by_route_key,
             MatrixRaftAsyncResultStatus::Error,
@@ -1215,7 +1215,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timed_out_read_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.status_values_by_route_key(
             &self.read_indices_by_route_key,
             MatrixRaftAsyncResultStatus::TimedOut,
@@ -1331,7 +1331,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn removed_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.removed_ids_by_route_key.clone()
     }
 
@@ -1361,19 +1361,19 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.snapshot_ids_by_route_key.clone()
     }
 
     pub fn snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.snapshot_indices_by_route_key.clone()
     }
 
     pub fn auto_promote_learner_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.auto_promote_learner_ids_by_route_key.clone()
     }
 
@@ -1387,13 +1387,13 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn transfer_leader_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.transfer_leader_transferee_ids_by_route_key.clone()
     }
 
     pub fn ok_transfer_leader_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.transfer_leader_transferee_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Ok,
@@ -1402,7 +1402,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn error_transfer_leader_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.transfer_leader_transferee_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Error,
@@ -1411,7 +1411,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timed_out_transfer_leader_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.transfer_leader_transferee_ids_by_route_key,
             MatrixRaftAsyncResultStatus::TimedOut,
@@ -1453,13 +1453,13 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn step_down_requested_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.step_down_requested_transferee_ids_by_route_key.clone()
     }
 
     pub fn ok_step_down_requested_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.step_down_requested_transferee_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Ok,
@@ -1468,7 +1468,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn error_step_down_requested_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.step_down_requested_transferee_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Error,
@@ -1477,7 +1477,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timed_out_step_down_requested_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.step_down_requested_transferee_ids_by_route_key,
             MatrixRaftAsyncResultStatus::TimedOut,
@@ -1486,13 +1486,13 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn step_down_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.step_down_transferee_ids_by_route_key.clone()
     }
 
     pub fn ok_step_down_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.step_down_transferee_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Ok,
@@ -1501,7 +1501,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn error_step_down_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.step_down_transferee_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Error,
@@ -1510,7 +1510,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timed_out_step_down_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.step_down_transferee_ids_by_route_key,
             MatrixRaftAsyncResultStatus::TimedOut,
@@ -1668,13 +1668,13 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timeout_now_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.timeout_now_node_ids_by_route_key.clone()
     }
 
     pub fn ok_timeout_now_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.timeout_now_node_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Ok,
@@ -1683,7 +1683,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn error_timeout_now_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.timeout_now_node_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Error,
@@ -1692,7 +1692,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timed_out_timeout_now_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.timeout_now_node_ids_by_route_key,
             MatrixRaftAsyncResultStatus::TimedOut,
@@ -1701,13 +1701,13 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timeout_now_from_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.timeout_now_from_ids_by_route_key.clone()
     }
 
     pub fn ok_timeout_now_from_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.timeout_now_from_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Ok,
@@ -1716,7 +1716,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn error_timeout_now_from_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.timeout_now_from_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Error,
@@ -1725,7 +1725,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timed_out_timeout_now_from_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.timeout_now_from_ids_by_route_key,
             MatrixRaftAsyncResultStatus::TimedOut,
@@ -1767,13 +1767,13 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timeout_now_terms_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<Term>)> {
         self.timeout_now_terms_by_route_key.clone()
     }
 
     pub fn ok_timeout_now_terms_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<Term>)> {
         self.status_values_by_route_key(
             &self.timeout_now_terms_by_route_key,
             MatrixRaftAsyncResultStatus::Ok,
@@ -1782,7 +1782,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn error_timeout_now_terms_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<Term>)> {
         self.status_values_by_route_key(
             &self.timeout_now_terms_by_route_key,
             MatrixRaftAsyncResultStatus::Error,
@@ -1791,7 +1791,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timed_out_timeout_now_terms_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<Term>)> {
         self.status_values_by_route_key(
             &self.timeout_now_terms_by_route_key,
             MatrixRaftAsyncResultStatus::TimedOut,
@@ -1800,13 +1800,13 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timeout_now_leader_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.timeout_now_leader_ids_by_route_key.clone()
     }
 
     pub fn ok_timeout_now_leader_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.timeout_now_leader_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Ok,
@@ -1815,7 +1815,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn error_timeout_now_leader_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.timeout_now_leader_ids_by_route_key,
             MatrixRaftAsyncResultStatus::Error,
@@ -1824,7 +1824,7 @@ impl MatrixRaftAsyncGroupSummary {
 
     pub fn timed_out_timeout_now_leader_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.status_values_by_route_key(
             &self.timeout_now_leader_ids_by_route_key,
             MatrixRaftAsyncResultStatus::TimedOut,
@@ -1929,7 +1929,7 @@ impl MatrixRaftAsyncGroupSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftScheduledCallback {
     pub operation: MatrixRaftAsyncOperation,
-    pub task: RustRaftTimerTask,
+    pub task: TimerTask,
 }
 
 impl MatrixRaftScheduledCallback {
@@ -1952,8 +1952,8 @@ impl MatrixRaftScheduledCallback {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftCallbackScheduler {
-    timer: RustRaftRequestTimer,
-    operations: BTreeMap<(RustRaftNodeId, u64), MatrixRaftAsyncOperation>,
+    timer: RequestTimer,
+    operations: BTreeMap<(NodeId, u64), MatrixRaftAsyncOperation>,
 }
 
 impl MatrixRaftCallbackScheduler {
@@ -1963,7 +1963,7 @@ impl MatrixRaftCallbackScheduler {
 
     pub fn schedule(
         &mut self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         request_id: u64,
         operation: MatrixRaftAsyncOperation,
         start_at_ms: u64,
@@ -1986,7 +1986,7 @@ impl MatrixRaftCallbackScheduler {
 
     pub fn complete(
         &mut self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         request_id: u64,
     ) -> Option<MatrixRaftScheduledCallback> {
         let task = self.timer.notify(node_id, request_id)?;
@@ -1999,7 +1999,7 @@ impl MatrixRaftCallbackScheduler {
 
     pub fn cancel(
         &mut self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         request_id: u64,
     ) -> Option<MatrixRaftScheduledCallback> {
         let task = self.timer.cancel(node_id, request_id)?;
@@ -2043,7 +2043,7 @@ impl MatrixRaftCallbackScheduler {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotStatus {
-    pub snapshot_id: Option<RustRaftSnapshotId>,
+    pub snapshot_id: Option<SnapshotId>,
     pub sending: bool,
     pub downloading: bool,
     pub total_chunks: u64,
@@ -2054,11 +2054,11 @@ pub struct MatrixRaftSnapshotStatus {
     pub rate_limited_ticks: u64,
     pub rolled_back: u64,
     pub completed: bool,
-    pub installed_index: RustRaftLogIndex,
+    pub installed_index: LogIndex,
 }
 
-impl From<RaftSnapshotLifecycleStatus> for MatrixRaftSnapshotStatus {
-    fn from(status: RaftSnapshotLifecycleStatus) -> Self {
+impl From<SnapshotLifecycleStatus> for MatrixRaftSnapshotStatus {
+    fn from(status: SnapshotLifecycleStatus) -> Self {
         Self {
             snapshot_id: status.snapshot_id,
             sending: status.sending,
@@ -2095,30 +2095,30 @@ pub struct MatrixRaftSnapshotCancelResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotPeerReport {
-    pub peer_id: RustRaftNodeId,
-    pub status: RaftPeerPipelineState,
+    pub peer_id: NodeId,
+    pub status: PeerProgress,
     #[serde(default)]
     pub peer_healthy: Option<bool>,
     #[serde(default)]
-    pub peer_lag: Option<RustRaftLogIndex>,
+    pub peer_lag: Option<LogIndex>,
 }
 
 impl MatrixRaftOldSnapshotFinish {
-    pub fn received(snapshot_index: RustRaftLogIndex) -> Self {
+    pub fn received(snapshot_index: LogIndex) -> Self {
         Self {
             finish_state: MatrixRaftOldSnapshotFinishState::Received,
             snapshot_index,
         }
     }
 
-    pub fn rejected(snapshot_index: RustRaftLogIndex) -> Self {
+    pub fn rejected(snapshot_index: LogIndex) -> Self {
         Self {
             finish_state: MatrixRaftOldSnapshotFinishState::Rejected,
             snapshot_index,
         }
     }
 
-    pub fn staled(snapshot_index: RustRaftLogIndex) -> Self {
+    pub fn staled(snapshot_index: LogIndex) -> Self {
         Self {
             finish_state: MatrixRaftOldSnapshotFinishState::Staled,
             snapshot_index,
@@ -2127,7 +2127,7 @@ impl MatrixRaftOldSnapshotFinish {
 
     pub fn from_install_snapshot_response(
         response: &InstallSnapshotResponse,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
     ) -> Self {
         if response.accepted {
             Self::received(snapshot_index)
@@ -2141,21 +2141,21 @@ impl MatrixRaftOldSnapshotFinish {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotSender {
-    lifecycle: RaftSnapshotLifecycle,
+    lifecycle: SnapshotLifecycle,
 }
 
 impl MatrixRaftSnapshotSender {
-    pub fn new(config: RaftSnapshotLifecycleConfig) -> Result<Self, RaftError> {
+    pub fn new(config: SnapshotLifecycleConfig) -> Result<Self, RaftError> {
         Ok(Self {
-            lifecycle: RaftSnapshotLifecycle::new(config)?,
+            lifecycle: SnapshotLifecycle::new(config)?,
         })
     }
 
     pub fn begin_send(
         &mut self,
         snapshot: &RaftSnapshot,
-        term: RustRaftTerm,
-        leader_id: RustRaftNodeId,
+        term: Term,
+        leader_id: NodeId,
     ) -> Result<(), RaftError> {
         self.lifecycle.begin_send(snapshot, term, leader_id)
     }
@@ -2163,8 +2163,8 @@ impl MatrixRaftSnapshotSender {
     pub fn send(
         &mut self,
         snapshot: &RaftSnapshot,
-        term: RustRaftTerm,
-        leader_id: RustRaftNodeId,
+        term: Term,
+        leader_id: NodeId,
     ) -> Result<(), RaftError> {
         self.begin_send(snapshot, term, leader_id)
     }
@@ -2175,7 +2175,7 @@ impl MatrixRaftSnapshotSender {
 
     pub fn poll_send_requests_with_limiter(
         &mut self,
-        limiter: &mut impl RustRaftRateLimiter,
+        limiter: &mut impl RateLimiter,
     ) -> Result<Vec<InstallSnapshotRequest>, RaftError> {
         self.lifecycle.poll_send_requests_with_limiter(limiter)
     }
@@ -2218,20 +2218,20 @@ impl MatrixRaftSnapshotSender {
 
 impl Default for MatrixRaftSnapshotSender {
     fn default() -> Self {
-        Self::new(RaftSnapshotLifecycleConfig::default())
+        Self::new(SnapshotLifecycleConfig::default())
             .expect("default MatrixRaft snapshot sender config is valid")
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotDownloader {
-    lifecycle: RaftSnapshotLifecycle,
+    lifecycle: SnapshotLifecycle,
 }
 
 impl MatrixRaftSnapshotDownloader {
-    pub fn new(config: RaftSnapshotLifecycleConfig) -> Result<Self, RaftError> {
+    pub fn new(config: SnapshotLifecycleConfig) -> Result<Self, RaftError> {
         Ok(Self {
-            lifecycle: RaftSnapshotLifecycle::new(config)?,
+            lifecycle: SnapshotLifecycle::new(config)?,
         })
     }
 
@@ -2289,7 +2289,7 @@ impl MatrixRaftSnapshotDownloader {
 
 impl Default for MatrixRaftSnapshotDownloader {
     fn default() -> Self {
-        Self::new(RaftSnapshotLifecycleConfig::default())
+        Self::new(SnapshotLifecycleConfig::default())
             .expect("default MatrixRaft snapshot downloader config is valid")
     }
 }
@@ -2312,8 +2312,8 @@ impl MatrixRaftSnapshotCreator {
         &self,
         snapshot: &RaftSnapshot,
         chunk_size: u64,
-    ) -> Result<Vec<RustRaftSnapshotChunk>, RaftError> {
-        RaftSnapshotLifecycle::checkpoint(snapshot, chunk_size)
+    ) -> Result<Vec<SnapshotChunk>, RaftError> {
+        SnapshotLifecycle::checkpoint(snapshot, chunk_size)
     }
 }
 
@@ -2333,8 +2333,8 @@ impl MatrixRaftSnapshotLoader {
 
     pub fn install_chunk(
         &self,
-        state: &mut RaftSnapshotInstallState,
-        chunk: RustRaftSnapshotChunk,
+        state: &mut SnapshotInstallState,
+        chunk: SnapshotChunk,
     ) -> Result<(), RaftError> {
         state.install_chunk(chunk)
     }
@@ -2741,8 +2741,8 @@ impl MatrixRaftGroupContextBuilder {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftRuntimeWiring {
-    pub group_id: RustRaftGroupId,
-    pub node_id: RustRaftNodeId,
+    pub group_id: GroupId,
+    pub node_id: NodeId,
     pub creator_index: Option<usize>,
     pub store_id: u64,
     pub worker_num: usize,
@@ -2904,14 +2904,14 @@ impl Default for MatrixRaftSnapshotRecycleOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftOptions {
-    pub group_id: RustRaftGroupId,
-    pub peer_id: RustRaftNodeId,
+    pub group_id: GroupId,
+    pub peer_id: NodeId,
     pub raft_addr: String,
     pub snapshot_addr: String,
     pub wal_dir: String,
     pub snapshot_dir: String,
-    pub peers: Vec<RustRaftPeer>,
-    pub role: RustRaftReplicaRole,
+    pub peers: Vec<Peer>,
+    pub role: ReplicaRole,
     pub wal_sync: bool,
     pub election_cycle_tick: u64,
     pub transfer_timeout_tick: u64,
@@ -2947,7 +2947,7 @@ pub struct MatrixRaftOptions {
 }
 
 impl MatrixRaftOptions {
-    pub fn to_raft_config(&self) -> RaftConfig {
+    pub fn to_raft_config(&self) -> Config {
         let election_timeout_ms = self
             .election_cycle_tick
             .max(1)
@@ -2957,7 +2957,7 @@ impl MatrixRaftOptions {
         } else {
             self.lease_duration_ms.min(election_timeout_ms.saturating_sub(1).max(1))
         };
-        RaftConfig {
+        Config {
             election_timeout_ms,
             heartbeat_interval_ms: self.tick_interval_ms.max(1),
             leader_lease_ms,
@@ -2973,8 +2973,8 @@ impl MatrixRaftOptions {
         }
     }
 
-    pub fn to_node_options(&self) -> RustRaftNodeOptions {
-        RustRaftNodeOptions {
+    pub fn to_node_options(&self) -> NodeOptions {
+        NodeOptions {
             group_id: self.group_id,
             node_id: self.peer_id,
             raft_addr: self.raft_addr.clone(),
@@ -3010,8 +3010,8 @@ impl MatrixRaftOptions {
         }
     }
 
-    pub fn to_pipeline_limits(&self) -> RustRaftPipelineLimits {
-        RustRaftPipelineLimits {
+    pub fn to_pipeline_limits(&self) -> PipelineLimits {
+        PipelineLimits {
             max_inflights_replicate: self.max_inflights_replicate.max(1),
             max_memory_replicate_log_bytes: self.max_memory_replicate_log_bytes.max(1),
             max_inflights_apply_task: self.max_inflights_apply_task.max(1),
@@ -3022,16 +3022,16 @@ impl MatrixRaftOptions {
         }
     }
 
-    pub fn create_node(&self, start_index: RustRaftLogIndex) -> Result<MatrixRaftNode, RaftError> {
+    pub fn create_node(&self, start_index: LogIndex) -> Result<MatrixRaftNode, RaftError> {
         MatrixRaftNode::create(self.to_node_options(), start_index)
     }
 }
 
 #[derive(Debug)]
 pub struct MatrixRaftNode {
-    runtime: RaftNodeRuntime,
-    peers: BTreeMap<RustRaftNodeId, RustRaftPeer>,
-    start_index: RustRaftLogIndex,
+    runtime: NodeRuntime,
+    peers: BTreeMap<NodeId, Peer>,
+    start_index: LogIndex,
     recover_fsm_from_snapshot: bool,
     callback_scheduler: std::rc::Rc<std::cell::RefCell<MatrixRaftCallbackScheduler>>,
     next_callback_request_id: std::cell::Cell<u64>,
@@ -3039,8 +3039,8 @@ pub struct MatrixRaftNode {
 
 impl MatrixRaftNode {
     pub fn create(
-        options: RustRaftNodeOptions,
-        start_index: RustRaftLogIndex,
+        options: NodeOptions,
+        start_index: LogIndex,
     ) -> Result<Self, RaftError> {
         let mut peers: BTreeMap<_, _> = options
             .peers
@@ -3048,7 +3048,7 @@ impl MatrixRaftNode {
             .cloned()
             .map(|peer| (peer.node_id, peer))
             .collect();
-        peers.entry(options.node_id).or_insert_with(|| RustRaftPeer {
+        peers.entry(options.node_id).or_insert_with(|| Peer {
             node_id: options.node_id,
             raft_addr: options.raft_addr.clone(),
             snapshot_addr: options.snapshot_addr.clone(),
@@ -3056,7 +3056,7 @@ impl MatrixRaftNode {
             auto_promote: false,
         });
         Ok(Self {
-            runtime: RaftNodeRuntime::create(options)?,
+            runtime: NodeRuntime::create(options)?,
             peers,
             start_index,
             recover_fsm_from_snapshot: false,
@@ -3067,7 +3067,7 @@ impl MatrixRaftNode {
         })
     }
 
-    pub fn start(&mut self, start_index: RustRaftLogIndex) -> Result<(), RaftError> {
+    pub fn start(&mut self, start_index: LogIndex) -> Result<(), RaftError> {
         self.start_index = start_index;
         self.runtime.start()
     }
@@ -3085,18 +3085,18 @@ impl MatrixRaftNode {
         self.runtime.shutdown()
     }
 
-    pub fn in_lease(&self, term: Option<RustRaftTerm>) -> Result<bool, RaftError> {
+    pub fn in_lease(&self, term: Option<Term>) -> Result<bool, RaftError> {
         let status = self.get_status()?;
-        Ok(status.role == RustRaftRole::Leader
+        Ok(status.role == StateRole::Leader
             && status.leader_lease_valid
             && term.is_none_or(|term| term == status.term))
     }
 
-    pub fn group_id(&self) -> RustRaftGroupId {
+    pub fn group_id(&self) -> GroupId {
         self.runtime.group_id()
     }
 
-    pub fn node_id(&self) -> RustRaftNodeId {
+    pub fn node_id(&self) -> NodeId {
         self.runtime.node_id()
     }
 
@@ -3123,16 +3123,16 @@ impl MatrixRaftNode {
             .map(|scheduled| scheduled.completed_result())
     }
 
-    pub fn propose(&self, data: RustRaftPayload) -> Result<RustRaftLogId, RaftError> {
+    pub fn propose(&self, data: Payload) -> Result<LogId, RaftError> {
         self.propose_with_options(MatrixRaftProposeOptions::default(), data)
     }
 
     pub fn propose_with_options(
         &self,
         options: MatrixRaftProposeOptions,
-        data: RustRaftPayload,
-    ) -> Result<RustRaftLogId, RaftError> {
-        if options.is_command && self.local_replica_role() == Some(RustRaftReplicaRole::Witness) {
+        data: Payload,
+    ) -> Result<LogId, RaftError> {
+        if options.is_command && self.local_replica_role() == Some(ReplicaRole::Witness) {
             return Err(RaftError::InvalidRequest(
                 "matrixraft witness node ignores normal command proposals".to_string(),
             ));
@@ -3142,7 +3142,7 @@ impl MatrixRaftNode {
 
     pub fn propose_callback<F>(
         &self,
-        data: RustRaftPayload,
+        data: Payload,
         callback: F,
         timeout_ms: u64,
     ) -> MatrixRaftAsyncResult
@@ -3160,7 +3160,7 @@ impl MatrixRaftNode {
     pub fn propose_with_options_callback<F>(
         &self,
         options: MatrixRaftProposeOptions,
-        data: RustRaftPayload,
+        data: Payload,
         callback: F,
         timeout_ms: u64,
     ) -> MatrixRaftAsyncResult
@@ -3181,9 +3181,9 @@ impl MatrixRaftNode {
     pub fn add_node(
         &mut self,
         node_id: MatrixRaftNodeId,
-    ) -> Result<RaftMembershipExecutionReport, RaftError> {
-        let peer = self.peer_from_node_id(node_id, RustRaftReplicaRole::Voter, false);
-        let report = self.execute_membership(RaftMembershipOperation::AddNode(peer.clone()))?;
+    ) -> Result<MembershipExecutionReport, RaftError> {
+        let peer = self.peer_from_node_id(node_id, ReplicaRole::Voter, false);
+        let report = self.execute_membership(MembershipOperation::AddNode(peer.clone()))?;
         if report.success {
             self.peers.insert(peer.node_id, peer);
         }
@@ -3203,7 +3203,7 @@ impl MatrixRaftNode {
             MatrixRaftAsyncOperation::AddNode,
             timeout_ms,
             callback,
-            |result, report: RaftMembershipExecutionReport| {
+            |result, report: MembershipExecutionReport| {
                 result.ok = report.success;
                 result.membership = Some(report);
             },
@@ -3215,9 +3215,9 @@ impl MatrixRaftNode {
         &mut self,
         node_id: MatrixRaftNodeId,
         auto_promote: bool,
-    ) -> Result<RaftMembershipExecutionReport, RaftError> {
-        let peer = self.peer_from_node_id(node_id, RustRaftReplicaRole::Learner, auto_promote);
-        let report = self.execute_membership(RaftMembershipOperation::AddLearner(peer.clone()))?;
+    ) -> Result<MembershipExecutionReport, RaftError> {
+        let peer = self.peer_from_node_id(node_id, ReplicaRole::Learner, auto_promote);
+        let report = self.execute_membership(MembershipOperation::AddLearner(peer.clone()))?;
         if report.success {
             self.peers.insert(peer.node_id, peer);
         }
@@ -3238,7 +3238,7 @@ impl MatrixRaftNode {
             MatrixRaftAsyncOperation::AddLearner,
             timeout_ms,
             callback,
-            |result, report: RaftMembershipExecutionReport| {
+            |result, report: MembershipExecutionReport| {
                 result.ok = report.success;
                 result.membership = Some(report);
             },
@@ -3249,9 +3249,9 @@ impl MatrixRaftNode {
     pub fn add_witness(
         &mut self,
         node_id: MatrixRaftNodeId,
-    ) -> Result<RaftMembershipExecutionReport, RaftError> {
-        let peer = self.peer_from_node_id(node_id, RustRaftReplicaRole::Witness, false);
-        let report = self.execute_membership(RaftMembershipOperation::AddWitness(peer.clone()))?;
+    ) -> Result<MembershipExecutionReport, RaftError> {
+        let peer = self.peer_from_node_id(node_id, ReplicaRole::Witness, false);
+        let report = self.execute_membership(MembershipOperation::AddWitness(peer.clone()))?;
         if report.success {
             self.peers.insert(peer.node_id, peer);
         }
@@ -3271,7 +3271,7 @@ impl MatrixRaftNode {
             MatrixRaftAsyncOperation::AddWitness,
             timeout_ms,
             callback,
-            |result, report: RaftMembershipExecutionReport| {
+            |result, report: MembershipExecutionReport| {
                 result.ok = report.success;
                 result.membership = Some(report);
             },
@@ -3281,22 +3281,22 @@ impl MatrixRaftNode {
 
     pub fn promote(
         &mut self,
-        node_id: RustRaftNodeId,
-    ) -> Result<RaftMembershipExecutionReport, RaftError> {
+        node_id: NodeId,
+    ) -> Result<MembershipExecutionReport, RaftError> {
         let report = self.promote_after_catch_up(node_id)?.membership;
         Ok(report)
     }
 
     pub fn catch_up_peer(
         &self,
-        peer_id: RustRaftNodeId,
-    ) -> Result<RaftLearnerCatchUpLoopReport, RaftError> {
+        peer_id: NodeId,
+    ) -> Result<LearnerCatchUpLoopReport, RaftError> {
         self.runtime.catch_up_peer(peer_id)
     }
 
     pub fn promote_after_catch_up(
         &mut self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
     ) -> Result<MatrixRaftPromoteReport, RaftError> {
         let catch_up = self.catch_up_peer(node_id)?;
         if !catch_up.caught_up {
@@ -3305,10 +3305,10 @@ impl MatrixRaftNode {
                 node_id, catch_up.reason
             )));
         }
-        let report = self.execute_membership(RaftMembershipOperation::Promote(node_id))?;
+        let report = self.execute_membership(MembershipOperation::Promote(node_id))?;
         if report.success {
             if let Some(peer) = self.peers.get_mut(&node_id) {
-                peer.role = RustRaftReplicaRole::Voter;
+                peer.role = ReplicaRole::Voter;
                 peer.auto_promote = false;
             }
         }
@@ -3322,12 +3322,12 @@ impl MatrixRaftNode {
 
     pub fn auto_promote_learner(
         &mut self,
-        node_id: RustRaftNodeId,
-    ) -> Result<RaftLearnerAutoPromoteReport, RaftError> {
+        node_id: NodeId,
+    ) -> Result<LearnerAutoPromoteReport, RaftError> {
         let report = self.runtime.auto_promote_learner(node_id)?;
         if report.promoted {
             if let Some(peer) = self.peers.get_mut(&node_id) {
-                peer.role = RustRaftReplicaRole::Voter;
+                peer.role = ReplicaRole::Voter;
                 peer.auto_promote = false;
             }
         }
@@ -3336,7 +3336,7 @@ impl MatrixRaftNode {
 
     pub fn auto_promote_learner_callback<F>(
         &mut self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         callback: F,
         timeout_ms: u64,
     ) -> MatrixRaftAsyncResult
@@ -3347,7 +3347,7 @@ impl MatrixRaftNode {
             MatrixRaftAsyncOperation::AutoPromoteLearner,
             timeout_ms,
             callback,
-            |result, report: RaftLearnerAutoPromoteReport| {
+            |result, report: LearnerAutoPromoteReport| {
                 result.ok = report.promoted;
                 result.auto_promote = Some(report);
             },
@@ -3368,7 +3368,7 @@ impl MatrixRaftNode {
             MatrixRaftAsyncOperation::Promote,
             timeout_ms,
             callback,
-            |result, report: RaftMembershipExecutionReport| {
+            |result, report: MembershipExecutionReport| {
                 result.ok = report.success;
                 result.membership = Some(report);
             },
@@ -3378,17 +3378,17 @@ impl MatrixRaftNode {
 
     pub fn remove_node(
         &mut self,
-        node_id: RustRaftNodeId,
-    ) -> Result<RaftMembershipExecutionReport, RaftError> {
+        node_id: NodeId,
+    ) -> Result<MembershipExecutionReport, RaftError> {
         Ok(self.remove_node_with_report(node_id)?.membership)
     }
 
     pub fn remove_node_with_report(
         &mut self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
     ) -> Result<MatrixRaftRemoveReport, RaftError> {
         let removed_node = self.peers.get(&node_id).map(MatrixRaftNodeId::from);
-        let report = self.execute_membership(RaftMembershipOperation::Remove(node_id))?;
+        let report = self.execute_membership(MembershipOperation::Remove(node_id))?;
         let removed_conf_state = if report.before.voters.contains(&node_id) {
             Some(MatrixRaftConfState::Voter)
         } else if report.before.learners.contains(&node_id) {
@@ -3434,21 +3434,21 @@ impl MatrixRaftNode {
 
     pub fn read_index(
         &self,
-        min_commit_index: RustRaftLogIndex,
+        min_commit_index: LogIndex,
     ) -> Result<ReadIndexResponse, RaftError> {
         self.read_index_with_options(MatrixRaftReadIndexOptions::lease_read(min_commit_index))
     }
 
     pub fn lease_read_index(
         &self,
-        min_commit_index: RustRaftLogIndex,
+        min_commit_index: LogIndex,
     ) -> Result<ReadIndexResponse, RaftError> {
         self.read_index_with_options(MatrixRaftReadIndexOptions::lease_read(min_commit_index))
     }
 
     pub fn quorum_read_index(
         &self,
-        min_commit_index: RustRaftLogIndex,
+        min_commit_index: LogIndex,
     ) -> Result<ReadIndexResponse, RaftError> {
         self.read_index_with_options(MatrixRaftReadIndexOptions::quorum_read(min_commit_index))
     }
@@ -3457,15 +3457,15 @@ impl MatrixRaftNode {
         &self,
         options: MatrixRaftReadIndexOptions,
     ) -> Result<ReadIndexResponse, RaftError> {
-        let request = options.to_request(self.group_id(), self.node_id());
+        let request = options.into_request(self.group_id(), self.node_id());
         self.runtime.read_index_request(request)
     }
 
     pub fn bounded_stale_read_index(
         &self,
-        min_commit_index: RustRaftLogIndex,
-        max_stale_index_lag: RustRaftLogIndex,
-    ) -> Result<RustRaftReadPathReport, RaftError> {
+        min_commit_index: LogIndex,
+        max_stale_index_lag: LogIndex,
+    ) -> Result<ReadPathReport, RaftError> {
         self.bounded_stale_read_index_with_options(MatrixRaftBoundedStaleReadOptions::new(
             min_commit_index,
             max_stale_index_lag,
@@ -3475,7 +3475,7 @@ impl MatrixRaftNode {
     pub fn bounded_stale_read_index_with_options(
         &self,
         options: MatrixRaftBoundedStaleReadOptions,
-    ) -> Result<RustRaftReadPathReport, RaftError> {
+    ) -> Result<ReadPathReport, RaftError> {
         self.runtime
             .bounded_stale_read_index(options.min_commit_index, options.max_stale_index_lag)
     }
@@ -3497,7 +3497,7 @@ impl MatrixRaftNode {
 
     pub fn read_index_with_min_callback<F>(
         &self,
-        min_commit_index: RustRaftLogIndex,
+        min_commit_index: LogIndex,
         callback: F,
         timeout_ms: u64,
     ) -> MatrixRaftAsyncResult
@@ -3513,7 +3513,7 @@ impl MatrixRaftNode {
 
     pub fn lease_read_index_callback<F>(
         &self,
-        min_commit_index: RustRaftLogIndex,
+        min_commit_index: LogIndex,
         callback: F,
         timeout_ms: u64,
     ) -> MatrixRaftAsyncResult
@@ -3529,7 +3529,7 @@ impl MatrixRaftNode {
 
     pub fn quorum_read_index_callback<F>(
         &self,
-        min_commit_index: RustRaftLogIndex,
+        min_commit_index: LogIndex,
         callback: F,
         timeout_ms: u64,
     ) -> MatrixRaftAsyncResult
@@ -3598,7 +3598,7 @@ impl MatrixRaftNode {
         )
     }
 
-    pub fn transfer_leader(&self, transferee: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn transfer_leader(&self, transferee: NodeId) -> Result<(), RaftError> {
         if let Some(peer) = self.peers.get(&transferee) {
             if !peer.role.can_be_leader() {
                 return Err(RaftError::InvalidRequest(format!(
@@ -3612,7 +3612,7 @@ impl MatrixRaftNode {
 
     pub fn transfer_leader_with_report(
         &self,
-        transferee: RustRaftNodeId,
+        transferee: NodeId,
     ) -> Result<MatrixRaftTransferLeaderReport, RaftError> {
         let transferee_node = self.peers.get(&transferee).map(MatrixRaftNodeId::from);
         self.transfer_leader(transferee)?;
@@ -3626,7 +3626,7 @@ impl MatrixRaftNode {
 
     pub fn transfer_leader_callback<F>(
         &self,
-        transferee: RustRaftNodeId,
+        transferee: NodeId,
         callback: F,
         timeout_ms: u64,
     ) -> MatrixRaftAsyncResult
@@ -3647,16 +3647,16 @@ impl MatrixRaftNode {
 
     pub fn timeout_now(
         &self,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
+        from: NodeId,
+        target: NodeId,
     ) -> Result<TimeoutNowResponse, RaftError> {
         self.runtime.timeout_now(from, target)
     }
 
     pub fn timeout_now_callback<F>(
         &self,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
+        from: NodeId,
+        target: NodeId,
         callback: F,
         timeout_ms: u64,
     ) -> MatrixRaftAsyncResult
@@ -3677,7 +3677,7 @@ impl MatrixRaftNode {
 
     pub fn step_down(
         &self,
-        transferee: Option<RustRaftNodeId>,
+        transferee: Option<NodeId>,
     ) -> Result<MatrixRaftStepDownReport, RaftError> {
         let selected = self.runtime.step_down(transferee)?;
         let transferee_node = selected.and_then(|node_id| self.peers.get(&node_id).map(MatrixRaftNodeId::from));
@@ -3692,7 +3692,7 @@ impl MatrixRaftNode {
 
     pub fn step_down_callback<F>(
         &self,
-        transferee: Option<RustRaftNodeId>,
+        transferee: Option<NodeId>,
         callback: F,
         timeout_ms: u64,
     ) -> MatrixRaftAsyncResult
@@ -3746,7 +3746,7 @@ impl MatrixRaftNode {
         )
     }
 
-    pub fn async_snapshot(&self) -> Result<RustRaftSnapshotMeta, RaftError> {
+    pub fn async_snapshot(&self) -> Result<SnapshotMetadata, RaftError> {
         self.runtime.trigger_snapshot()
     }
 
@@ -3765,7 +3765,7 @@ impl MatrixRaftNode {
 
     fn snapshot_peer_report(
         &self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftSnapshotPeerReport, RaftError> {
         let runtime_status = self.runtime.status()?;
         let peer_status = runtime_status
@@ -3788,9 +3788,9 @@ impl MatrixRaftNode {
 
     pub fn begin_snapshot_send_to(
         &self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<MatrixRaftSnapshotPeerReport, RaftError> {
         self.runtime.begin_snapshot_send_to(
@@ -3804,7 +3804,7 @@ impl MatrixRaftNode {
 
     pub fn record_snapshot_chunk_sent_to(
         &self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         bytes: u64,
     ) -> Result<MatrixRaftSnapshotPeerReport, RaftError> {
         self.runtime.record_snapshot_chunk_sent_to(peer_id, bytes)?;
@@ -3813,7 +3813,7 @@ impl MatrixRaftNode {
 
     pub fn acknowledge_snapshot_chunk_to(
         &self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftSnapshotPeerReport, RaftError> {
         self.runtime.acknowledge_snapshot_chunk_to(peer_id)?;
         self.snapshot_peer_report(peer_id)
@@ -3821,7 +3821,7 @@ impl MatrixRaftNode {
 
     pub fn retry_snapshot_chunk_to(
         &self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftSnapshotPeerReport, RaftError> {
         self.runtime.retry_snapshot_chunk_to(peer_id)?;
         self.snapshot_peer_report(peer_id)
@@ -3829,7 +3829,7 @@ impl MatrixRaftNode {
 
     pub fn cancel_snapshot_send_to(
         &self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftSnapshotPeerReport, RaftError> {
         self.runtime.cancel_snapshot_send_to(peer_id)?;
         self.snapshot_peer_report(peer_id)
@@ -3837,9 +3837,9 @@ impl MatrixRaftNode {
 
     pub fn begin_snapshot_install_from(
         &self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<MatrixRaftSnapshotPeerReport, RaftError> {
         self.runtime.begin_snapshot_install_from(
@@ -3853,7 +3853,7 @@ impl MatrixRaftNode {
 
     pub fn receive_snapshot_chunk_from(
         &self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         bytes: u64,
         done: bool,
     ) -> Result<MatrixRaftSnapshotPeerReport, RaftError> {
@@ -3864,7 +3864,7 @@ impl MatrixRaftNode {
 
     pub fn rollback_snapshot_install_from(
         &self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftSnapshotPeerReport, RaftError> {
         self.runtime.rollback_snapshot_install_from(peer_id)?;
         self.snapshot_peer_report(peer_id)
@@ -3872,9 +3872,9 @@ impl MatrixRaftNode {
 
     pub fn install_snapshot_to(
         &self,
-        target: RustRaftNodeId,
+        target: NodeId,
         snapshot: RaftSnapshot,
-        fence: RustRaftApplySnapshotFence,
+        fence: ApplySnapshotFence,
     ) -> Result<(), RaftError> {
         self.runtime.install_snapshot_to(target, snapshot, fence)
     }
@@ -3894,14 +3894,14 @@ impl MatrixRaftNode {
         )
     }
 
-    pub fn resolve_address(&self, peer_id: RustRaftNodeId) -> Result<MatrixRaftNodeId, RaftError> {
+    pub fn resolve_address(&self, peer_id: NodeId) -> Result<MatrixRaftNodeId, RaftError> {
         self.peers
             .get(&peer_id)
             .map(MatrixRaftNodeId::from)
             .ok_or(RaftError::NodeNotFound(peer_id))
     }
 
-    pub fn leader(&self) -> Result<Option<RustRaftNodeId>, RaftError> {
+    pub fn leader(&self) -> Result<Option<NodeId>, RaftError> {
         Ok(self.get_status()?.leader_id)
     }
 
@@ -4028,15 +4028,33 @@ impl MatrixRaftNode {
         self.runtime.set_leader_lease_valid(valid)
     }
 
+    /// Advances the leader-lease clock by `elapsed_ms`, reporting whether the
+    /// lease has now expired. The multi-raft server has had
+    /// `tick_leader_lease_on_node` for a while; this is the single-node
+    /// equivalent.
+    pub fn tick_leader_lease(&self, elapsed_ms: u64) -> Result<bool, RaftError> {
+        self.runtime.tick_leader_lease(elapsed_ms)
+    }
+
+    /// Advances the follower-lease clock by `elapsed_ms`, reporting whether the
+    /// lease has now expired.
+    ///
+    /// Without this there is no way to expire a *follower* lease through this
+    /// facade, which matters because a node inside one refuses to campaign
+    /// (`InvalidRequest("follower is still in leader lease")`).
+    pub fn tick_follower_lease(&self, elapsed_ms: u64) -> Result<bool, RaftError> {
+        self.runtime.tick_follower_lease(elapsed_ms)
+    }
+
     pub fn fire_fatal_event(
         &self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         reason: impl Into<String>,
-    ) -> Result<Option<RustRaftNodeId>, RaftError> {
+    ) -> Result<Option<NodeId>, RaftError> {
         self.runtime.fire_fatal_event(node_id, reason)
     }
 
-    pub fn get_fatal_blockers(&self) -> Result<Vec<RustRaftBlocker>, RaftError> {
+    pub fn get_fatal_blockers(&self) -> Result<Vec<Blocker>, RaftError> {
         Ok(self
             .runtime
             .status()?
@@ -4052,7 +4070,7 @@ impl MatrixRaftNode {
             .collect())
     }
 
-    pub fn start_index(&self) -> RustRaftLogIndex {
+    pub fn start_index(&self) -> LogIndex {
         self.start_index
     }
 
@@ -4060,51 +4078,51 @@ impl MatrixRaftNode {
         self.recover_fsm_from_snapshot
     }
 
-    pub fn into_runtime(self) -> RaftNodeRuntime {
+    pub fn into_runtime(self) -> NodeRuntime {
         self.runtime
     }
 
     fn execute_membership(
         &self,
-        operation: RaftMembershipOperation,
-    ) -> Result<RaftMembershipExecutionReport, RaftError> {
+        operation: MembershipOperation,
+    ) -> Result<MembershipExecutionReport, RaftError> {
         self.runtime.execute_membership_operation(operation)
     }
 
-    fn apply_successful_membership_operation(&mut self, operation: RaftMembershipOperation) {
+    fn apply_successful_membership_operation(&mut self, operation: MembershipOperation) {
         match operation {
-            RaftMembershipOperation::AddNode(mut peer)
-            | RaftMembershipOperation::AddVoter(mut peer) => {
-                peer.role = RustRaftReplicaRole::Voter;
+            MembershipOperation::AddNode(mut peer)
+            | MembershipOperation::AddVoter(mut peer) => {
+                peer.role = ReplicaRole::Voter;
                 peer.auto_promote = false;
                 self.peers.insert(peer.node_id, peer);
             }
-            RaftMembershipOperation::AddLearner(mut peer) => {
-                peer.role = RustRaftReplicaRole::Learner;
+            MembershipOperation::AddLearner(mut peer) => {
+                peer.role = ReplicaRole::Learner;
                 self.peers.insert(peer.node_id, peer);
             }
-            RaftMembershipOperation::AddWitness(mut peer) => {
-                peer.role = RustRaftReplicaRole::Witness;
+            MembershipOperation::AddWitness(mut peer) => {
+                peer.role = ReplicaRole::Witness;
                 peer.auto_promote = false;
                 self.peers.insert(peer.node_id, peer);
             }
-            RaftMembershipOperation::Promote(node_id) => {
+            MembershipOperation::Promote(node_id) => {
                 if let Some(peer) = self.peers.get_mut(&node_id) {
-                    peer.role = RustRaftReplicaRole::Voter;
+                    peer.role = ReplicaRole::Voter;
                     peer.auto_promote = false;
                 }
             }
-            RaftMembershipOperation::Remove(node_id) => {
+            MembershipOperation::Remove(node_id) => {
                 self.peers.remove(&node_id);
             }
-            RaftMembershipOperation::TransferLeader(_) => {}
+            MembershipOperation::TransferLeader(_) => {}
         }
     }
 
     fn execute_membership_operation(
         &mut self,
-        operation: RaftMembershipOperation,
-    ) -> Result<RaftMembershipExecutionReport, RaftError> {
+        operation: MembershipOperation,
+    ) -> Result<MembershipExecutionReport, RaftError> {
         let report = self.execute_membership(operation.clone())?;
         if report.success {
             self.apply_successful_membership_operation(operation);
@@ -4115,9 +4133,9 @@ impl MatrixRaftNode {
     fn execute_membership_workflow_with_rollback<I>(
         &mut self,
         operations: I,
-    ) -> Result<Vec<RaftMembershipExecutionReport>, RaftError>
+    ) -> Result<Vec<MembershipExecutionReport>, RaftError>
     where
-        I: IntoIterator<Item = RaftMembershipOperation>,
+        I: IntoIterator<Item = MembershipOperation>,
     {
         let reports = self
             .runtime
@@ -4132,7 +4150,7 @@ impl MatrixRaftNode {
 
     fn finish_callback<T, F, M, O>(
         callback_scheduler: std::rc::Rc<std::cell::RefCell<MatrixRaftCallbackScheduler>>,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         request_id: u64,
         operation: MatrixRaftAsyncOperation,
         timeout_ms: u64,
@@ -4195,10 +4213,10 @@ impl MatrixRaftNode {
     fn peer_from_node_id(
         &self,
         node_id: MatrixRaftNodeId,
-        role: RustRaftReplicaRole,
+        role: ReplicaRole,
         auto_promote: bool,
-    ) -> RustRaftPeer {
-        RustRaftPeer {
+    ) -> Peer {
+        Peer {
             node_id: node_id.peer_id,
             raft_addr: node_id.raft_addr,
             snapshot_addr: node_id.snapshot_addr,
@@ -4207,12 +4225,12 @@ impl MatrixRaftNode {
         }
     }
 
-    fn local_replica_role(&self) -> Option<RustRaftReplicaRole> {
+    fn local_replica_role(&self) -> Option<ReplicaRole> {
         self.peers.get(&self.runtime.node_id()).map(|peer| peer.role)
     }
 
-    fn membership_from_cluster_status(&self, cluster: &RaftClusterStatusReport) -> RaftMembership {
-        let mut membership = RaftMembership {
+    fn membership_from_cluster_status(&self, cluster: &ClusterStatusReport) -> Membership {
+        let mut membership = Membership {
             group_id: cluster.group_id,
             voters: Vec::new(),
             learners: Vec::new(),
@@ -4225,16 +4243,16 @@ impl MatrixRaftNode {
                 .get(&node.node_id)
                 .map(|peer| peer.role)
                 .unwrap_or_else(|| {
-                    if node.role == RustRaftRole::Learner {
-                        RustRaftReplicaRole::Learner
+                    if node.role == StateRole::Learner {
+                        ReplicaRole::Learner
                     } else {
-                        RustRaftReplicaRole::Voter
+                        ReplicaRole::Voter
                     }
                 });
             match role {
-                RustRaftReplicaRole::Voter => membership.voters.push(node.node_id),
-                RustRaftReplicaRole::Learner => membership.learners.push(node.node_id),
-                RustRaftReplicaRole::Witness => membership.witnesses.push(node.node_id),
+                ReplicaRole::Voter => membership.voters.push(node.node_id),
+                ReplicaRole::Learner => membership.learners.push(node.node_id),
+                ReplicaRole::Witness => membership.witnesses.push(node.node_id),
             }
         }
         membership
@@ -4243,20 +4261,20 @@ impl MatrixRaftNode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MatrixRaftRouteKey {
-    pub group_id: RustRaftGroupId,
-    pub node_id: RustRaftNodeId,
+    pub group_id: GroupId,
+    pub node_id: NodeId,
 }
 
 impl MatrixRaftRouteKey {
-    pub fn new(group_id: RustRaftGroupId, node_id: RustRaftNodeId) -> Self {
+    pub fn new(group_id: GroupId, node_id: NodeId) -> Self {
         Self { group_id, node_id }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftGroupTopology {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub runtime_wiring_count: usize,
@@ -4273,21 +4291,21 @@ pub struct MatrixRaftTopology {
 }
 
 impl MatrixRaftTopology {
-    pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_group(&self) -> Vec<(GroupId, Vec<NodeId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize, usize)> {
+    pub fn counts_by_group(&self) -> Vec<(GroupId, usize, usize, usize)> {
         self.groups
             .iter()
             .map(|group| {
@@ -4305,16 +4323,16 @@ impl MatrixRaftTopology {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftCreateNodePlan {
     pub key: MatrixRaftRouteKey,
-    pub start_index: RustRaftLogIndex,
+    pub start_index: LogIndex,
     pub runtime_wiring: MatrixRaftRuntimeWiring,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftCreateGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
-    pub start_indices: Vec<RustRaftLogIndex>,
+    pub start_indices: Vec<LogIndex>,
     pub node_count: usize,
 }
 
@@ -4323,56 +4341,56 @@ pub struct MatrixRaftCreateBatchPlan {
     pub creator_index: Option<usize>,
     pub node_count: usize,
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub groups: Vec<MatrixRaftCreateGroupPlan>,
     pub nodes: Vec<MatrixRaftCreateNodePlan>,
 }
 
 impl MatrixRaftCreateBatchPlan {
-    pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_group(&self) -> Vec<(GroupId, Vec<NodeId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn start_indices_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftLogIndex>)> {
+    pub fn start_indices_by_group(&self) -> Vec<(GroupId, Vec<LogIndex>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.start_indices.clone()))
             .collect()
     }
 
-    pub fn node_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn node_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_count))
             .collect()
     }
 
-    pub fn route_key_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn route_key_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.len()))
             .collect()
     }
 
-    pub fn fanout_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize)> {
+    pub fn fanout_counts_by_group(&self) -> Vec<(GroupId, usize, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_count, group.route_keys.len()))
             .collect()
     }
 
-    pub fn creator_indices_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<usize>>)> {
+    pub fn creator_indices_by_group(&self) -> Vec<(GroupId, Vec<Option<usize>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -4388,11 +4406,11 @@ impl MatrixRaftCreateBatchPlan {
             .collect()
     }
 
-    pub fn creator_index_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn creator_index_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.creator_indices_by_group())
     }
 
-    pub fn store_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<u64>)> {
+    pub fn store_ids_by_group(&self) -> Vec<(GroupId, Vec<u64>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -4408,7 +4426,7 @@ impl MatrixRaftCreateBatchPlan {
             .collect()
     }
 
-    pub fn flexible_apply_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn flexible_apply_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -4424,7 +4442,7 @@ impl MatrixRaftCreateBatchPlan {
             .collect()
     }
 
-    pub fn heartbeat_merge_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn heartbeat_merge_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -4440,7 +4458,7 @@ impl MatrixRaftCreateBatchPlan {
             .collect()
     }
 
-    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.nodes
             .iter()
             .map(|node| (node.key, node.key.node_id))
@@ -4487,7 +4505,7 @@ impl MatrixRaftCreateBatchPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftCreateNodeResult {
     pub key: MatrixRaftRouteKey,
-    pub start_index: RustRaftLogIndex,
+    pub start_index: LogIndex,
     pub ok: bool,
     #[serde(default)]
     pub runtime_wiring: Option<MatrixRaftRuntimeWiring>,
@@ -4498,7 +4516,7 @@ pub struct MatrixRaftCreateNodeResult {
 impl MatrixRaftCreateNodeResult {
     pub fn ok(
         key: MatrixRaftRouteKey,
-        start_index: RustRaftLogIndex,
+        start_index: LogIndex,
         runtime_wiring: MatrixRaftRuntimeWiring,
     ) -> Self {
         Self {
@@ -4510,7 +4528,7 @@ impl MatrixRaftCreateNodeResult {
         }
     }
 
-    pub fn error(key: MatrixRaftRouteKey, start_index: RustRaftLogIndex, error: RaftError) -> Self {
+    pub fn error(key: MatrixRaftRouteKey, start_index: LogIndex, error: RaftError) -> Self {
         Self {
             key,
             start_index,
@@ -4527,7 +4545,7 @@ impl MatrixRaftCreateNodeResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftCreateGroupResult {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub node_count: usize,
     pub ok_count: usize,
     pub error_count: usize,
@@ -4568,7 +4586,7 @@ impl MatrixRaftCreateGroupResult {
 
     pub fn start_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.results
             .iter()
             .map(|result| (result.key, result.start_index))
@@ -4679,21 +4697,21 @@ macro_rules! impl_matrixraft_group_result_route_accessors {
                     .collect()
             }
 
-            pub fn node_ids(&self) -> Vec<RustRaftNodeId> {
+            pub fn node_ids(&self) -> Vec<NodeId> {
                 self.results
                     .iter()
                     .map(|result| result.key.node_id)
                     .collect()
             }
 
-            pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+            pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
                 self.results
                     .iter()
                     .map(|result| (result.key, result.key.node_id))
                     .collect()
             }
 
-            pub fn ok_node_ids(&self) -> Vec<RustRaftNodeId> {
+            pub fn ok_node_ids(&self) -> Vec<NodeId> {
                 self.results
                     .iter()
                     .filter(|result| result.is_ok())
@@ -4701,7 +4719,7 @@ macro_rules! impl_matrixraft_group_result_route_accessors {
                     .collect()
             }
 
-            pub fn ok_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+            pub fn ok_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
                 self.results
                     .iter()
                     .filter(|result| result.is_ok())
@@ -4709,7 +4727,7 @@ macro_rules! impl_matrixraft_group_result_route_accessors {
                     .collect()
             }
 
-            pub fn error_node_ids(&self) -> Vec<RustRaftNodeId> {
+            pub fn error_node_ids(&self) -> Vec<NodeId> {
                 self.results
                     .iter()
                     .filter(|result| !result.is_ok())
@@ -4717,7 +4735,7 @@ macro_rules! impl_matrixraft_group_result_route_accessors {
                     .collect()
             }
 
-            pub fn error_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+            pub fn error_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
                 self.results
                     .iter()
                     .filter(|result| !result.is_ok())
@@ -4744,8 +4762,8 @@ macro_rules! impl_matrixraft_group_result_route_accessors {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftUnregisterGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub runtime_wiring_count: usize,
@@ -4755,7 +4773,7 @@ pub struct MatrixRaftUnregisterGroupPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftUnregisterBatchPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub runtime_wiring_count: usize,
     pub snapshot_route_count: usize,
@@ -4764,28 +4782,28 @@ pub struct MatrixRaftUnregisterBatchPlan {
 }
 
 impl MatrixRaftUnregisterBatchPlan {
-    pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_group(&self) -> Vec<(GroupId, Vec<NodeId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn route_key_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn route_key_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.len()))
             .collect()
     }
 
-    pub fn counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize, usize)> {
+    pub fn counts_by_group(&self) -> Vec<(GroupId, usize, usize, usize)> {
         self.groups
             .iter()
             .map(|group| {
@@ -4801,7 +4819,7 @@ impl MatrixRaftUnregisterBatchPlan {
 
     pub fn unregister_counts_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, usize, usize, usize, usize)> {
+    ) -> Vec<(GroupId, usize, usize, usize, usize)> {
         self.groups
             .iter()
             .map(|group| {
@@ -4816,7 +4834,7 @@ impl MatrixRaftUnregisterBatchPlan {
             .collect()
     }
 
-    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -4861,12 +4879,12 @@ impl MatrixRaftUnregisterBatchPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftUnregisterGroupResult {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub ok: bool,
     pub node_count: usize,
     pub runtime_wiring_count: usize,
     pub snapshot_route_count: usize,
-    pub removed_node_ids: Vec<RustRaftNodeId>,
+    pub removed_node_ids: Vec<NodeId>,
     pub removed_route_keys: Vec<MatrixRaftRouteKey>,
     #[serde(default)]
     pub error: Option<String>,
@@ -4886,7 +4904,7 @@ impl MatrixRaftUnregisterGroupResult {
         }
     }
 
-    pub fn error(group_id: RustRaftGroupId, error: RaftError) -> Self {
+    pub fn error(group_id: GroupId, error: RaftError) -> Self {
         Self {
             group_id,
             ok: false,
@@ -4903,17 +4921,17 @@ impl MatrixRaftUnregisterGroupResult {
         self.ok && self.error.is_none()
     }
 
-    pub fn result_by_group_id(&self) -> (RustRaftGroupId, MatrixRaftUnregisterGroupResult) {
+    pub fn result_by_group_id(&self) -> (GroupId, MatrixRaftUnregisterGroupResult) {
         (self.group_id, self.clone())
     }
 
-    pub fn ok_result_by_group_id(&self) -> Option<(RustRaftGroupId, MatrixRaftUnregisterGroupResult)> {
+    pub fn ok_result_by_group_id(&self) -> Option<(GroupId, MatrixRaftUnregisterGroupResult)> {
         self.is_ok().then(|| (self.group_id, self.clone()))
     }
 
     pub fn error_result_by_group_id(
         &self,
-    ) -> Option<(RustRaftGroupId, MatrixRaftUnregisterGroupResult)> {
+    ) -> Option<(GroupId, MatrixRaftUnregisterGroupResult)> {
         (!self.is_ok()).then(|| (self.group_id, self.clone()))
     }
 
@@ -4948,7 +4966,7 @@ impl MatrixRaftUnregisterGroupResult {
         self.removed_route_keys.clone()
     }
 
-    pub fn node_ids(&self) -> Vec<RustRaftNodeId> {
+    pub fn node_ids(&self) -> Vec<NodeId> {
         self.removed_node_ids.clone()
     }
 
@@ -4961,7 +4979,7 @@ impl MatrixRaftUnregisterGroupResult {
         )
     }
 
-    pub fn removed_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn removed_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.removed_route_keys
             .iter()
             .map(|key| (*key, key.node_id))
@@ -5005,11 +5023,11 @@ pub enum MatrixRaftLifecycleAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftLifecycleGroupPlan {
     pub action: MatrixRaftLifecycleAction,
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
-    pub start_index: Option<RustRaftLogIndex>,
+    pub start_index: Option<LogIndex>,
     pub recover_fsm_from_snapshot: Option<bool>,
 }
 
@@ -5017,51 +5035,51 @@ pub struct MatrixRaftLifecycleGroupPlan {
 pub struct MatrixRaftLifecycleBatchPlan {
     pub action: MatrixRaftLifecycleAction,
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub groups: Vec<MatrixRaftLifecycleGroupPlan>,
-    pub start_index: Option<RustRaftLogIndex>,
+    pub start_index: Option<LogIndex>,
     pub recover_fsm_from_snapshot: Option<bool>,
 }
 
 impl MatrixRaftLifecycleBatchPlan {
-    pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_group(&self) -> Vec<(GroupId, Vec<NodeId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn node_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn node_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_count))
             .collect()
     }
 
-    pub fn route_key_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn route_key_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.len()))
             .collect()
     }
 
-    pub fn fanout_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize)> {
+    pub fn fanout_counts_by_group(&self) -> Vec<(GroupId, usize, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_count, group.route_keys.len()))
             .collect()
     }
 
-    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -5073,7 +5091,7 @@ impl MatrixRaftLifecycleBatchPlan {
             .collect()
     }
 
-    pub fn actions_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftLifecycleAction)> {
+    pub fn actions_by_group(&self) -> Vec<(GroupId, MatrixRaftLifecycleAction)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.action))
@@ -5092,14 +5110,14 @@ impl MatrixRaftLifecycleBatchPlan {
             .collect()
     }
 
-    pub fn start_indices_by_group(&self) -> Vec<(RustRaftGroupId, Option<RustRaftLogIndex>)> {
+    pub fn start_indices_by_group(&self) -> Vec<(GroupId, Option<LogIndex>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.start_index))
             .collect()
     }
 
-    pub fn start_index_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+    pub fn start_index_presence_by_group(&self) -> Vec<(GroupId, bool)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.start_index.is_some()))
@@ -5108,7 +5126,7 @@ impl MatrixRaftLifecycleBatchPlan {
 
     pub fn start_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -5132,14 +5150,14 @@ impl MatrixRaftLifecycleBatchPlan {
             .collect()
     }
 
-    pub fn recover_fsm_from_snapshot_by_group(&self) -> Vec<(RustRaftGroupId, Option<bool>)> {
+    pub fn recover_fsm_from_snapshot_by_group(&self) -> Vec<(GroupId, Option<bool>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.recover_fsm_from_snapshot))
             .collect()
     }
 
-    pub fn recover_fsm_from_snapshot_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+    pub fn recover_fsm_from_snapshot_presence_by_group(&self) -> Vec<(GroupId, bool)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.recover_fsm_from_snapshot.is_some()))
@@ -5210,7 +5228,7 @@ impl MatrixRaftLifecycleNodeResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftLifecycleGroupResult {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub action: MatrixRaftLifecycleAction,
     pub node_count: usize,
     pub ok_count: usize,
@@ -5316,7 +5334,7 @@ impl MatrixRaftFsmRuntimeSyncNodeResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftFsmRuntimeSyncGroupResult {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub node_count: usize,
     pub ok_count: usize,
     pub error_count: usize,
@@ -5421,7 +5439,7 @@ impl MatrixRaftFsmRuntimeSyncGroupResult {
         matrixraft_presence_by_route_key(self.following_started_by_route_key())
     }
 
-    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)> {
+    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<Term>)> {
         self.results
             .iter()
             .map(|result| (result.key, result.report.as_ref().map(|report| report.term)))
@@ -5434,7 +5452,7 @@ impl MatrixRaftFsmRuntimeSyncGroupResult {
 
     pub fn leader_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results
             .iter()
             .map(|result| {
@@ -5450,7 +5468,7 @@ impl MatrixRaftFsmRuntimeSyncGroupResult {
         matrixraft_presence_by_route_key(self.leader_ids_by_route_key())
     }
 
-    pub fn roles_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftRole>)> {
+    pub fn roles_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<StateRole>)> {
         self.results
             .iter()
             .map(|result| (result.key, result.report.as_ref().map(|report| report.role)))
@@ -5505,19 +5523,19 @@ impl MatrixRaftNodeSnapshotCompletionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotInstallFanoutGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub target: RustRaftNodeId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub target: NodeId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub snapshot: RaftSnapshot,
-    pub fence: RustRaftApplySnapshotFence,
+    pub fence: ApplySnapshotFence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotInstallFanoutPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub groups: Vec<MatrixRaftSnapshotInstallFanoutGroupPlan>,
@@ -5526,16 +5544,16 @@ pub struct MatrixRaftSnapshotInstallFanoutPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotInstallNodeResult {
     pub key: MatrixRaftRouteKey,
-    pub target: RustRaftNodeId,
-    pub snapshot_id: RustRaftSnapshotId,
-    pub snapshot_index: RustRaftLogIndex,
+    pub target: NodeId,
+    pub snapshot_id: SnapshotId,
+    pub snapshot_index: LogIndex,
     pub ok: bool,
     #[serde(default)]
     pub error: Option<String>,
 }
 
 impl MatrixRaftSnapshotInstallNodeResult {
-    pub fn ok(key: MatrixRaftRouteKey, target: RustRaftNodeId, snapshot: &RaftSnapshot) -> Self {
+    pub fn ok(key: MatrixRaftRouteKey, target: NodeId, snapshot: &RaftSnapshot) -> Self {
         Self {
             key,
             target,
@@ -5548,7 +5566,7 @@ impl MatrixRaftSnapshotInstallNodeResult {
 
     pub fn error(
         key: MatrixRaftRouteKey,
-        target: RustRaftNodeId,
+        target: NodeId,
         snapshot: &RaftSnapshot,
         error: RaftError,
     ) -> Self {
@@ -5569,8 +5587,8 @@ impl MatrixRaftSnapshotInstallNodeResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotInstallGroupResult {
-    pub group_id: RustRaftGroupId,
-    pub target: RustRaftNodeId,
+    pub group_id: GroupId,
+    pub target: NodeId,
     pub node_count: usize,
     pub ok_count: usize,
     pub error_count: usize,
@@ -5611,14 +5629,14 @@ impl MatrixRaftSnapshotInstallGroupResult {
             .collect()
     }
 
-    pub fn targets_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn targets_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.results
             .iter()
             .map(|result| (result.key, result.target))
             .collect()
     }
 
-    pub fn snapshot_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftSnapshotId)> {
+    pub fn snapshot_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, SnapshotId)> {
         self.results
             .iter()
             .map(|result| (result.key, result.snapshot_id.clone()))
@@ -5627,7 +5645,7 @@ impl MatrixRaftSnapshotInstallGroupResult {
 
     pub fn snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.results
             .iter()
             .map(|result| (result.key, result.snapshot_index))
@@ -5636,7 +5654,7 @@ impl MatrixRaftSnapshotInstallGroupResult {
 
     pub fn ok_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftSnapshotId)> {
+    ) -> Vec<(MatrixRaftRouteKey, SnapshotId)> {
         self.results
             .iter()
             .filter(|result| result.is_ok())
@@ -5646,7 +5664,7 @@ impl MatrixRaftSnapshotInstallGroupResult {
 
     pub fn ok_snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.results
             .iter()
             .filter(|result| result.is_ok())
@@ -5656,7 +5674,7 @@ impl MatrixRaftSnapshotInstallGroupResult {
 
     pub fn error_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftSnapshotId)> {
+    ) -> Vec<(MatrixRaftRouteKey, SnapshotId)> {
         self.results
             .iter()
             .filter(|result| !result.is_ok())
@@ -5666,7 +5684,7 @@ impl MatrixRaftSnapshotInstallGroupResult {
 
     pub fn error_snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.results
             .iter()
             .filter(|result| !result.is_ok())
@@ -5677,41 +5695,41 @@ impl MatrixRaftSnapshotInstallGroupResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMembershipFanoutGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
-    pub operation: RaftMembershipOperation,
+    pub operation: MembershipOperation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMembershipFanoutPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
-    pub operation: RaftMembershipOperation,
+    pub operation: MembershipOperation,
     pub groups: Vec<MatrixRaftMembershipFanoutGroupPlan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMembershipWorkflowFanoutGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub operation_count: usize,
-    pub operations: Vec<RaftMembershipOperation>,
+    pub operations: Vec<MembershipOperation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMembershipWorkflowFanoutPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub operation_count: usize,
-    pub operations: Vec<RaftMembershipOperation>,
+    pub operations: Vec<MembershipOperation>,
     pub groups: Vec<MatrixRaftMembershipWorkflowFanoutGroupPlan>,
 }
 
@@ -5719,13 +5737,13 @@ pub struct MatrixRaftMembershipWorkflowFanoutPlan {
 pub struct MatrixRaftMembershipWorkflowNodeResult {
     pub key: MatrixRaftRouteKey,
     #[serde(default)]
-    pub reports: Option<Vec<RaftMembershipExecutionReport>>,
+    pub reports: Option<Vec<MembershipExecutionReport>>,
     #[serde(default)]
     pub error: Option<String>,
 }
 
 impl MatrixRaftMembershipWorkflowNodeResult {
-    pub fn ok(key: MatrixRaftRouteKey, reports: Vec<RaftMembershipExecutionReport>) -> Self {
+    pub fn ok(key: MatrixRaftRouteKey, reports: Vec<MembershipExecutionReport>) -> Self {
         Self {
             key,
             reports: Some(reports),
@@ -5748,7 +5766,7 @@ impl MatrixRaftMembershipWorkflowNodeResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMembershipWorkflowGroupResult {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub node_count: usize,
     pub ok_count: usize,
     pub error_count: usize,
@@ -5762,7 +5780,7 @@ impl MatrixRaftMembershipWorkflowGroupResult {
 
     pub fn reports_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<Vec<RaftMembershipExecutionReport>>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<Vec<MembershipExecutionReport>>)> {
         self.results
             .iter()
             .map(|result| (result.key, result.reports.clone()))
@@ -5778,7 +5796,7 @@ impl MatrixRaftMembershipWorkflowGroupResult {
 
     pub fn ok_reports_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Vec<RaftMembershipExecutionReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Vec<MembershipExecutionReport>)> {
         self.results
             .iter()
             .filter(|result| result.is_ok())
@@ -5793,7 +5811,7 @@ impl MatrixRaftMembershipWorkflowGroupResult {
 
     pub fn error_reports_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<Vec<RaftMembershipExecutionReport>>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<Vec<MembershipExecutionReport>>)> {
         self.results
             .iter()
             .filter(|result| !result.is_ok())
@@ -5815,7 +5833,7 @@ impl MatrixRaftMembershipWorkflowGroupResult {
 
     pub fn operations_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Vec<RaftMembershipOperation>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Vec<MembershipOperation>)> {
         self.results
             .iter()
             .map(|result| {
@@ -5838,7 +5856,7 @@ impl MatrixRaftMembershipWorkflowGroupResult {
 
     pub fn operation_member_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Vec<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Vec<NodeId>)> {
         self.results
             .iter()
             .map(|result| {
@@ -5934,34 +5952,34 @@ impl MatrixRaftMembershipWorkflowGroupResult {
     }
 }
 
-fn matrixraft_membership_operation_node_id(operation: &RaftMembershipOperation) -> RustRaftNodeId {
+fn matrixraft_membership_operation_node_id(operation: &MembershipOperation) -> NodeId {
     match operation {
-        RaftMembershipOperation::AddNode(peer)
-        | RaftMembershipOperation::AddVoter(peer)
-        | RaftMembershipOperation::AddLearner(peer)
-        | RaftMembershipOperation::AddWitness(peer) => peer.node_id,
-        RaftMembershipOperation::Promote(node_id)
-        | RaftMembershipOperation::Remove(node_id)
-        | RaftMembershipOperation::TransferLeader(node_id) => *node_id,
+        MembershipOperation::AddNode(peer)
+        | MembershipOperation::AddVoter(peer)
+        | MembershipOperation::AddLearner(peer)
+        | MembershipOperation::AddWitness(peer) => peer.node_id,
+        MembershipOperation::Promote(node_id)
+        | MembershipOperation::Remove(node_id)
+        | MembershipOperation::TransferLeader(node_id) => *node_id,
     }
 }
 
-fn matrixraft_membership_operation_type(operation: &RaftMembershipOperation) -> &'static str {
+fn matrixraft_membership_operation_type(operation: &MembershipOperation) -> &'static str {
     match operation {
-        RaftMembershipOperation::AddNode(_) => "add_node",
-        RaftMembershipOperation::AddVoter(_) => "add_voter",
-        RaftMembershipOperation::AddLearner(_) => "add_learner",
-        RaftMembershipOperation::AddWitness(_) => "add_witness",
-        RaftMembershipOperation::Promote(_) => "promote",
-        RaftMembershipOperation::Remove(_) => "remove",
-        RaftMembershipOperation::TransferLeader(_) => "transfer_leader",
+        MembershipOperation::AddNode(_) => "add_node",
+        MembershipOperation::AddVoter(_) => "add_voter",
+        MembershipOperation::AddLearner(_) => "add_learner",
+        MembershipOperation::AddWitness(_) => "add_witness",
+        MembershipOperation::Promote(_) => "promote",
+        MembershipOperation::Remove(_) => "remove",
+        MembershipOperation::TransferLeader(_) => "transfer_leader",
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftConfigChangeFanoutGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub change: MatrixRaftConfigChange,
@@ -5970,7 +5988,7 @@ pub struct MatrixRaftConfigChangeFanoutGroupPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftConfigChangeFanoutPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub change: MatrixRaftConfigChange,
@@ -5979,8 +5997,8 @@ pub struct MatrixRaftConfigChangeFanoutPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftProposeFanoutGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub options: MatrixRaftProposeOptions,
@@ -5990,7 +6008,7 @@ pub struct MatrixRaftProposeFanoutGroupPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftProposeFanoutPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub options: MatrixRaftProposeOptions,
@@ -6000,8 +6018,8 @@ pub struct MatrixRaftProposeFanoutPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftReadIndexFanoutGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub options: MatrixRaftReadIndexOptions,
@@ -6010,7 +6028,7 @@ pub struct MatrixRaftReadIndexFanoutGroupPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftReadIndexFanoutPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub options: MatrixRaftReadIndexOptions,
@@ -6050,7 +6068,7 @@ impl MatrixRaftReadIndexNodeResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftReadIndexGroupResult {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub node_count: usize,
     pub ok_count: usize,
     pub error_count: usize,
@@ -6076,7 +6094,7 @@ impl MatrixRaftReadIndexGroupResult {
             .collect()
     }
 
-    pub fn read_indices_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    pub fn read_indices_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.results
             .iter()
             .map(|result| {
@@ -6138,8 +6156,8 @@ impl MatrixRaftReadIndexGroupResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftBoundedStaleReadFanoutGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub options: MatrixRaftBoundedStaleReadOptions,
@@ -6148,7 +6166,7 @@ pub struct MatrixRaftBoundedStaleReadFanoutGroupPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftBoundedStaleReadFanoutPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub options: MatrixRaftBoundedStaleReadOptions,
@@ -6159,13 +6177,13 @@ pub struct MatrixRaftBoundedStaleReadFanoutPlan {
 pub struct MatrixRaftBoundedStaleReadNodeResult {
     pub key: MatrixRaftRouteKey,
     #[serde(default)]
-    pub report: Option<RustRaftReadPathReport>,
+    pub report: Option<ReadPathReport>,
     #[serde(default)]
     pub error: Option<String>,
 }
 
 impl MatrixRaftBoundedStaleReadNodeResult {
-    pub fn ok(key: MatrixRaftRouteKey, report: RustRaftReadPathReport) -> Self {
+    pub fn ok(key: MatrixRaftRouteKey, report: ReadPathReport) -> Self {
         Self {
             key,
             report: Some(report),
@@ -6188,7 +6206,7 @@ impl MatrixRaftBoundedStaleReadNodeResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftBoundedStaleReadGroupResult {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub node_count: usize,
     pub ok_count: usize,
     pub error_count: usize,
@@ -6202,7 +6220,7 @@ impl MatrixRaftBoundedStaleReadGroupResult {
 
     pub fn reports_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftReadPathReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<ReadPathReport>)> {
         self.results
             .iter()
             .map(|result| (result.key, result.report.clone()))
@@ -6231,7 +6249,7 @@ impl MatrixRaftBoundedStaleReadGroupResult {
             .collect()
     }
 
-    pub fn read_indices_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    pub fn read_indices_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.results
             .iter()
             .map(|result| {
@@ -6312,7 +6330,7 @@ impl MatrixRaftBoundedStaleReadGroupResult {
 
     pub fn bounded_lags_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.results
             .iter()
             .map(|result| {
@@ -6343,8 +6361,8 @@ impl_matrixraft_group_result_route_accessors!(MatrixRaftBoundedStaleReadGroupRes
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotPublishGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub existing_route_count: usize,
@@ -6356,7 +6374,7 @@ pub struct MatrixRaftSnapshotPublishGroupPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotPublishPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub existing_route_count: usize,
@@ -6365,8 +6383,8 @@ pub struct MatrixRaftSnapshotPublishPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotFinishGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub active_route_count: usize,
@@ -6378,7 +6396,7 @@ pub struct MatrixRaftSnapshotFinishGroupPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotFinishPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub active_route_count: usize,
@@ -6388,8 +6406,8 @@ pub struct MatrixRaftSnapshotFinishPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMessageFanoutGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub message_type: MatrixRaftMessageType,
@@ -6399,7 +6417,7 @@ pub struct MatrixRaftMessageFanoutGroupPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMessageFanoutPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub message_type: MatrixRaftMessageType,
@@ -6408,9 +6426,9 @@ pub struct MatrixRaftMessageFanoutPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftHeartbeatMergeGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub from: RustRaftNodeId,
-    pub to: RustRaftNodeId,
+    pub group_id: GroupId,
+    pub from: NodeId,
+    pub to: NodeId,
     pub route_key: MatrixRaftRouteKey,
     pub raft_addr: String,
     pub message_type: MatrixRaftMessageType,
@@ -6428,7 +6446,7 @@ pub struct MatrixRaftHeartbeatMergeBatchPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftHeartbeatMergePlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub message_count: usize,
     pub batch_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
@@ -6439,8 +6457,8 @@ pub struct MatrixRaftHeartbeatMergePlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftAdminCommandFanoutGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub command_type: MatrixRaftAdminCommandType,
@@ -6450,7 +6468,7 @@ pub struct MatrixRaftAdminCommandFanoutGroupPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftAdminCommandFanoutPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub command_type: MatrixRaftAdminCommandType,
@@ -6460,7 +6478,7 @@ pub struct MatrixRaftAdminCommandFanoutPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftAdminCommandBatchPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub command_types: Vec<MatrixRaftAdminCommandType>,
@@ -6470,21 +6488,21 @@ pub struct MatrixRaftAdminCommandBatchPlan {
 macro_rules! impl_matrixraft_group_node_route_accessors {
     ($plan:ty) => {
         impl $plan {
-            pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+            pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.route_keys.clone()))
                     .collect()
             }
 
-            pub fn node_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftNodeId>)> {
+            pub fn node_ids_by_group(&self) -> Vec<(GroupId, Vec<NodeId>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.node_ids.clone()))
                     .collect()
             }
 
-            pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+            pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
                 self.groups
                     .iter()
                     .flat_map(|group| {
@@ -6496,21 +6514,21 @@ macro_rules! impl_matrixraft_group_node_route_accessors {
                     .collect()
             }
 
-            pub fn node_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+            pub fn node_counts_by_group(&self) -> Vec<(GroupId, usize)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.node_count))
                     .collect()
             }
 
-            pub fn route_key_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+            pub fn route_key_counts_by_group(&self) -> Vec<(GroupId, usize)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.route_keys.len()))
                     .collect()
             }
 
-            pub fn fanout_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize)> {
+            pub fn fanout_counts_by_group(&self) -> Vec<(GroupId, usize, usize)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.node_count, group.route_keys.len()))
@@ -6534,14 +6552,14 @@ impl_matrixraft_group_node_route_accessors!(MatrixRaftAdminCommandFanoutPlan);
 impl_matrixraft_group_node_route_accessors!(MatrixRaftAdminCommandBatchPlan);
 
 impl MatrixRaftSnapshotInstallFanoutPlan {
-    pub fn targets_by_group(&self) -> Vec<(RustRaftGroupId, RustRaftNodeId)> {
+    pub fn targets_by_group(&self) -> Vec<(GroupId, NodeId)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.target))
             .collect()
     }
 
-    pub fn snapshots_by_group(&self) -> Vec<(RustRaftGroupId, RaftSnapshot)> {
+    pub fn snapshots_by_group(&self) -> Vec<(GroupId, RaftSnapshot)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.snapshot.clone()))
@@ -6560,28 +6578,28 @@ impl MatrixRaftSnapshotInstallFanoutPlan {
             .collect()
     }
 
-    pub fn snapshot_ids_by_group(&self) -> Vec<(RustRaftGroupId, RustRaftSnapshotId)> {
+    pub fn snapshot_ids_by_group(&self) -> Vec<(GroupId, SnapshotId)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.snapshot.meta.snapshot_id.clone()))
             .collect()
     }
 
-    pub fn snapshot_indices_by_group(&self) -> Vec<(RustRaftGroupId, RustRaftLogIndex)> {
+    pub fn snapshot_indices_by_group(&self) -> Vec<(GroupId, LogIndex)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.snapshot.meta.last_log_id.index))
             .collect()
     }
 
-    pub fn fences_by_group(&self) -> Vec<(RustRaftGroupId, RustRaftApplySnapshotFence)> {
+    pub fn fences_by_group(&self) -> Vec<(GroupId, ApplySnapshotFence)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.fence.clone()))
             .collect()
     }
 
-    pub fn fences_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftApplySnapshotFence)> {
+    pub fn fences_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, ApplySnapshotFence)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6595,7 +6613,7 @@ impl MatrixRaftSnapshotInstallFanoutPlan {
 
     pub fn fence_applied_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6609,7 +6627,7 @@ impl MatrixRaftSnapshotInstallFanoutPlan {
 
     pub fn fence_commit_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6623,7 +6641,7 @@ impl MatrixRaftSnapshotInstallFanoutPlan {
 
     pub fn fence_installed_snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6636,7 +6654,7 @@ impl MatrixRaftSnapshotInstallFanoutPlan {
 
     pub fn fence_first_retained_log_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6649,14 +6667,14 @@ impl MatrixRaftSnapshotInstallFanoutPlan {
 }
 
 impl MatrixRaftMembershipFanoutPlan {
-    pub fn operations_by_group(&self) -> Vec<(RustRaftGroupId, RaftMembershipOperation)> {
+    pub fn operations_by_group(&self) -> Vec<(GroupId, MembershipOperation)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.operation.clone()))
             .collect()
     }
 
-    pub fn operations_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RaftMembershipOperation)> {
+    pub fn operations_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, MembershipOperation)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6684,7 +6702,7 @@ impl MatrixRaftMembershipFanoutPlan {
 
     pub fn operation_member_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    ) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6700,7 +6718,7 @@ impl MatrixRaftMembershipFanoutPlan {
 }
 
 impl MatrixRaftMembershipWorkflowFanoutPlan {
-    pub fn operation_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn operation_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.operation_count))
@@ -6719,7 +6737,7 @@ impl MatrixRaftMembershipWorkflowFanoutPlan {
             .collect()
     }
 
-    pub fn operations_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RaftMembershipOperation>)> {
+    pub fn operations_by_group(&self) -> Vec<(GroupId, Vec<MembershipOperation>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.operations.clone()))
@@ -6728,7 +6746,7 @@ impl MatrixRaftMembershipWorkflowFanoutPlan {
 
     pub fn operations_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Vec<RaftMembershipOperation>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Vec<MembershipOperation>)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6762,7 +6780,7 @@ impl MatrixRaftMembershipWorkflowFanoutPlan {
 
     pub fn operation_member_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Vec<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Vec<NodeId>)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6782,7 +6800,7 @@ impl MatrixRaftMembershipWorkflowFanoutPlan {
 }
 
 impl MatrixRaftConfigChangeFanoutPlan {
-    pub fn changes_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftConfigChange)> {
+    pub fn changes_by_group(&self) -> Vec<(GroupId, MatrixRaftConfigChange)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.change.clone()))
@@ -6801,7 +6819,7 @@ impl MatrixRaftConfigChangeFanoutPlan {
             .collect()
     }
 
-    pub fn change_types_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftConfigChangeType)> {
+    pub fn change_types_by_group(&self) -> Vec<(GroupId, MatrixRaftConfigChangeType)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.change.change_type))
@@ -6822,14 +6840,14 @@ impl MatrixRaftConfigChangeFanoutPlan {
             .collect()
     }
 
-    pub fn member_ids_by_group(&self) -> Vec<(RustRaftGroupId, RustRaftNodeId)> {
+    pub fn member_ids_by_group(&self) -> Vec<(GroupId, NodeId)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.change.member_id))
             .collect()
     }
 
-    pub fn member_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn member_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6853,14 +6871,14 @@ impl MatrixRaftConfigChangeFanoutPlan {
             .collect()
     }
 
-    pub fn request_ids_by_group(&self) -> Vec<(RustRaftGroupId, Option<u64>)> {
+    pub fn request_ids_by_group(&self) -> Vec<(GroupId, Option<u64>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.change.request_id))
             .collect()
     }
 
-    pub fn conf_states_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftConfState)> {
+    pub fn conf_states_by_group(&self) -> Vec<(GroupId, MatrixRaftConfState)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.change.conf_state))
@@ -6879,7 +6897,7 @@ impl MatrixRaftConfigChangeFanoutPlan {
             .collect()
     }
 
-    pub fn auto_promote_values_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+    pub fn auto_promote_values_by_group(&self) -> Vec<(GroupId, bool)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.change.auto_promote))
@@ -6900,7 +6918,7 @@ impl MatrixRaftConfigChangeFanoutPlan {
 }
 
 impl MatrixRaftProposeFanoutPlan {
-    pub fn options_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftProposeOptions)> {
+    pub fn options_by_group(&self) -> Vec<(GroupId, MatrixRaftProposeOptions)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.options.clone()))
@@ -6919,14 +6937,14 @@ impl MatrixRaftProposeFanoutPlan {
             .collect()
     }
 
-    pub fn terms_by_group(&self) -> Vec<(RustRaftGroupId, Option<RustRaftTerm>)> {
+    pub fn terms_by_group(&self) -> Vec<(GroupId, Option<Term>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.options.with_term))
             .collect()
     }
 
-    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)> {
+    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<Term>)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -6938,7 +6956,7 @@ impl MatrixRaftProposeFanoutPlan {
             .collect()
     }
 
-    pub fn command_values_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+    pub fn command_values_by_group(&self) -> Vec<(GroupId, bool)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.options.is_command))
@@ -6957,7 +6975,7 @@ impl MatrixRaftProposeFanoutPlan {
             .collect()
     }
 
-    pub fn payload_bytes_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn payload_bytes_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.payload_bytes))
@@ -6978,7 +6996,7 @@ impl MatrixRaftProposeFanoutPlan {
 }
 
 impl MatrixRaftReadIndexFanoutPlan {
-    pub fn options_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftReadIndexOptions)> {
+    pub fn options_by_group(&self) -> Vec<(GroupId, MatrixRaftReadIndexOptions)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.options))
@@ -6999,7 +7017,7 @@ impl MatrixRaftReadIndexFanoutPlan {
 
     pub fn min_commit_indices_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, RustRaftLogIndex)> {
+    ) -> Vec<(GroupId, LogIndex)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.options.min_commit_index))
@@ -7008,7 +7026,7 @@ impl MatrixRaftReadIndexFanoutPlan {
 
     pub fn min_commit_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -7020,7 +7038,7 @@ impl MatrixRaftReadIndexFanoutPlan {
             .collect()
     }
 
-    pub fn modes_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftReadIndexMode)> {
+    pub fn modes_by_group(&self) -> Vec<(GroupId, MatrixRaftReadIndexMode)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.options.mode))
@@ -7041,7 +7059,7 @@ impl MatrixRaftReadIndexFanoutPlan {
 }
 
 impl MatrixRaftBoundedStaleReadFanoutPlan {
-    pub fn options_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftBoundedStaleReadOptions)> {
+    pub fn options_by_group(&self) -> Vec<(GroupId, MatrixRaftBoundedStaleReadOptions)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.options))
@@ -7064,7 +7082,7 @@ impl MatrixRaftBoundedStaleReadFanoutPlan {
 
     pub fn min_commit_indices_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, RustRaftLogIndex)> {
+    ) -> Vec<(GroupId, LogIndex)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.options.min_commit_index))
@@ -7073,7 +7091,7 @@ impl MatrixRaftBoundedStaleReadFanoutPlan {
 
     pub fn min_commit_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -7087,7 +7105,7 @@ impl MatrixRaftBoundedStaleReadFanoutPlan {
 
     pub fn max_stale_index_lags_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, RustRaftLogIndex)> {
+    ) -> Vec<(GroupId, LogIndex)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.options.max_stale_index_lag))
@@ -7096,7 +7114,7 @@ impl MatrixRaftBoundedStaleReadFanoutPlan {
 
     pub fn max_stale_index_lags_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -7110,14 +7128,14 @@ impl MatrixRaftBoundedStaleReadFanoutPlan {
 }
 
 impl MatrixRaftSnapshotPublishPlan {
-    pub fn existing_route_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn existing_route_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.existing_route_count))
             .collect()
     }
 
-    pub fn existing_route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn existing_route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.existing_route_keys.clone()))
@@ -7135,7 +7153,7 @@ impl MatrixRaftSnapshotPublishPlan {
             .collect()
     }
 
-    pub fn snapshots_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftSnapshotDesc)> {
+    pub fn snapshots_by_group(&self) -> Vec<(GroupId, MatrixRaftSnapshotDesc)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.snapshot.clone()))
@@ -7154,7 +7172,7 @@ impl MatrixRaftSnapshotPublishPlan {
             .collect()
     }
 
-    pub fn snapshot_ids_by_group(&self) -> Vec<(RustRaftGroupId, Option<RustRaftSnapshotId>)> {
+    pub fn snapshot_ids_by_group(&self) -> Vec<(GroupId, Option<SnapshotId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.snapshot.snapshot_id.clone()))
@@ -7163,7 +7181,7 @@ impl MatrixRaftSnapshotPublishPlan {
 
     pub fn snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -7175,7 +7193,7 @@ impl MatrixRaftSnapshotPublishPlan {
             .collect()
     }
 
-    pub fn snapshot_indices_by_group(&self) -> Vec<(RustRaftGroupId, RustRaftLogIndex)> {
+    pub fn snapshot_indices_by_group(&self) -> Vec<(GroupId, LogIndex)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.snapshot.index))
@@ -7184,7 +7202,7 @@ impl MatrixRaftSnapshotPublishPlan {
 
     pub fn snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -7196,14 +7214,14 @@ impl MatrixRaftSnapshotPublishPlan {
             .collect()
     }
 
-    pub fn snapshot_terms_by_group(&self) -> Vec<(RustRaftGroupId, RustRaftTerm)> {
+    pub fn snapshot_terms_by_group(&self) -> Vec<(GroupId, Term)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.snapshot.term))
             .collect()
     }
 
-    pub fn snapshot_terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftTerm)> {
+    pub fn snapshot_terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Term)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -7215,7 +7233,7 @@ impl MatrixRaftSnapshotPublishPlan {
             .collect()
     }
 
-    pub fn snapshot_member_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn snapshot_member_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.snapshot.members.len()))
@@ -7236,14 +7254,14 @@ impl MatrixRaftSnapshotPublishPlan {
 }
 
 impl MatrixRaftSnapshotFinishPlan {
-    pub fn active_route_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn active_route_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.active_route_count))
             .collect()
     }
 
-    pub fn active_route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn active_route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.active_route_keys.clone()))
@@ -7262,7 +7280,7 @@ impl MatrixRaftSnapshotFinishPlan {
             .collect()
     }
 
-    pub fn finishes_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftOldSnapshotFinish)> {
+    pub fn finishes_by_group(&self) -> Vec<(GroupId, MatrixRaftOldSnapshotFinish)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.finish.clone()))
@@ -7283,7 +7301,7 @@ impl MatrixRaftSnapshotFinishPlan {
 
     pub fn finish_states_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, MatrixRaftOldSnapshotFinishState)> {
+    ) -> Vec<(GroupId, MatrixRaftOldSnapshotFinishState)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.finish.finish_state))
@@ -7304,7 +7322,7 @@ impl MatrixRaftSnapshotFinishPlan {
             .collect()
     }
 
-    pub fn snapshot_indices_by_group(&self) -> Vec<(RustRaftGroupId, RustRaftLogIndex)> {
+    pub fn snapshot_indices_by_group(&self) -> Vec<(GroupId, LogIndex)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.finish.snapshot_index))
@@ -7313,7 +7331,7 @@ impl MatrixRaftSnapshotFinishPlan {
 
     pub fn snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftLogIndex)> {
+    ) -> Vec<(MatrixRaftRouteKey, LogIndex)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -7327,7 +7345,7 @@ impl MatrixRaftSnapshotFinishPlan {
 }
 
 impl MatrixRaftMessageFanoutPlan {
-    pub fn messages_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftMessage)> {
+    pub fn messages_by_group(&self) -> Vec<(GroupId, MatrixRaftMessage)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message.clone()))
@@ -7346,7 +7364,7 @@ impl MatrixRaftMessageFanoutPlan {
             .collect()
     }
 
-    pub fn message_types_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftMessageType)> {
+    pub fn message_types_by_group(&self) -> Vec<(GroupId, MatrixRaftMessageType)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message_type))
@@ -7369,7 +7387,7 @@ impl MatrixRaftMessageFanoutPlan {
 
     pub fn sender_receiver_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Option<RustRaftNodeId>, Option<RustRaftNodeId>)> {
+    ) -> Vec<(GroupId, Option<NodeId>, Option<NodeId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message.from, group.message.to))
@@ -7380,7 +7398,7 @@ impl MatrixRaftMessageFanoutPlan {
         &self,
     ) -> Vec<(
         MatrixRaftRouteKey,
-        (Option<RustRaftNodeId>, Option<RustRaftNodeId>),
+        (Option<NodeId>, Option<NodeId>),
     )> {
         self.groups
             .iter()
@@ -7393,14 +7411,14 @@ impl MatrixRaftMessageFanoutPlan {
             .collect()
     }
 
-    pub fn terms_by_group(&self) -> Vec<(RustRaftGroupId, Option<RustRaftTerm>)> {
+    pub fn terms_by_group(&self) -> Vec<(GroupId, Option<Term>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message.term))
             .collect()
     }
 
-    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)> {
+    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<Term>)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -7412,7 +7430,7 @@ impl MatrixRaftMessageFanoutPlan {
             .collect()
     }
 
-    pub fn committed_indices_by_group(&self) -> Vec<(RustRaftGroupId, Option<RustRaftLogIndex>)> {
+    pub fn committed_indices_by_group(&self) -> Vec<(GroupId, Option<LogIndex>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message.committed_index))
@@ -7421,7 +7439,7 @@ impl MatrixRaftMessageFanoutPlan {
 
     pub fn committed_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -7433,7 +7451,7 @@ impl MatrixRaftMessageFanoutPlan {
             .collect()
     }
 
-    pub fn message_bytes_by_group(&self) -> Vec<(RustRaftGroupId, u64)> {
+    pub fn message_bytes_by_group(&self) -> Vec<(GroupId, u64)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message.bytes_size))
@@ -7452,7 +7470,7 @@ impl MatrixRaftMessageFanoutPlan {
             .collect()
     }
 
-    pub fn propose_request_ids_by_group(&self) -> Vec<(RustRaftGroupId, Option<u64>)> {
+    pub fn propose_request_ids_by_group(&self) -> Vec<(GroupId, Option<u64>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -7486,7 +7504,7 @@ impl MatrixRaftMessageFanoutPlan {
             .collect()
     }
 
-    pub fn snapshot_ids_by_group(&self) -> Vec<(RustRaftGroupId, Option<RustRaftSnapshotId>)> {
+    pub fn snapshot_ids_by_group(&self) -> Vec<(GroupId, Option<SnapshotId>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -7504,7 +7522,7 @@ impl MatrixRaftMessageFanoutPlan {
 
     pub fn snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -7522,7 +7540,7 @@ impl MatrixRaftMessageFanoutPlan {
             .collect()
     }
 
-    pub fn snapshot_chunk_offsets_by_group(&self) -> Vec<(RustRaftGroupId, Option<u64>)> {
+    pub fn snapshot_chunk_offsets_by_group(&self) -> Vec<(GroupId, Option<u64>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -7558,7 +7576,7 @@ impl MatrixRaftMessageFanoutPlan {
             .collect()
     }
 
-    pub fn snapshot_chunk_done_by_group(&self) -> Vec<(RustRaftGroupId, Option<bool>)> {
+    pub fn snapshot_chunk_done_by_group(&self) -> Vec<(GroupId, Option<bool>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -7594,7 +7612,7 @@ impl MatrixRaftMessageFanoutPlan {
             .collect()
     }
 
-    pub fn snapshot_chunk_payload_bytes_by_group(&self) -> Vec<(RustRaftGroupId, Option<usize>)> {
+    pub fn snapshot_chunk_payload_bytes_by_group(&self) -> Vec<(GroupId, Option<usize>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -7634,7 +7652,7 @@ impl MatrixRaftMessageFanoutPlan {
 macro_rules! impl_matrixraft_admin_command_metadata_accessors {
     ($plan:ty) => {
         impl $plan {
-            pub fn commands_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftAdminCommand)> {
+            pub fn commands_by_group(&self) -> Vec<(GroupId, MatrixRaftAdminCommand)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.clone()))
@@ -7657,7 +7675,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn command_types_by_group(
                 &self,
-            ) -> Vec<(RustRaftGroupId, MatrixRaftAdminCommandType)> {
+            ) -> Vec<(GroupId, MatrixRaftAdminCommandType)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command_type))
@@ -7678,14 +7696,14 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
                     .collect()
             }
 
-            pub fn request_ids_by_group(&self) -> Vec<(RustRaftGroupId, Option<u64>)> {
+            pub fn request_ids_by_group(&self) -> Vec<(GroupId, Option<u64>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.request_id))
                     .collect()
             }
 
-            pub fn request_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+            pub fn request_id_presence_by_group(&self) -> Vec<(GroupId, bool)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.request_id.is_some()))
@@ -7710,7 +7728,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn command_node_ids_by_group(
                 &self,
-            ) -> Vec<(RustRaftGroupId, Option<RustRaftNodeId>)> {
+            ) -> Vec<(GroupId, Option<NodeId>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.node_id))
@@ -7719,7 +7737,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn command_node_ids_by_route_key(
                 &self,
-            ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+            ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
                 self.groups
                     .iter()
                     .flat_map(|group| {
@@ -7733,14 +7751,14 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn transferee_ids_by_group(
                 &self,
-            ) -> Vec<(RustRaftGroupId, Option<RustRaftNodeId>)> {
+            ) -> Vec<(GroupId, Option<NodeId>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.transferee_id))
                     .collect()
             }
 
-            pub fn transferee_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+            pub fn transferee_id_presence_by_group(&self) -> Vec<(GroupId, bool)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.transferee_id.is_some()))
@@ -7749,7 +7767,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn transferee_ids_by_route_key(
                 &self,
-            ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+            ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
                 self.groups
                     .iter()
                     .flat_map(|group| {
@@ -7765,7 +7783,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
                 matrixraft_presence_by_route_key(self.transferee_ids_by_route_key())
             }
 
-            pub fn forced_campaigns_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+            pub fn forced_campaigns_by_group(&self) -> Vec<(GroupId, bool)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.forced_campaign))
@@ -7786,14 +7804,14 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn node_healthy_values_by_group(
                 &self,
-            ) -> Vec<(RustRaftGroupId, Option<bool>)> {
+            ) -> Vec<(GroupId, Option<bool>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.healthy))
                     .collect()
             }
 
-            pub fn node_healthy_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+            pub fn node_healthy_presence_by_group(&self) -> Vec<(GroupId, bool)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.healthy.is_some()))
@@ -7818,14 +7836,14 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
                 matrixraft_presence_by_route_key(self.node_healthy_values_by_route_key())
             }
 
-            pub fn lease_valid_values_by_group(&self) -> Vec<(RustRaftGroupId, Option<bool>)> {
+            pub fn lease_valid_values_by_group(&self) -> Vec<(GroupId, Option<bool>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.lease_valid))
                     .collect()
             }
 
-            pub fn lease_valid_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+            pub fn lease_valid_presence_by_group(&self) -> Vec<(GroupId, bool)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.lease_valid.is_some()))
@@ -7852,14 +7870,14 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn snapshot_ids_by_group(
                 &self,
-            ) -> Vec<(RustRaftGroupId, Option<RustRaftSnapshotId>)> {
+            ) -> Vec<(GroupId, Option<SnapshotId>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.snapshot_id.clone()))
                     .collect()
             }
 
-            pub fn snapshot_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+            pub fn snapshot_id_presence_by_group(&self) -> Vec<(GroupId, bool)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.snapshot_id.is_some()))
@@ -7868,7 +7886,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn snapshot_ids_by_route_key(
                 &self,
-            ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+            ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
                 self.groups
                     .iter()
                     .flat_map(|group| {
@@ -7886,14 +7904,14 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn snapshot_peer_ids_by_group(
                 &self,
-            ) -> Vec<(RustRaftGroupId, Option<RustRaftNodeId>)> {
+            ) -> Vec<(GroupId, Option<NodeId>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.snapshot_peer_id))
                     .collect()
             }
 
-            pub fn snapshot_peer_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+            pub fn snapshot_peer_id_presence_by_group(&self) -> Vec<(GroupId, bool)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.snapshot_peer_id.is_some()))
@@ -7902,7 +7920,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn snapshot_peer_ids_by_route_key(
                 &self,
-            ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+            ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
                 self.groups
                     .iter()
                     .flat_map(|group| {
@@ -7922,14 +7940,14 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn snapshot_indices_by_group(
                 &self,
-            ) -> Vec<(RustRaftGroupId, Option<RustRaftLogIndex>)> {
+            ) -> Vec<(GroupId, Option<LogIndex>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.snapshot_index))
                     .collect()
             }
 
-            pub fn snapshot_index_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+            pub fn snapshot_index_presence_by_group(&self) -> Vec<(GroupId, bool)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.snapshot_index.is_some()))
@@ -7938,7 +7956,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn snapshot_indices_by_route_key(
                 &self,
-            ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+            ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
                 self.groups
                     .iter()
                     .flat_map(|group| {
@@ -7958,14 +7976,14 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn log_indices_by_group(
                 &self,
-            ) -> Vec<(RustRaftGroupId, Option<RustRaftLogIndex>)> {
+            ) -> Vec<(GroupId, Option<LogIndex>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.log_index))
                     .collect()
             }
 
-            pub fn log_index_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+            pub fn log_index_presence_by_group(&self) -> Vec<(GroupId, bool)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.log_index.is_some()))
@@ -7974,7 +7992,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn log_indices_by_route_key(
                 &self,
-            ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+            ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
                 self.groups
                     .iter()
                     .flat_map(|group| {
@@ -7992,7 +8010,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn storage_fences_by_group(
                 &self,
-            ) -> Vec<(RustRaftGroupId, Option<RustRaftStorageApplyFence>)> {
+            ) -> Vec<(GroupId, Option<StorageApplyFence>)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.storage_fence.clone()))
@@ -8001,7 +8019,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
 
             pub fn storage_fences_by_route_key(
                 &self,
-            ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftStorageApplyFence>)> {
+            ) -> Vec<(MatrixRaftRouteKey, Option<StorageApplyFence>)> {
                 self.groups
                     .iter()
                     .flat_map(|group| {
@@ -8013,7 +8031,7 @@ macro_rules! impl_matrixraft_admin_command_metadata_accessors {
                     .collect()
             }
 
-            pub fn storage_fence_presence_by_group(&self) -> Vec<(RustRaftGroupId, bool)> {
+            pub fn storage_fence_presence_by_group(&self) -> Vec<(GroupId, bool)> {
                 self.groups
                     .iter()
                     .map(|group| (group.group_id, group.command.storage_fence.is_some()))
@@ -8041,14 +8059,14 @@ impl_matrixraft_admin_command_metadata_accessors!(MatrixRaftAdminCommandFanoutPl
 impl_matrixraft_admin_command_metadata_accessors!(MatrixRaftAdminCommandBatchPlan);
 
 impl MatrixRaftHeartbeatMergePlan {
-    pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, vec![group.route_key]))
             .collect()
     }
 
-    pub fn raft_addrs_by_group(&self) -> Vec<(RustRaftGroupId, String)> {
+    pub fn raft_addrs_by_group(&self) -> Vec<(GroupId, String)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.raft_addr.clone()))
@@ -8057,42 +8075,42 @@ impl MatrixRaftHeartbeatMergePlan {
 
     pub fn sender_receiver_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, RustRaftNodeId, RustRaftNodeId)> {
+    ) -> Vec<(GroupId, NodeId, NodeId)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.from, group.to))
             .collect()
     }
 
-    pub fn message_types_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftMessageType)> {
+    pub fn message_types_by_group(&self) -> Vec<(GroupId, MatrixRaftMessageType)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message_type))
             .collect()
     }
 
-    pub fn messages_by_group(&self) -> Vec<(RustRaftGroupId, MatrixRaftMessage)> {
+    pub fn messages_by_group(&self) -> Vec<(GroupId, MatrixRaftMessage)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message.clone()))
             .collect()
     }
 
-    pub fn terms_by_group(&self) -> Vec<(RustRaftGroupId, Option<RustRaftTerm>)> {
+    pub fn terms_by_group(&self) -> Vec<(GroupId, Option<Term>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message.term))
             .collect()
     }
 
-    pub fn committed_indices_by_group(&self) -> Vec<(RustRaftGroupId, Option<RustRaftLogIndex>)> {
+    pub fn committed_indices_by_group(&self) -> Vec<(GroupId, Option<LogIndex>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message.committed_index))
             .collect()
     }
 
-    pub fn message_bytes_by_group(&self) -> Vec<(RustRaftGroupId, u64)> {
+    pub fn message_bytes_by_group(&self) -> Vec<(GroupId, u64)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message.bytes_size))
@@ -8106,7 +8124,7 @@ impl MatrixRaftHeartbeatMergePlan {
             .collect()
     }
 
-    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.groups
             .iter()
             .map(|group| (group.route_key, group.route_key.node_id))
@@ -8115,7 +8133,7 @@ impl MatrixRaftHeartbeatMergePlan {
 
     pub fn sender_receiver_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId, RustRaftNodeId)> {
+    ) -> Vec<(MatrixRaftRouteKey, NodeId, NodeId)> {
         self.groups
             .iter()
             .map(|group| (group.route_key, group.from, group.to))
@@ -8138,7 +8156,7 @@ impl MatrixRaftHeartbeatMergePlan {
             .collect()
     }
 
-    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)> {
+    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<Term>)> {
         self.groups
             .iter()
             .map(|group| (group.route_key, group.message.term))
@@ -8147,7 +8165,7 @@ impl MatrixRaftHeartbeatMergePlan {
 
     pub fn committed_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.groups
             .iter()
             .map(|group| (group.route_key, group.message.committed_index))
@@ -8175,21 +8193,21 @@ impl MatrixRaftHeartbeatMergePlan {
             .collect()
     }
 
-    pub fn message_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn message_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, 1))
             .collect()
     }
 
-    pub fn route_key_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn route_key_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, 1))
             .collect()
     }
 
-    pub fn fanout_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize)> {
+    pub fn fanout_counts_by_group(&self) -> Vec<(GroupId, usize, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, 1, 1))
@@ -8226,15 +8244,15 @@ impl MatrixRaftHeartbeatMergePlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftRoutedAdminCommand {
-    pub group_id: RustRaftGroupId,
-    pub runtime_node_id: RustRaftNodeId,
+    pub group_id: GroupId,
+    pub runtime_node_id: NodeId,
     pub command: MatrixRaftAdminCommand,
 }
 
 impl MatrixRaftRoutedAdminCommand {
     pub fn new(
-        group_id: RustRaftGroupId,
-        runtime_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        runtime_node_id: NodeId,
         command: MatrixRaftAdminCommand,
     ) -> Self {
         Self {
@@ -8251,12 +8269,12 @@ impl MatrixRaftRoutedAdminCommand {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftPriorityRoutedAdminCommand {
-    pub priority: RustRaftMailPriority,
+    pub priority: MailPriority,
     pub routed: MatrixRaftRoutedAdminCommand,
 }
 
 impl MatrixRaftPriorityRoutedAdminCommand {
-    pub fn new(priority: RustRaftMailPriority, routed: MatrixRaftRoutedAdminCommand) -> Self {
+    pub fn new(priority: MailPriority, routed: MatrixRaftRoutedAdminCommand) -> Self {
         Self { priority, routed }
     }
 
@@ -8267,9 +8285,9 @@ impl MatrixRaftPriorityRoutedAdminCommand {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftRoutedAdminCommandBatchGroupPlan {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub command_count: usize,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub command_types: Vec<MatrixRaftAdminCommandType>,
 }
@@ -8278,9 +8296,9 @@ pub struct MatrixRaftRoutedAdminCommandBatchGroupPlan {
 pub struct MatrixRaftRoutedAdminCommandBatchPlan {
     pub command_count: usize,
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub command_types: Vec<MatrixRaftAdminCommandType>,
     pub groups: Vec<MatrixRaftRoutedAdminCommandBatchGroupPlan>,
@@ -8288,35 +8306,35 @@ pub struct MatrixRaftRoutedAdminCommandBatchPlan {
 }
 
 impl MatrixRaftRoutedAdminCommandBatchPlan {
-    pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_group(&self) -> Vec<(GroupId, Vec<NodeId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn command_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn command_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.command_count))
             .collect()
     }
 
-    pub fn route_key_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn route_key_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.len()))
             .collect()
     }
 
-    pub fn command_fanout_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize)> {
+    pub fn command_fanout_counts_by_group(&self) -> Vec<(GroupId, usize, usize)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8331,14 +8349,14 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
 
     pub fn command_types_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<MatrixRaftAdminCommandType>)> {
+    ) -> Vec<(GroupId, Vec<MatrixRaftAdminCommandType>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.command_types.clone()))
             .collect()
     }
 
-    pub fn commands_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftAdminCommand>)> {
+    pub fn commands_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftAdminCommand>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8372,7 +8390,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
 
     pub fn command_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.command.node_id))
@@ -8388,7 +8406,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
 
     pub fn snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.command.snapshot_id.clone()))
@@ -8401,7 +8419,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
 
     pub fn snapshot_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.command.snapshot_peer_id))
@@ -8414,7 +8432,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
 
     pub fn snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.command.snapshot_index))
@@ -8427,7 +8445,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
 
     pub fn transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.command.transferee_id))
@@ -8447,7 +8465,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
 
     pub fn log_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.command.log_index))
@@ -8493,7 +8511,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
 
     pub fn command_node_ids_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftNodeId>>)> {
+    ) -> Vec<(GroupId, Vec<Option<NodeId>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8509,7 +8527,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn request_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<u64>>)> {
+    pub fn request_ids_by_group(&self) -> Vec<(GroupId, Vec<Option<u64>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8525,13 +8543,13 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn request_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn request_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.request_ids_by_group())
     }
 
     pub fn snapshot_ids_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftSnapshotId>>)> {
+    ) -> Vec<(GroupId, Vec<Option<SnapshotId>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8547,13 +8565,13 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_ids_by_group())
     }
 
     pub fn snapshot_peer_ids_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftNodeId>>)> {
+    ) -> Vec<(GroupId, Vec<Option<NodeId>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8569,13 +8587,13 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_peer_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_peer_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_peer_ids_by_group())
     }
 
     pub fn snapshot_indices_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftLogIndex>>)> {
+    ) -> Vec<(GroupId, Vec<Option<LogIndex>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8591,13 +8609,13 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_index_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_index_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_indices_by_group())
     }
 
     pub fn transferee_ids_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftNodeId>>)> {
+    ) -> Vec<(GroupId, Vec<Option<NodeId>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8613,11 +8631,11 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn transferee_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn transferee_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.transferee_ids_by_group())
     }
 
-    pub fn forced_campaigns_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn forced_campaigns_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8635,7 +8653,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
 
     pub fn log_indices_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftLogIndex>>)> {
+    ) -> Vec<(GroupId, Vec<Option<LogIndex>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8651,13 +8669,13 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn log_index_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn log_index_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.log_indices_by_group())
     }
 
     pub fn storage_fences_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftStorageApplyFence>>)> {
+    ) -> Vec<(GroupId, Vec<Option<StorageApplyFence>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8673,7 +8691,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn storage_fence_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn storage_fence_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8689,7 +8707,7 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn node_healthy_values_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<bool>>)> {
+    pub fn node_healthy_values_by_group(&self) -> Vec<(GroupId, Vec<Option<bool>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8705,11 +8723,11 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn node_healthy_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn node_healthy_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.node_healthy_values_by_group())
     }
 
-    pub fn lease_valid_values_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<bool>>)> {
+    pub fn lease_valid_values_by_group(&self) -> Vec<(GroupId, Vec<Option<bool>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8725,19 +8743,19 @@ impl MatrixRaftRoutedAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn lease_valid_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn lease_valid_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.lease_valid_values_by_group())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftPriorityAdminCommandGroupPlan {
-    pub priority: RustRaftMailPriority,
+    pub priority: MailPriority,
     pub command_count: usize,
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub node_ids: Vec<NodeId>,
     pub command_types: Vec<MatrixRaftAdminCommandType>,
 }
 
@@ -8745,9 +8763,9 @@ pub struct MatrixRaftPriorityAdminCommandGroupPlan {
 pub struct MatrixRaftPriorityAdminCommandBatchPlan {
     pub command_count: usize,
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub command_types: Vec<MatrixRaftAdminCommandType>,
     pub priority_groups: Vec<MatrixRaftPriorityAdminCommandGroupPlan>,
@@ -8756,35 +8774,35 @@ pub struct MatrixRaftPriorityAdminCommandBatchPlan {
 }
 
 impl MatrixRaftPriorityAdminCommandBatchPlan {
-    pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_group(&self) -> Vec<(GroupId, Vec<NodeId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn command_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn command_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.command_count))
             .collect()
     }
 
-    pub fn route_key_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn route_key_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.len()))
             .collect()
     }
 
-    pub fn command_fanout_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize)> {
+    pub fn command_fanout_counts_by_group(&self) -> Vec<(GroupId, usize, usize)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8799,14 +8817,14 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn command_types_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<MatrixRaftAdminCommandType>)> {
+    ) -> Vec<(GroupId, Vec<MatrixRaftAdminCommandType>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.command_types.clone()))
             .collect()
     }
 
-    pub fn priorities_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftMailPriority>)> {
+    pub fn priorities_by_group(&self) -> Vec<(GroupId, Vec<MailPriority>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8822,7 +8840,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn commands_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftAdminCommand>)> {
+    pub fn commands_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftAdminCommand>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -8838,7 +8856,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn priorities_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftMailPriority)> {
+    pub fn priorities_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, MailPriority)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.priority))
@@ -8863,7 +8881,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn command_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.routed.command.node_id))
@@ -8879,7 +8897,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.routed.command.snapshot_id.clone()))
@@ -8892,7 +8910,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn snapshot_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.routed.command.snapshot_peer_id))
@@ -8905,7 +8923,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.routed.command.snapshot_index))
@@ -8918,7 +8936,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.routed.command.transferee_id))
@@ -8938,7 +8956,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn log_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.commands
             .iter()
             .map(|command| (command.route_key(), command.routed.command.log_index))
@@ -8987,21 +9005,21 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
         matrixraft_presence_by_route_key(self.lease_valid_values_by_route_key())
     }
 
-    pub fn route_keys_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_priority(&self) -> Vec<(MailPriority, Vec<MatrixRaftRouteKey>)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_priority(&self) -> Vec<(MailPriority, Vec<NodeId>)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn group_ids_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<RustRaftGroupId>)> {
+    pub fn group_ids_by_priority(&self) -> Vec<(MailPriority, Vec<GroupId>)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.group_ids.clone()))
@@ -9010,7 +9028,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn command_types_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<MatrixRaftAdminCommandType>)> {
+    ) -> Vec<(MailPriority, Vec<MatrixRaftAdminCommandType>)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.command_types.clone()))
@@ -9019,7 +9037,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn commands_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<MatrixRaftAdminCommand>)> {
+    ) -> Vec<(MailPriority, Vec<MatrixRaftAdminCommand>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9035,14 +9053,14 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn command_counts_by_priority(&self) -> Vec<(RustRaftMailPriority, usize)> {
+    pub fn command_counts_by_priority(&self) -> Vec<(MailPriority, usize)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.command_count))
             .collect()
     }
 
-    pub fn route_key_counts_by_priority(&self) -> Vec<(RustRaftMailPriority, usize)> {
+    pub fn route_key_counts_by_priority(&self) -> Vec<(MailPriority, usize)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.route_keys.len()))
@@ -9051,7 +9069,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn command_fanout_counts_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, usize, usize)> {
+    ) -> Vec<(MailPriority, usize, usize)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9066,7 +9084,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn command_node_ids_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftNodeId>>)> {
+    ) -> Vec<(GroupId, Vec<Option<NodeId>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9082,7 +9100,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn request_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<u64>>)> {
+    pub fn request_ids_by_group(&self) -> Vec<(GroupId, Vec<Option<u64>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9098,13 +9116,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn request_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn request_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.request_ids_by_group())
     }
 
     pub fn snapshot_ids_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftSnapshotId>>)> {
+    ) -> Vec<(GroupId, Vec<Option<SnapshotId>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9120,13 +9138,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_ids_by_group())
     }
 
     pub fn snapshot_peer_ids_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftNodeId>>)> {
+    ) -> Vec<(GroupId, Vec<Option<NodeId>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9142,13 +9160,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_peer_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_peer_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_peer_ids_by_group())
     }
 
     pub fn snapshot_indices_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftLogIndex>>)> {
+    ) -> Vec<(GroupId, Vec<Option<LogIndex>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9164,13 +9182,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_index_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_index_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_indices_by_group())
     }
 
     pub fn transferee_ids_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftNodeId>>)> {
+    ) -> Vec<(GroupId, Vec<Option<NodeId>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9186,11 +9204,11 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn transferee_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn transferee_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.transferee_ids_by_group())
     }
 
-    pub fn forced_campaigns_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn forced_campaigns_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9208,7 +9226,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn log_indices_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftLogIndex>>)> {
+    ) -> Vec<(GroupId, Vec<Option<LogIndex>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9224,13 +9242,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn log_index_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn log_index_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.log_indices_by_group())
     }
 
     pub fn storage_fences_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftStorageApplyFence>>)> {
+    ) -> Vec<(GroupId, Vec<Option<StorageApplyFence>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9246,7 +9264,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn storage_fence_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn storage_fence_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9262,7 +9280,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn node_healthy_values_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<bool>>)> {
+    pub fn node_healthy_values_by_group(&self) -> Vec<(GroupId, Vec<Option<bool>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9278,11 +9296,11 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn node_healthy_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn node_healthy_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.node_healthy_values_by_group())
     }
 
-    pub fn lease_valid_values_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<bool>>)> {
+    pub fn lease_valid_values_by_group(&self) -> Vec<(GroupId, Vec<Option<bool>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9298,13 +9316,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn lease_valid_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn lease_valid_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.lease_valid_values_by_group())
     }
 
     pub fn command_node_ids_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<RustRaftNodeId>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<NodeId>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9320,7 +9338,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn request_ids_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<Option<u64>>)> {
+    pub fn request_ids_by_priority(&self) -> Vec<(MailPriority, Vec<Option<u64>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9336,13 +9354,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn request_id_presence_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    pub fn request_id_presence_by_priority(&self) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.request_ids_by_priority())
     }
 
     pub fn snapshot_ids_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<RustRaftSnapshotId>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<SnapshotId>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9358,13 +9376,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_id_presence_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    pub fn snapshot_id_presence_by_priority(&self) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.snapshot_ids_by_priority())
     }
 
     pub fn snapshot_peer_ids_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<RustRaftNodeId>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<NodeId>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9382,13 +9400,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn snapshot_peer_id_presence_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    ) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.snapshot_peer_ids_by_priority())
     }
 
     pub fn snapshot_indices_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<RustRaftLogIndex>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<LogIndex>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9406,13 +9424,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn snapshot_index_presence_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    ) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.snapshot_indices_by_priority())
     }
 
     pub fn transferee_ids_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<RustRaftNodeId>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<NodeId>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9430,11 +9448,11 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn transferee_id_presence_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    ) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.transferee_ids_by_priority())
     }
 
-    pub fn forced_campaigns_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    pub fn forced_campaigns_by_priority(&self) -> Vec<(MailPriority, Vec<bool>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9452,7 +9470,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn log_indices_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<RustRaftLogIndex>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<LogIndex>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9468,13 +9486,13 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn log_index_presence_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    pub fn log_index_presence_by_priority(&self) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.log_indices_by_priority())
     }
 
     pub fn storage_fences_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<RustRaftStorageApplyFence>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<StorageApplyFence>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9490,7 +9508,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn storage_fence_presence_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    pub fn storage_fence_presence_by_priority(&self) -> Vec<(MailPriority, Vec<bool>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9508,7 +9526,7 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
 
     pub fn node_healthy_values_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<bool>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<bool>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9524,11 +9542,11 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn node_healthy_presence_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    pub fn node_healthy_presence_by_priority(&self) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.node_healthy_values_by_priority())
     }
 
-    pub fn lease_valid_values_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<Option<bool>>)> {
+    pub fn lease_valid_values_by_priority(&self) -> Vec<(MailPriority, Vec<Option<bool>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -9544,15 +9562,15 @@ impl MatrixRaftPriorityAdminCommandBatchPlan {
             .collect()
     }
 
-    pub fn lease_valid_presence_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    pub fn lease_valid_presence_by_priority(&self) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.lease_valid_values_by_priority())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftQueryFanoutGroupPlan {
-    pub group_id: RustRaftGroupId,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub group_id: GroupId,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub node_count: usize,
     pub operation: String,
@@ -9561,7 +9579,7 @@ pub struct MatrixRaftQueryFanoutGroupPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftQueryFanoutPlan {
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub operation: String,
@@ -9598,42 +9616,42 @@ impl MatrixRaftQueryFanoutPlan {
         )]
     }
 
-    pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_group(&self) -> Vec<(GroupId, Vec<NodeId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn node_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn node_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_count))
             .collect()
     }
 
-    pub fn route_key_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn route_key_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.len()))
             .collect()
     }
 
-    pub fn fanout_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize)> {
+    pub fn fanout_counts_by_group(&self) -> Vec<(GroupId, usize, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_count, group.route_keys.len()))
             .collect()
     }
 
-    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.groups
             .iter()
             .flat_map(|group| {
@@ -9706,14 +9724,14 @@ impl MatrixRaftQueryFanoutPlan {
             .collect()
     }
 
-    pub fn operations_by_group(&self) -> Vec<(RustRaftGroupId, String)> {
+    pub fn operations_by_group(&self) -> Vec<(GroupId, String)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.operation.clone()))
             .collect()
     }
 
-    pub fn operation_names_by_group(&self) -> Vec<(RustRaftGroupId, String)> {
+    pub fn operation_names_by_group(&self) -> Vec<(GroupId, String)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9730,7 +9748,7 @@ impl MatrixRaftQueryFanoutPlan {
             .collect()
     }
 
-    pub fn operation_arguments_by_group(&self) -> Vec<(RustRaftGroupId, Vec<String>)> {
+    pub fn operation_arguments_by_group(&self) -> Vec<(GroupId, Vec<String>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9747,7 +9765,7 @@ impl MatrixRaftQueryFanoutPlan {
             .collect()
     }
 
-    pub fn operation_argument_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn operation_argument_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.operation.split(':').skip(1).count()))
@@ -9757,15 +9775,15 @@ impl MatrixRaftQueryFanoutPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftRoutedMessage {
-    pub group_id: RustRaftGroupId,
-    pub runtime_node_id: RustRaftNodeId,
+    pub group_id: GroupId,
+    pub runtime_node_id: NodeId,
     pub message: MatrixRaftMessage,
 }
 
 impl MatrixRaftRoutedMessage {
     pub fn new(
-        group_id: RustRaftGroupId,
-        runtime_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        runtime_node_id: NodeId,
         message: MatrixRaftMessage,
     ) -> Self {
         Self {
@@ -9782,9 +9800,9 @@ impl MatrixRaftRoutedMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftRouteBatchGroupPlan {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub message_count: usize,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub message_types: Vec<MatrixRaftMessageType>,
 }
@@ -9793,9 +9811,9 @@ pub struct MatrixRaftRouteBatchGroupPlan {
 pub struct MatrixRaftRouteBatchPlan {
     pub message_count: usize,
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub message_types: Vec<MatrixRaftMessageType>,
     pub groups: Vec<MatrixRaftRouteBatchGroupPlan>,
@@ -9812,8 +9830,8 @@ fn matrixraft_presence_by_route_key<T>(
 }
 
 fn matrixraft_presence_by_group<T>(
-    values: Vec<(RustRaftGroupId, Vec<Option<T>>)>,
-) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    values: Vec<(GroupId, Vec<Option<T>>)>,
+) -> Vec<(GroupId, Vec<bool>)> {
     values
         .into_iter()
         .map(|(group_id, values)| {
@@ -9826,8 +9844,8 @@ fn matrixraft_presence_by_group<T>(
 }
 
 fn matrixraft_presence_by_priority<T>(
-    values: Vec<(RustRaftMailPriority, Vec<Option<T>>)>,
-) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    values: Vec<(MailPriority, Vec<Option<T>>)>,
+) -> Vec<(MailPriority, Vec<bool>)> {
     values
         .into_iter()
         .map(|(priority, values)| {
@@ -9840,35 +9858,35 @@ fn matrixraft_presence_by_priority<T>(
 }
 
 impl MatrixRaftRouteBatchPlan {
-    pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_group(&self) -> Vec<(GroupId, Vec<NodeId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn message_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn message_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message_count))
             .collect()
     }
 
-    pub fn route_key_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn route_key_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.len()))
             .collect()
     }
 
-    pub fn fanout_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize)> {
+    pub fn fanout_counts_by_group(&self) -> Vec<(GroupId, usize, usize)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9883,14 +9901,14 @@ impl MatrixRaftRouteBatchPlan {
 
     pub fn message_types_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<MatrixRaftMessageType>)> {
+    ) -> Vec<(GroupId, Vec<MatrixRaftMessageType>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message_types.clone()))
             .collect()
     }
 
-    pub fn messages_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftMessage>)> {
+    pub fn messages_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftMessage>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -9906,7 +9924,7 @@ impl MatrixRaftRouteBatchPlan {
             .collect()
     }
 
-    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.messages
             .iter()
             .map(|message| (message.route_key(), message.runtime_node_id))
@@ -9933,7 +9951,7 @@ impl MatrixRaftRouteBatchPlan {
         &self,
     ) -> Vec<(
         MatrixRaftRouteKey,
-        (Option<RustRaftNodeId>, Option<RustRaftNodeId>),
+        (Option<NodeId>, Option<NodeId>),
     )> {
         self.messages
             .iter()
@@ -9946,7 +9964,7 @@ impl MatrixRaftRouteBatchPlan {
             .collect()
     }
 
-    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)> {
+    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<Term>)> {
         self.messages
             .iter()
             .map(|message| (message.route_key(), message.message.term))
@@ -9955,7 +9973,7 @@ impl MatrixRaftRouteBatchPlan {
 
     pub fn committed_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.messages
             .iter()
             .map(|message| (message.route_key(), message.message.committed_index))
@@ -9993,7 +10011,7 @@ impl MatrixRaftRouteBatchPlan {
 
     pub fn snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.messages
             .iter()
             .map(|message| {
@@ -10086,8 +10104,8 @@ impl MatrixRaftRouteBatchPlan {
     pub fn sender_receiver_by_group(
         &self,
     ) -> Vec<(
-        RustRaftGroupId,
-        Vec<(Option<RustRaftNodeId>, Option<RustRaftNodeId>)>,
+        GroupId,
+        Vec<(Option<NodeId>, Option<NodeId>)>,
     )> {
         self.groups
             .iter()
@@ -10104,7 +10122,7 @@ impl MatrixRaftRouteBatchPlan {
             .collect()
     }
 
-    pub fn terms_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftTerm>>)> {
+    pub fn terms_by_group(&self) -> Vec<(GroupId, Vec<Option<Term>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10122,7 +10140,7 @@ impl MatrixRaftRouteBatchPlan {
 
     pub fn committed_indices_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftLogIndex>>)> {
+    ) -> Vec<(GroupId, Vec<Option<LogIndex>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10138,7 +10156,7 @@ impl MatrixRaftRouteBatchPlan {
             .collect()
     }
 
-    pub fn message_bytes_by_group(&self) -> Vec<(RustRaftGroupId, Vec<u64>)> {
+    pub fn message_bytes_by_group(&self) -> Vec<(GroupId, Vec<u64>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10154,7 +10172,7 @@ impl MatrixRaftRouteBatchPlan {
             .collect()
     }
 
-    pub fn propose_request_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<u64>>)> {
+    pub fn propose_request_ids_by_group(&self) -> Vec<(GroupId, Vec<Option<u64>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10176,13 +10194,13 @@ impl MatrixRaftRouteBatchPlan {
             .collect()
     }
 
-    pub fn propose_request_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn propose_request_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.propose_request_ids_by_group())
     }
 
     pub fn snapshot_ids_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftSnapshotId>>)> {
+    ) -> Vec<(GroupId, Vec<Option<SnapshotId>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10204,11 +10222,11 @@ impl MatrixRaftRouteBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_ids_by_group())
     }
 
-    pub fn snapshot_chunk_offsets_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<u64>>)> {
+    pub fn snapshot_chunk_offsets_by_group(&self) -> Vec<(GroupId, Vec<Option<u64>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10230,11 +10248,11 @@ impl MatrixRaftRouteBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_chunk_offset_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_chunk_offset_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_chunk_offsets_by_group())
     }
 
-    pub fn snapshot_chunk_done_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<bool>>)> {
+    pub fn snapshot_chunk_done_by_group(&self) -> Vec<(GroupId, Vec<Option<bool>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10256,13 +10274,13 @@ impl MatrixRaftRouteBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_chunk_done_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_chunk_done_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_chunk_done_by_group())
     }
 
     pub fn snapshot_chunk_payload_bytes_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<usize>>)> {
+    ) -> Vec<(GroupId, Vec<Option<usize>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10284,19 +10302,19 @@ impl MatrixRaftRouteBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_chunk_payload_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_chunk_payload_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_chunk_payload_bytes_by_group())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftPriorityRoutedMessage {
-    pub priority: RustRaftMailPriority,
+    pub priority: MailPriority,
     pub routed: MatrixRaftRoutedMessage,
 }
 
 impl MatrixRaftPriorityRoutedMessage {
-    pub fn new(priority: RustRaftMailPriority, routed: MatrixRaftRoutedMessage) -> Self {
+    pub fn new(priority: MailPriority, routed: MatrixRaftRoutedMessage) -> Self {
         Self { priority, routed }
     }
 
@@ -10307,12 +10325,12 @@ impl MatrixRaftPriorityRoutedMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftPriorityRouteGroupPlan {
-    pub priority: RustRaftMailPriority,
+    pub priority: MailPriority,
     pub message_count: usize,
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub node_ids: Vec<NodeId>,
     pub message_types: Vec<MatrixRaftMessageType>,
 }
 
@@ -10320,9 +10338,9 @@ pub struct MatrixRaftPriorityRouteGroupPlan {
 pub struct MatrixRaftPriorityRouteBatchPlan {
     pub message_count: usize,
     pub group_count: usize,
-    pub group_ids: Vec<RustRaftGroupId>,
+    pub group_ids: Vec<GroupId>,
     pub node_count: usize,
-    pub node_ids: Vec<RustRaftNodeId>,
+    pub node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub message_types: Vec<MatrixRaftMessageType>,
     pub priority_groups: Vec<MatrixRaftPriorityRouteGroupPlan>,
@@ -10331,35 +10349,35 @@ pub struct MatrixRaftPriorityRouteBatchPlan {
 }
 
 impl MatrixRaftPriorityRouteBatchPlan {
-    pub fn route_keys_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftRouteKey>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_group(&self) -> Vec<(GroupId, Vec<NodeId>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn message_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn message_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message_count))
             .collect()
     }
 
-    pub fn route_key_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize)> {
+    pub fn route_key_counts_by_group(&self) -> Vec<(GroupId, usize)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.route_keys.len()))
             .collect()
     }
 
-    pub fn fanout_counts_by_group(&self) -> Vec<(RustRaftGroupId, usize, usize)> {
+    pub fn fanout_counts_by_group(&self) -> Vec<(GroupId, usize, usize)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10374,14 +10392,14 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn message_types_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<MatrixRaftMessageType>)> {
+    ) -> Vec<(GroupId, Vec<MatrixRaftMessageType>)> {
         self.groups
             .iter()
             .map(|group| (group.group_id, group.message_types.clone()))
             .collect()
     }
 
-    pub fn priorities_by_group(&self) -> Vec<(RustRaftGroupId, Vec<RustRaftMailPriority>)> {
+    pub fn priorities_by_group(&self) -> Vec<(GroupId, Vec<MailPriority>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10397,7 +10415,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn messages_by_group(&self) -> Vec<(RustRaftGroupId, Vec<MatrixRaftMessage>)> {
+    pub fn messages_by_group(&self) -> Vec<(GroupId, Vec<MatrixRaftMessage>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10413,7 +10431,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn priorities_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftMailPriority)> {
+    pub fn priorities_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, MailPriority)> {
         self.messages
             .iter()
             .map(|message| (message.route_key(), message.priority))
@@ -10427,7 +10445,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.messages
             .iter()
             .map(|message| (message.route_key(), message.routed.runtime_node_id))
@@ -10447,7 +10465,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
         &self,
     ) -> Vec<(
         MatrixRaftRouteKey,
-        (Option<RustRaftNodeId>, Option<RustRaftNodeId>),
+        (Option<NodeId>, Option<NodeId>),
     )> {
         self.messages
             .iter()
@@ -10460,7 +10478,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<RustRaftTerm>)> {
+    pub fn terms_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, Option<Term>)> {
         self.messages
             .iter()
             .map(|message| (message.route_key(), message.routed.message.term))
@@ -10469,7 +10487,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn committed_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.messages
             .iter()
             .map(|message| (message.route_key(), message.routed.message.committed_index))
@@ -10508,7 +10526,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.messages
             .iter()
             .map(|message| {
@@ -10605,8 +10623,8 @@ impl MatrixRaftPriorityRouteBatchPlan {
     pub fn sender_receiver_by_group(
         &self,
     ) -> Vec<(
-        RustRaftGroupId,
-        Vec<(Option<RustRaftNodeId>, Option<RustRaftNodeId>)>,
+        GroupId,
+        Vec<(Option<NodeId>, Option<NodeId>)>,
     )> {
         self.groups
             .iter()
@@ -10623,7 +10641,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn terms_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftTerm>>)> {
+    pub fn terms_by_group(&self) -> Vec<(GroupId, Vec<Option<Term>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10641,7 +10659,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn committed_indices_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftLogIndex>>)> {
+    ) -> Vec<(GroupId, Vec<Option<LogIndex>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10657,7 +10675,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn message_bytes_by_group(&self) -> Vec<(RustRaftGroupId, Vec<u64>)> {
+    pub fn message_bytes_by_group(&self) -> Vec<(GroupId, Vec<u64>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10673,7 +10691,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn propose_request_ids_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<u64>>)> {
+    pub fn propose_request_ids_by_group(&self) -> Vec<(GroupId, Vec<Option<u64>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10696,13 +10714,13 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn propose_request_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn propose_request_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.propose_request_ids_by_group())
     }
 
     pub fn snapshot_ids_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<RustRaftSnapshotId>>)> {
+    ) -> Vec<(GroupId, Vec<Option<SnapshotId>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10725,11 +10743,11 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_id_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_id_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_ids_by_group())
     }
 
-    pub fn snapshot_chunk_offsets_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<u64>>)> {
+    pub fn snapshot_chunk_offsets_by_group(&self) -> Vec<(GroupId, Vec<Option<u64>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10752,11 +10770,11 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_chunk_offset_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_chunk_offset_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_chunk_offsets_by_group())
     }
 
-    pub fn snapshot_chunk_done_by_group(&self) -> Vec<(RustRaftGroupId, Vec<Option<bool>>)> {
+    pub fn snapshot_chunk_done_by_group(&self) -> Vec<(GroupId, Vec<Option<bool>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10779,13 +10797,13 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_chunk_done_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_chunk_done_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_chunk_done_by_group())
     }
 
     pub fn snapshot_chunk_payload_bytes_by_group(
         &self,
-    ) -> Vec<(RustRaftGroupId, Vec<Option<usize>>)> {
+    ) -> Vec<(GroupId, Vec<Option<usize>>)> {
         self.groups
             .iter()
             .map(|group| {
@@ -10808,25 +10826,25 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_chunk_payload_presence_by_group(&self) -> Vec<(RustRaftGroupId, Vec<bool>)> {
+    pub fn snapshot_chunk_payload_presence_by_group(&self) -> Vec<(GroupId, Vec<bool>)> {
         matrixraft_presence_by_group(self.snapshot_chunk_payload_bytes_by_group())
     }
 
-    pub fn route_keys_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<MatrixRaftRouteKey>)> {
+    pub fn route_keys_by_priority(&self) -> Vec<(MailPriority, Vec<MatrixRaftRouteKey>)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.route_keys.clone()))
             .collect()
     }
 
-    pub fn node_ids_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<RustRaftNodeId>)> {
+    pub fn node_ids_by_priority(&self) -> Vec<(MailPriority, Vec<NodeId>)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.node_ids.clone()))
             .collect()
     }
 
-    pub fn group_ids_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<RustRaftGroupId>)> {
+    pub fn group_ids_by_priority(&self) -> Vec<(MailPriority, Vec<GroupId>)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.group_ids.clone()))
@@ -10835,14 +10853,14 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn message_types_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<MatrixRaftMessageType>)> {
+    ) -> Vec<(MailPriority, Vec<MatrixRaftMessageType>)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.message_types.clone()))
             .collect()
     }
 
-    pub fn messages_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<MatrixRaftMessage>)> {
+    pub fn messages_by_priority(&self) -> Vec<(MailPriority, Vec<MatrixRaftMessage>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -10861,8 +10879,8 @@ impl MatrixRaftPriorityRouteBatchPlan {
     pub fn sender_receiver_by_priority(
         &self,
     ) -> Vec<(
-        RustRaftMailPriority,
-        Vec<(Option<RustRaftNodeId>, Option<RustRaftNodeId>)>,
+        MailPriority,
+        Vec<(Option<NodeId>, Option<NodeId>)>,
     )> {
         self.priority_groups
             .iter()
@@ -10879,7 +10897,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn terms_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<Option<RustRaftTerm>>)> {
+    pub fn terms_by_priority(&self) -> Vec<(MailPriority, Vec<Option<Term>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -10897,7 +10915,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn committed_indices_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<RustRaftLogIndex>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<LogIndex>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -10913,21 +10931,21 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn message_counts_by_priority(&self) -> Vec<(RustRaftMailPriority, usize)> {
+    pub fn message_counts_by_priority(&self) -> Vec<(MailPriority, usize)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.message_count))
             .collect()
     }
 
-    pub fn route_key_counts_by_priority(&self) -> Vec<(RustRaftMailPriority, usize)> {
+    pub fn route_key_counts_by_priority(&self) -> Vec<(MailPriority, usize)> {
         self.priority_groups
             .iter()
             .map(|group| (group.priority, group.route_keys.len()))
             .collect()
     }
 
-    pub fn fanout_counts_by_priority(&self) -> Vec<(RustRaftMailPriority, usize, usize)> {
+    pub fn fanout_counts_by_priority(&self) -> Vec<(MailPriority, usize, usize)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -10940,7 +10958,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn message_bytes_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<u64>)> {
+    pub fn message_bytes_by_priority(&self) -> Vec<(MailPriority, Vec<u64>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -10958,7 +10976,7 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn propose_request_ids_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<u64>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<u64>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -10983,13 +11001,13 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn propose_request_id_presence_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    ) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.propose_request_ids_by_priority())
     }
 
     pub fn snapshot_ids_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<RustRaftSnapshotId>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<SnapshotId>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -11012,13 +11030,13 @@ impl MatrixRaftPriorityRouteBatchPlan {
             .collect()
     }
 
-    pub fn snapshot_id_presence_by_priority(&self) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    pub fn snapshot_id_presence_by_priority(&self) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.snapshot_ids_by_priority())
     }
 
     pub fn snapshot_chunk_offsets_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<u64>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<u64>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -11043,13 +11061,13 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn snapshot_chunk_offset_presence_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    ) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.snapshot_chunk_offsets_by_priority())
     }
 
     pub fn snapshot_chunk_done_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<bool>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<bool>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -11074,13 +11092,13 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn snapshot_chunk_done_presence_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    ) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.snapshot_chunk_done_by_priority())
     }
 
     pub fn snapshot_chunk_payload_bytes_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<Option<usize>>)> {
+    ) -> Vec<(MailPriority, Vec<Option<usize>>)> {
         self.priority_groups
             .iter()
             .map(|group| {
@@ -11105,15 +11123,15 @@ impl MatrixRaftPriorityRouteBatchPlan {
 
     pub fn snapshot_chunk_payload_presence_by_priority(
         &self,
-    ) -> Vec<(RustRaftMailPriority, Vec<bool>)> {
+    ) -> Vec<(MailPriority, Vec<bool>)> {
         matrixraft_presence_by_priority(self.snapshot_chunk_payload_bytes_by_priority())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftBatchRouteResult {
-    pub group_id: RustRaftGroupId,
-    pub runtime_node_id: RustRaftNodeId,
+    pub group_id: GroupId,
+    pub runtime_node_id: NodeId,
     pub message_type: MatrixRaftMessageType,
     #[serde(default)]
     pub result: Option<MatrixRaftRouteResult>,
@@ -11172,13 +11190,13 @@ impl MatrixRaftBatchRouteResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftBatchRouteGroupSummary {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub result_count: usize,
     pub ok_count: usize,
     pub error_count: usize,
-    pub node_ids: Vec<RustRaftNodeId>,
-    pub ok_node_ids: Vec<RustRaftNodeId>,
-    pub error_node_ids: Vec<RustRaftNodeId>,
+    pub node_ids: Vec<NodeId>,
+    pub ok_node_ids: Vec<NodeId>,
+    pub error_node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub ok_route_keys: Vec<MatrixRaftRouteKey>,
     pub error_route_keys: Vec<MatrixRaftRouteKey>,
@@ -11195,7 +11213,7 @@ pub struct MatrixRaftBatchRouteGroupSummary {
     pub statuses_by_route_key: Vec<(MatrixRaftRouteKey, bool)>,
     pub errors_by_route_key: Vec<(MatrixRaftRouteKey, Option<String>)>,
     #[serde(default)]
-    pub proposed_log_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftLogId>)>,
+    pub proposed_log_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<LogId>)>,
     #[serde(default)]
     pub read_index_responses_by_route_key:
         Vec<(MatrixRaftRouteKey, Option<ReadIndexResponse>)>,
@@ -11227,12 +11245,12 @@ pub struct MatrixRaftBatchRouteGroupSummary {
     pub compacted_logs_by_route_key: Vec<(MatrixRaftRouteKey, Option<u64>)>,
     #[serde(default)]
     pub fenced_compactions_by_route_key:
-        Vec<(MatrixRaftRouteKey, Option<RaftWalCompactionReport>)>,
+        Vec<(MatrixRaftRouteKey, Option<WalCompactionReport>)>,
     #[serde(default)]
     pub checkpoints_by_route_key: Vec<(MatrixRaftRouteKey, Option<RaftSnapshot>)>,
     #[serde(default)]
     pub witness_quorums_by_route_key:
-        Vec<(MatrixRaftRouteKey, Option<RaftWitnessQuorumReport>)>,
+        Vec<(MatrixRaftRouteKey, Option<WitnessQuorumReport>)>,
     #[serde(default)]
     pub released_memory_by_route_key: Vec<(MatrixRaftRouteKey, Option<bool>)>,
     #[serde(default)]
@@ -11251,11 +11269,11 @@ pub struct MatrixRaftBatchRouteGroupSummary {
     pub reorder_queue_dropped_by_route_key: Vec<(MatrixRaftRouteKey, Option<u64>)>,
     #[serde(default)]
     pub fatal_event_transfer_targets_by_route_key:
-        Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)>,
+        Vec<(MatrixRaftRouteKey, Option<NodeId>)>,
 }
 
 impl MatrixRaftBatchRouteGroupSummary {
-    pub fn from_results(group_id: RustRaftGroupId, results: &[MatrixRaftBatchRouteResult]) -> Self {
+    pub fn from_results(group_id: GroupId, results: &[MatrixRaftBatchRouteResult]) -> Self {
         let mut node_ids = Vec::with_capacity(results.len());
         let mut ok_node_ids = Vec::new();
         let mut error_node_ids = Vec::new();
@@ -11471,7 +11489,7 @@ impl MatrixRaftBatchRouteGroupSummary {
     }
 
     pub fn from_grouped_results(
-        groups: &[(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)],
+        groups: &[(GroupId, Vec<MatrixRaftBatchRouteResult>)],
     ) -> Vec<Self> {
         groups
             .iter()
@@ -11584,21 +11602,21 @@ impl MatrixRaftBatchRouteGroupSummary {
             .collect()
     }
 
-    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.route_keys
             .iter()
             .map(|route_key| (*route_key, route_key.node_id))
             .collect()
     }
 
-    pub fn ok_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn ok_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.ok_route_keys
             .iter()
             .map(|route_key| (*route_key, route_key.node_id))
             .collect()
     }
 
-    pub fn error_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn error_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.error_route_keys
             .iter()
             .map(|route_key| (*route_key, route_key.node_id))
@@ -11614,13 +11632,13 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn proposed_log_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogId>)> {
         self.proposed_log_ids_by_route_key.clone()
     }
 
     pub fn ok_proposed_log_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogId>)> {
         self.ok_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -11637,7 +11655,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_proposed_log_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogId>)> {
         self.error_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -11991,7 +12009,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn campaign_candidate_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12008,7 +12026,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_campaign_candidate_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.ok_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12025,7 +12043,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_campaign_candidate_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.error_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12087,7 +12105,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn transfer_leader_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12105,7 +12123,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_transfer_leader_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.ok_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12123,7 +12141,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_transfer_leader_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.error_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12297,7 +12315,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn step_down_requested_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12315,7 +12333,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_step_down_requested_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.ok_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12333,7 +12351,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_step_down_requested_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.error_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12351,7 +12369,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn step_down_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12369,7 +12387,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_step_down_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.ok_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12387,7 +12405,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_step_down_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.error_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12589,7 +12607,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn catch_up_learner_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12623,7 +12641,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn promote_learner_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12675,7 +12693,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn auto_promote_learner_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -12786,7 +12804,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.snapshots_by_route_key
             .iter()
             .map(|(key, snapshot)| (*key, snapshot.as_ref().and_then(|snapshot| snapshot.snapshot_id.clone())))
@@ -12795,7 +12813,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.ok_snapshots_by_route_key()
             .into_iter()
             .map(|(key, snapshot)| (key, snapshot.and_then(|snapshot| snapshot.snapshot_id)))
@@ -12804,7 +12822,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.error_snapshots_by_route_key()
             .into_iter()
             .map(|(key, snapshot)| (key, snapshot.and_then(|snapshot| snapshot.snapshot_id)))
@@ -12813,7 +12831,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.snapshots_by_route_key
             .iter()
             .map(|(key, snapshot)| (*key, snapshot.as_ref().map(|snapshot| snapshot.index)))
@@ -12822,7 +12840,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.ok_snapshots_by_route_key()
             .into_iter()
             .map(|(key, snapshot)| (key, snapshot.map(|snapshot| snapshot.index)))
@@ -12831,7 +12849,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.error_snapshots_by_route_key()
             .into_iter()
             .map(|(key, snapshot)| (key, snapshot.map(|snapshot| snapshot.index)))
@@ -12905,7 +12923,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn snapshot_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.snapshot_peer_reports_by_route_key
             .iter()
             .map(|(key, report)| (*key, report.as_ref().map(|report| report.peer_id)))
@@ -12914,7 +12932,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_snapshot_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.ok_snapshot_peer_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.peer_id)))
@@ -12923,7 +12941,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_snapshot_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.error_snapshot_peer_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.peer_id)))
@@ -12993,7 +13011,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn apply_result_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.apply_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.as_ref().map(|result| result.node_id)))
@@ -13002,7 +13020,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_apply_result_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.ok_apply_results_by_route_key()
             .into_iter()
             .map(|(key, result)| (key, result.map(|result| result.node_id)))
@@ -13011,7 +13029,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_apply_result_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.error_apply_results_by_route_key()
             .into_iter()
             .map(|(key, result)| (key, result.map(|result| result.node_id)))
@@ -13020,7 +13038,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn applied_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.apply_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.as_ref().map(|result| result.applied_index)))
@@ -13029,7 +13047,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_applied_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.ok_apply_results_by_route_key()
             .into_iter()
             .map(|(key, result)| (key, result.map(|result| result.applied_index)))
@@ -13038,7 +13056,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_applied_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.error_apply_results_by_route_key()
             .into_iter()
             .map(|(key, result)| (key, result.map(|result| result.applied_index)))
@@ -13129,7 +13147,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn synced_first_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.synced_reports_by_route_key
             .iter()
             .map(|(key, report)| (*key, report.as_ref().and_then(|report| report.first_index)))
@@ -13138,7 +13156,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_synced_first_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.ok_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.and_then(|report| report.first_index)))
@@ -13147,7 +13165,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_synced_first_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.error_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.and_then(|report| report.first_index)))
@@ -13156,7 +13174,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn synced_last_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.synced_reports_by_route_key
             .iter()
             .map(|(key, report)| (*key, report.as_ref().and_then(|report| report.last_index)))
@@ -13165,7 +13183,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_synced_last_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.ok_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.and_then(|report| report.last_index)))
@@ -13174,7 +13192,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_synced_last_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.error_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.and_then(|report| report.last_index)))
@@ -13183,7 +13201,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn synced_stabled_config_change_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.synced_reports_by_route_key
             .iter()
             .map(|(key, report)| {
@@ -13199,7 +13217,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_synced_stabled_config_change_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.ok_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.stabled_config_change_index)))
@@ -13208,7 +13226,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_synced_stabled_config_change_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.error_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.stabled_config_change_index)))
@@ -13278,7 +13296,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn replicated_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.replicated_reports_by_route_key
             .iter()
             .map(|(key, report)| (*key, report.as_ref().map(|report| report.peer_id)))
@@ -13287,7 +13305,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_replicated_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.ok_replicated_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.peer_id)))
@@ -13296,7 +13314,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_replicated_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.error_replicated_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.peer_id)))
@@ -13388,13 +13406,13 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn fenced_compactions_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWalCompactionReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WalCompactionReport>)> {
         self.fenced_compactions_by_route_key.clone()
     }
 
     pub fn ok_fenced_compactions_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWalCompactionReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WalCompactionReport>)> {
         self.ok_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -13411,7 +13429,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_fenced_compactions_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWalCompactionReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WalCompactionReport>)> {
         self.error_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -13503,7 +13521,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn checkpoint_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.checkpoints_by_route_key
             .iter()
             .map(|(key, checkpoint)| {
@@ -13519,7 +13537,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_checkpoint_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.ok_checkpoints_by_route_key()
             .into_iter()
             .map(|(key, checkpoint)| {
@@ -13533,7 +13551,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_checkpoint_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.error_checkpoints_by_route_key()
             .into_iter()
             .map(|(key, checkpoint)| {
@@ -13547,7 +13565,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn checkpoint_last_log_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.checkpoints_by_route_key
             .iter()
             .map(|(key, checkpoint)| {
@@ -13563,7 +13581,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn ok_checkpoint_last_log_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.ok_checkpoints_by_route_key()
             .into_iter()
             .map(|(key, checkpoint)| {
@@ -13577,7 +13595,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_checkpoint_last_log_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.error_checkpoints_by_route_key()
             .into_iter()
             .map(|(key, checkpoint)| {
@@ -13598,13 +13616,13 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn witness_quorums_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWitnessQuorumReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WitnessQuorumReport>)> {
         self.witness_quorums_by_route_key.clone()
     }
 
     pub fn ok_witness_quorums_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWitnessQuorumReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WitnessQuorumReport>)> {
         self.ok_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -13621,7 +13639,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_witness_quorums_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWitnessQuorumReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WitnessQuorumReport>)> {
         self.error_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -14256,13 +14274,13 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn fatal_event_transfer_targets_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.fatal_event_transfer_targets_by_route_key.clone()
     }
 
     pub fn ok_fatal_event_transfer_targets_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.ok_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -14279,7 +14297,7 @@ impl MatrixRaftBatchRouteGroupSummary {
 
     pub fn error_fatal_event_transfer_targets_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.error_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -14324,21 +14342,21 @@ pub enum MatrixRaftRouteResultKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftApplyResultReport {
-    pub node_id: RustRaftNodeId,
-    pub applied_index: RustRaftLogIndex,
+    pub node_id: NodeId,
+    pub applied_index: LogIndex,
     pub rejected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSyncedReport {
-    pub first_index: Option<RustRaftLogIndex>,
-    pub last_index: Option<RustRaftLogIndex>,
-    pub stabled_config_change_index: RustRaftLogIndex,
+    pub first_index: Option<LogIndex>,
+    pub last_index: Option<LogIndex>,
+    pub stabled_config_change_index: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftReplicatedReport {
-    pub peer_id: RustRaftNodeId,
+    pub peer_id: NodeId,
     pub success: bool,
 }
 
@@ -14350,9 +14368,9 @@ pub struct MatrixRaftRouteResult {
     pub handled: bool,
     pub detail: String,
     #[serde(default)]
-    pub proposed_log_id: Option<RustRaftLogId>,
+    pub proposed_log_id: Option<LogId>,
     #[serde(default)]
-    pub membership: Option<RaftMembershipExecutionReport>,
+    pub membership: Option<MembershipExecutionReport>,
     #[serde(default)]
     pub append_entries_response: Option<MatrixRaftAppendEntriesResponse>,
     #[serde(default)]
@@ -14360,15 +14378,15 @@ pub struct MatrixRaftRouteResult {
     #[serde(default)]
     pub read_index_response: Option<ReadIndexResponse>,
     #[serde(default)]
-    pub catch_up: Option<RaftLearnerCatchUpLoopReport>,
+    pub catch_up: Option<LearnerCatchUpLoopReport>,
     #[serde(default)]
     pub promote: Option<MatrixRaftPromoteReport>,
     #[serde(default)]
-    pub auto_promote: Option<RaftLearnerAutoPromoteReport>,
+    pub auto_promote: Option<LearnerAutoPromoteReport>,
     #[serde(default)]
     pub vote_response: Option<VoteResponse>,
     #[serde(default)]
-    pub campaign_candidate_id: Option<RustRaftNodeId>,
+    pub campaign_candidate_id: Option<NodeId>,
     #[serde(default)]
     pub campaign_forced: Option<bool>,
     #[serde(default)]
@@ -14396,11 +14414,11 @@ pub struct MatrixRaftRouteResult {
     #[serde(default)]
     pub compacted_logs: Option<u64>,
     #[serde(default)]
-    pub fenced_compaction: Option<RaftWalCompactionReport>,
+    pub fenced_compaction: Option<WalCompactionReport>,
     #[serde(default)]
     pub checkpoint: Option<RaftSnapshot>,
     #[serde(default)]
-    pub witness_quorum: Option<RaftWitnessQuorumReport>,
+    pub witness_quorum: Option<WitnessQuorumReport>,
     #[serde(default)]
     pub released_memory: Option<bool>,
     #[serde(default)]
@@ -14418,7 +14436,7 @@ pub struct MatrixRaftRouteResult {
     #[serde(default)]
     pub reorder_queue_dropped: Option<u64>,
     #[serde(default)]
-    pub fatal_event_transfer_target: Option<RustRaftNodeId>,
+    pub fatal_event_transfer_target: Option<NodeId>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -14430,13 +14448,13 @@ pub enum MatrixRaftRouteResultStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftRouteGroupSummary {
-    pub group_id: RustRaftGroupId,
+    pub group_id: GroupId,
     pub result_count: usize,
     pub handled_count: usize,
     pub unhandled_count: usize,
-    pub node_ids: Vec<RustRaftNodeId>,
-    pub handled_node_ids: Vec<RustRaftNodeId>,
-    pub unhandled_node_ids: Vec<RustRaftNodeId>,
+    pub node_ids: Vec<NodeId>,
+    pub handled_node_ids: Vec<NodeId>,
+    pub unhandled_node_ids: Vec<NodeId>,
     pub route_keys: Vec<MatrixRaftRouteKey>,
     pub handled_route_keys: Vec<MatrixRaftRouteKey>,
     pub unhandled_route_keys: Vec<MatrixRaftRouteKey>,
@@ -14456,7 +14474,7 @@ pub struct MatrixRaftRouteGroupSummary {
     pub unhandled_results_by_route_key: Vec<(MatrixRaftRouteKey, MatrixRaftRouteResult)>,
     pub handled_by_route_key: Vec<(MatrixRaftRouteKey, bool)>,
     #[serde(default)]
-    pub proposed_log_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<RustRaftLogId>)>,
+    pub proposed_log_ids_by_route_key: Vec<(MatrixRaftRouteKey, Option<LogId>)>,
     #[serde(default)]
     pub read_index_responses_by_route_key:
         Vec<(MatrixRaftRouteKey, Option<ReadIndexResponse>)>,
@@ -14488,12 +14506,12 @@ pub struct MatrixRaftRouteGroupSummary {
     pub compacted_logs_by_route_key: Vec<(MatrixRaftRouteKey, Option<u64>)>,
     #[serde(default)]
     pub fenced_compactions_by_route_key:
-        Vec<(MatrixRaftRouteKey, Option<RaftWalCompactionReport>)>,
+        Vec<(MatrixRaftRouteKey, Option<WalCompactionReport>)>,
     #[serde(default)]
     pub checkpoints_by_route_key: Vec<(MatrixRaftRouteKey, Option<RaftSnapshot>)>,
     #[serde(default)]
     pub witness_quorums_by_route_key:
-        Vec<(MatrixRaftRouteKey, Option<RaftWitnessQuorumReport>)>,
+        Vec<(MatrixRaftRouteKey, Option<WitnessQuorumReport>)>,
     #[serde(default)]
     pub released_memory_by_route_key: Vec<(MatrixRaftRouteKey, Option<bool>)>,
     #[serde(default)]
@@ -14512,13 +14530,13 @@ pub struct MatrixRaftRouteGroupSummary {
     pub reorder_queue_dropped_by_route_key: Vec<(MatrixRaftRouteKey, Option<u64>)>,
     #[serde(default)]
     pub fatal_event_transfer_targets_by_route_key:
-        Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)>,
+        Vec<(MatrixRaftRouteKey, Option<NodeId>)>,
 }
 
 impl MatrixRaftRouteGroupSummary {
     pub fn handled_step_down_requested_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.handled_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -14535,7 +14553,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_step_down_requested_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.unhandled_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -14552,7 +14570,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_step_down_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.handled_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -14569,7 +14587,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_step_down_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.unhandled_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -14756,7 +14774,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_fenced_compactions_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWalCompactionReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WalCompactionReport>)> {
         self.handled_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.fenced_compaction.clone()))
@@ -14765,7 +14783,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_fenced_compactions_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWalCompactionReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WalCompactionReport>)> {
         self.unhandled_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.fenced_compaction.clone()))
@@ -14792,7 +14810,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_witness_quorums_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWitnessQuorumReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WitnessQuorumReport>)> {
         self.handled_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.witness_quorum.clone()))
@@ -14801,7 +14819,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_witness_quorums_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWitnessQuorumReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WitnessQuorumReport>)> {
         self.unhandled_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.witness_quorum.clone()))
@@ -14956,7 +14974,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.handled_snapshots_by_route_key()
             .into_iter()
             .map(|(key, snapshot)| (key, snapshot.and_then(|snapshot| snapshot.snapshot_id)))
@@ -14965,7 +14983,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.unhandled_snapshots_by_route_key()
             .into_iter()
             .map(|(key, snapshot)| (key, snapshot.and_then(|snapshot| snapshot.snapshot_id)))
@@ -14974,7 +14992,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.handled_snapshots_by_route_key()
             .into_iter()
             .map(|(key, snapshot)| (key, snapshot.map(|snapshot| snapshot.index)))
@@ -14983,7 +15001,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.unhandled_snapshots_by_route_key()
             .into_iter()
             .map(|(key, snapshot)| (key, snapshot.map(|snapshot| snapshot.index)))
@@ -14992,7 +15010,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_snapshot_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.handled_snapshot_peer_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.peer_id)))
@@ -15001,7 +15019,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_snapshot_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.unhandled_snapshot_peer_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.peer_id)))
@@ -15010,7 +15028,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_apply_result_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.handled_apply_results_by_route_key()
             .into_iter()
             .map(|(key, result)| (key, result.map(|result| result.node_id)))
@@ -15019,7 +15037,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_apply_result_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.unhandled_apply_results_by_route_key()
             .into_iter()
             .map(|(key, result)| (key, result.map(|result| result.node_id)))
@@ -15028,7 +15046,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_applied_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.handled_apply_results_by_route_key()
             .into_iter()
             .map(|(key, result)| (key, result.map(|result| result.applied_index)))
@@ -15037,7 +15055,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_applied_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.unhandled_apply_results_by_route_key()
             .into_iter()
             .map(|(key, result)| (key, result.map(|result| result.applied_index)))
@@ -15060,7 +15078,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_synced_first_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.handled_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.and_then(|report| report.first_index)))
@@ -15069,7 +15087,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_synced_first_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.unhandled_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.and_then(|report| report.first_index)))
@@ -15078,7 +15096,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_synced_last_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.handled_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.and_then(|report| report.last_index)))
@@ -15087,7 +15105,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_synced_last_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.unhandled_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.and_then(|report| report.last_index)))
@@ -15096,7 +15114,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_synced_stabled_config_change_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.handled_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.stabled_config_change_index)))
@@ -15105,7 +15123,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_synced_stabled_config_change_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.unhandled_synced_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.stabled_config_change_index)))
@@ -15114,7 +15132,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_replicated_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.handled_replicated_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.peer_id)))
@@ -15123,7 +15141,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_replicated_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.unhandled_replicated_reports_by_route_key()
             .into_iter()
             .map(|(key, report)| (key, report.map(|report| report.peer_id)))
@@ -15150,7 +15168,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_checkpoint_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.handled_checkpoints_by_route_key()
             .into_iter()
             .map(|(key, checkpoint)| (key, checkpoint.map(|checkpoint| checkpoint.meta.snapshot_id)))
@@ -15159,7 +15177,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_checkpoint_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.unhandled_checkpoints_by_route_key()
             .into_iter()
             .map(|(key, checkpoint)| (key, checkpoint.map(|checkpoint| checkpoint.meta.snapshot_id)))
@@ -15168,7 +15186,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_checkpoint_last_log_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.handled_checkpoints_by_route_key()
             .into_iter()
             .map(|(key, checkpoint)| {
@@ -15182,7 +15200,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_checkpoint_last_log_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.unhandled_checkpoints_by_route_key()
             .into_iter()
             .map(|(key, checkpoint)| {
@@ -15538,7 +15556,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_fatal_event_transfer_targets_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.handled_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.fatal_event_transfer_target))
@@ -15547,7 +15565,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_fatal_event_transfer_targets_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.unhandled_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.fatal_event_transfer_target))
@@ -15572,7 +15590,7 @@ impl MatrixRaftRouteGroupSummary {
             .collect()
     }
 
-    pub fn from_results(group_id: RustRaftGroupId, results: &[MatrixRaftRouteResult]) -> Self {
+    pub fn from_results(group_id: GroupId, results: &[MatrixRaftRouteResult]) -> Self {
         let mut node_ids = Vec::with_capacity(results.len());
         let mut handled_node_ids = Vec::new();
         let mut unhandled_node_ids = Vec::new();
@@ -15772,7 +15790,7 @@ impl MatrixRaftRouteGroupSummary {
     }
 
     pub fn from_grouped_results(
-        groups: &[(RustRaftGroupId, Vec<MatrixRaftRouteResult>)],
+        groups: &[(GroupId, Vec<MatrixRaftRouteResult>)],
     ) -> Vec<Self> {
         groups
             .iter()
@@ -15886,21 +15904,21 @@ impl MatrixRaftRouteGroupSummary {
             .collect()
     }
 
-    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.route_keys
             .iter()
             .map(|route_key| (*route_key, route_key.node_id))
             .collect()
     }
 
-    pub fn handled_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn handled_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.handled_route_keys
             .iter()
             .map(|route_key| (*route_key, route_key.node_id))
             .collect()
     }
 
-    pub fn unhandled_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, RustRaftNodeId)> {
+    pub fn unhandled_node_ids_by_route_key(&self) -> Vec<(MatrixRaftRouteKey, NodeId)> {
         self.unhandled_route_keys
             .iter()
             .map(|route_key| (*route_key, route_key.node_id))
@@ -15916,13 +15934,13 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn proposed_log_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogId>)> {
         self.proposed_log_ids_by_route_key.clone()
     }
 
     pub fn handled_proposed_log_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogId>)> {
         self.handled_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.proposed_log_id.clone()))
@@ -15931,7 +15949,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_proposed_log_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogId>)> {
         self.unhandled_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.proposed_log_id.clone()))
@@ -16205,7 +16223,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn campaign_candidate_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.campaign_candidate_id))
@@ -16214,7 +16232,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_campaign_candidate_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.handled_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.campaign_candidate_id))
@@ -16223,7 +16241,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_campaign_candidate_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.unhandled_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.campaign_candidate_id))
@@ -16257,7 +16275,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn transfer_leader_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -16274,7 +16292,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn handled_transfer_leader_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.handled_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -16291,7 +16309,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn unhandled_transfer_leader_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.unhandled_results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -16413,7 +16431,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn step_down_requested_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -16430,7 +16448,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn step_down_transferee_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -16521,7 +16539,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn catch_up_learner_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -16547,7 +16565,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn promote_learner_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -16582,7 +16600,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn auto_promote_learner_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.results_by_route_key
             .iter()
             .map(|(key, result)| {
@@ -16642,7 +16660,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.snapshots_by_route_key
             .iter()
             .map(|(key, snapshot)| (*key, snapshot.as_ref().and_then(|snapshot| snapshot.snapshot_id.clone())))
@@ -16651,7 +16669,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn snapshot_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.snapshots_by_route_key
             .iter()
             .map(|(key, snapshot)| (*key, snapshot.as_ref().map(|snapshot| snapshot.index)))
@@ -16673,7 +16691,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn snapshot_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.snapshot_peer_reports_by_route_key
             .iter()
             .map(|(key, report)| (*key, report.as_ref().map(|report| report.peer_id)))
@@ -16695,7 +16713,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn apply_result_node_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.apply_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.as_ref().map(|result| result.node_id)))
@@ -16704,7 +16722,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn applied_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.apply_results_by_route_key
             .iter()
             .map(|(key, result)| (*key, result.as_ref().map(|result| result.applied_index)))
@@ -16733,7 +16751,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn synced_first_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.synced_reports_by_route_key
             .iter()
             .map(|(key, report)| (*key, report.as_ref().and_then(|report| report.first_index)))
@@ -16742,7 +16760,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn synced_last_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.synced_reports_by_route_key
             .iter()
             .map(|(key, report)| (*key, report.as_ref().and_then(|report| report.last_index)))
@@ -16751,7 +16769,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn synced_stabled_config_change_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.synced_reports_by_route_key
             .iter()
             .map(|(key, report)| {
@@ -16780,7 +16798,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn replicated_peer_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.replicated_reports_by_route_key
             .iter()
             .map(|(key, report)| (*key, report.as_ref().map(|report| report.peer_id)))
@@ -16814,7 +16832,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn fenced_compactions_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWalCompactionReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WalCompactionReport>)> {
         self.fenced_compactions_by_route_key.clone()
     }
 
@@ -16831,7 +16849,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn checkpoint_snapshot_ids_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftSnapshotId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<SnapshotId>)> {
         self.checkpoints_by_route_key
             .iter()
             .map(|(key, checkpoint)| {
@@ -16847,7 +16865,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn checkpoint_last_log_indices_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftLogIndex>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<LogIndex>)> {
         self.checkpoints_by_route_key
             .iter()
             .map(|(key, checkpoint)| {
@@ -16870,7 +16888,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn witness_quorums_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RaftWitnessQuorumReport>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<WitnessQuorumReport>)> {
         self.witness_quorums_by_route_key.clone()
     }
 
@@ -17016,7 +17034,7 @@ impl MatrixRaftRouteGroupSummary {
 
     pub fn fatal_event_transfer_targets_by_route_key(
         &self,
-    ) -> Vec<(MatrixRaftRouteKey, Option<RustRaftNodeId>)> {
+    ) -> Vec<(MatrixRaftRouteKey, Option<NodeId>)> {
         self.fatal_event_transfer_targets_by_route_key.clone()
     }
 }
@@ -17310,35 +17328,35 @@ impl MatrixRaftMultiRaftServer {
     pub fn create_node(
         &mut self,
         options: MatrixRaftOptions,
-        start_index: RustRaftLogIndex,
+        start_index: LogIndex,
     ) -> Result<(), RaftError> {
         self.create_node_with_creator_index(options, start_index, 0)
     }
 
     pub fn create_nodes(
         &mut self,
-        nodes: impl IntoIterator<Item = (MatrixRaftOptions, RustRaftLogIndex)>,
+        nodes: impl IntoIterator<Item = (MatrixRaftOptions, LogIndex)>,
     ) -> Result<Vec<MatrixRaftRouteKey>, RaftError> {
         self.create_nodes_with_creator_index(nodes, 0)
     }
 
     pub fn create_nodes_best_effort(
         &mut self,
-        nodes: impl IntoIterator<Item = (MatrixRaftOptions, RustRaftLogIndex)>,
+        nodes: impl IntoIterator<Item = (MatrixRaftOptions, LogIndex)>,
     ) -> Result<Vec<MatrixRaftCreateGroupResult>, RaftError> {
         self.create_nodes_with_creator_index_best_effort(nodes, 0)
     }
 
     pub fn plan_create_nodes(
         &self,
-        nodes: impl IntoIterator<Item = (MatrixRaftOptions, RustRaftLogIndex)>,
+        nodes: impl IntoIterator<Item = (MatrixRaftOptions, LogIndex)>,
     ) -> Result<MatrixRaftCreateBatchPlan, RaftError> {
         self.plan_create_nodes_with_creator_index(nodes, 0)
     }
 
     pub fn plan_create_nodes_with_creator_index(
         &self,
-        nodes: impl IntoIterator<Item = (MatrixRaftOptions, RustRaftLogIndex)>,
+        nodes: impl IntoIterator<Item = (MatrixRaftOptions, LogIndex)>,
         creator_index: usize,
     ) -> Result<MatrixRaftCreateBatchPlan, RaftError> {
         let nodes: Vec<_> = nodes.into_iter().collect();
@@ -17347,7 +17365,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn create_nodes_with_creator_index(
         &mut self,
-        nodes: impl IntoIterator<Item = (MatrixRaftOptions, RustRaftLogIndex)>,
+        nodes: impl IntoIterator<Item = (MatrixRaftOptions, LogIndex)>,
         creator_index: usize,
     ) -> Result<Vec<MatrixRaftRouteKey>, RaftError> {
         let nodes: Vec<_> = nodes.into_iter().collect();
@@ -17361,7 +17379,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn create_nodes_with_creator_index_best_effort(
         &mut self,
-        nodes: impl IntoIterator<Item = (MatrixRaftOptions, RustRaftLogIndex)>,
+        nodes: impl IntoIterator<Item = (MatrixRaftOptions, LogIndex)>,
         creator_index: usize,
     ) -> Result<Vec<MatrixRaftCreateGroupResult>, RaftError> {
         if !self.context.node_creators.is_empty() {
@@ -17373,7 +17391,7 @@ impl MatrixRaftMultiRaftServer {
             })?;
         }
         let mut seen = BTreeSet::new();
-        let mut groups = BTreeMap::<RustRaftGroupId, Vec<MatrixRaftCreateNodeResult>>::new();
+        let mut groups = BTreeMap::<GroupId, Vec<MatrixRaftCreateNodeResult>>::new();
 
         for (options, start_index) in nodes {
             let key = MatrixRaftRouteKey::new(options.group_id, options.peer_id);
@@ -17422,7 +17440,7 @@ impl MatrixRaftMultiRaftServer {
     pub fn create_node_with_creator_index(
         &mut self,
         options: MatrixRaftOptions,
-        start_index: RustRaftLogIndex,
+        start_index: LogIndex,
         creator_index: usize,
     ) -> Result<(), RaftError> {
         let key = MatrixRaftRouteKey::new(options.group_id, options.peer_id);
@@ -17457,8 +17475,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn unregister_node(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<MatrixRaftNode, RaftError> {
         let key = MatrixRaftRouteKey::new(group_id, node_id);
         self.snapshot_routes.remove(&key);
@@ -17468,7 +17486,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn unregister_group(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftNode>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         let mut removed = Vec::with_capacity(keys.len());
@@ -17486,7 +17504,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn unregister_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> MatrixRaftUnregisterGroupResult {
         match self.plan_unregister_group(group_id) {
             Ok(plan) => self.unregister_group_plan_best_effort(plan),
@@ -17496,7 +17514,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_unregister_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<MatrixRaftUnregisterGroupPlan, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         Ok(self.unregister_group_plan_from_keys(group_id, keys))
@@ -17504,7 +17522,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_unregister_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftUnregisterBatchPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         self.unregister_batch_plan_from_groups(&group_ids)
@@ -17512,8 +17530,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn unregister_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftNode>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftNode>)>, RaftError> {
         let group_ids: Vec<_> = group_ids.into_iter().collect();
         let plan = self.unregister_batch_plan_from_groups(&group_ids)?;
 
@@ -17536,7 +17554,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn unregister_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Vec<MatrixRaftUnregisterGroupResult> {
         let mut seen = BTreeSet::new();
         let mut results = Vec::new();
@@ -17568,7 +17586,7 @@ impl MatrixRaftMultiRaftServer {
         MatrixRaftUnregisterGroupResult::ok(plan)
     }
 
-    pub fn has_node(&self, group_id: RustRaftGroupId, node_id: RustRaftNodeId) -> bool {
+    pub fn has_node(&self, group_id: GroupId, node_id: NodeId) -> bool {
         self.nodes
             .contains_key(&MatrixRaftRouteKey::new(group_id, node_id))
     }
@@ -17581,7 +17599,7 @@ impl MatrixRaftMultiRaftServer {
         self.nodes.keys().map(|key| key.group_id).collect::<BTreeSet<_>>().len()
     }
 
-    pub fn group_ids(&self) -> Vec<RustRaftGroupId> {
+    pub fn group_ids(&self) -> Vec<GroupId> {
         self.nodes
             .keys()
             .map(|key| key.group_id)
@@ -17596,15 +17614,15 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn group_route_key_list(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftRouteKey>, RaftError> {
         self.group_route_keys(group_id)
     }
 
     pub fn route_keys_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteKey>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteKey>)>, RaftError> {
         let plan = self.plan_query_for_groups(group_ids, "route_keys")?;
         Ok(plan
             .groups
@@ -17615,7 +17633,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_query_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         operation: impl Into<String>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -17624,22 +17642,22 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_route_keys_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "route_keys")
     }
 
     pub fn node_id_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<MatrixRaftNodeId, RaftError> {
         Ok(self.node(group_id, node_id)?.get_node_id())
     }
 
     pub fn node_ids_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftNodeId>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -17649,8 +17667,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn node_ids_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftNodeId>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftNodeId>)>, RaftError> {
         let plan = self.plan_node_ids_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -17672,14 +17690,14 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_node_ids_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "node_ids")
     }
 
     pub fn group_topology(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<MatrixRaftGroupTopology, RaftError> {
         let route_keys = self.group_route_keys(group_id)?;
         Ok(self.topology_for_route_keys(group_id, route_keys))
@@ -17687,7 +17705,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn topologies_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<Vec<MatrixRaftGroupTopology>, RaftError> {
         let plan = self.plan_topologies_for_groups(group_ids)?;
         Ok(plan
@@ -17699,7 +17717,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_topologies_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "topologies")
     }
@@ -17729,8 +17747,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn runtime_wiring(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Option<&MatrixRaftRuntimeWiring> {
         self.runtime_wiring
             .get(&MatrixRaftRouteKey::new(group_id, node_id))
@@ -17742,7 +17760,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn group_route_keys(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftRouteKey>, RaftError> {
         let keys: Vec<_> = self
             .nodes
@@ -17760,7 +17778,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn unregister_batch_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
+        group_ids: &[GroupId],
     ) -> Result<MatrixRaftUnregisterBatchPlan, RaftError> {
         let mut seen = BTreeSet::new();
         let mut groups = Vec::with_capacity(group_ids.len());
@@ -17801,7 +17819,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn unregister_group_plan_from_keys(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         route_keys: Vec<MatrixRaftRouteKey>,
     ) -> MatrixRaftUnregisterGroupPlan {
         let node_ids = route_keys.iter().map(|key| key.node_id).collect::<Vec<_>>();
@@ -17826,8 +17844,8 @@ impl MatrixRaftMultiRaftServer {
     fn lifecycle_batch_plan_from_groups(
         &self,
         action: MatrixRaftLifecycleAction,
-        group_ids: &[RustRaftGroupId],
-        start_index: Option<RustRaftLogIndex>,
+        group_ids: &[GroupId],
+        start_index: Option<LogIndex>,
         recover_fsm_from_snapshot: Option<bool>,
     ) -> Result<MatrixRaftLifecycleBatchPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_ids.len());
@@ -17864,8 +17882,8 @@ impl MatrixRaftMultiRaftServer {
 
     fn membership_fanout_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
-        operation: RaftMembershipOperation,
+        group_ids: &[GroupId],
+        operation: MembershipOperation,
     ) -> Result<MatrixRaftMembershipFanoutPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_ids.len());
         for group_id in group_ids {
@@ -17897,8 +17915,8 @@ impl MatrixRaftMultiRaftServer {
 
     fn membership_workflow_fanout_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
-        operations: Vec<RaftMembershipOperation>,
+        group_ids: &[GroupId],
+        operations: Vec<MembershipOperation>,
     ) -> Result<MatrixRaftMembershipWorkflowFanoutPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_ids.len());
         for group_id in group_ids {
@@ -17932,7 +17950,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn config_change_fanout_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
+        group_ids: &[GroupId],
         change: MatrixRaftConfigChange,
     ) -> Result<MatrixRaftConfigChangeFanoutPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_ids.len());
@@ -17965,9 +17983,9 @@ impl MatrixRaftMultiRaftServer {
 
     fn propose_fanout_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
+        group_ids: &[GroupId],
         options: MatrixRaftProposeOptions,
-        data: &RustRaftPayload,
+        data: &Payload,
     ) -> Result<MatrixRaftProposeFanoutPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_ids.len());
         for group_id in group_ids {
@@ -18001,7 +18019,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn read_index_fanout_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
+        group_ids: &[GroupId],
         options: MatrixRaftReadIndexOptions,
     ) -> Result<MatrixRaftReadIndexFanoutPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_ids.len());
@@ -18034,7 +18052,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn bounded_stale_read_fanout_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
+        group_ids: &[GroupId],
         options: MatrixRaftBoundedStaleReadOptions,
     ) -> Result<MatrixRaftBoundedStaleReadFanoutPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_ids.len());
@@ -18067,7 +18085,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn snapshot_install_plan_from_groups(
         &self,
-        group_installs: &[(RustRaftGroupId, RustRaftNodeId, RaftSnapshot, RustRaftApplySnapshotFence)],
+        group_installs: &[(GroupId, NodeId, RaftSnapshot, ApplySnapshotFence)],
     ) -> Result<MatrixRaftSnapshotInstallFanoutPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_installs.len());
         for (group_id, target, snapshot, fence) in group_installs {
@@ -18100,7 +18118,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn snapshot_publish_plan_from_groups(
         &self,
-        group_snapshots: &[(RustRaftGroupId, MatrixRaftSnapshotDesc)],
+        group_snapshots: &[(GroupId, MatrixRaftSnapshotDesc)],
     ) -> Result<MatrixRaftSnapshotPublishPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_snapshots.len());
         for (group_id, snapshot) in group_snapshots {
@@ -18144,7 +18162,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn snapshot_finish_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
+        group_ids: &[GroupId],
         finish: MatrixRaftOldSnapshotFinish,
     ) -> Result<MatrixRaftSnapshotFinishPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_ids.len());
@@ -18190,7 +18208,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn message_fanout_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
+        group_ids: &[GroupId],
         message: MatrixRaftMessage,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_ids.len());
@@ -18224,7 +18242,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn admin_command_fanout_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
+        group_ids: &[GroupId],
         command: MatrixRaftAdminCommand,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         let mut groups = Vec::with_capacity(group_ids.len());
@@ -18259,7 +18277,7 @@ impl MatrixRaftMultiRaftServer {
     fn admin_command_fanout_plan_from_group_commands(
         &self,
         command_type: MatrixRaftAdminCommandType,
-        group_commands: impl IntoIterator<Item = (RustRaftGroupId, MatrixRaftAdminCommand)>,
+        group_commands: impl IntoIterator<Item = (GroupId, MatrixRaftAdminCommand)>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         let mut groups = Vec::new();
         for (group_id, command) in group_commands {
@@ -18297,7 +18315,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn query_fanout_plan_from_groups(
         &self,
-        group_ids: &[RustRaftGroupId],
+        group_ids: &[GroupId],
         operation: impl Into<String>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         let operation = operation.into();
@@ -18331,7 +18349,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn create_batch_plan_from_nodes(
         &self,
-        nodes: &[(MatrixRaftOptions, RustRaftLogIndex)],
+        nodes: &[(MatrixRaftOptions, LogIndex)],
         creator_index: usize,
     ) -> Result<MatrixRaftCreateBatchPlan, RaftError> {
         let creator = if self.context.node_creators.is_empty() {
@@ -18347,7 +18365,7 @@ impl MatrixRaftMultiRaftServer {
         let bound_creator_index = creator.map(|_| creator_index);
         let mut seen = BTreeSet::new();
         let mut node_plans = Vec::with_capacity(nodes.len());
-        let mut group_plans = BTreeMap::<RustRaftGroupId, MatrixRaftCreateGroupPlan>::new();
+        let mut group_plans = BTreeMap::<GroupId, MatrixRaftCreateGroupPlan>::new();
 
         for (options, start_index) in nodes {
             let key = MatrixRaftRouteKey::new(options.group_id, options.peer_id);
@@ -18405,7 +18423,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn topology_for_route_keys(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         route_keys: Vec<MatrixRaftRouteKey>,
     ) -> MatrixRaftGroupTopology {
         let node_ids = route_keys.iter().map(|key| key.node_id).collect::<Vec<_>>();
@@ -18429,8 +18447,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<&MatrixRaftNode, RaftError> {
         self.nodes
             .get(&MatrixRaftRouteKey::new(group_id, node_id))
@@ -18439,8 +18457,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn node_mut(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<&mut MatrixRaftNode, RaftError> {
         self.nodes
             .get_mut(&MatrixRaftRouteKey::new(group_id, node_id))
@@ -18460,8 +18478,8 @@ impl MatrixRaftMultiRaftServer {
     /// through its normal local read path.
     pub fn forwarded_read_index_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         options: MatrixRaftReadIndexOptions,
     ) -> Result<ReadIndexResponse, RaftError> {
         let leader_id = self.node(group_id, node_id)?.leader()?;
@@ -18508,7 +18526,7 @@ impl MatrixRaftMultiRaftServer {
     /// followers honestly report `follower_apply_pending`.
     pub fn forwarded_read_index_for_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftReadIndexOptions,
     ) -> Result<Vec<(MatrixRaftRouteKey, ReadIndexResponse)>, RaftError> {
         let mut route_keys: Vec<MatrixRaftRouteKey> = self
@@ -18533,10 +18551,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_to_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        data: RustRaftPayload,
-    ) -> Result<RustRaftLogId, RaftError> {
+        group_id: GroupId,
+        node_id: NodeId,
+        data: Payload,
+    ) -> Result<LogId, RaftError> {
         self.propose_to_node_with_options(
             group_id,
             node_id,
@@ -18547,19 +18565,19 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_to_node_with_options(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         options: MatrixRaftProposeOptions,
-        data: RustRaftPayload,
-    ) -> Result<RustRaftLogId, RaftError> {
+        data: Payload,
+    ) -> Result<LogId, RaftError> {
         self.node(group_id, node_id)?.propose_with_options(options, data)
     }
 
     pub fn propose_to_group_nodes(
         &self,
-        group_id: RustRaftGroupId,
-        data: RustRaftPayload,
-    ) -> Result<Vec<RustRaftLogId>, RaftError> {
+        group_id: GroupId,
+        data: Payload,
+    ) -> Result<Vec<LogId>, RaftError> {
         self.propose_to_group_nodes_with_options(
             group_id,
             MatrixRaftProposeOptions::default(),
@@ -18569,10 +18587,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_to_group_nodes_with_options(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftProposeOptions,
-        data: RustRaftPayload,
-    ) -> Result<Vec<RustRaftLogId>, RaftError> {
+        data: Payload,
+    ) -> Result<Vec<LogId>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
             .map(|key| {
@@ -18584,8 +18602,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_to_group_nodes_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        data: RustRaftPayload,
+        group_id: GroupId,
+        data: Payload,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.propose_to_group_nodes_with_options_best_effort(
             group_id,
@@ -18596,9 +18614,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_to_group_nodes_with_options_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftProposeOptions,
-        data: RustRaftPayload,
+        data: Payload,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         let mut results = Vec::with_capacity(keys.len());
@@ -18639,8 +18657,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_propose_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        data: &RustRaftPayload,
+        group_id: GroupId,
+        data: &Payload,
     ) -> Result<MatrixRaftProposeFanoutGroupPlan, RaftError> {
         self.plan_propose_with_options_on_group(
             group_id,
@@ -18651,9 +18669,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_propose_with_options_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftProposeOptions,
-        data: &RustRaftPayload,
+        data: &Payload,
     ) -> Result<MatrixRaftProposeFanoutGroupPlan, RaftError> {
         Ok(self
             .propose_fanout_plan_from_groups(&[group_id], options, data)?
@@ -18665,8 +18683,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_propose_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        data: &RustRaftPayload,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        data: &Payload,
     ) -> Result<MatrixRaftProposeFanoutPlan, RaftError> {
         self.plan_propose_with_options_for_groups(
             group_ids,
@@ -18677,9 +18695,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_propose_with_options_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftProposeOptions,
-        data: &RustRaftPayload,
+        data: &Payload,
     ) -> Result<MatrixRaftProposeFanoutPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         self.propose_fanout_plan_from_groups(&group_ids, options, data)
@@ -18687,18 +18705,18 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_to_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        data: RustRaftPayload,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<RustRaftLogId>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        data: Payload,
+    ) -> Result<Vec<(GroupId, Vec<LogId>)>, RaftError> {
         self.propose_to_groups_with_options(group_ids, MatrixRaftProposeOptions::default(), data)
     }
 
     pub fn propose_to_groups_with_options(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftProposeOptions,
-        data: RustRaftPayload,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<RustRaftLogId>)>, RaftError> {
+        data: Payload,
+    ) -> Result<Vec<(GroupId, Vec<LogId>)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.propose_fanout_plan_from_groups(&group_ids, options, &data)?;
 
@@ -18718,8 +18736,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
-        data: RustRaftPayload,
+        group_id: GroupId,
+        data: Payload,
         callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -18738,9 +18756,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_with_options_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftProposeOptions,
-        data: RustRaftPayload,
+        data: Payload,
         mut callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -18765,11 +18783,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        data: RustRaftPayload,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        data: Payload,
         callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -18785,12 +18803,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_with_options_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftProposeOptions,
-        data: RustRaftPayload,
+        data: Payload,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -18817,9 +18835,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_to_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        data: RustRaftPayload,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        data: Payload,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.propose_to_groups_with_options_best_effort(
             group_ids,
             MatrixRaftProposeOptions::default(),
@@ -18829,10 +18847,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_to_groups_with_options_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftProposeOptions,
-        data: RustRaftPayload,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        data: Payload,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.propose_fanout_plan_from_groups(&group_ids, options, &data)?;
 
@@ -18878,9 +18896,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_index_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        min_commit_index: RustRaftLogIndex,
+        group_id: GroupId,
+        node_id: NodeId,
+        min_commit_index: LogIndex,
     ) -> Result<ReadIndexResponse, RaftError> {
         self.read_index_on_node_with_options(
             group_id,
@@ -18891,8 +18909,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_index_on_node_with_options(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         options: MatrixRaftReadIndexOptions,
     ) -> Result<ReadIndexResponse, RaftError> {
         self.node(group_id, node_id)?.read_index_with_options(options)
@@ -18900,8 +18918,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn group_read_indexes(
         &self,
-        group_id: RustRaftGroupId,
-        min_commit_index: RustRaftLogIndex,
+        group_id: GroupId,
+        min_commit_index: LogIndex,
     ) -> Result<Vec<ReadIndexResponse>, RaftError> {
         self.group_read_indexes_with_options(
             group_id,
@@ -18911,7 +18929,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn group_read_indexes_with_options(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftReadIndexOptions,
     ) -> Result<Vec<ReadIndexResponse>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
@@ -18925,8 +18943,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_read_indexes_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        min_commit_index: RustRaftLogIndex,
+        group_id: GroupId,
+        min_commit_index: LogIndex,
     ) -> Result<MatrixRaftReadIndexFanoutGroupPlan, RaftError> {
         self.plan_read_indexes_with_options_on_group(
             group_id,
@@ -18936,7 +18954,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_read_indexes_with_options_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftReadIndexOptions,
     ) -> Result<MatrixRaftReadIndexFanoutGroupPlan, RaftError> {
         Ok(self
@@ -18949,8 +18967,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_read_indexes_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        min_commit_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        min_commit_index: LogIndex,
     ) -> Result<MatrixRaftReadIndexFanoutPlan, RaftError> {
         self.plan_read_indexes_with_options_for_groups(
             group_ids,
@@ -18960,7 +18978,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_read_indexes_with_options_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftReadIndexOptions,
     ) -> Result<MatrixRaftReadIndexFanoutPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -18969,9 +18987,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_indexes_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        min_commit_index: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<ReadIndexResponse>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        min_commit_index: LogIndex,
+    ) -> Result<Vec<(GroupId, Vec<ReadIndexResponse>)>, RaftError> {
         self.read_indexes_for_groups_with_options(
             group_ids,
             MatrixRaftReadIndexOptions::lease_read(min_commit_index),
@@ -18980,9 +18998,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_indexes_for_groups_with_options(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftReadIndexOptions,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<ReadIndexResponse>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<ReadIndexResponse>)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.read_index_fanout_plan_from_groups(&group_ids, options)?;
 
@@ -19002,8 +19020,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_indexes_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        min_commit_index: RustRaftLogIndex,
+        group_id: GroupId,
+        min_commit_index: LogIndex,
     ) -> Result<MatrixRaftReadIndexGroupResult, RaftError> {
         self.read_indexes_with_options_on_group_best_effort(
             group_id,
@@ -19013,7 +19031,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_indexes_with_options_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftReadIndexOptions,
     ) -> Result<MatrixRaftReadIndexGroupResult, RaftError> {
         let plan = self.plan_read_indexes_with_options_on_group(group_id, options)?;
@@ -19022,8 +19040,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_indexes_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        min_commit_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        min_commit_index: LogIndex,
     ) -> Result<Vec<MatrixRaftReadIndexGroupResult>, RaftError> {
         self.read_indexes_with_options_for_groups_best_effort(
             group_ids,
@@ -19033,7 +19051,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_indexes_with_options_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftReadIndexOptions,
     ) -> Result<Vec<MatrixRaftReadIndexGroupResult>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -19073,11 +19091,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn bounded_stale_read_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        min_commit_index: RustRaftLogIndex,
-        max_stale_index_lag: RustRaftLogIndex,
-    ) -> Result<RustRaftReadPathReport, RaftError> {
+        group_id: GroupId,
+        node_id: NodeId,
+        min_commit_index: LogIndex,
+        max_stale_index_lag: LogIndex,
+    ) -> Result<ReadPathReport, RaftError> {
         self.bounded_stale_read_on_node_with_options(
             group_id,
             node_id,
@@ -19087,20 +19105,20 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn bounded_stale_read_on_node_with_options(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         options: MatrixRaftBoundedStaleReadOptions,
-    ) -> Result<RustRaftReadPathReport, RaftError> {
+    ) -> Result<ReadPathReport, RaftError> {
         self.node(group_id, node_id)?
             .bounded_stale_read_index_with_options(options)
     }
 
     pub fn bounded_stale_reads_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        min_commit_index: RustRaftLogIndex,
-        max_stale_index_lag: RustRaftLogIndex,
-    ) -> Result<Vec<RustRaftReadPathReport>, RaftError> {
+        group_id: GroupId,
+        min_commit_index: LogIndex,
+        max_stale_index_lag: LogIndex,
+    ) -> Result<Vec<ReadPathReport>, RaftError> {
         self.bounded_stale_reads_with_options_on_group(
             group_id,
             MatrixRaftBoundedStaleReadOptions::new(min_commit_index, max_stale_index_lag),
@@ -19109,9 +19127,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn bounded_stale_reads_with_options_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftBoundedStaleReadOptions,
-    ) -> Result<Vec<RustRaftReadPathReport>, RaftError> {
+    ) -> Result<Vec<ReadPathReport>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
             .map(|key| {
@@ -19123,9 +19141,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_bounded_stale_reads_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        min_commit_index: RustRaftLogIndex,
-        max_stale_index_lag: RustRaftLogIndex,
+        group_id: GroupId,
+        min_commit_index: LogIndex,
+        max_stale_index_lag: LogIndex,
     ) -> Result<MatrixRaftBoundedStaleReadFanoutGroupPlan, RaftError> {
         self.plan_bounded_stale_reads_with_options_on_group(
             group_id,
@@ -19135,7 +19153,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_bounded_stale_reads_with_options_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftBoundedStaleReadOptions,
     ) -> Result<MatrixRaftBoundedStaleReadFanoutGroupPlan, RaftError> {
         Ok(self
@@ -19148,9 +19166,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_bounded_stale_reads_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        min_commit_index: RustRaftLogIndex,
-        max_stale_index_lag: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        min_commit_index: LogIndex,
+        max_stale_index_lag: LogIndex,
     ) -> Result<MatrixRaftBoundedStaleReadFanoutPlan, RaftError> {
         self.plan_bounded_stale_reads_with_options_for_groups(
             group_ids,
@@ -19160,7 +19178,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_bounded_stale_reads_with_options_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftBoundedStaleReadOptions,
     ) -> Result<MatrixRaftBoundedStaleReadFanoutPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -19169,10 +19187,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn bounded_stale_reads_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        min_commit_index: RustRaftLogIndex,
-        max_stale_index_lag: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<RustRaftReadPathReport>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        min_commit_index: LogIndex,
+        max_stale_index_lag: LogIndex,
+    ) -> Result<Vec<(GroupId, Vec<ReadPathReport>)>, RaftError> {
         self.bounded_stale_reads_with_options_for_groups(
             group_ids,
             MatrixRaftBoundedStaleReadOptions::new(min_commit_index, max_stale_index_lag),
@@ -19181,9 +19199,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn bounded_stale_reads_with_options_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftBoundedStaleReadOptions,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<RustRaftReadPathReport>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<ReadPathReport>)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.bounded_stale_read_fanout_plan_from_groups(&group_ids, options)?;
 
@@ -19203,9 +19221,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn bounded_stale_reads_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        min_commit_index: RustRaftLogIndex,
-        max_stale_index_lag: RustRaftLogIndex,
+        group_id: GroupId,
+        min_commit_index: LogIndex,
+        max_stale_index_lag: LogIndex,
     ) -> Result<MatrixRaftBoundedStaleReadGroupResult, RaftError> {
         self.bounded_stale_reads_with_options_on_group_best_effort(
             group_id,
@@ -19215,7 +19233,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn bounded_stale_reads_with_options_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftBoundedStaleReadOptions,
     ) -> Result<MatrixRaftBoundedStaleReadGroupResult, RaftError> {
         let plan = self.plan_bounded_stale_reads_with_options_on_group(group_id, options)?;
@@ -19224,9 +19242,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn bounded_stale_reads_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        min_commit_index: RustRaftLogIndex,
-        max_stale_index_lag: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        min_commit_index: LogIndex,
+        max_stale_index_lag: LogIndex,
     ) -> Result<Vec<MatrixRaftBoundedStaleReadGroupResult>, RaftError> {
         self.bounded_stale_reads_with_options_for_groups_best_effort(
             group_ids,
@@ -19236,7 +19254,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn bounded_stale_reads_with_options_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftBoundedStaleReadOptions,
     ) -> Result<Vec<MatrixRaftBoundedStaleReadGroupResult>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -19275,8 +19293,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_index_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
-        min_commit_index: RustRaftLogIndex,
+        group_id: GroupId,
+        min_commit_index: LogIndex,
         callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -19294,7 +19312,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_index_with_options_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         options: MatrixRaftReadIndexOptions,
         mut callback_for_key: F,
         timeout_ms: u64,
@@ -19319,11 +19337,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_index_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        min_commit_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        min_commit_index: LogIndex,
         callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -19338,11 +19356,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_index_with_options_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         options: MatrixRaftReadIndexOptions,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -19368,18 +19386,18 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_membership_operation_to_node(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        operation: RaftMembershipOperation,
-    ) -> Result<RaftMembershipExecutionReport, RaftError> {
+        group_id: GroupId,
+        node_id: NodeId,
+        operation: MembershipOperation,
+    ) -> Result<MembershipExecutionReport, RaftError> {
         self.node_mut(group_id, node_id)?
             .execute_membership_operation(operation)
     }
 
     pub fn plan_membership_operation_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        operation: RaftMembershipOperation,
+        group_id: GroupId,
+        operation: MembershipOperation,
     ) -> Result<MatrixRaftMembershipFanoutGroupPlan, RaftError> {
         Ok(self
             .membership_fanout_plan_from_groups(&[group_id], operation)?
@@ -19391,8 +19409,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_membership_operation_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        operation: RaftMembershipOperation,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        operation: MembershipOperation,
     ) -> Result<MatrixRaftMembershipFanoutPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         self.membership_fanout_plan_from_groups(&group_ids, operation)
@@ -19401,7 +19419,7 @@ impl MatrixRaftMultiRaftServer {
     fn membership_operation_callback_on_node<F>(
         &mut self,
         key: MatrixRaftRouteKey,
-        operation: RaftMembershipOperation,
+        operation: MembershipOperation,
         callback: F,
         timeout_ms: u64,
     ) -> Result<MatrixRaftAsyncResult, RaftError>
@@ -19409,14 +19427,14 @@ impl MatrixRaftMultiRaftServer {
         F: FnOnce(MatrixRaftAsyncResult),
     {
         let result = match operation {
-            RaftMembershipOperation::AddNode(peer) | RaftMembershipOperation::AddVoter(peer) => {
+            MembershipOperation::AddNode(peer) | MembershipOperation::AddVoter(peer) => {
                 self.node_mut(key.group_id, key.node_id)?.add_node_callback(
                     MatrixRaftNodeId::from(&peer),
                     callback,
                     timeout_ms,
                 )
             }
-            RaftMembershipOperation::AddLearner(peer) => self
+            MembershipOperation::AddLearner(peer) => self
                 .node_mut(key.group_id, key.node_id)?
                 .add_learner_callback(
                     MatrixRaftNodeId::from(&peer),
@@ -19424,10 +19442,10 @@ impl MatrixRaftMultiRaftServer {
                     callback,
                     timeout_ms,
                 ),
-            RaftMembershipOperation::AddWitness(peer) => self
+            MembershipOperation::AddWitness(peer) => self
                 .node_mut(key.group_id, key.node_id)?
                 .add_witness_callback(MatrixRaftNodeId::from(&peer), callback, timeout_ms),
-            RaftMembershipOperation::Promote(node_id) => {
+            MembershipOperation::Promote(node_id) => {
                 self.node_mut(key.group_id, key.node_id)?.promote_callback(
                     MatrixRaftNodeId {
                         peer_id: node_id,
@@ -19438,7 +19456,7 @@ impl MatrixRaftMultiRaftServer {
                     timeout_ms,
                 )
             }
-            RaftMembershipOperation::Remove(node_id) => self
+            MembershipOperation::Remove(node_id) => self
                 .node_mut(key.group_id, key.node_id)?
                 .remove_node_callback(
                     MatrixRaftNodeId {
@@ -19449,7 +19467,7 @@ impl MatrixRaftMultiRaftServer {
                     callback,
                     timeout_ms,
                 ),
-            RaftMembershipOperation::TransferLeader(transferee_id) => self
+            MembershipOperation::TransferLeader(transferee_id) => self
                 .node(key.group_id, key.node_id)?
                 .transfer_leader_callback(transferee_id, callback, timeout_ms),
         };
@@ -19458,8 +19476,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn membership_operation_callbacks_on_group<F, C>(
         &mut self,
-        group_id: RustRaftGroupId,
-        operation: RaftMembershipOperation,
+        group_id: GroupId,
+        operation: MembershipOperation,
         mut callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -19484,11 +19502,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn membership_operation_callbacks_for_groups<F, C>(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        operation: RaftMembershipOperation,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        operation: MembershipOperation,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -19514,9 +19532,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_membership_operation_to_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        operation: RaftMembershipOperation,
-    ) -> Result<Vec<RaftMembershipExecutionReport>, RaftError> {
+        group_id: GroupId,
+        operation: MembershipOperation,
+    ) -> Result<Vec<MembershipExecutionReport>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         let mut reports = Vec::with_capacity(keys.len());
         for key in keys {
@@ -19530,8 +19548,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_membership_operation_to_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
-        operation: RaftMembershipOperation,
+        group_id: GroupId,
+        operation: MembershipOperation,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         let mut results = Vec::with_capacity(keys.len());
@@ -19563,9 +19581,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_membership_operation_to_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        operation: RaftMembershipOperation,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<RaftMembershipExecutionReport>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        operation: MembershipOperation,
+    ) -> Result<Vec<(GroupId, Vec<MembershipExecutionReport>)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.plan_membership_operation_for_groups(group_ids, operation.clone())?;
         let mut groups = Vec::new();
@@ -19580,9 +19598,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_membership_operation_to_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        operation: RaftMembershipOperation,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        operation: MembershipOperation,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.plan_membership_operation_for_groups(group_ids, operation.clone())?;
         let mut groups = Vec::new();
@@ -19600,18 +19618,18 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_membership_workflow_to_node(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        operations: impl IntoIterator<Item = RaftMembershipOperation>,
-    ) -> Result<Vec<RaftMembershipExecutionReport>, RaftError> {
+        group_id: GroupId,
+        node_id: NodeId,
+        operations: impl IntoIterator<Item = MembershipOperation>,
+    ) -> Result<Vec<MembershipExecutionReport>, RaftError> {
         self.node_mut(group_id, node_id)?
             .execute_membership_workflow_with_rollback(operations)
     }
 
     pub fn plan_membership_workflow_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        operations: impl IntoIterator<Item = RaftMembershipOperation>,
+        group_id: GroupId,
+        operations: impl IntoIterator<Item = MembershipOperation>,
     ) -> Result<MatrixRaftMembershipWorkflowFanoutGroupPlan, RaftError> {
         Ok(self
             .membership_workflow_fanout_plan_from_groups(
@@ -19626,8 +19644,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_membership_workflow_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        operations: impl IntoIterator<Item = RaftMembershipOperation>,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        operations: impl IntoIterator<Item = MembershipOperation>,
     ) -> Result<MatrixRaftMembershipWorkflowFanoutPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         self.membership_workflow_fanout_plan_from_groups(
@@ -19638,9 +19656,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_membership_workflow_to_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        operations: impl IntoIterator<Item = RaftMembershipOperation>,
-    ) -> Result<Vec<(MatrixRaftRouteKey, Vec<RaftMembershipExecutionReport>)>, RaftError> {
+        group_id: GroupId,
+        operations: impl IntoIterator<Item = MembershipOperation>,
+    ) -> Result<Vec<(MatrixRaftRouteKey, Vec<MembershipExecutionReport>)>, RaftError> {
         let plan = self.plan_membership_workflow_on_group(group_id, operations)?;
         let mut results = Vec::with_capacity(plan.node_count);
         for key in plan.route_keys {
@@ -19654,9 +19672,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_membership_workflow_to_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        operations: impl IntoIterator<Item = RaftMembershipOperation>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, Vec<RaftMembershipExecutionReport>)>)>, RaftError>
+        group_ids: impl IntoIterator<Item = GroupId>,
+        operations: impl IntoIterator<Item = MembershipOperation>,
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, Vec<MembershipExecutionReport>)>)>, RaftError>
     {
         let plan = self.plan_membership_workflow_for_groups(group_ids, operations)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
@@ -19675,8 +19693,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_membership_workflow_to_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
-        operations: impl IntoIterator<Item = RaftMembershipOperation>,
+        group_id: GroupId,
+        operations: impl IntoIterator<Item = MembershipOperation>,
     ) -> Result<MatrixRaftMembershipWorkflowGroupResult, RaftError> {
         let plan = self.plan_membership_workflow_on_group(group_id, operations)?;
         Ok(self.membership_workflow_group_plan_best_effort(plan))
@@ -19684,8 +19702,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_membership_workflow_to_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        operations: impl IntoIterator<Item = RaftMembershipOperation>,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        operations: impl IntoIterator<Item = MembershipOperation>,
     ) -> Result<Vec<MatrixRaftMembershipWorkflowGroupResult>, RaftError> {
         let plan = self.plan_membership_workflow_for_groups(group_ids, operations)?;
         Ok(plan
@@ -19722,8 +19740,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_config_change_to_node(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         change: MatrixRaftConfigChange,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_config_change(MatrixRaftRouteKey::new(group_id, node_id), change)
@@ -19731,7 +19749,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_config_change_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         change: MatrixRaftConfigChange,
     ) -> Result<MatrixRaftConfigChangeFanoutGroupPlan, RaftError> {
         Ok(self
@@ -19744,7 +19762,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_config_change_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         change: MatrixRaftConfigChange,
     ) -> Result<MatrixRaftConfigChangeFanoutPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -19753,7 +19771,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_config_change_to_group(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         change: MatrixRaftConfigChange,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
@@ -19766,7 +19784,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_config_change_to_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         change: MatrixRaftConfigChange,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
@@ -19788,9 +19806,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_config_change_to_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         change: MatrixRaftConfigChange,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.plan_config_change_for_groups(group_ids, change.clone())?;
         let mut groups = Vec::new();
@@ -19805,9 +19823,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_config_change_to_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         change: MatrixRaftConfigChange,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.plan_config_change_for_groups(group_ids, change.clone())?;
         let mut groups = Vec::new();
@@ -19822,18 +19840,18 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn catch_up_peer_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
-    ) -> Result<RaftLearnerCatchUpLoopReport, RaftError> {
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
+    ) -> Result<LearnerCatchUpLoopReport, RaftError> {
         self.node(group_id, node_id)?.catch_up_peer(peer_id)
     }
 
     pub fn catch_up_peer_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<RaftLearnerCatchUpLoopReport>, RaftError> {
+        group_id: GroupId,
+        peer_id: NodeId,
+    ) -> Result<Vec<LearnerCatchUpLoopReport>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
             .map(|key| self.node(key.group_id, key.node_id)?.catch_up_peer(peer_id))
@@ -19842,8 +19860,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn catch_up_peer_on_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_message_to_group_best_effort(
             group_id,
@@ -19853,9 +19871,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn catch_up_peer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<RaftLearnerCatchUpLoopReport>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<LearnerCatchUpLoopReport>)>, RaftError> {
         let plan = self.plan_catch_up_peer_for_groups(group_ids, peer_id)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -19870,8 +19888,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_catch_up_peer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(
             group_ids,
@@ -19881,9 +19899,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn catch_up_peer_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::catch_up_peer(peer_id, peer_id),
@@ -19892,9 +19910,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn promote_peer_on_node(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftPromoteReport, RaftError> {
         self.node_mut(group_id, node_id)?
             .promote_after_catch_up(peer_id)
@@ -19902,8 +19920,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn promote_peer_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftPromoteReport>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         let mut reports = Vec::with_capacity(keys.len());
@@ -19918,8 +19936,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn promote_peer_on_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_message_to_group_best_effort(
             group_id,
@@ -19929,9 +19947,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn promote_peer_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftPromoteReport>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftPromoteReport>)>, RaftError> {
         let plan = self.plan_promote_peer_for_groups(group_ids, peer_id)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -19949,8 +19967,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn promote_peer_callbacks_on_group<F, C>(
         &mut self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         mut callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -19978,11 +19996,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn promote_peer_callbacks_for_groups<F, C>(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -20011,17 +20029,17 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_promote_peer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(group_ids, MatrixRaftMessage::promote_peer(peer_id, peer_id))
     }
 
     pub fn promote_peer_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::promote_peer(peer_id, peer_id),
@@ -20030,19 +20048,19 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn auto_promote_learner_on_node(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        learner_id: RustRaftNodeId,
-    ) -> Result<RaftLearnerAutoPromoteReport, RaftError> {
+        group_id: GroupId,
+        node_id: NodeId,
+        learner_id: NodeId,
+    ) -> Result<LearnerAutoPromoteReport, RaftError> {
         self.node_mut(group_id, node_id)?
             .auto_promote_learner(learner_id)
     }
 
     pub fn auto_promote_learner_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        learner_id: RustRaftNodeId,
-    ) -> Result<Vec<RaftLearnerAutoPromoteReport>, RaftError> {
+        group_id: GroupId,
+        learner_id: NodeId,
+    ) -> Result<Vec<LearnerAutoPromoteReport>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         let mut reports = Vec::with_capacity(keys.len());
         for key in keys {
@@ -20056,8 +20074,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn auto_promote_learner_on_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
-        learner_id: RustRaftNodeId,
+        group_id: GroupId,
+        learner_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_message_to_group_best_effort(
             group_id,
@@ -20067,9 +20085,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn auto_promote_learner_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        learner_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<RaftLearnerAutoPromoteReport>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        learner_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<LearnerAutoPromoteReport>)>, RaftError> {
         let plan = self.plan_auto_promote_learner_for_groups(group_ids, learner_id)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -20087,8 +20105,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn auto_promote_learner_callbacks_on_group<F, C>(
         &mut self,
-        group_id: RustRaftGroupId,
-        learner_id: RustRaftNodeId,
+        group_id: GroupId,
+        learner_id: NodeId,
         mut callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -20110,11 +20128,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn auto_promote_learner_callbacks_for_groups<F, C>(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        learner_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        learner_id: NodeId,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -20137,8 +20155,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_auto_promote_learner_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        learner_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        learner_id: NodeId,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(
             group_ids,
@@ -20148,9 +20166,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn auto_promote_learner_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        learner_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        learner_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::auto_promote_learner(learner_id, learner_id),
@@ -20159,9 +20177,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn campaign_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        candidate_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        candidate_id: NodeId,
         forced: bool,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -20172,8 +20190,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn campaign_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        candidate_id: RustRaftNodeId,
+        group_id: GroupId,
+        candidate_id: NodeId,
         forced: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -20184,8 +20202,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn campaign_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        candidate_id: RustRaftNodeId,
+        group_id: GroupId,
+        candidate_id: NodeId,
         forced: bool,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -20196,10 +20214,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn campaigns_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        candidate_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        candidate_id: NodeId,
         forced: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::campaign(candidate_id, forced),
@@ -20208,8 +20226,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_campaigns_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        candidate_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        candidate_id: NodeId,
         forced: bool,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -20220,10 +20238,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn campaigns_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        candidate_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        candidate_id: NodeId,
         forced: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::campaign(candidate_id, forced),
@@ -20232,7 +20250,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn campaign_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         mut callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -20254,10 +20272,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn campaign_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -20281,7 +20299,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn forced_campaign_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         mut callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -20303,10 +20321,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn forced_campaign_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -20330,9 +20348,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn transfer_leader_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        transferee_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        transferee_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -20342,8 +20360,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn transfer_leader_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        transferee_id: RustRaftNodeId,
+        group_id: GroupId,
+        transferee_id: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
             group_id,
@@ -20353,8 +20371,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn transfer_leader_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        transferee_id: RustRaftNodeId,
+        group_id: GroupId,
+        transferee_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -20364,9 +20382,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn transfer_leader_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        transferee_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        transferee_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::transfer_leader(transferee_id),
@@ -20375,8 +20393,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_transfer_leader_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        transferee_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        transferee_id: NodeId,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -20386,9 +20404,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn transfer_leader_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        transferee_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        transferee_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::transfer_leader(transferee_id),
@@ -20397,8 +20415,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn transfer_leader_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
-        transferee_id: RustRaftNodeId,
+        group_id: GroupId,
+        transferee_id: NodeId,
         mut callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -20425,11 +20443,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn transfer_leader_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        transferee_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        transferee_id: NodeId,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -20452,8 +20470,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn complete_leader_transfer_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -20463,14 +20481,14 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn complete_leader_transfer_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(group_id, MatrixRaftAdminCommand::complete_leader_transfer())
     }
 
     pub fn complete_leader_transfer_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -20480,8 +20498,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn complete_leader_transfer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::complete_leader_transfer(),
@@ -20490,7 +20508,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_complete_leader_transfer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -20500,8 +20518,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn complete_leader_transfer_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::complete_leader_transfer(),
@@ -20510,8 +20528,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn abort_leader_transfer_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         reason: impl Into<String>,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -20522,7 +20540,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn abort_leader_transfer_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         reason: impl Into<String>,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -20533,7 +20551,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn abort_leader_transfer_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         reason: impl Into<String>,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -20544,9 +20562,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn abort_leader_transfer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         reason: impl Into<String>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let reason = reason.into();
         self.route_admin_command_to_groups_grouped(
             group_ids,
@@ -20556,7 +20574,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_abort_leader_transfer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         reason: impl Into<String>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -20567,9 +20585,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn abort_leader_transfer_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         reason: impl Into<String>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let reason = reason.into();
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
@@ -20579,9 +20597,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn step_down_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        transferee_id: Option<RustRaftNodeId>,
+        group_id: GroupId,
+        node_id: NodeId,
+        transferee_id: Option<NodeId>,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -20591,16 +20609,16 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn step_down_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        transferee_id: Option<RustRaftNodeId>,
+        group_id: GroupId,
+        transferee_id: Option<NodeId>,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(group_id, MatrixRaftAdminCommand::step_down(transferee_id))
     }
 
     pub fn step_down_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        transferee_id: Option<RustRaftNodeId>,
+        group_id: GroupId,
+        transferee_id: Option<NodeId>,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -20610,9 +20628,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn step_down_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        transferee_id: Option<RustRaftNodeId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        transferee_id: Option<NodeId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::step_down(transferee_id),
@@ -20621,8 +20639,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_step_down_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        transferee_id: Option<RustRaftNodeId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        transferee_id: Option<NodeId>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -20632,9 +20650,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn step_down_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        transferee_id: Option<RustRaftNodeId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        transferee_id: Option<NodeId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::step_down(transferee_id),
@@ -20643,8 +20661,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn step_down_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
-        transferee_id: Option<RustRaftNodeId>,
+        group_id: GroupId,
+        transferee_id: Option<NodeId>,
         mut callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -20671,11 +20689,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn step_down_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        transferee_id: Option<RustRaftNodeId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        transferee_id: Option<NodeId>,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -20698,8 +20716,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn resign_leader_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -20709,36 +20727,36 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn resign_leader_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(group_id, MatrixRaftAdminCommand::resign())
     }
 
     pub fn resign_leader_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(group_id, MatrixRaftAdminCommand::resign())
     }
 
     pub fn resign_leader_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(group_ids, MatrixRaftAdminCommand::resign())
     }
 
     pub fn plan_resign_leader_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(group_ids, MatrixRaftAdminCommand::resign())
     }
 
     pub fn resign_leader_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::resign(),
@@ -20747,7 +20765,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn resign_leader_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         reason: impl Into<String>,
         mut callback_for_key: F,
         timeout_ms: u64,
@@ -20778,11 +20796,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn resign_leader_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         reason: impl Into<String>,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -20808,8 +20826,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn trigger_snapshot_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -20819,22 +20837,22 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn trigger_snapshot_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(group_id, MatrixRaftAdminCommand::trigger_snapshot())
     }
 
     pub fn trigger_snapshot_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(group_id, MatrixRaftAdminCommand::trigger_snapshot())
     }
 
     pub fn trigger_snapshot_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::trigger_snapshot(),
@@ -20843,7 +20861,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_trigger_snapshot_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -20853,8 +20871,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn trigger_snapshot_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::trigger_snapshot(),
@@ -20863,16 +20881,16 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn async_snapshot_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-    ) -> Result<RustRaftSnapshotMeta, RaftError> {
+        group_id: GroupId,
+        node_id: NodeId,
+    ) -> Result<SnapshotMetadata, RaftError> {
         self.node(group_id, node_id)?.async_snapshot()
     }
 
     pub fn async_snapshots_on_group(
         &self,
-        group_id: RustRaftGroupId,
-    ) -> Result<Vec<(MatrixRaftRouteKey, RustRaftSnapshotMeta)>, RaftError> {
+        group_id: GroupId,
+    ) -> Result<Vec<(MatrixRaftRouteKey, SnapshotMetadata)>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
             .map(|key| {
@@ -20886,8 +20904,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn async_snapshots_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, RustRaftSnapshotMeta)>)>, RaftError>
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, SnapshotMetadata)>)>, RaftError>
     {
         let plan = self.plan_async_snapshots_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
@@ -20896,7 +20914,7 @@ impl MatrixRaftMultiRaftServer {
                 .route_keys
                 .into_iter()
                 .map(|key| {
-                    Ok::<(MatrixRaftRouteKey, RustRaftSnapshotMeta), RaftError>((
+                    Ok::<(MatrixRaftRouteKey, SnapshotMetadata), RaftError>((
                         key,
                         self.nodes
                             .get(&key)
@@ -20912,14 +20930,14 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_async_snapshots_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_trigger_snapshot_for_groups(group_ids)
     }
 
     pub fn async_snapshot_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         mut callback_for_key: F,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
     where
@@ -20940,9 +20958,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn async_snapshot_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         mut callback_for_key: F,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -20976,8 +20994,8 @@ impl MatrixRaftMultiRaftServer {
         let mut seen = BTreeSet::new();
         let mut route_keys = Vec::new();
         let mut group_plans = BTreeMap::<
-            RustRaftGroupId,
-            (Vec<RustRaftNodeId>, Vec<MatrixRaftRouteKey>),
+            GroupId,
+            (Vec<NodeId>, Vec<MatrixRaftRouteKey>),
         >::new();
 
         for (key, _) in node_snapshots {
@@ -21017,8 +21035,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn async_snapshot_ready_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         snapshot_id: impl AsRef<str>,
         success: bool,
     ) -> Result<(), RaftError> {
@@ -21084,8 +21102,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn async_snapshot_applied_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         snapshot_id: impl AsRef<str>,
     ) -> Result<(), RaftError> {
         self.node(group_id, node_id)?
@@ -21191,11 +21209,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn install_snapshot_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        target: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        target: NodeId,
         snapshot: RaftSnapshot,
-        fence: RustRaftApplySnapshotFence,
+        fence: ApplySnapshotFence,
     ) -> Result<MatrixRaftSnapshotInstallNodeResult, RaftError> {
         let key = MatrixRaftRouteKey::new(group_id, node_id);
         self.node(group_id, node_id)?
@@ -21207,10 +21225,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_install_snapshot_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        target: RustRaftNodeId,
+        group_id: GroupId,
+        target: NodeId,
         snapshot: RaftSnapshot,
-        fence: RustRaftApplySnapshotFence,
+        fence: ApplySnapshotFence,
     ) -> Result<MatrixRaftSnapshotInstallFanoutGroupPlan, RaftError> {
         Ok(self
             .snapshot_install_plan_from_groups(&[(group_id, target, snapshot, fence)])?
@@ -21224,10 +21242,10 @@ impl MatrixRaftMultiRaftServer {
         &self,
         group_installs: impl IntoIterator<
             Item = (
-                RustRaftGroupId,
-                RustRaftNodeId,
+                GroupId,
+                NodeId,
                 RaftSnapshot,
-                RustRaftApplySnapshotFence,
+                ApplySnapshotFence,
             ),
         >,
     ) -> Result<MatrixRaftSnapshotInstallFanoutPlan, RaftError> {
@@ -21237,10 +21255,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn install_snapshot_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        target: RustRaftNodeId,
+        group_id: GroupId,
+        target: NodeId,
         snapshot: RaftSnapshot,
-        fence: RustRaftApplySnapshotFence,
+        fence: ApplySnapshotFence,
     ) -> Result<Vec<MatrixRaftSnapshotInstallNodeResult>, RaftError> {
         let plan = self.plan_install_snapshot_on_group(group_id, target, snapshot, fence)?;
         let mut results = Vec::with_capacity(plan.node_count);
@@ -21263,10 +21281,10 @@ impl MatrixRaftMultiRaftServer {
         &self,
         group_installs: impl IntoIterator<
             Item = (
-                RustRaftGroupId,
-                RustRaftNodeId,
+                GroupId,
+                NodeId,
                 RaftSnapshot,
-                RustRaftApplySnapshotFence,
+                ApplySnapshotFence,
             ),
         >,
     ) -> Result<Vec<MatrixRaftSnapshotInstallGroupResult>, RaftError> {
@@ -21300,10 +21318,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn install_snapshot_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        target: RustRaftNodeId,
+        group_id: GroupId,
+        target: NodeId,
         snapshot: RaftSnapshot,
-        fence: RustRaftApplySnapshotFence,
+        fence: ApplySnapshotFence,
     ) -> Result<MatrixRaftSnapshotInstallGroupResult, RaftError> {
         let plan = self.plan_install_snapshot_on_group(group_id, target, snapshot, fence)?;
         Ok(self.install_snapshot_group_plan_best_effort(plan))
@@ -21313,10 +21331,10 @@ impl MatrixRaftMultiRaftServer {
         &self,
         group_installs: impl IntoIterator<
             Item = (
-                RustRaftGroupId,
-                RustRaftNodeId,
+                GroupId,
+                NodeId,
                 RaftSnapshot,
-                RustRaftApplySnapshotFence,
+                ApplySnapshotFence,
             ),
         >,
     ) -> Result<Vec<MatrixRaftSnapshotInstallGroupResult>, RaftError> {
@@ -21365,8 +21383,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_ready_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         snapshot_id: impl Into<String>,
         success: bool,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
@@ -21378,7 +21396,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_ready_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         snapshot_id: impl Into<String>,
         success: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
@@ -21390,7 +21408,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_ready_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         snapshot_id: impl Into<String>,
         success: bool,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
@@ -21402,10 +21420,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_ready_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         snapshot_id: impl Into<String>,
         success: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::snapshot_ready(snapshot_id, success),
@@ -21414,7 +21432,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_mark_snapshot_ready_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         snapshot_id: impl Into<String>,
         success: bool,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
@@ -21426,10 +21444,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_ready_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         snapshot_id: impl Into<String>,
         success: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::snapshot_ready(snapshot_id, success),
@@ -21438,9 +21456,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_ready_for_group_snapshots<S>(
         &self,
-        group_snapshots: impl IntoIterator<Item = (RustRaftGroupId, S)>,
+        group_snapshots: impl IntoIterator<Item = (GroupId, S)>,
         success: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError>
     where
         S: Into<String>,
     {
@@ -21513,9 +21531,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_ready_for_group_snapshots_best_effort<S>(
         &self,
-        group_snapshots: impl IntoIterator<Item = (RustRaftGroupId, S)>,
+        group_snapshots: impl IntoIterator<Item = (GroupId, S)>,
         success: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError>
     where
         S: Into<String>,
     {
@@ -21531,8 +21549,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_applied_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         snapshot_id: impl Into<String>,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -21543,7 +21561,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_applied_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         snapshot_id: impl Into<String>,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -21554,7 +21572,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_applied_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         snapshot_id: impl Into<String>,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -21565,9 +21583,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_applied_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         snapshot_id: impl Into<String>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::snapshot_applied(snapshot_id),
@@ -21576,7 +21594,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_mark_snapshot_applied_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         snapshot_id: impl Into<String>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -21587,9 +21605,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_applied_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         snapshot_id: impl Into<String>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::snapshot_applied(snapshot_id),
@@ -21598,8 +21616,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_applied_for_group_snapshots<S>(
         &self,
-        group_snapshots: impl IntoIterator<Item = (RustRaftGroupId, S)>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError>
+        group_snapshots: impl IntoIterator<Item = (GroupId, S)>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError>
     where
         S: Into<String>,
     {
@@ -21704,8 +21722,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn mark_snapshot_applied_for_group_snapshots_best_effort<S>(
         &self,
-        group_snapshots: impl IntoIterator<Item = (RustRaftGroupId, S)>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError>
+        group_snapshots: impl IntoIterator<Item = (GroupId, S)>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError>
     where
         S: Into<String>,
     {
@@ -21721,11 +21739,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn begin_snapshot_send_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -21741,10 +21759,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn begin_snapshot_send_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -21760,10 +21778,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn begin_snapshot_send_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -21779,12 +21797,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn begin_snapshot_send_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::begin_snapshot_send(
@@ -21798,10 +21816,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_begin_snapshot_send_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -21817,12 +21835,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn begin_snapshot_send_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::begin_snapshot_send(
@@ -21836,9 +21854,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn record_snapshot_chunk_sent_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
         bytes: u64,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -21849,8 +21867,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn record_snapshot_chunk_sent_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         bytes: u64,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -21861,8 +21879,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn record_snapshot_chunk_sent_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         bytes: u64,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -21873,10 +21891,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn record_snapshot_chunk_sent_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         bytes: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::record_snapshot_chunk_sent(peer_id, bytes),
@@ -21885,8 +21903,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_record_snapshot_chunk_sent_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         bytes: u64,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -21897,10 +21915,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn record_snapshot_chunk_sent_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         bytes: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::record_snapshot_chunk_sent(peer_id, bytes),
@@ -21909,9 +21927,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn acknowledge_snapshot_chunk_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -21921,8 +21939,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn acknowledge_snapshot_chunk_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
             group_id,
@@ -21932,8 +21950,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn acknowledge_snapshot_chunk_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -21943,9 +21961,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn acknowledge_snapshot_chunk_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::acknowledge_snapshot_chunk(peer_id),
@@ -21954,8 +21972,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_acknowledge_snapshot_chunk_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -21965,9 +21983,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn acknowledge_snapshot_chunk_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::acknowledge_snapshot_chunk(peer_id),
@@ -21976,9 +21994,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn retry_snapshot_chunk_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -21988,8 +22006,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn retry_snapshot_chunk_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
             group_id,
@@ -21999,8 +22017,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn retry_snapshot_chunk_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -22010,9 +22028,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn retry_snapshot_chunk_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::retry_snapshot_chunk(peer_id),
@@ -22021,8 +22039,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_retry_snapshot_chunk_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -22032,9 +22050,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn retry_snapshot_chunk_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::retry_snapshot_chunk(peer_id),
@@ -22043,9 +22061,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn cancel_snapshot_send_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -22055,8 +22073,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn cancel_snapshot_send_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
             group_id,
@@ -22066,8 +22084,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn cancel_snapshot_send_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -22077,9 +22095,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn cancel_snapshot_send_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::cancel_snapshot_send(peer_id),
@@ -22088,8 +22106,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_cancel_snapshot_send_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -22099,9 +22117,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn cancel_snapshot_send_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::cancel_snapshot_send(peer_id),
@@ -22110,11 +22128,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn begin_snapshot_install_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -22130,10 +22148,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn begin_snapshot_install_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -22149,10 +22167,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn begin_snapshot_install_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -22168,12 +22186,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn begin_snapshot_install_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::begin_snapshot_install(
@@ -22187,10 +22205,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_begin_snapshot_install_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -22206,12 +22224,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn begin_snapshot_install_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::begin_snapshot_install(
@@ -22225,9 +22243,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_snapshot_chunk_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
         bytes: u64,
         done: bool,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
@@ -22239,8 +22257,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_snapshot_chunk_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         bytes: u64,
         done: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
@@ -22252,8 +22270,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_snapshot_chunk_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         bytes: u64,
         done: bool,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
@@ -22265,11 +22283,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_snapshot_chunk_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         bytes: u64,
         done: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::receive_snapshot_chunk(peer_id, bytes, done),
@@ -22278,8 +22296,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_receive_snapshot_chunk_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         bytes: u64,
         done: bool,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
@@ -22291,11 +22309,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_snapshot_chunk_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         bytes: u64,
         done: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::receive_snapshot_chunk(peer_id, bytes, done),
@@ -22304,9 +22322,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn rollback_snapshot_install_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -22316,8 +22334,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn rollback_snapshot_install_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
             group_id,
@@ -22327,8 +22345,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn rollback_snapshot_install_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -22338,9 +22356,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn rollback_snapshot_install_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::rollback_snapshot_install(peer_id),
@@ -22349,8 +22367,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_rollback_snapshot_install_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -22360,9 +22378,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn rollback_snapshot_install_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::rollback_snapshot_install(peer_id),
@@ -22371,9 +22389,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn partition_peer_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -22383,16 +22401,16 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn partition_peer_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(group_id, MatrixRaftAdminCommand::partition_peer(peer_id))
     }
 
     pub fn partition_peer_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -22402,9 +22420,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn partition_peer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::partition_peer(peer_id),
@@ -22413,8 +22431,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_partition_peer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -22424,9 +22442,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn partition_peer_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::partition_peer(peer_id),
@@ -22435,9 +22453,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn heal_peer_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -22447,16 +22465,16 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn heal_peer_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(group_id, MatrixRaftAdminCommand::heal_peer(peer_id))
     }
 
     pub fn heal_peer_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -22466,9 +22484,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn heal_peer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::heal_peer(peer_id),
@@ -22477,17 +22495,17 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_heal_peer_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(group_ids, MatrixRaftAdminCommand::heal_peer(peer_id))
     }
 
     pub fn heal_peer_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::heal_peer(peer_id),
@@ -22496,9 +22514,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_node_healthy_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        target_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        target_node_id: NodeId,
         healthy: bool,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -22509,8 +22527,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_node_healthy_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        target_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        target_node_id: NodeId,
         healthy: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -22521,8 +22539,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_node_healthy_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        target_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        target_node_id: NodeId,
         healthy: bool,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -22533,10 +22551,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_node_healthy_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        target_node_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        target_node_id: NodeId,
         healthy: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::set_node_healthy(target_node_id, healthy),
@@ -22545,8 +22563,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_set_node_healthy_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        target_node_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        target_node_id: NodeId,
         healthy: bool,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -22557,10 +22575,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_node_healthy_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        target_node_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        target_node_id: NodeId,
         healthy: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::set_node_healthy(target_node_id, healthy),
@@ -22569,9 +22587,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn fire_fatal_event_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        target_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        target_node_id: NodeId,
         reason: impl Into<String>,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -22582,8 +22600,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn fire_fatal_event_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        target_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        target_node_id: NodeId,
         reason: impl Into<String>,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -22594,8 +22612,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn fire_fatal_event_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        target_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        target_node_id: NodeId,
         reason: impl Into<String>,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -22606,10 +22624,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn fire_fatal_event_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        target_node_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        target_node_id: NodeId,
         reason: impl Into<String>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::fire_fatal_event(target_node_id, reason),
@@ -22618,8 +22636,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_fire_fatal_event_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        target_node_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        target_node_id: NodeId,
         reason: impl Into<String>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -22630,10 +22648,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn fire_fatal_event_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        target_node_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        target_node_id: NodeId,
         reason: impl Into<String>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::fire_fatal_event(target_node_id, reason),
@@ -22642,9 +22660,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_out_of_order_append_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
         entry: MatrixRaftEntry,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -22655,8 +22673,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_out_of_order_append_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         entry: MatrixRaftEntry,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -22667,8 +22685,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_out_of_order_append_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         entry: MatrixRaftEntry,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -22679,10 +22697,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_out_of_order_append_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         entry: MatrixRaftEntry,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::receive_out_of_order_append(peer_id, entry),
@@ -22691,8 +22709,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_receive_out_of_order_append_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         entry: MatrixRaftEntry,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -22703,10 +22721,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_out_of_order_append_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         entry: MatrixRaftEntry,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::receive_out_of_order_append(peer_id, entry),
@@ -22715,9 +22733,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn expire_peer_reorder_queue_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -22727,8 +22745,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn expire_peer_reorder_queue_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
             group_id,
@@ -22738,8 +22756,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn expire_peer_reorder_queue_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -22749,9 +22767,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn expire_peer_reorder_queue_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::expire_peer_reorder_queue(peer_id),
@@ -22760,8 +22778,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_expire_peer_reorder_queue_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -22771,9 +22789,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn expire_peer_reorder_queue_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::expire_peer_reorder_queue(peer_id),
@@ -22782,8 +22800,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_prohibits_election_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         prohibits: bool,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -22794,7 +22812,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_prohibits_election_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         prohibits: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -22805,7 +22823,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_prohibits_election_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         prohibits: bool,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -22816,9 +22834,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_prohibits_election_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         prohibits: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::prohibits_election(prohibits),
@@ -22827,7 +22845,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_set_prohibits_election_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         prohibits: bool,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -22838,9 +22856,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_prohibits_election_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         prohibits: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::prohibits_election(prohibits),
@@ -22849,8 +22867,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_ignore_witness_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         ignore: bool,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -22861,7 +22879,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_ignore_witness_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         ignore: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(group_id, MatrixRaftAdminCommand::ignore_witness(ignore))
@@ -22869,7 +22887,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_ignore_witness_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         ignore: bool,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -22880,9 +22898,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_ignore_witness_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         ignore: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::ignore_witness(ignore),
@@ -22891,7 +22909,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_set_ignore_witness_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         ignore: bool,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -22902,9 +22920,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_ignore_witness_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         ignore: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::ignore_witness(ignore),
@@ -22913,8 +22931,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_leader_lease_valid_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         valid: bool,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -22925,7 +22943,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_leader_lease_valid_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         valid: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -22936,7 +22954,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_leader_lease_valid_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         valid: bool,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -22947,9 +22965,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_leader_lease_valid_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         valid: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::set_leader_lease_valid(valid),
@@ -22958,7 +22976,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_set_leader_lease_valid_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         valid: bool,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -22969,9 +22987,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn set_leader_lease_valid_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         valid: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::set_leader_lease_valid(valid),
@@ -22980,9 +22998,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_leader_lease_confirmation_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        confirmer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        confirmer_id: NodeId,
         confirmation_epoch: u64,
         duration_ms: Option<u64>,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
@@ -22998,8 +23016,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_leader_lease_confirmation_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        confirmer_id: RustRaftNodeId,
+        group_id: GroupId,
+        confirmer_id: NodeId,
         confirmation_epoch: u64,
         duration_ms: Option<u64>,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
@@ -23015,8 +23033,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_leader_lease_confirmation_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        confirmer_id: RustRaftNodeId,
+        group_id: GroupId,
+        confirmer_id: NodeId,
         confirmation_epoch: u64,
         duration_ms: Option<u64>,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
@@ -23032,11 +23050,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_leader_lease_confirmation_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        confirmer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        confirmer_id: NodeId,
         confirmation_epoch: u64,
         duration_ms: Option<u64>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::receive_leader_lease_confirmation(
@@ -23049,8 +23067,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_receive_leader_lease_confirmation_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        confirmer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        confirmer_id: NodeId,
         confirmation_epoch: u64,
         duration_ms: Option<u64>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
@@ -23066,11 +23084,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_leader_lease_confirmation_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        confirmer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        confirmer_id: NodeId,
         confirmation_epoch: u64,
         duration_ms: Option<u64>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::receive_leader_lease_confirmation(
@@ -23083,8 +23101,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn tick_leader_lease_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         elapsed_ms: u64,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -23095,7 +23113,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn tick_leader_lease_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         elapsed_ms: u64,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -23106,7 +23124,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn tick_leader_lease_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         elapsed_ms: u64,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -23117,9 +23135,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn tick_leader_lease_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         elapsed_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::tick_leader_lease(elapsed_ms),
@@ -23128,7 +23146,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_tick_leader_lease_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         elapsed_ms: u64,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -23139,9 +23157,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn tick_leader_lease_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         elapsed_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::tick_leader_lease(elapsed_ms),
@@ -23150,8 +23168,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_follower_lease_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         epoch: u64,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -23162,7 +23180,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_follower_lease_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         epoch: u64,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -23173,7 +23191,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_follower_lease_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         epoch: u64,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -23184,9 +23202,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_follower_lease_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         epoch: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::receive_follower_lease(epoch),
@@ -23195,7 +23213,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_receive_follower_lease_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         epoch: u64,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -23206,9 +23224,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn receive_follower_lease_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         epoch: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::receive_follower_lease(epoch),
@@ -23217,8 +23235,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn tick_follower_lease_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         elapsed_ms: u64,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -23229,7 +23247,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn tick_follower_lease_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         elapsed_ms: u64,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -23240,7 +23258,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn tick_follower_lease_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         elapsed_ms: u64,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -23251,9 +23269,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn tick_follower_lease_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         elapsed_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::tick_follower_lease(elapsed_ms),
@@ -23262,7 +23280,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_tick_follower_lease_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         elapsed_ms: u64,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -23273,9 +23291,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn tick_follower_lease_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         elapsed_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::tick_follower_lease(elapsed_ms),
@@ -23284,11 +23302,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn synced_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        first_index: Option<RustRaftLogIndex>,
-        last_index: Option<RustRaftLogIndex>,
-        stabled_config_change_index: RustRaftLogIndex,
+        group_id: GroupId,
+        node_id: NodeId,
+        first_index: Option<LogIndex>,
+        last_index: Option<LogIndex>,
+        stabled_config_change_index: LogIndex,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -23302,10 +23320,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn synced_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        first_index: Option<RustRaftLogIndex>,
-        last_index: Option<RustRaftLogIndex>,
-        stabled_config_change_index: RustRaftLogIndex,
+        group_id: GroupId,
+        first_index: Option<LogIndex>,
+        last_index: Option<LogIndex>,
+        stabled_config_change_index: LogIndex,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
             group_id,
@@ -23315,10 +23333,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn synced_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        first_index: Option<RustRaftLogIndex>,
-        last_index: Option<RustRaftLogIndex>,
-        stabled_config_change_index: RustRaftLogIndex,
+        group_id: GroupId,
+        first_index: Option<LogIndex>,
+        last_index: Option<LogIndex>,
+        stabled_config_change_index: LogIndex,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -23328,11 +23346,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn synced_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        first_index: Option<RustRaftLogIndex>,
-        last_index: Option<RustRaftLogIndex>,
-        stabled_config_change_index: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        first_index: Option<LogIndex>,
+        last_index: Option<LogIndex>,
+        stabled_config_change_index: LogIndex,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::synced(first_index, last_index, stabled_config_change_index),
@@ -23341,10 +23359,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_synced_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        first_index: Option<RustRaftLogIndex>,
-        last_index: Option<RustRaftLogIndex>,
-        stabled_config_change_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        first_index: Option<LogIndex>,
+        last_index: Option<LogIndex>,
+        stabled_config_change_index: LogIndex,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -23354,11 +23372,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn synced_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        first_index: Option<RustRaftLogIndex>,
-        last_index: Option<RustRaftLogIndex>,
-        stabled_config_change_index: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        first_index: Option<LogIndex>,
+        last_index: Option<LogIndex>,
+        stabled_config_change_index: LogIndex,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::synced(first_index, last_index, stabled_config_change_index),
@@ -23367,10 +23385,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn applied_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        group_id: GroupId,
+        node_id: NodeId,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
         rejected: bool,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -23381,9 +23399,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn applied_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        group_id: GroupId,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
         rejected: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -23394,9 +23412,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn applied_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        group_id: GroupId,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
         rejected: bool,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -23407,11 +23425,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn applied_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
         rejected: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::applied(applied_node_id, applied_index, rejected),
@@ -23420,9 +23438,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_applied_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
         rejected: bool,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -23433,11 +23451,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn applied_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
         rejected: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::applied(applied_node_id, applied_index, rejected),
@@ -23446,10 +23464,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn apply_task_inflight_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        group_id: GroupId,
+        node_id: NodeId,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -23459,9 +23477,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn apply_task_inflight_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        group_id: GroupId,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
             group_id,
@@ -23471,9 +23489,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn apply_task_inflight_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        group_id: GroupId,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -23483,10 +23501,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn apply_task_inflight_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::apply_task_inflight(applied_node_id, applied_index),
@@ -23495,9 +23513,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_apply_task_inflight_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -23507,10 +23525,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn apply_task_inflight_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        applied_node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        applied_node_id: NodeId,
+        applied_index: LogIndex,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::apply_task_inflight(applied_node_id, applied_index),
@@ -23519,9 +23537,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn replicated_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
         success: bool,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -23532,8 +23550,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn replicated_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         success: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -23544,8 +23562,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn replicated_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
         success: bool,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -23556,10 +23574,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn replicated_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         success: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::replicated(peer_id, success),
@@ -23568,8 +23586,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_replicated_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         success: bool,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -23580,10 +23598,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn replicated_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
         success: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::replicated(peer_id, success),
@@ -23592,9 +23610,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn compact_logs_through_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        log_index: RustRaftLogIndex,
+        group_id: GroupId,
+        node_id: NodeId,
+        log_index: LogIndex,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -23604,8 +23622,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn compact_logs_through_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        log_index: RustRaftLogIndex,
+        group_id: GroupId,
+        log_index: LogIndex,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
             group_id,
@@ -23615,8 +23633,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn compact_logs_through_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        log_index: RustRaftLogIndex,
+        group_id: GroupId,
+        log_index: LogIndex,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -23626,9 +23644,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn compact_logs_through_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        log_index: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        log_index: LogIndex,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::compact_logs_through(log_index),
@@ -23637,8 +23655,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_compact_logs_through_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        log_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        log_index: LogIndex,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -23648,9 +23666,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn compact_logs_through_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        log_index: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        log_index: LogIndex,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::compact_logs_through(log_index),
@@ -23659,10 +23677,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn compact_logs_with_storage_fence_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        log_index: RustRaftLogIndex,
-        fence: RustRaftStorageApplyFence,
+        group_id: GroupId,
+        node_id: NodeId,
+        log_index: LogIndex,
+        fence: StorageApplyFence,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -23672,9 +23690,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn compact_logs_with_storage_fence_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        log_index: RustRaftLogIndex,
-        fence: RustRaftStorageApplyFence,
+        group_id: GroupId,
+        log_index: LogIndex,
+        fence: StorageApplyFence,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
             group_id,
@@ -23684,9 +23702,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn compact_logs_with_storage_fence_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        log_index: RustRaftLogIndex,
-        fence: RustRaftStorageApplyFence,
+        group_id: GroupId,
+        log_index: LogIndex,
+        fence: StorageApplyFence,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
             group_id,
@@ -23696,9 +23714,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn compact_logs_with_storage_fences_for_groups(
         &self,
-        group_fences: impl IntoIterator<Item = (RustRaftGroupId, RustRaftStorageApplyFence)>,
-        log_index: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_fences: impl IntoIterator<Item = (GroupId, StorageApplyFence)>,
+        log_index: LogIndex,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_compact_logs_with_storage_fences_for_groups(group_fences, log_index)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -23713,8 +23731,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_compact_logs_with_storage_fences_for_groups(
         &self,
-        group_fences: impl IntoIterator<Item = (RustRaftGroupId, RustRaftStorageApplyFence)>,
-        log_index: RustRaftLogIndex,
+        group_fences: impl IntoIterator<Item = (GroupId, StorageApplyFence)>,
+        log_index: LogIndex,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         let group_commands = group_fences.into_iter().map(|(group_id, fence)| {
             (
@@ -23730,9 +23748,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn compact_logs_with_storage_fences_for_groups_best_effort(
         &self,
-        group_fences: impl IntoIterator<Item = (RustRaftGroupId, RustRaftStorageApplyFence)>,
-        log_index: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_fences: impl IntoIterator<Item = (GroupId, StorageApplyFence)>,
+        log_index: LogIndex,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let plan = self.plan_compact_logs_with_storage_fences_for_groups(group_fences, log_index)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -23756,9 +23774,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn checkpoint_snapshot_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        target_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        target_node_id: NodeId,
         snapshot_id: impl Into<String>,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
@@ -23769,8 +23787,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn checkpoint_snapshot_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        target_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        target_node_id: NodeId,
         snapshot_id: impl Into<String>,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(
@@ -23781,8 +23799,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn checkpoint_snapshot_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        target_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        target_node_id: NodeId,
         snapshot_id: impl Into<String>,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(
@@ -23793,10 +23811,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn checkpoint_snapshot_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        target_node_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        target_node_id: NodeId,
         snapshot_id: impl Into<String>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::checkpoint_snapshot(target_node_id, snapshot_id),
@@ -23805,8 +23823,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_checkpoint_snapshot_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        target_node_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        target_node_id: NodeId,
         snapshot_id: impl Into<String>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
@@ -23817,10 +23835,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn checkpoint_snapshot_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        target_node_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        target_node_id: NodeId,
         snapshot_id: impl Into<String>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::checkpoint_snapshot(target_node_id, snapshot_id),
@@ -23829,9 +23847,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn witness_quorum_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        acknowledgements: impl IntoIterator<Item = RustRaftNodeId>,
+        group_id: GroupId,
+        node_id: NodeId,
+        acknowledgements: impl IntoIterator<Item = NodeId>,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -23841,8 +23859,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn witness_quorum_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        acknowledgements: impl IntoIterator<Item = RustRaftNodeId>,
+        group_id: GroupId,
+        acknowledgements: impl IntoIterator<Item = NodeId>,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let command = MatrixRaftAdminCommand::witness_quorum(acknowledgements);
         self.route_admin_command_to_group(group_id, command)
@@ -23850,8 +23868,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn witness_quorum_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
-        acknowledgements: impl IntoIterator<Item = RustRaftNodeId>,
+        group_id: GroupId,
+        acknowledgements: impl IntoIterator<Item = NodeId>,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let command = MatrixRaftAdminCommand::witness_quorum(acknowledgements);
         self.route_admin_command_to_group_best_effort(group_id, command)
@@ -23859,9 +23877,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn witness_quorum_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        acknowledgements: impl IntoIterator<Item = RustRaftNodeId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        acknowledgements: impl IntoIterator<Item = NodeId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::witness_quorum(acknowledgements),
@@ -23870,8 +23888,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_witness_quorum_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        acknowledgements: impl IntoIterator<Item = RustRaftNodeId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        acknowledgements: impl IntoIterator<Item = NodeId>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(
             group_ids,
@@ -23881,9 +23899,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn witness_quorum_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        acknowledgements: impl IntoIterator<Item = RustRaftNodeId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        acknowledgements: impl IntoIterator<Item = NodeId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::witness_quorum(acknowledgements),
@@ -23892,8 +23910,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn release_memory_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_admin_command(
             MatrixRaftRouteKey::new(group_id, node_id),
@@ -23903,22 +23921,22 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn release_memory_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_admin_command_to_group(group_id, MatrixRaftAdminCommand::release_memory())
     }
 
     pub fn release_memory_on_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_admin_command_to_group_best_effort(group_id, MatrixRaftAdminCommand::release_memory())
     }
 
     pub fn release_memory_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped(
             group_ids,
             MatrixRaftAdminCommand::release_memory(),
@@ -23927,15 +23945,15 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_release_memory_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         self.plan_route_admin_command_to_groups(group_ids, MatrixRaftAdminCommand::release_memory())
     }
 
     pub fn release_memory_for_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_admin_command_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftAdminCommand::release_memory(),
@@ -23944,7 +23962,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn group_statuses(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftStatus>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -23959,8 +23977,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn statuses_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftStatus>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftStatus>)>, RaftError> {
         let plan = self.plan_statuses_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -23981,14 +23999,14 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_statuses_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "statuses")
     }
 
     pub fn group_local_statuses(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<MatrixRaftLocalStatus>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -24003,8 +24021,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn local_statuses_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftLocalStatus>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftLocalStatus>)>, RaftError> {
         let plan = self.plan_local_statuses_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24025,23 +24043,23 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_local_statuses_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "local_statuses")
     }
 
     pub fn start_index_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-    ) -> Result<RustRaftLogIndex, RaftError> {
+        group_id: GroupId,
+        node_id: NodeId,
+    ) -> Result<LogIndex, RaftError> {
         Ok(self.node(group_id, node_id)?.start_index())
     }
 
     pub fn start_indices_on_group(
         &self,
-        group_id: RustRaftGroupId,
-    ) -> Result<Vec<RustRaftLogIndex>, RaftError> {
+        group_id: GroupId,
+    ) -> Result<Vec<LogIndex>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
             .map(|key| Ok(self.node(key.group_id, key.node_id)?.start_index()))
@@ -24050,8 +24068,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn start_indices_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<RustRaftLogIndex>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<LogIndex>)>, RaftError> {
         let plan = self.plan_start_indices_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24059,7 +24077,7 @@ impl MatrixRaftMultiRaftServer {
                 .route_keys
                 .into_iter()
                 .map(|key| {
-                    Ok::<RustRaftLogIndex, RaftError>(self
+                    Ok::<LogIndex, RaftError>(self
                         .nodes
                         .get(&key)
                         .ok_or(RaftError::NodeNotFound(key.node_id))?
@@ -24073,22 +24091,22 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_start_indices_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "start_indices")
     }
 
     pub fn recover_fsm_from_snapshot_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<bool, RaftError> {
         Ok(self.node(group_id, node_id)?.recover_fsm_from_snapshot())
     }
 
     pub fn recover_fsm_from_snapshot_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<bool>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -24102,8 +24120,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn recover_fsm_from_snapshot_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<bool>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<bool>)>, RaftError> {
         let plan = self.plan_recover_fsm_from_snapshot_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24125,14 +24143,14 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_recover_fsm_from_snapshot_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "recover_fsm_from_snapshot")
     }
 
     pub fn group_leaders(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<Option<MatrixRaftNodeId>>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -24147,8 +24165,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn leaders_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<Option<MatrixRaftNodeId>>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<Option<MatrixRaftNodeId>>)>, RaftError> {
         let plan = self.plan_leaders_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24169,24 +24187,24 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_leaders_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "leaders")
     }
 
     pub fn in_lease_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        term: Option<RustRaftTerm>,
+        group_id: GroupId,
+        node_id: NodeId,
+        term: Option<Term>,
     ) -> Result<bool, RaftError> {
         self.node(group_id, node_id)?.in_lease(term)
     }
 
     pub fn in_lease_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        term: Option<RustRaftTerm>,
+        group_id: GroupId,
+        term: Option<Term>,
     ) -> Result<Vec<bool>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -24196,9 +24214,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn in_lease_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        term: Option<RustRaftTerm>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<bool>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        term: Option<Term>,
+    ) -> Result<Vec<(GroupId, Vec<bool>)>, RaftError> {
         let plan = self.plan_in_lease_for_groups(group_ids, term)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24219,8 +24237,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_in_lease_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        term: Option<RustRaftTerm>,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        term: Option<Term>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         let operation = match term {
             Some(term) => format!("in_lease:{term}"),
@@ -24231,15 +24249,15 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn callback_scheduler_len_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<usize, RaftError> {
         Ok(self.node(group_id, node_id)?.callback_scheduler_len())
     }
 
     pub fn callback_scheduler_lens_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<usize>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -24249,8 +24267,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn callback_scheduler_lens_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<usize>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<usize>)>, RaftError> {
         let plan = self.plan_callback_scheduler_lens_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24272,15 +24290,15 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_callback_scheduler_lens_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "callback_scheduler_lens")
     }
 
     pub fn callback_scheduler_next_timeout_ms_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         now_ms: u64,
     ) -> Result<u64, RaftError> {
         Ok(self
@@ -24290,7 +24308,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn callback_scheduler_next_timeout_ms_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         now_ms: u64,
     ) -> Result<Vec<u64>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
@@ -24305,9 +24323,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn callback_scheduler_next_timeout_ms_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         now_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<u64>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<u64>)>, RaftError> {
         let plan = self.plan_callback_scheduler_next_timeout_ms_for_groups(group_ids, now_ms)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24329,7 +24347,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_callback_scheduler_next_timeout_ms_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         now_ms: u64,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, format!("callback_scheduler_next_timeout_ms:{now_ms}"))
@@ -24337,8 +24355,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn drain_lapsed_callbacks_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         now_ms: u64,
         limit: usize,
     ) -> Result<Vec<MatrixRaftAsyncResult>, RaftError> {
@@ -24349,7 +24367,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn drain_lapsed_callbacks_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         now_ms: u64,
         limit: usize,
     ) -> Result<Vec<Vec<MatrixRaftAsyncResult>>, RaftError> {
@@ -24365,10 +24383,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn drain_lapsed_callbacks_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         now_ms: u64,
         limit: usize,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<Vec<MatrixRaftAsyncResult>>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<Vec<MatrixRaftAsyncResult>>)>, RaftError> {
         let plan = self.plan_drain_lapsed_callbacks_for_groups(group_ids, now_ms, limit)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24390,7 +24408,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_drain_lapsed_callbacks_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         now_ms: u64,
         limit: usize,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
@@ -24399,8 +24417,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn cancel_callback_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         request_id: u64,
     ) -> Result<Option<MatrixRaftAsyncResult>, RaftError> {
         Ok(self.node(group_id, node_id)?.cancel_callback(request_id))
@@ -24408,7 +24426,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn cancel_callback_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         request_id: u64,
     ) -> Result<Vec<Option<MatrixRaftAsyncResult>>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
@@ -24419,9 +24437,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn cancel_callback_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         request_id: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<Option<MatrixRaftAsyncResult>>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<Option<MatrixRaftAsyncResult>>)>, RaftError> {
         let plan = self.plan_cancel_callback_for_groups(group_ids, request_id)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24443,7 +24461,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_cancel_callback_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         request_id: u64,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, format!("cancel_callback:{request_id}"))
@@ -24451,17 +24469,17 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn resolve_address_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftNodeId, RaftError> {
         self.node(group_id, node_id)?.resolve_address(peer_id)
     }
 
     pub fn resolve_address_on_group(
         &self,
-        group_id: RustRaftGroupId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftNodeId>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -24471,9 +24489,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn resolve_address_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftNodeId>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftNodeId>)>, RaftError> {
         let plan = self.plan_resolve_address_for_groups(group_ids, peer_id)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24489,24 +24507,24 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_resolve_address_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, format!("resolve_address:{peer_id}"))
     }
 
     pub fn fatal_blockers_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-    ) -> Result<Vec<RustRaftBlocker>, RaftError> {
+        group_id: GroupId,
+        node_id: NodeId,
+    ) -> Result<Vec<Blocker>, RaftError> {
         self.node(group_id, node_id)?.get_fatal_blockers()
     }
 
     pub fn fatal_blockers_on_group(
         &self,
-        group_id: RustRaftGroupId,
-    ) -> Result<Vec<Vec<RustRaftBlocker>>, RaftError> {
+        group_id: GroupId,
+    ) -> Result<Vec<Vec<Blocker>>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
             .map(|key| self.node(key.group_id, key.node_id)?.get_fatal_blockers())
@@ -24515,8 +24533,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn fatal_blockers_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<Vec<RustRaftBlocker>>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<Vec<Blocker>>)>, RaftError> {
         let plan = self.plan_fatal_blockers_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24537,22 +24555,22 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_fatal_blockers_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "fatal_blockers")
     }
 
     pub fn fatal_events_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Result<Vec<MatrixRaftFatalEvent>, RaftError> {
         self.node(group_id, node_id)?.get_fatal_events()
     }
 
     pub fn fatal_events_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<Vec<MatrixRaftFatalEvent>>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -24562,8 +24580,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn fatal_events_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<Vec<MatrixRaftFatalEvent>>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<Vec<MatrixRaftFatalEvent>>)>, RaftError> {
         let plan = self.plan_fatal_events_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24584,14 +24602,14 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_fatal_events_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "fatal_events")
     }
 
     pub fn snapshot_routes_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<(MatrixRaftRouteKey, Option<MatrixRaftSnapshotDesc>)>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         Ok(keys
@@ -24602,8 +24620,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn snapshot_routes_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, Option<MatrixRaftSnapshotDesc>)>)>, RaftError>
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, Option<MatrixRaftSnapshotDesc>)>)>, RaftError>
     {
         let plan = self.plan_snapshot_routes_for_groups(group_ids)?;
         Ok(plan
@@ -24624,14 +24642,14 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_snapshot_routes_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "snapshot_routes")
     }
 
     pub fn memberships_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<Vec<MatrixRaftNodeId>>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -24641,8 +24659,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn memberships_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<Vec<MatrixRaftNodeId>>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<Vec<MatrixRaftNodeId>>)>, RaftError> {
         let plan = self.plan_memberships_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24658,14 +24676,14 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_memberships_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "memberships")
     }
 
     pub fn membership_members_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<Vec<Vec<MatrixRaftMemberId>>, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         keys.into_iter()
@@ -24678,8 +24696,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn membership_members_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<Vec<MatrixRaftMemberId>>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, Vec<Vec<MatrixRaftMemberId>>)>, RaftError> {
         let plan = self.plan_membership_members_for_groups(group_ids)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -24698,35 +24716,35 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_membership_members_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "membership_members")
     }
 
     pub fn timeout_now_on_node(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        from: NodeId,
+        target: NodeId,
     ) -> Result<TimeoutNowResponse, RaftError> {
         self.node(group_id, node_id)?.timeout_now(from, target)
     }
 
     pub fn timeout_now_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        target: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_message_to_group(group_id, MatrixRaftMessage::timeout_now(from, target))
     }
 
     pub fn timeout_now_on_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        target: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_message_to_group_best_effort(
             group_id,
@@ -24736,28 +24754,28 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn timeout_now_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        target: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(group_ids, MatrixRaftMessage::timeout_now(from, target))
     }
 
     pub fn plan_timeout_now_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        target: NodeId,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(group_ids, MatrixRaftMessage::timeout_now(from, target))
     }
 
     pub fn timeout_now_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        target: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::timeout_now(from, target),
@@ -24766,9 +24784,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn timeout_now_callbacks_on_group<F, C>(
         &self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        target: NodeId,
         mut callback_for_key: F,
         timeout_ms: u64,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>, RaftError>
@@ -24795,12 +24813,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn timeout_now_callbacks_for_groups<F, C>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        target: NodeId,
         mut callback_for_key: F,
         timeout_ms: u64,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
+    ) -> Result<Vec<(GroupId, Vec<(MatrixRaftRouteKey, MatrixRaftAsyncResult)>)>, RaftError>
     where
         F: FnMut(MatrixRaftRouteKey) -> C,
         C: FnOnce(MatrixRaftAsyncResult),
@@ -24823,9 +24841,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_vote_request_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: VoteRequest,
         pre_vote: bool,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
@@ -24837,9 +24855,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn vote_request_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         request: VoteRequest,
         pre_vote: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
@@ -24848,12 +24866,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn vote_requests_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: VoteRequest,
         pre_vote: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(
             group_ids,
             MatrixRaftMessage::vote(from, to, request, pre_vote),
@@ -24862,12 +24880,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn vote_requests_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: VoteRequest,
         pre_vote: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::vote(from, to, request, pre_vote),
@@ -24876,37 +24894,37 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_pre_vote_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(group_ids, MatrixRaftMessage::pre_vote(from, to))
     }
 
     pub fn pre_vote_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_message_to_group(group_id, MatrixRaftMessage::pre_vote(from, to))
     }
 
     pub fn pre_votes_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(group_ids, MatrixRaftMessage::pre_vote(from, to))
     }
 
     pub fn pre_votes_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::pre_vote(from, to),
@@ -24915,9 +24933,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_vote_response_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: VoteResponse,
         pre_vote: bool,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
@@ -24929,9 +24947,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn vote_response_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         response: VoteResponse,
         pre_vote: bool,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
@@ -24943,12 +24961,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn vote_responses_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: VoteResponse,
         pre_vote: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(
             group_ids,
             MatrixRaftMessage::vote_response(from, to, response, pre_vote),
@@ -24957,12 +24975,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn vote_responses_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: VoteResponse,
         pre_vote: bool,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::vote_response(from, to, response, pre_vote),
@@ -24971,9 +24989,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_append_entries_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(
@@ -24984,9 +25002,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn append_entries_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_message_to_group(group_id, MatrixRaftMessage::append_entries(from, to, request))
@@ -24994,11 +25012,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn append_entries_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(
             group_ids,
             MatrixRaftMessage::append_entries(from, to, request),
@@ -25007,11 +25025,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn append_entries_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::append_entries(from, to, request),
@@ -25020,9 +25038,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_append_entries_response_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(
@@ -25033,9 +25051,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn append_entries_response_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_message_to_group(
@@ -25046,11 +25064,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn append_entries_responses_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(
             group_ids,
             MatrixRaftMessage::append_entries_response(from, to, response),
@@ -25059,11 +25077,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn append_entries_responses_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::append_entries_response(from, to, response),
@@ -25072,7 +25090,7 @@ impl MatrixRaftMultiRaftServer {
 
     fn heartbeat_merge_plan_from_group_messages(
         &self,
-        group_messages: impl IntoIterator<Item = (RustRaftGroupId, RustRaftNodeId, RustRaftNodeId, MatrixRaftMessage)>,
+        group_messages: impl IntoIterator<Item = (GroupId, NodeId, NodeId, MatrixRaftMessage)>,
     ) -> Result<MatrixRaftHeartbeatMergePlan, RaftError> {
         let mut groups = Vec::new();
         let mut batches = BTreeMap::<String, MatrixRaftHeartbeatMergeBatchPlan>::new();
@@ -25138,9 +25156,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_merged_heartbeat_requests_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
     ) -> Result<MatrixRaftHeartbeatMergePlan, RaftError> {
         if !request.entries.is_empty() {
@@ -25160,9 +25178,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn merged_heartbeat_requests_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let plan = self.plan_merged_heartbeat_requests_for_groups([group_id], from, to, request)?;
@@ -25176,11 +25194,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn merged_heartbeat_requests_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_merged_heartbeat_requests_for_groups(group_ids, from, to, request)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -25192,11 +25210,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn merged_heartbeat_requests_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let plan = self.plan_merged_heartbeat_requests_for_groups(group_ids, from, to, request)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -25209,9 +25227,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_merged_heartbeat_responses_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
     ) -> Result<MatrixRaftHeartbeatMergePlan, RaftError> {
         self.heartbeat_merge_plan_from_group_messages(group_ids.into_iter().map(|group_id| {
@@ -25226,9 +25244,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn merged_heartbeat_response_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let plan = self.plan_merged_heartbeat_responses_for_groups([group_id], from, to, response)?;
@@ -25242,11 +25260,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn merged_heartbeat_responses_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_merged_heartbeat_responses_for_groups(group_ids, from, to, response)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -25258,11 +25276,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn merged_heartbeat_responses_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let plan = self.plan_merged_heartbeat_responses_for_groups(group_ids, from, to, response)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -25275,9 +25293,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_lease_request_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
         lease_request: MatrixRaftLeaseRequest,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
@@ -25289,9 +25307,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn lease_request_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
         lease_request: MatrixRaftLeaseRequest,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
@@ -25303,12 +25321,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn lease_requests_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
         lease_request: MatrixRaftLeaseRequest,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(
             group_ids,
             MatrixRaftMessage::append_entries_lease_request(from, to, request, lease_request),
@@ -25317,12 +25335,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn lease_requests_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
         lease_request: MatrixRaftLeaseRequest,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::append_entries_lease_request(from, to, request, lease_request),
@@ -25331,9 +25349,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_lease_response_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
         lease_response: MatrixRaftLeaseResponse,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
@@ -25345,9 +25363,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn lease_response_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
         lease_response: MatrixRaftLeaseResponse,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
@@ -25359,12 +25377,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn lease_responses_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
         lease_response: MatrixRaftLeaseResponse,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(
             group_ids,
             MatrixRaftMessage::append_entries_lease_response(from, to, response, lease_response),
@@ -25373,12 +25391,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn lease_responses_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
         lease_response: MatrixRaftLeaseResponse,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::append_entries_lease_response(from, to, response, lease_response),
@@ -25387,9 +25405,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_install_snapshot_request_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: InstallSnapshotRequest,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(
@@ -25400,9 +25418,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn install_snapshot_request_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         request: InstallSnapshotRequest,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_message_to_group(group_id, MatrixRaftMessage::install_snapshot(from, to, request))
@@ -25410,11 +25428,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn install_snapshot_requests_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: InstallSnapshotRequest,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(
             group_ids,
             MatrixRaftMessage::install_snapshot(from, to, request),
@@ -25423,11 +25441,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn install_snapshot_requests_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: InstallSnapshotRequest,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::install_snapshot(from, to, request),
@@ -25436,9 +25454,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_install_snapshot_response_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: InstallSnapshotResponse,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(
@@ -25449,9 +25467,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn install_snapshot_response_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         response: InstallSnapshotResponse,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_message_to_group(
@@ -25462,11 +25480,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn install_snapshot_responses_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: InstallSnapshotResponse,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(
             group_ids,
             MatrixRaftMessage::install_snapshot_response(from, to, response),
@@ -25475,11 +25493,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn install_snapshot_responses_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         response: InstallSnapshotResponse,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::install_snapshot_response(from, to, response),
@@ -25488,9 +25506,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_read_index_request_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: ReadIndexRequest,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(group_ids, MatrixRaftMessage::read_index(from, to, request))
@@ -25498,9 +25516,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_index_request_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         request: ReadIndexRequest,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_message_to_group(group_id, MatrixRaftMessage::read_index(from, to, request))
@@ -25508,21 +25526,21 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn read_index_requests_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: ReadIndexRequest,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(group_ids, MatrixRaftMessage::read_index(from, to, request))
     }
 
     pub fn read_index_requests_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         request: ReadIndexRequest,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::read_index(from, to, request),
@@ -25531,8 +25549,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_propose_request_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
         propose: MatrixRaftPropose,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -25575,8 +25593,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_request_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
         propose: MatrixRaftPropose,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let plan = self.plan_propose_request_for_groups([group_id], from, propose)?;
@@ -25594,10 +25612,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_requests_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
         propose: MatrixRaftPropose,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_propose_request_for_groups(group_ids, from, propose)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -25612,10 +25630,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn propose_requests_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
         propose: MatrixRaftPropose,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let plan = self.plan_propose_request_for_groups(group_ids, from, propose)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -25631,10 +25649,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn network_error_on_node(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        from: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        from: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_message(
             group_id,
@@ -25645,18 +25663,18 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn network_error_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_message_to_group(group_id, MatrixRaftMessage::network_error(from, peer_id))
     }
 
     pub fn network_error_on_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        peer_id: NodeId,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_message_to_group_best_effort(
             group_id,
@@ -25666,10 +25684,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn network_error_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(
             group_ids,
             MatrixRaftMessage::network_error(from, peer_id),
@@ -25678,19 +25696,19 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_network_error_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        peer_id: NodeId,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(group_ids, MatrixRaftMessage::network_error(from, peer_id))
     }
 
     pub fn network_error_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        peer_id: NodeId,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::network_error(from, peer_id),
@@ -25699,10 +25717,10 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn snapshot_progress_on_node(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
+        from: NodeId,
+        to: NodeId,
         progress: MatrixRaftSnapshotProgress,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         self.route_message(
@@ -25714,9 +25732,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn snapshot_progress_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         progress: MatrixRaftSnapshotProgress,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         self.route_message_to_group(group_id, MatrixRaftMessage::snapshot_progress(from, to, progress))
@@ -25724,9 +25742,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn snapshot_progress_on_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_id: GroupId,
+        from: NodeId,
+        to: NodeId,
         progress: MatrixRaftSnapshotProgress,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         self.route_message_to_group_best_effort(
@@ -25737,11 +25755,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn snapshot_progress_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         progress: MatrixRaftSnapshotProgress,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped(
             group_ids,
             MatrixRaftMessage::snapshot_progress(from, to, progress),
@@ -25750,9 +25768,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_snapshot_progress_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         progress: MatrixRaftSnapshotProgress,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         self.plan_route_message_to_groups(
@@ -25763,11 +25781,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn snapshot_progress_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        from: NodeId,
+        to: NodeId,
         progress: MatrixRaftSnapshotProgress,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         self.route_message_to_groups_grouped_best_effort(
             group_ids,
             MatrixRaftMessage::snapshot_progress(from, to, progress),
@@ -25776,8 +25794,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn sync_fsm_runtime_on_node<F>(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         binding: &mut MatrixRaftFsmRuntimeBinding<F>,
     ) -> Result<MatrixRaftFsmRuntimeHookReport, RaftError>
     where
@@ -25788,7 +25806,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn sync_fsm_runtimes_on_group<F>(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         bindings: &mut BTreeMap<MatrixRaftRouteKey, MatrixRaftFsmRuntimeBinding<F>>,
     ) -> Result<Vec<(MatrixRaftRouteKey, MatrixRaftFsmRuntimeHookReport)>, RaftError>
     where
@@ -25836,7 +25854,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn sync_fsm_runtimes_on_group_best_effort<F>(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         bindings: &mut BTreeMap<MatrixRaftRouteKey, MatrixRaftFsmRuntimeBinding<F>>,
     ) -> Result<MatrixRaftFsmRuntimeSyncGroupResult, RaftError>
     where
@@ -25852,11 +25870,11 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn sync_fsm_runtimes_for_groups<F>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         bindings: &mut BTreeMap<MatrixRaftRouteKey, MatrixRaftFsmRuntimeBinding<F>>,
     ) -> Result<
         Vec<(
-            RustRaftGroupId,
+            GroupId,
             Vec<(MatrixRaftRouteKey, MatrixRaftFsmRuntimeHookReport)>,
         )>,
         RaftError,
@@ -25888,7 +25906,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn sync_fsm_runtimes_for_groups_best_effort<F>(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         bindings: &mut BTreeMap<MatrixRaftRouteKey, MatrixRaftFsmRuntimeBinding<F>>,
     ) -> Result<Vec<MatrixRaftFsmRuntimeSyncGroupResult>, RaftError>
     where
@@ -25927,12 +25945,12 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_sync_fsm_runtimes_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftQueryFanoutPlan, RaftError> {
         self.plan_query_for_groups(group_ids, "sync_fsm_runtimes")
     }
 
-    pub fn start_all(&mut self, start_index: RustRaftLogIndex) -> Result<(), RaftError> {
+    pub fn start_all(&mut self, start_index: LogIndex) -> Result<(), RaftError> {
         for node in self.nodes.values_mut() {
             node.start(start_index)?;
         }
@@ -25941,8 +25959,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn start_group(
         &mut self,
-        group_id: RustRaftGroupId,
-        start_index: RustRaftLogIndex,
+        group_id: GroupId,
+        start_index: LogIndex,
     ) -> Result<usize, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         for key in &keys {
@@ -25956,8 +25974,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_start_group(
         &self,
-        group_id: RustRaftGroupId,
-        start_index: RustRaftLogIndex,
+        group_id: GroupId,
+        start_index: LogIndex,
     ) -> Result<MatrixRaftLifecycleGroupPlan, RaftError> {
         Ok(self
             .lifecycle_batch_plan_from_groups(
@@ -25974,8 +25992,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_start_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        start_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        start_index: LogIndex,
     ) -> Result<MatrixRaftLifecycleBatchPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         self.lifecycle_batch_plan_from_groups(
@@ -25990,7 +26008,7 @@ impl MatrixRaftMultiRaftServer {
         &mut self,
         action: MatrixRaftLifecycleAction,
         key: MatrixRaftRouteKey,
-        start_index: Option<RustRaftLogIndex>,
+        start_index: Option<LogIndex>,
         recover_fsm_from_snapshot: Option<bool>,
     ) -> MatrixRaftLifecycleNodeResult {
         let result = self
@@ -26045,8 +26063,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn start_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
-        start_index: RustRaftLogIndex,
+        group_id: GroupId,
+        start_index: LogIndex,
     ) -> Result<MatrixRaftLifecycleGroupResult, RaftError> {
         let plan = self.plan_start_group(group_id, start_index)?;
         Ok(self
@@ -26067,8 +26085,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn start_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        start_index: RustRaftLogIndex,
+        group_ids: impl IntoIterator<Item = GroupId>,
+        start_index: LogIndex,
     ) -> Result<Vec<MatrixRaftLifecycleGroupResult>, RaftError> {
         let plan = self.plan_start_groups(group_ids, start_index)?;
         Ok(self.execute_lifecycle_plan_best_effort(plan))
@@ -26076,9 +26094,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn start_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-        start_index: RustRaftLogIndex,
-    ) -> Result<Vec<(RustRaftGroupId, usize)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+        start_index: LogIndex,
+    ) -> Result<Vec<(GroupId, usize)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.plan_start_groups(group_ids, start_index)?;
         let mut counts = Vec::new();
@@ -26101,7 +26119,7 @@ impl MatrixRaftMultiRaftServer {
         Ok(())
     }
 
-    pub fn stop_group(&mut self, group_id: RustRaftGroupId) -> Result<usize, RaftError> {
+    pub fn stop_group(&mut self, group_id: GroupId) -> Result<usize, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         for key in &keys {
             self.nodes
@@ -26114,7 +26132,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_stop_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<MatrixRaftLifecycleGroupPlan, RaftError> {
         Ok(self
             .lifecycle_batch_plan_from_groups(
@@ -26131,7 +26149,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_stop_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftLifecycleBatchPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         self.lifecycle_batch_plan_from_groups(
@@ -26144,7 +26162,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn stop_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<MatrixRaftLifecycleGroupResult, RaftError> {
         let plan = self.plan_stop_group(group_id)?;
         Ok(self
@@ -26165,7 +26183,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn stop_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<Vec<MatrixRaftLifecycleGroupResult>, RaftError> {
         let plan = self.plan_stop_groups(group_ids)?;
         Ok(self.execute_lifecycle_plan_best_effort(plan))
@@ -26173,8 +26191,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn stop_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, usize)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, usize)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.plan_stop_groups(group_ids)?;
         let mut counts = Vec::new();
@@ -26192,7 +26210,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn restart_group(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         recover_fsm_from_snapshot: bool,
     ) -> Result<usize, RaftError> {
         let keys = self.group_route_keys(group_id)?;
@@ -26207,7 +26225,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_restart_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         recover_fsm_from_snapshot: bool,
     ) -> Result<MatrixRaftLifecycleGroupPlan, RaftError> {
         Ok(self
@@ -26225,7 +26243,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_restart_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         recover_fsm_from_snapshot: bool,
     ) -> Result<MatrixRaftLifecycleBatchPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -26239,7 +26257,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn restart_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         recover_fsm_from_snapshot: bool,
     ) -> Result<MatrixRaftLifecycleGroupResult, RaftError> {
         let plan = self.plan_restart_group(group_id, recover_fsm_from_snapshot)?;
@@ -26261,7 +26279,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn restart_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         recover_fsm_from_snapshot: bool,
     ) -> Result<Vec<MatrixRaftLifecycleGroupResult>, RaftError> {
         let plan = self.plan_restart_groups(group_ids, recover_fsm_from_snapshot)?;
@@ -26270,9 +26288,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn restart_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         recover_fsm_from_snapshot: bool,
-    ) -> Result<Vec<(RustRaftGroupId, usize)>, RaftError> {
+    ) -> Result<Vec<(GroupId, usize)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.plan_restart_groups(group_ids, recover_fsm_from_snapshot)?;
         let mut counts = Vec::new();
@@ -26295,7 +26313,7 @@ impl MatrixRaftMultiRaftServer {
         Ok(())
     }
 
-    pub fn shutdown_group(&mut self, group_id: RustRaftGroupId) -> Result<usize, RaftError> {
+    pub fn shutdown_group(&mut self, group_id: GroupId) -> Result<usize, RaftError> {
         let keys = self.group_route_keys(group_id)?;
         for key in &keys {
             self.nodes
@@ -26308,7 +26326,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_shutdown_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<MatrixRaftLifecycleGroupPlan, RaftError> {
         Ok(self
             .lifecycle_batch_plan_from_groups(
@@ -26325,7 +26343,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_shutdown_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<MatrixRaftLifecycleBatchPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         self.lifecycle_batch_plan_from_groups(
@@ -26338,7 +26356,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn shutdown_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
     ) -> Result<MatrixRaftLifecycleGroupResult, RaftError> {
         let plan = self.plan_shutdown_group(group_id)?;
         Ok(self
@@ -26359,7 +26377,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn shutdown_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
     ) -> Result<Vec<MatrixRaftLifecycleGroupResult>, RaftError> {
         let plan = self.plan_shutdown_groups(group_ids)?;
         Ok(self.execute_lifecycle_plan_best_effort(plan))
@@ -26367,8 +26385,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn shutdown_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
-    ) -> Result<Vec<(RustRaftGroupId, usize)>, RaftError> {
+        group_ids: impl IntoIterator<Item = GroupId>,
+    ) -> Result<Vec<(GroupId, usize)>, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
         let plan = self.plan_shutdown_groups(group_ids)?;
         let mut counts = Vec::new();
@@ -26386,8 +26404,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn publish_snapshot_route(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         snapshot: MatrixRaftSnapshotDesc,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         let key = MatrixRaftRouteKey::new(group_id, node_id);
@@ -26439,8 +26457,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn snapshot_route(
         &self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
     ) -> Option<&MatrixRaftSnapshotDesc> {
         self.snapshot_routes
             .get(&MatrixRaftRouteKey::new(group_id, node_id))
@@ -26538,7 +26556,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn publish_snapshot_route_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         snapshot: MatrixRaftSnapshotDesc,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let plan = self.plan_publish_snapshot_route_on_group(group_id, snapshot)?;
@@ -26555,7 +26573,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn publish_snapshot_route_on_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         snapshot: MatrixRaftSnapshotDesc,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let plan = self.plan_publish_snapshot_route_on_group(group_id, snapshot)?;
@@ -26575,7 +26593,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_publish_snapshot_route_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         snapshot: MatrixRaftSnapshotDesc,
     ) -> Result<MatrixRaftSnapshotPublishGroupPlan, RaftError> {
         Ok(self
@@ -26588,7 +26606,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_publish_snapshot_routes_for_groups(
         &self,
-        group_snapshots: impl IntoIterator<Item = (RustRaftGroupId, MatrixRaftSnapshotDesc)>,
+        group_snapshots: impl IntoIterator<Item = (GroupId, MatrixRaftSnapshotDesc)>,
     ) -> Result<MatrixRaftSnapshotPublishPlan, RaftError> {
         let group_snapshots = group_snapshots.into_iter().collect::<Vec<_>>();
         self.snapshot_publish_plan_from_groups(&group_snapshots)
@@ -26596,8 +26614,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn publish_snapshot_routes_for_groups(
         &mut self,
-        group_snapshots: impl IntoIterator<Item = (RustRaftGroupId, MatrixRaftSnapshotDesc)>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_snapshots: impl IntoIterator<Item = (GroupId, MatrixRaftSnapshotDesc)>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_publish_snapshot_routes_for_groups(group_snapshots)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -26616,8 +26634,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn publish_snapshot_routes_for_groups_best_effort(
         &mut self,
-        group_snapshots: impl IntoIterator<Item = (RustRaftGroupId, MatrixRaftSnapshotDesc)>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_snapshots: impl IntoIterator<Item = (GroupId, MatrixRaftSnapshotDesc)>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let plan = self.plan_publish_snapshot_routes_for_groups(group_snapshots)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -26641,8 +26659,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn finish_snapshot_route(
         &mut self,
-        group_id: RustRaftGroupId,
-        node_id: RustRaftNodeId,
+        group_id: GroupId,
+        node_id: NodeId,
         finish: MatrixRaftOldSnapshotFinish,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         let key = MatrixRaftRouteKey::new(group_id, node_id);
@@ -26703,7 +26721,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn finish_snapshot_route_on_group(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         finish: MatrixRaftOldSnapshotFinish,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let plan = self.plan_finish_snapshot_route_on_group(group_id, finish)?;
@@ -26720,7 +26738,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn finish_snapshot_route_on_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         finish: MatrixRaftOldSnapshotFinish,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let plan = self.plan_finish_snapshot_route_on_group(group_id, finish)?;
@@ -26739,7 +26757,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_finish_snapshot_route_on_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         finish: MatrixRaftOldSnapshotFinish,
     ) -> Result<MatrixRaftSnapshotFinishGroupPlan, RaftError> {
         Ok(self
@@ -26752,7 +26770,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_finish_snapshot_routes_for_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         finish: MatrixRaftOldSnapshotFinish,
     ) -> Result<MatrixRaftSnapshotFinishPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -26761,9 +26779,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn finish_snapshot_routes_for_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         finish: MatrixRaftOldSnapshotFinish,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_finish_snapshot_routes_for_groups(group_ids, finish)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -26782,9 +26800,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn finish_snapshot_routes_for_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         finish: MatrixRaftOldSnapshotFinish,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let plan = self.plan_finish_snapshot_routes_for_groups(group_ids, finish)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -26808,8 +26826,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_message(
         &mut self,
-        group_id: RustRaftGroupId,
-        runtime_node_id: RustRaftNodeId,
+        group_id: GroupId,
+        runtime_node_id: NodeId,
         message: MatrixRaftMessage,
     ) -> Result<MatrixRaftRouteResult, RaftError> {
         let key = MatrixRaftRouteKey::new(group_id, runtime_node_id);
@@ -26881,7 +26899,7 @@ impl MatrixRaftMultiRaftServer {
                 })?;
                 let log_id = node.runtime.propose_with_options(
                     propose.data,
-                    RustRaftProposeOptions {
+                    ProposeOptions {
                         expected_term: message.term,
                         is_command: propose.is_command,
                         is_membership_change: false,
@@ -26941,7 +26959,7 @@ impl MatrixRaftMultiRaftServer {
                         term: message.term.unwrap_or_default(),
                         leader_id: message.from.unwrap_or(runtime_node_id),
                         prev_log_id: (request.prev_term != 0 || request.prev_index != 0)
-                            .then_some(RustRaftLogId {
+                            .then_some(LogId {
                                 term: request.prev_term,
                                 index: request.prev_index,
                             }),
@@ -26978,7 +26996,7 @@ impl MatrixRaftMultiRaftServer {
                         "append-entries response missing payload".to_string(),
                     )
                 })?;
-                let step = node.runtime.step(RustRaftMessage::AppendEntriesResponse {
+                let step = node.runtime.step(Message::AppendEntriesResponse {
                     local_node_id,
                     peer_id,
                     response: AppendEntriesResponse {
@@ -26990,7 +27008,7 @@ impl MatrixRaftMultiRaftServer {
                         require_snapshot: message
                             .require_snapshot
                             .map(|snapshot| snapshot.required_index),
-                        snapshot_state: message.snapshot_state.unwrap_or(RustRaftSnapshotState::None),
+                        snapshot_state: message.snapshot_state.unwrap_or(SnapshotState::None),
                         lease_confirmation_epoch: message
                             .lease_response
                             .as_ref()
@@ -27003,7 +27021,7 @@ impl MatrixRaftMultiRaftServer {
                             .unwrap_or_default(),
                     },
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected append-entries response result: {step:?}"
                     )));
@@ -27028,12 +27046,12 @@ impl MatrixRaftMultiRaftServer {
                         "install-snapshot response missing payload".to_string(),
                     )
                 })?;
-                let step = node.runtime.step(RustRaftMessage::InstallSnapshotResponse {
+                let step = node.runtime.step(Message::InstallSnapshotResponse {
                     local_node_id,
                     peer_id,
                     response: response.clone(),
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected install-snapshot response result: {step:?}"
                     )));
@@ -27103,9 +27121,9 @@ impl MatrixRaftMultiRaftServer {
                 })?;
                 let step = node
                     .runtime
-                    .step(RustRaftMessage::PreVote { candidate_id })?;
+                    .step(Message::PreVote { candidate_id })?;
                 match step {
-                    RustRaftStepResult::PreVote(response) => {
+                    StepResult::PreVote(response) => {
                         let mut result = MatrixRaftRouteResult::delivered(
                             key,
                             MatrixRaftMessageType::PreVote,
@@ -27128,13 +27146,13 @@ impl MatrixRaftMultiRaftServer {
                     RaftError::InvalidRequest("vote response missing payload".to_string())
                 })?;
                 let pre_vote = message.message_type == MatrixRaftMessageType::PreVoteResponse;
-                let step = node.runtime.step(RustRaftMessage::VoteResponse {
+                let step = node.runtime.step(Message::VoteResponse {
                     local_node_id,
                     peer_id: Some(peer_id),
                     response: response.clone(),
                     pre_vote,
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected vote response result: {step:?}"
                     )));
@@ -27191,13 +27209,13 @@ impl MatrixRaftMultiRaftServer {
                         "snapshot-progress message missing payload".to_string(),
                     )
                 })?;
-                let step = node.runtime.step(RustRaftMessage::SnapshotProgress {
+                let step = node.runtime.step(Message::SnapshotProgress {
                     peer_id,
                     remote_receiving: progress.remote_receiving,
                     elapsed_since_last_receiving_ms: progress.elapsed_since_last_receiving_ms,
                     send_timeout_ms: progress.send_timeout_ms,
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected snapshot-progress result: {step:?}"
                     )));
@@ -27258,7 +27276,7 @@ impl MatrixRaftMultiRaftServer {
     pub fn route_message_batch_grouped(
         &mut self,
         messages: Vec<MatrixRaftRoutedMessage>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_route_message_batch(messages)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -27301,8 +27319,8 @@ impl MatrixRaftMultiRaftServer {
     pub fn route_message_batch_grouped_best_effort(
         &mut self,
         messages: Vec<MatrixRaftRoutedMessage>,
-    ) -> Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)> {
-        let mut groups = Vec::<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>::new();
+    ) -> Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)> {
+        let mut groups = Vec::<(GroupId, Vec<MatrixRaftBatchRouteResult>)>::new();
         for result in self.route_message_batch_best_effort(messages) {
             if let Some((_, results)) = groups
                 .iter_mut()
@@ -27337,7 +27355,7 @@ impl MatrixRaftMultiRaftServer {
         });
 
         let mut message_types = Vec::new();
-        let mut grouped = BTreeMap::<RustRaftGroupId, MatrixRaftRouteBatchGroupPlan>::new();
+        let mut grouped = BTreeMap::<GroupId, MatrixRaftRouteBatchGroupPlan>::new();
         for (message, key) in messages.iter().zip(route_keys.iter()) {
             if !message_types.contains(&message.message.message_type) {
                 message_types.push(message.message.message_type);
@@ -27391,9 +27409,9 @@ impl MatrixRaftMultiRaftServer {
         }
         let mut priority_groups = Vec::new();
         for priority in [
-            RustRaftMailPriority::Urgent,
-            RustRaftMailPriority::Normal,
-            RustRaftMailPriority::Slowly,
+            MailPriority::Urgent,
+            MailPriority::Normal,
+            MailPriority::Slowly,
         ] {
             let priority_messages = messages
                 .iter()
@@ -27478,7 +27496,7 @@ impl MatrixRaftMultiRaftServer {
     pub fn route_priority_message_batch_grouped(
         &mut self,
         messages: Vec<MatrixRaftPriorityRoutedMessage>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_priority_route_message_batch(messages)?;
         self.route_message_batch_grouped(
             plan.messages
@@ -27504,7 +27522,7 @@ impl MatrixRaftMultiRaftServer {
     pub fn route_priority_message_batch_grouped_best_effort(
         &mut self,
         mut messages: Vec<MatrixRaftPriorityRoutedMessage>,
-    ) -> Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)> {
+    ) -> Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)> {
         messages.sort_by_key(|message| message.priority);
         self.route_message_batch_grouped_best_effort(
             messages
@@ -27516,7 +27534,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_message_to_group(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         message: MatrixRaftMessage,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let plan = self.plan_route_message_to_group(group_id, message)?;
@@ -27529,7 +27547,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_route_message_to_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         message: MatrixRaftMessage,
     ) -> Result<MatrixRaftMessageFanoutGroupPlan, RaftError> {
         Ok(self
@@ -27542,7 +27560,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_route_message_to_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         message: MatrixRaftMessage,
     ) -> Result<MatrixRaftMessageFanoutPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -27551,7 +27569,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_message_to_group_best_effort(
         &mut self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         message: MatrixRaftMessage,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let plan = self.plan_route_message_to_group(group_id, message)?;
@@ -27565,7 +27583,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_message_to_groups(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         message: MatrixRaftMessage,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let plan = self.plan_route_message_to_groups(group_ids, message)?;
@@ -27580,9 +27598,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_message_to_groups_grouped(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         message: MatrixRaftMessage,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_route_message_to_groups(group_ids, message)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -27597,7 +27615,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_message_to_groups_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         message: MatrixRaftMessage,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let plan = self.plan_route_message_to_groups(group_ids, message)?;
@@ -27615,9 +27633,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_message_to_groups_grouped_best_effort(
         &mut self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         message: MatrixRaftMessage,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let plan = self.plan_route_message_to_groups(group_ids, message)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -27633,7 +27651,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_route_admin_command_to_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         command: MatrixRaftAdminCommand,
     ) -> Result<MatrixRaftAdminCommandFanoutGroupPlan, RaftError> {
         Ok(self
@@ -27646,7 +27664,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_route_admin_command_to_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         command: MatrixRaftAdminCommand,
     ) -> Result<MatrixRaftAdminCommandFanoutPlan, RaftError> {
         let group_ids = group_ids.into_iter().collect::<Vec<_>>();
@@ -27655,7 +27673,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn plan_route_admin_commands_for_groups(
         &self,
-        group_commands: impl IntoIterator<Item = (RustRaftGroupId, MatrixRaftAdminCommand)>,
+        group_commands: impl IntoIterator<Item = (GroupId, MatrixRaftAdminCommand)>,
     ) -> Result<MatrixRaftAdminCommandBatchPlan, RaftError> {
         let mut command_types = Vec::new();
         let mut groups = Vec::new();
@@ -27712,7 +27730,7 @@ impl MatrixRaftMultiRaftServer {
 
         let mut command_types = Vec::new();
         let mut grouped =
-            BTreeMap::<RustRaftGroupId, MatrixRaftRoutedAdminCommandBatchGroupPlan>::new();
+            BTreeMap::<GroupId, MatrixRaftRoutedAdminCommandBatchGroupPlan>::new();
         for (command, key) in commands.iter().zip(route_keys.iter()) {
             if !command_types.contains(&command.command.command_type) {
                 command_types.push(command.command.command_type);
@@ -27763,9 +27781,9 @@ impl MatrixRaftMultiRaftServer {
 
         let mut priority_groups = Vec::new();
         for priority in [
-            RustRaftMailPriority::Urgent,
-            RustRaftMailPriority::Normal,
-            RustRaftMailPriority::Slowly,
+            MailPriority::Urgent,
+            MailPriority::Normal,
+            MailPriority::Slowly,
         ] {
             let mut route_keys = Vec::new();
             let mut group_ids = Vec::new();
@@ -27812,7 +27830,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_admin_command_to_group(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         command: MatrixRaftAdminCommand,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let plan = self.plan_route_admin_command_to_group(group_id, command)?;
@@ -27825,7 +27843,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_admin_command_to_groups(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         command: MatrixRaftAdminCommand,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let plan = self.plan_route_admin_command_to_groups(group_ids, command)?;
@@ -27840,9 +27858,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_admin_command_to_groups_grouped(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         command: MatrixRaftAdminCommand,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_route_admin_command_to_groups(group_ids, command)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -27857,7 +27875,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_admin_commands_for_groups(
         &self,
-        group_commands: impl IntoIterator<Item = (RustRaftGroupId, MatrixRaftAdminCommand)>,
+        group_commands: impl IntoIterator<Item = (GroupId, MatrixRaftAdminCommand)>,
     ) -> Result<Vec<MatrixRaftRouteResult>, RaftError> {
         let plan = self.plan_route_admin_commands_for_groups(group_commands)?;
         let mut results = Vec::with_capacity(plan.node_count);
@@ -27871,8 +27889,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_admin_commands_for_groups_grouped(
         &self,
-        group_commands: impl IntoIterator<Item = (RustRaftGroupId, MatrixRaftAdminCommand)>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+        group_commands: impl IntoIterator<Item = (GroupId, MatrixRaftAdminCommand)>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_route_admin_commands_for_groups(group_commands)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -27899,7 +27917,7 @@ impl MatrixRaftMultiRaftServer {
     pub fn route_admin_command_batch_grouped(
         &self,
         commands: Vec<MatrixRaftRoutedAdminCommand>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_route_admin_command_batch(commands)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -27932,7 +27950,7 @@ impl MatrixRaftMultiRaftServer {
     pub fn route_priority_admin_command_batch_grouped(
         &self,
         commands: Vec<MatrixRaftPriorityRoutedAdminCommand>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftRouteResult>)>, RaftError> {
         let plan = self.plan_priority_route_admin_command_batch(commands)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -27954,7 +27972,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_admin_command_to_group_best_effort(
         &self,
-        group_id: RustRaftGroupId,
+        group_id: GroupId,
         command: MatrixRaftAdminCommand,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let plan = self.plan_route_admin_command_to_group(group_id, command)?;
@@ -27976,9 +27994,9 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_admin_command_to_groups_grouped_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         command: MatrixRaftAdminCommand,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let plan = self.plan_route_admin_command_to_groups(group_ids, command)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -28002,8 +28020,8 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_admin_commands_for_groups_grouped_best_effort(
         &self,
-        group_commands: impl IntoIterator<Item = (RustRaftGroupId, MatrixRaftAdminCommand)>,
-    ) -> Result<Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
+        group_commands: impl IntoIterator<Item = (GroupId, MatrixRaftAdminCommand)>,
+    ) -> Result<Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)>, RaftError> {
         let plan = self.plan_route_admin_commands_for_groups(group_commands)?;
         let mut groups = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
@@ -28053,8 +28071,8 @@ impl MatrixRaftMultiRaftServer {
     pub fn route_admin_command_batch_grouped_best_effort(
         &self,
         commands: Vec<MatrixRaftRoutedAdminCommand>,
-    ) -> Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)> {
-        let mut groups = Vec::<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)>::new();
+    ) -> Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)> {
+        let mut groups = Vec::<(GroupId, Vec<MatrixRaftBatchRouteResult>)>::new();
         for result in self.route_admin_command_batch_best_effort(commands) {
             if let Some((_, results)) = groups
                 .iter_mut()
@@ -28084,7 +28102,7 @@ impl MatrixRaftMultiRaftServer {
     pub fn route_priority_admin_command_batch_grouped_best_effort(
         &self,
         mut commands: Vec<MatrixRaftPriorityRoutedAdminCommand>,
-    ) -> Vec<(RustRaftGroupId, Vec<MatrixRaftBatchRouteResult>)> {
+    ) -> Vec<(GroupId, Vec<MatrixRaftBatchRouteResult>)> {
         commands.sort_by_key(|command| command.priority);
         self.route_admin_command_batch_grouped_best_effort(
             commands
@@ -28096,7 +28114,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_admin_command_to_groups_best_effort(
         &self,
-        group_ids: impl IntoIterator<Item = RustRaftGroupId>,
+        group_ids: impl IntoIterator<Item = GroupId>,
         command: MatrixRaftAdminCommand,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let plan = self.plan_route_admin_command_to_groups(group_ids, command)?;
@@ -28120,7 +28138,7 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn route_admin_commands_for_groups_best_effort(
         &self,
-        group_commands: impl IntoIterator<Item = (RustRaftGroupId, MatrixRaftAdminCommand)>,
+        group_commands: impl IntoIterator<Item = (GroupId, MatrixRaftAdminCommand)>,
     ) -> Result<Vec<MatrixRaftBatchRouteResult>, RaftError> {
         let plan = self.plan_route_admin_commands_for_groups(group_commands)?;
         let mut results = Vec::with_capacity(plan.node_count);
@@ -28181,14 +28199,14 @@ impl MatrixRaftMultiRaftServer {
         match command.command_type {
             MatrixRaftAdminCommandType::Election => {
                 let candidate_id = command.node_id.unwrap_or(key.node_id);
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::Campaign {
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::Campaign {
                         candidate_id,
                         forced: command.forced_campaign,
                     },
                 })?;
                 match step {
-                    RustRaftStepResult::Handled => {}
+                    StepResult::Handled => {}
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected campaign admin result: {other:?}"
@@ -28220,11 +28238,11 @@ impl MatrixRaftMultiRaftServer {
                 Ok(result)
             }
             MatrixRaftAdminCommandType::CompleteLeaderTransfer => {
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::CompleteLeaderTransfer,
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::CompleteLeaderTransfer,
                 })?;
                 let completed = match step {
-                    RustRaftStepResult::LeaderTransferCompleted(completed) => completed,
+                    StepResult::LeaderTransferCompleted(completed) => completed,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected complete-leader-transfer admin result: {other:?}"
@@ -28243,11 +28261,11 @@ impl MatrixRaftMultiRaftServer {
                 let reason = command
                     .reason
                     .unwrap_or_else(|| "matrixraft admin abort leader transfer".to_string());
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::AbortLeaderTransfer { reason },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::AbortLeaderTransfer { reason },
                 })?;
                 let aborted = match step {
-                    RustRaftStepResult::LeaderTransferAborted(aborted) => aborted,
+                    StepResult::LeaderTransferAborted(aborted) => aborted,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected abort-leader-transfer admin result: {other:?}"
@@ -28298,10 +28316,10 @@ impl MatrixRaftMultiRaftServer {
             MatrixRaftAdminCommandType::SetNodeHealthy => {
                 let node_id = command.require_node_id("set-node-healthy")?;
                 let healthy = command.healthy.unwrap_or(true);
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::SetNodeHealthy { node_id, healthy },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::SetNodeHealthy { node_id, healthy },
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected set-node-healthy admin result: {step:?}"
                     )));
@@ -28320,11 +28338,11 @@ impl MatrixRaftMultiRaftServer {
                 let reason = command
                     .reason
                     .unwrap_or_else(|| "matrixraft admin fatal event".to_string());
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::FireFatalEvent { node_id, reason },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::FireFatalEvent { node_id, reason },
                 })?;
                 let transfer_target = match step {
-                    RustRaftStepResult::FatalEvent(transfer_target) => transfer_target,
+                    StepResult::FatalEvent(transfer_target) => transfer_target,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected fatal-event admin result: {other:?}"
@@ -28346,13 +28364,13 @@ impl MatrixRaftMultiRaftServer {
                         "receive-out-of-order-append admin command missing entry".to_string(),
                     )
                 })?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::ReceiveOutOfOrderAppend {
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::ReceiveOutOfOrderAppend {
                         peer_id,
                         entry: entry.to_log_entry(),
                     },
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected receive-out-of-order-append admin result: {step:?}"
                     )));
@@ -28367,11 +28385,11 @@ impl MatrixRaftMultiRaftServer {
             }
             MatrixRaftAdminCommandType::ExpirePeerReorderQueue => {
                 let peer_id = command.require_node_id("expire-peer-reorder-queue")?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::ExpirePeerReorderQueue { peer_id },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::ExpirePeerReorderQueue { peer_id },
                 })?;
                 let dropped = match step {
-                    RustRaftStepResult::CompactedLogs(dropped) => dropped,
+                    StepResult::CompactedLogs(dropped) => dropped,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected expire-peer-reorder-queue admin result: {other:?}"
@@ -28463,10 +28481,10 @@ impl MatrixRaftMultiRaftServer {
             }
             MatrixRaftAdminCommandType::SetLeaderLeaseValid => {
                 let valid = command.lease_valid.unwrap_or(true);
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::SetLeaderLeaseValid { valid },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::SetLeaderLeaseValid { valid },
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected set-leader-lease-valid admin result: {step:?}"
                     )));
@@ -28483,15 +28501,15 @@ impl MatrixRaftMultiRaftServer {
                 let node_id = command.require_node_id("receive-leader-lease-confirmation")?;
                 let confirmation_epoch =
                     command.require_lease_epoch("receive-leader-lease-confirmation")?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::ReceiveLeaderLeaseConfirmation {
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::ReceiveLeaderLeaseConfirmation {
                         node_id,
                         confirmation_epoch,
                         duration_ms: command.lease_duration_ms,
                     },
                 })?;
                 let confirmed = match step {
-                    RustRaftStepResult::LeaderLeaseConfirmed(confirmed) => confirmed,
+                    StepResult::LeaderLeaseConfirmed(confirmed) => confirmed,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected leader-lease-confirmation admin result: {other:?}"
@@ -28508,11 +28526,11 @@ impl MatrixRaftMultiRaftServer {
             }
             MatrixRaftAdminCommandType::TickLeaderLease => {
                 let elapsed_ms = command.require_elapsed_ms("tick-leader-lease")?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::TickLeaderLease { elapsed_ms },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::TickLeaderLease { elapsed_ms },
                 })?;
                 let expired = match step {
-                    RustRaftStepResult::LeaderLeaseExpired(expired) => expired,
+                    StepResult::LeaderLeaseExpired(expired) => expired,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected tick-leader-lease admin result: {other:?}"
@@ -28529,11 +28547,11 @@ impl MatrixRaftMultiRaftServer {
             }
             MatrixRaftAdminCommandType::ReceiveFollowerLease => {
                 let epoch = command.require_lease_epoch("receive-follower-lease")?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::ReceiveFollowerLease { epoch },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::ReceiveFollowerLease { epoch },
                 })?;
                 let received = match step {
-                    RustRaftStepResult::FollowerLeaseReceived(received) => received,
+                    StepResult::FollowerLeaseReceived(received) => received,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected receive-follower-lease admin result: {other:?}"
@@ -28550,11 +28568,11 @@ impl MatrixRaftMultiRaftServer {
             }
             MatrixRaftAdminCommandType::TickFollowerLease => {
                 let elapsed_ms = command.require_elapsed_ms("tick-follower-lease")?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::TickFollowerLease { elapsed_ms },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::TickFollowerLease { elapsed_ms },
                 })?;
                 let expired = match step {
-                    RustRaftStepResult::FollowerLeaseExpired(expired) => expired,
+                    StepResult::FollowerLeaseExpired(expired) => expired,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected tick-follower-lease admin result: {other:?}"
@@ -28675,14 +28693,14 @@ impl MatrixRaftMultiRaftServer {
             MatrixRaftAdminCommandType::Synced => {
                 let stabled_config_change_index =
                     command.stabled_config_change_index.unwrap_or_default();
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::StabledResult {
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::StabledResult {
                         first_index: command.first_index,
                         last_index: command.last_index,
                         stabled_membership_change_index: stabled_config_change_index,
                     },
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected synced admin result: {step:?}"
                     )));
@@ -28706,14 +28724,14 @@ impl MatrixRaftMultiRaftServer {
                         "applied admin command missing applied index".to_string(),
                     )
                 })?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::ApplyResult {
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::ApplyResult {
                         node_id,
                         applied_index,
                         rejected: command.apply_task_rejected,
                     },
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected applied admin result: {step:?}"
                     )));
@@ -28737,13 +28755,13 @@ impl MatrixRaftMultiRaftServer {
                         "apply-task-inflight admin command missing applied index".to_string(),
                     )
                 })?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::ApplyTaskInflight {
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::ApplyTaskInflight {
                         node_id,
                         applied_index,
                     },
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected apply-task-inflight admin result: {step:?}"
                     )));
@@ -28763,10 +28781,10 @@ impl MatrixRaftMultiRaftServer {
             MatrixRaftAdminCommandType::Replicated => {
                 let peer_id = command.require_node_id("replicated")?;
                 let success = command.status.as_ref().is_none_or(|status| status.success);
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::Replicated { peer_id, success },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::Replicated { peer_id, success },
                 })?;
-                if step != RustRaftStepResult::Handled {
+                if step != StepResult::Handled {
                     return Err(RaftError::InvalidRequest(format!(
                         "unexpected replicated admin result: {step:?}"
                     )));
@@ -28781,13 +28799,13 @@ impl MatrixRaftMultiRaftServer {
                 Ok(result)
             }
             MatrixRaftAdminCommandType::WitnessQuorum => {
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::WitnessQuorum {
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::WitnessQuorum {
                         acknowledgements: command.acknowledgements,
                     },
                 })?;
                 let report = match step {
-                    RustRaftStepResult::WitnessQuorum(report) => report,
+                    StepResult::WitnessQuorum(report) => report,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected witness-quorum admin result: {other:?}"
@@ -28803,11 +28821,11 @@ impl MatrixRaftMultiRaftServer {
                 Ok(result)
             }
             MatrixRaftAdminCommandType::ReleaseMemory => {
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::ReleaseMemory,
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::ReleaseMemory,
                 })?;
                 let released = match step {
-                    RustRaftStepResult::ReleasedMemory(released) => released,
+                    StepResult::ReleasedMemory(released) => released,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected release-memory admin result: {other:?}"
@@ -28824,11 +28842,11 @@ impl MatrixRaftMultiRaftServer {
             }
             MatrixRaftAdminCommandType::CompactLogsThrough => {
                 let log_index = command.require_log_index("compact-logs-through")?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::CompactLogsThrough { log_index },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::CompactLogsThrough { log_index },
                 })?;
                 let compacted = match step {
-                    RustRaftStepResult::CompactedLogs(compacted) => compacted,
+                    StepResult::CompactedLogs(compacted) => compacted,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected compact-logs admin result: {other:?}"
@@ -28851,11 +28869,11 @@ impl MatrixRaftMultiRaftServer {
                             .to_string(),
                     )
                 })?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::CompactLogsWithStorageFence { log_index, fence },
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::CompactLogsWithStorageFence { log_index, fence },
                 })?;
                 let report = match step {
-                    RustRaftStepResult::FencedCompaction(report) => report,
+                    StepResult::FencedCompaction(report) => report,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected fenced-compaction admin result: {other:?}"
@@ -28877,14 +28895,14 @@ impl MatrixRaftMultiRaftServer {
                         "checkpoint-snapshot admin command missing snapshot id".to_string(),
                     )
                 })?;
-                let step = node.runtime.step(RustRaftMessage::Admin {
-                    command: RustRaftAdminCommand::CheckpointSnapshot {
+                let step = node.runtime.step(Message::Admin {
+                    command: AdminCommand::CheckpointSnapshot {
                         target: node_id,
                         snapshot_id,
                     },
                 })?;
                 let checkpoint = match step {
-                    RustRaftStepResult::CheckpointedSnapshot(snapshot) => snapshot,
+                    StepResult::CheckpointedSnapshot(snapshot) => snapshot,
                     other => {
                         return Err(RaftError::InvalidRequest(format!(
                             "unexpected checkpoint-snapshot admin result: {other:?}"
@@ -28913,6 +28931,6 @@ impl MatrixRaftMultiRaftServer {
 pub type MatrixRaftMultiSnapshotServer = MatrixRaftMultiRaftServer;
 pub type MatrixRaftGroupHost = MatrixRaftMultiRaftServer;
 
-pub type MatrixRaftAutoPromoteReport = RaftLearnerAutoPromoteReport;
+pub type MatrixRaftAutoPromoteReport = LearnerAutoPromoteReport;
 pub type MatrixRaftSnapshotRequest = InstallSnapshotRequest;
 pub type MatrixRaftSnapshotResponse = InstallSnapshotResponse;

@@ -6,19 +6,17 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::{
-    InstallSnapshotRequest, InstallSnapshotResponse, PersistentRaftSnapshotStore,
-    PersistentRaftSnapshotStoreOptions, RaftSnapshot, RaftSnapshotInstallState,
-    RaftSnapshotLifecycle, RaftSnapshotLifecycleConfig, RaftSnapshotLifecycleStatus,
-    RaftSnapshotSendState, RustRaftApplySnapshotFence, RustRaftGenericSnapshot,
-    RustRaftGenericSnapshotChunk, RustRaftInstallSnapshotRequest, RustRaftInstallSnapshotResponse,
-    RustRaftLogEntry, RustRaftLogId, RustRaftLogIndex, RustRaftPeerPipelineStatus,
-    RustRaftSnapshotChunk, RustRaftSnapshotMeta, SnapshotChunk,
+    ApplySnapshotFence, GenericSnapshot, GenericSnapshotChunk, InstallSnapshotRequest,
+    InstallSnapshotResponse, LogEntry, LogId, LogIndex, PeerProgress, PersistentRaftSnapshotStore,
+    PersistentRaftSnapshotStoreOptions, RaftSnapshot, SnapshotChunk, SnapshotInstallState,
+    SnapshotLifecycle, SnapshotLifecycleConfig, SnapshotLifecycleStatus, SnapshotMetadata,
+    SnapshotSendState,
 };
 
-use crate::{RaftError, RustRaftError};
+use crate::RaftError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftSnapshotLifecycleEvidence {
+pub struct SnapshotLifecycleEvidence {
     pub sender_lifecycle_present: bool,
     pub downloader_lifecycle_present: bool,
     pub retry_backpressure_present: bool,
@@ -38,16 +36,16 @@ pub struct RustRaftSnapshotLifecycleEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftSnapshotLifecycleEvidenceArtifact {
+pub struct SnapshotLifecycleEvidenceArtifact {
     pub schema: String,
     pub send_snapshot_timeout_ms: u64,
     pub max_inflights_replicate: u64,
-    pub peers: Vec<RustRaftPeerPipelineStatus>,
-    pub evidence: RustRaftSnapshotLifecycleEvidence,
+    pub peers: Vec<PeerProgress>,
+    pub evidence: SnapshotLifecycleEvidence,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftSnapshotLifecycleEvidenceValidationReport {
+pub struct SnapshotLifecycleEvidenceValidationReport {
     pub valid: bool,
     pub schema_valid: bool,
     pub sender_lifecycle_present: bool,
@@ -69,10 +67,10 @@ pub struct RustRaftSnapshotLifecycleEvidenceValidationReport {
 }
 
 pub fn matrixraft_validate_snapshot_floor_log_matching(
-    snapshot: &RustRaftSnapshotMeta,
-    first_retained_log_index: RustRaftLogIndex,
-    prev_log_id: Option<&RustRaftLogId>,
-) -> Result<(), RustRaftError> {
+    snapshot: &SnapshotMetadata,
+    first_retained_log_index: LogIndex,
+    prev_log_id: Option<&LogId>,
+) -> Result<(), RaftError> {
     if first_retained_log_index > 0 && first_retained_log_index <= snapshot.last_log_id.index {
         return Err(RaftError::Storage(
             "first retained log index overlaps snapshot floor".to_string(),
@@ -97,8 +95,8 @@ pub fn matrixraft_validate_snapshot_floor_log_matching(
 
 pub fn matrixraft_validate_snapshot_install(
     snapshot: &RaftSnapshot,
-    fence: &RustRaftApplySnapshotFence,
-) -> Result<(), RustRaftError> {
+    fence: &ApplySnapshotFence,
+) -> Result<(), RaftError> {
     if fence.installed_snapshot_index != snapshot.meta.last_log_id.index {
         return Err(RaftError::Storage(
             "snapshot install fence does not match snapshot last log index".to_string(),
@@ -112,9 +110,9 @@ pub fn matrixraft_validate_snapshot_install(
 }
 
 pub fn matrixraft_validate_snapshot_tail_catchup(
-    snapshot: &RustRaftSnapshotMeta,
-    tail_entries: &[RustRaftLogEntry],
-) -> Result<(), RustRaftError> {
+    snapshot: &SnapshotMetadata,
+    tail_entries: &[LogEntry],
+) -> Result<(), RaftError> {
     for (offset, entry) in tail_entries.iter().enumerate() {
         let expected_index = snapshot.last_log_id.index + 1 + offset as u64;
         if entry.log_id.index <= snapshot.last_log_id.index {
@@ -132,11 +130,11 @@ pub fn matrixraft_validate_snapshot_tail_catchup(
 }
 
 pub fn matrixraft_snapshot_lifecycle_evidence(
-    peers: &[RustRaftPeerPipelineStatus],
+    peers: &[PeerProgress],
     send_snapshot_timeout_ms: u64,
     max_inflights_replicate: u64,
-) -> RustRaftSnapshotLifecycleEvidence {
-    RustRaftSnapshotLifecycleEvidence {
+) -> SnapshotLifecycleEvidence {
+    SnapshotLifecycleEvidence {
         sender_lifecycle_present: send_snapshot_timeout_ms > 0
             && peers
                 .iter()
@@ -199,16 +197,16 @@ pub fn matrixraft_snapshot_lifecycle_evidence(
 }
 
 pub fn matrixraft_snapshot_lifecycle_evidence_artifact(
-    peers: Vec<RustRaftPeerPipelineStatus>,
+    peers: Vec<PeerProgress>,
     send_snapshot_timeout_ms: u64,
     max_inflights_replicate: u64,
-) -> RustRaftSnapshotLifecycleEvidenceArtifact {
+) -> SnapshotLifecycleEvidenceArtifact {
     let evidence = matrixraft_snapshot_lifecycle_evidence(
         &peers,
         send_snapshot_timeout_ms,
         max_inflights_replicate,
     );
-    RustRaftSnapshotLifecycleEvidenceArtifact {
+    SnapshotLifecycleEvidenceArtifact {
         schema: "rustraft.snapshot_lifecycle_evidence.v1".to_string(),
         send_snapshot_timeout_ms,
         max_inflights_replicate,
@@ -218,8 +216,8 @@ pub fn matrixraft_snapshot_lifecycle_evidence_artifact(
 }
 
 pub fn matrixraft_validate_snapshot_lifecycle_evidence_artifact(
-    artifact: &RustRaftSnapshotLifecycleEvidenceArtifact,
-) -> RustRaftSnapshotLifecycleEvidenceValidationReport {
+    artifact: &SnapshotLifecycleEvidenceArtifact,
+) -> SnapshotLifecycleEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.snapshot_lifecycle_evidence.v1";
     let recomputed = matrixraft_snapshot_lifecycle_evidence(
         &artifact.peers,
@@ -293,7 +291,7 @@ pub fn matrixraft_validate_snapshot_lifecycle_evidence_artifact(
         }
     }
 
-    RustRaftSnapshotLifecycleEvidenceValidationReport {
+    SnapshotLifecycleEvidenceValidationReport {
         valid: missing.is_empty(),
         schema_valid,
         sender_lifecycle_present,

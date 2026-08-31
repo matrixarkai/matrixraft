@@ -7,17 +7,17 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::{RustRaftMailPriority, RustRaftNodeId};
+use crate::{MailPriority, NodeId};
 
 pub const MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS: u64 = i64::MAX as u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RustRaftChannelSelectorPolicy {
+pub struct ChannelSelectorPolicy {
     pub limit: usize,
     pub timeout_ms: u64,
 }
 
-impl Default for RustRaftChannelSelectorPolicy {
+impl Default for ChannelSelectorPolicy {
     fn default() -> Self {
         Self {
             limit: 1,
@@ -27,7 +27,7 @@ impl Default for RustRaftChannelSelectorPolicy {
 }
 
 #[derive(Debug)]
-struct RustRaftMailChannelInner<Mail> {
+struct MailChannelInner<Mail> {
     size: usize,
     previous_channel_mail_count: i64,
     selector_total_mail_count: i64,
@@ -35,7 +35,7 @@ struct RustRaftMailChannelInner<Mail> {
     buffered: [VecDeque<Mail>; 3],
 }
 
-impl<Mail> RustRaftMailChannelInner<Mail> {
+impl<Mail> MailChannelInner<Mail> {
     fn new() -> Self {
         Self {
             size: 0,
@@ -48,26 +48,26 @@ impl<Mail> RustRaftMailChannelInner<Mail> {
 }
 
 #[derive(Debug)]
-pub struct RustRaftMailChannel<Mail> {
-    replica_id: RustRaftNodeId,
+pub struct MailChannel<Mail> {
+    replica_id: NodeId,
     num_mail_limit: usize,
-    inner: Mutex<RustRaftMailChannelInner<Mail>>,
+    inner: Mutex<MailChannelInner<Mail>>,
 }
 
-impl<Mail> RustRaftMailChannel<Mail> {
-    pub fn new(replica_id: RustRaftNodeId, num_mail_limit: usize) -> Arc<Self> {
+impl<Mail> MailChannel<Mail> {
+    pub fn new(replica_id: NodeId, num_mail_limit: usize) -> Arc<Self> {
         Arc::new(Self {
             replica_id,
             num_mail_limit: num_mail_limit.max(1),
-            inner: Mutex::new(RustRaftMailChannelInner::new()),
+            inner: Mutex::new(MailChannelInner::new()),
         })
     }
 
-    pub fn replica_id(&self) -> RustRaftNodeId {
+    pub fn replica_id(&self) -> NodeId {
         self.replica_id
     }
 
-    pub fn try_send(&self, priority: RustRaftMailPriority, mail: Mail) -> Result<(), Mail> {
+    pub fn try_send(&self, priority: MailPriority, mail: Mail) -> Result<(), Mail> {
         let mut inner = self.inner.lock().expect("mail channel mutex poisoned");
         if self.overflow(&inner) {
             return Err(mail);
@@ -77,11 +77,7 @@ impl<Mail> RustRaftMailChannel<Mail> {
         Ok(())
     }
 
-    pub fn try_send_many(
-        &self,
-        priority: RustRaftMailPriority,
-        mails: Vec<Mail>,
-    ) -> Result<(), Vec<Mail>> {
+    pub fn try_send_many(&self, priority: MailPriority, mails: Vec<Mail>) -> Result<(), Vec<Mail>> {
         let mut inner = self.inner.lock().expect("mail channel mutex poisoned");
         if self.overflow(&inner) {
             return Err(mails);
@@ -91,13 +87,13 @@ impl<Mail> RustRaftMailChannel<Mail> {
         Ok(())
     }
 
-    pub fn send(&self, priority: RustRaftMailPriority, mail: Mail) {
+    pub fn send(&self, priority: MailPriority, mail: Mail) {
         let mut inner = self.inner.lock().expect("mail channel mutex poisoned");
         inner.channels[priority_index(priority)].push_back(mail);
         inner.size += 1;
     }
 
-    pub fn fetch(&self, selector: &RustRaftChannelSelector<Mail>) -> Vec<Mail> {
+    pub fn fetch(&self, selector: &ChannelSelector<Mail>) -> Vec<Mail> {
         self.consume(selector);
         let mut inner = self.inner.lock().expect("mail channel mutex poisoned");
         let mut mails = Vec::new();
@@ -118,7 +114,7 @@ impl<Mail> RustRaftMailChannel<Mail> {
             .selector_total_mail_count
     }
 
-    fn consume(&self, selector: &RustRaftChannelSelector<Mail>) {
+    fn consume(&self, selector: &ChannelSelector<Mail>) {
         let mut inner = self.inner.lock().expect("mail channel mutex poisoned");
         let num_mails = inner.size as i64;
         let diff = num_mails - inner.previous_channel_mail_count;
@@ -131,20 +127,20 @@ impl<Mail> RustRaftMailChannel<Mail> {
         inner.buffered = channels;
     }
 
-    fn overflow(&self, inner: &RustRaftMailChannelInner<Mail>) -> bool {
+    fn overflow(&self, inner: &MailChannelInner<Mail>) -> bool {
         inner.selector_total_mail_count as usize > self.num_mail_limit
     }
 }
 
 #[derive(Debug)]
-struct RustRaftChannelSelectorInner<Mail> {
+struct ChannelSelectorInner<Mail> {
     total_mail_count: i64,
-    active_channels: BTreeSet<RustRaftNodeId>,
-    channel_list: VecDeque<Arc<RustRaftMailChannel<Mail>>>,
+    active_channels: BTreeSet<NodeId>,
+    channel_list: VecDeque<Arc<MailChannel<Mail>>>,
     global_mails: VecDeque<Mail>,
 }
 
-impl<Mail> RustRaftChannelSelectorInner<Mail> {
+impl<Mail> ChannelSelectorInner<Mail> {
     fn new() -> Self {
         Self {
             total_mail_count: 0,
@@ -160,28 +156,28 @@ impl<Mail> RustRaftChannelSelectorInner<Mail> {
 }
 
 #[derive(Debug)]
-pub struct RustRaftChannelSelector<Mail> {
-    inner: Mutex<RustRaftChannelSelectorInner<Mail>>,
+pub struct ChannelSelector<Mail> {
+    inner: Mutex<ChannelSelectorInner<Mail>>,
     readable: Condvar,
 }
 
 #[derive(Debug)]
-pub struct RustRaftChannelSelection<Mail> {
-    pub channels: Vec<Arc<RustRaftMailChannel<Mail>>>,
+pub struct ChannelSelection<Mail> {
+    pub channels: Vec<Arc<MailChannel<Mail>>>,
     pub global_mails: Vec<Mail>,
     pub has_active_channels_left: bool,
 }
 
-impl<Mail> Default for RustRaftChannelSelector<Mail> {
+impl<Mail> Default for ChannelSelector<Mail> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Mail> RustRaftChannelSelector<Mail> {
+impl<Mail> ChannelSelector<Mail> {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(RustRaftChannelSelectorInner::new()),
+            inner: Mutex::new(ChannelSelectorInner::new()),
             readable: Condvar::new(),
         }
     }
@@ -194,8 +190,8 @@ impl<Mail> RustRaftChannelSelector<Mail> {
 
     pub fn send_to_channel(
         &self,
-        channel: Arc<RustRaftMailChannel<Mail>>,
-        priority: RustRaftMailPriority,
+        channel: Arc<MailChannel<Mail>>,
+        priority: MailPriority,
         mail: Mail,
     ) {
         channel.send(priority, mail);
@@ -204,8 +200,8 @@ impl<Mail> RustRaftChannelSelector<Mail> {
 
     pub fn try_send_to_channel(
         &self,
-        channel: Arc<RustRaftMailChannel<Mail>>,
-        priority: RustRaftMailPriority,
+        channel: Arc<MailChannel<Mail>>,
+        priority: MailPriority,
         mail: Mail,
     ) -> Result<(), Mail> {
         channel.try_send(priority, mail)?;
@@ -213,7 +209,7 @@ impl<Mail> RustRaftChannelSelector<Mail> {
         Ok(())
     }
 
-    pub fn fire(&self, channel: Arc<RustRaftMailChannel<Mail>>) -> bool {
+    pub fn fire(&self, channel: Arc<MailChannel<Mail>>) -> bool {
         let replica_id = channel.replica_id();
         let mut inner = self.inner.lock().expect("channel selector mutex poisoned");
         if !inner.active_channels.insert(replica_id) {
@@ -226,9 +222,9 @@ impl<Mail> RustRaftChannelSelector<Mail> {
 
     pub fn select(
         &self,
-        policy: RustRaftChannelSelectorPolicy,
-        input: &[Arc<RustRaftMailChannel<Mail>>],
-    ) -> RustRaftChannelSelection<Mail> {
+        policy: ChannelSelectorPolicy,
+        input: &[Arc<MailChannel<Mail>>],
+    ) -> ChannelSelection<Mail> {
         let mut inner = self.inner.lock().expect("channel selector mutex poisoned");
         self.rearrange(&mut inner, input);
         if !inner.has_ready_work()
@@ -269,7 +265,7 @@ impl<Mail> RustRaftChannelSelector<Mail> {
             inner.active_channels.remove(&channel.replica_id());
             channels.push(channel);
         }
-        RustRaftChannelSelection {
+        ChannelSelection {
             channels,
             global_mails,
             has_active_channels_left: !inner.active_channels.is_empty(),
@@ -297,11 +293,7 @@ impl<Mail> RustRaftChannelSelector<Mail> {
         inner.total_mail_count
     }
 
-    fn rearrange(
-        &self,
-        inner: &mut RustRaftChannelSelectorInner<Mail>,
-        input: &[Arc<RustRaftMailChannel<Mail>>],
-    ) {
+    fn rearrange(&self, inner: &mut ChannelSelectorInner<Mail>, input: &[Arc<MailChannel<Mail>>]) {
         for channel in input {
             if inner.active_channels.insert(channel.replica_id()) {
                 inner.channel_list.push_back(Arc::clone(channel));
@@ -310,10 +302,10 @@ impl<Mail> RustRaftChannelSelector<Mail> {
     }
 }
 
-fn priority_index(priority: RustRaftMailPriority) -> usize {
+fn priority_index(priority: MailPriority) -> usize {
     match priority {
-        RustRaftMailPriority::Urgent => 0,
-        RustRaftMailPriority::Normal => 1,
-        RustRaftMailPriority::Slowly => 2,
+        MailPriority::Urgent => 0,
+        MailPriority::Normal => 1,
+        MailPriority::Slowly => 2,
     }
 }

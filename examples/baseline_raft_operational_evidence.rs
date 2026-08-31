@@ -3,12 +3,12 @@
 
 use matrixraft::{
     matrixraft_baseline_raft_operational_evidence_bundle,
-    matrixraft_validate_baseline_raft_operational_evidence_bundle, RustRaftPeerPipelineStatus,
-    RustRaftPipelineLimits, RustRaftWalLifecycleStatus,
+    matrixraft_validate_baseline_raft_operational_evidence_bundle, PeerProgress, PipelineLimits,
+    WalLifecycleStatus,
 };
 
 fn main() {
-    let pipeline_limits = RustRaftPipelineLimits::production_default();
+    let pipeline_limits = PipelineLimits::production_default();
     let bundle = matrixraft_baseline_raft_operational_evidence_bundle(
         replication_pipeline_peers(pipeline_limits),
         pipeline_limits,
@@ -25,8 +25,8 @@ fn main() {
     println!("{}", serde_json::to_string_pretty(&bundle).unwrap());
 }
 
-fn replication_pipeline_peers(limits: RustRaftPipelineLimits) -> Vec<RustRaftPeerPipelineStatus> {
-    let mut peer_2 = RustRaftPeerPipelineStatus::new(2, 105, limits);
+fn replication_pipeline_peers(limits: PipelineLimits) -> Vec<PeerProgress> {
+    let mut peer_2 = PeerProgress::new(2, 105, limits);
     peer_2.append_queue_depth = limits.max_inflights_replicate;
     peer_2.append_queue_max_depth = limits.max_inflights_replicate;
     peer_2.apply_queue_max_depth = limits.max_inflights_apply_task;
@@ -34,7 +34,7 @@ fn replication_pipeline_peers(limits: RustRaftPipelineLimits) -> Vec<RustRaftPee
     peer_2.oversized_log_rejections = 1;
     peer_2.stale_term_rejections = 1;
 
-    let mut peer_3 = RustRaftPeerPipelineStatus::new(3, 105, limits);
+    let mut peer_3 = PeerProgress::new(3, 105, limits);
     peer_3.reorder_queue_depth = 1;
     peer_3.reorder_entry_timeouts = 1;
     peer_3.reorder_dropped_packages = 1;
@@ -45,8 +45,8 @@ fn replication_pipeline_peers(limits: RustRaftPipelineLimits) -> Vec<RustRaftPee
     vec![peer_2, peer_3]
 }
 
-fn snapshot_lifecycle_peers(limits: RustRaftPipelineLimits) -> Vec<RustRaftPeerPipelineStatus> {
-    let mut sender = RustRaftPeerPipelineStatus::new(2, 105, limits);
+fn snapshot_lifecycle_peers(limits: PipelineLimits) -> Vec<PeerProgress> {
+    let mut sender = PeerProgress::new(2, 105, limits);
     sender.snapshot_sending = true;
     sender.snapshot_send_attempts = 2;
     sender.snapshot_install_total_chunks = 8;
@@ -57,7 +57,7 @@ fn snapshot_lifecycle_peers(limits: RustRaftPipelineLimits) -> Vec<RustRaftPeerP
     sender.snapshot_rate_limit_rejections = 1;
     sender.snapshot_during_membership_change = true;
 
-    let mut installer = RustRaftPeerPipelineStatus::new(3, 105, limits);
+    let mut installer = PeerProgress::new(3, 105, limits);
     installer.snapshot_installing = true;
     installer.snapshot_install_total_chunks = 4;
     installer.snapshot_install_progress_per_mille = 750;
@@ -68,8 +68,8 @@ fn snapshot_lifecycle_peers(limits: RustRaftPipelineLimits) -> Vec<RustRaftPeerP
     vec![sender, installer]
 }
 
-fn wal_lifecycle_status() -> RustRaftWalLifecycleStatus {
-    RustRaftWalLifecycleStatus {
+fn wal_lifecycle_status() -> WalLifecycleStatus {
+    WalLifecycleStatus {
         segment_count: 3,
         active_segment_id: 7,
         first_retained_segment_id: 5,

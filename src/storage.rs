@@ -4,38 +4,35 @@
 //! Generic log, state-machine, apply, and storage contracts.
 
 pub use crate::{
-    matrixraft_apply_entry, EntryPayload, RaftApply, RaftApplyRequest, RaftApplyResponse,
-    RaftFsmAdapter, RaftFsmApplyOutcome, RaftFsmCheckpoint, RaftFsmReplayReport, RaftLogEntry,
-    RaftStateMachine, RaftStorageApplyFence, RustRaftApplyRequest, RustRaftApplyResponse,
-    RustRaftGenericApplyRequest, RustRaftGenericApplyResponse, RustRaftGenericLogEntry,
-    RustRaftGroupId, RustRaftLogId, RustRaftLogIndex, RustRaftPayload, RustRaftStateMachine,
-    RustRaftStorageApplyFence, RustRaftTerm,
+    matrixraft_apply_entry, ApplyRequest, ApplyResponse, EntryPayload, FsmAdapter, FsmApplyOutcome,
+    FsmCheckpoint, FsmReplayReport, GenericApplyRequest, GenericApplyResponse, GenericLogEntry,
+    GroupId, LogId, LogIndex, Payload, RaftApply, RaftApplyRequest, RaftApplyResponse,
+    RaftLogEntry, RaftStateMachine, StateMachine, StorageApplyFence, Term,
 };
 
 use crate::{
-    MatrixRaftEntry, MatrixRaftHardState, MatrixRaftInitialState, MatrixRaftMemberId,
-    RustRaftError, RustRaftHardState, RustRaftLogEntry, RustRaftNodeId, RustRaftReplicaRole,
-    RustRaftSnapshotChunk,
+    HardState, LogEntry, MatrixRaftEntry, MatrixRaftHardState, MatrixRaftInitialState,
+    MatrixRaftMemberId, NodeId, RaftError, ReplicaRole, SnapshotChunk,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Persistent Raft log and snapshot storage API used by production adapters.
-pub trait RustRaftStorage {
-    fn append_entries(&mut self, entries: &[RustRaftLogEntry]) -> Result<(), RustRaftError>;
-    fn read_entries(&self, start: u64, end: u64) -> Result<Vec<RustRaftLogEntry>, RustRaftError>;
-    fn hard_state(&self) -> Result<RustRaftHardState, RustRaftError>;
-    fn install_snapshot(&mut self, chunk: RustRaftSnapshotChunk) -> Result<(), RustRaftError>;
+pub trait Storage {
+    fn append_entries(&mut self, entries: &[LogEntry]) -> Result<(), RaftError>;
+    fn read_entries(&self, start: u64, end: u64) -> Result<Vec<LogEntry>, RaftError>;
+    fn hard_state(&self) -> Result<HardState, RaftError>;
+    fn install_snapshot(&mut self, chunk: SnapshotChunk) -> Result<(), RaftError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftLogRange {
-    pub start_index: RustRaftLogIndex,
-    pub end_index: RustRaftLogIndex,
+    pub start_index: LogIndex,
+    pub end_index: LogIndex,
 }
 
 impl MatrixRaftLogRange {
-    pub fn new(start_index: RustRaftLogIndex, end_index: RustRaftLogIndex) -> Self {
+    pub fn new(start_index: LogIndex, end_index: LogIndex) -> Self {
         Self {
             start_index,
             end_index,
@@ -46,7 +43,7 @@ impl MatrixRaftLogRange {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MatrixRaftLogStorageWriteTask {
     pub sync_meta: bool,
-    pub committed_index: RustRaftLogIndex,
+    pub committed_index: LogIndex,
     pub size_hint: usize,
     #[serde(default)]
     pub hard_state: Option<MatrixRaftHardState>,
@@ -67,8 +64,8 @@ pub enum MatrixRaftLogSegmentEventKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftLogSegment {
     pub segment_id: u64,
-    pub first_index: RustRaftLogIndex,
-    pub last_index: RustRaftLogIndex,
+    pub first_index: LogIndex,
+    pub last_index: LogIndex,
     pub bytes: usize,
     pub sealed: bool,
 }
@@ -76,18 +73,18 @@ pub struct MatrixRaftLogSegment {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftLogSegmentEvent {
     pub kind: MatrixRaftLogSegmentEventKind,
-    pub peer_id: RustRaftNodeId,
+    pub peer_id: NodeId,
     pub segment_id: u64,
     pub previous_segment_id: Option<u64>,
-    pub first_index: RustRaftLogIndex,
-    pub last_index: RustRaftLogIndex,
+    pub first_index: LogIndex,
+    pub last_index: LogIndex,
     pub bytes: usize,
 }
 
 impl MatrixRaftLogSegmentEvent {
     fn from_segment(
         kind: MatrixRaftLogSegmentEventKind,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         previous_segment_id: Option<u64>,
         segment: &MatrixRaftLogSegment,
     ) -> Self {
@@ -106,8 +103,8 @@ impl MatrixRaftLogSegmentEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftLogCompactionReport {
     pub initial_state: MatrixRaftInitialState,
-    pub first_retained_index: RustRaftLogIndex,
-    pub last_index: RustRaftLogIndex,
+    pub first_retained_index: LogIndex,
+    pub last_index: LogIndex,
     pub released_segments: Vec<MatrixRaftLogSegmentEvent>,
     pub truncated_segments: Vec<MatrixRaftLogSegmentEvent>,
     pub retained_segments: Vec<MatrixRaftLogSegment>,
@@ -115,19 +112,19 @@ pub struct MatrixRaftLogCompactionReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftLogStoragePrepareOptions {
-    pub peer_id: RustRaftNodeId,
+    pub peer_id: NodeId,
     pub max_segment_bytes: usize,
     pub initial_state: MatrixRaftInitialState,
-    pub role: RustRaftReplicaRole,
+    pub role: ReplicaRole,
     pub local_id: MatrixRaftMemberId,
     pub members: Vec<MatrixRaftMemberId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftLogStorageOptions {
-    pub peer_id: RustRaftNodeId,
+    pub peer_id: NodeId,
     pub max_segment_bytes: usize,
-    pub applied_index: RustRaftLogIndex,
+    pub applied_index: LogIndex,
     pub local_id: MatrixRaftMemberId,
     pub sync: bool,
 }
@@ -137,47 +134,40 @@ pub trait MatrixRaftLogStorage {
         &mut self,
         initial_state: MatrixRaftInitialState,
         members: Vec<MatrixRaftMemberId>,
-    ) -> Result<(), RustRaftError>;
-    fn write(&mut self, task: MatrixRaftLogStorageWriteTask) -> Result<(), RustRaftError>;
-    fn truncate_until(
-        &mut self,
-        initial_state: MatrixRaftInitialState,
-    ) -> Result<(), RustRaftError>;
+    ) -> Result<(), RaftError>;
+    fn write(&mut self, task: MatrixRaftLogStorageWriteTask) -> Result<(), RaftError>;
+    fn truncate_until(&mut self, initial_state: MatrixRaftInitialState) -> Result<(), RaftError>;
     fn compact_until(
         &mut self,
         initial_state: MatrixRaftInitialState,
-    ) -> Result<MatrixRaftLogCompactionReport, RustRaftError>;
-    fn truncate_from_index(&mut self, index: RustRaftLogIndex) -> Result<(), RustRaftError>;
-    fn release_hint(&mut self, index: RustRaftLogIndex);
-    fn set_committed_index(&mut self, committed_index: RustRaftLogIndex);
-    fn load_entries(
-        &self,
-        range: MatrixRaftLogRange,
-    ) -> Result<Vec<MatrixRaftEntry>, RustRaftError>;
-    fn term(&self, index: RustRaftLogIndex) -> Result<RustRaftTerm, RustRaftError>;
-    fn first_index(&self) -> RustRaftLogIndex;
-    fn last_index(&self) -> RustRaftLogIndex;
+    ) -> Result<MatrixRaftLogCompactionReport, RaftError>;
+    fn truncate_from_index(&mut self, index: LogIndex) -> Result<(), RaftError>;
+    fn release_hint(&mut self, index: LogIndex);
+    fn set_committed_index(&mut self, committed_index: LogIndex);
+    fn load_entries(&self, range: MatrixRaftLogRange) -> Result<Vec<MatrixRaftEntry>, RaftError>;
+    fn term(&self, index: LogIndex) -> Result<Term, RaftError>;
+    fn first_index(&self) -> LogIndex;
+    fn last_index(&self) -> LogIndex;
     fn write_bytes(&self) -> usize;
     fn is_segment_based(&self) -> bool;
     fn range(&self) -> MatrixRaftLogRange;
-    fn voted_for(&self) -> Option<RustRaftNodeId>;
-    fn current_term(&self) -> RustRaftTerm;
-    fn committed_index(&self) -> RustRaftLogIndex;
-    fn stabled_committed_index(&self) -> RustRaftLogIndex;
+    fn voted_for(&self) -> Option<NodeId>;
+    fn current_term(&self) -> Term;
+    fn committed_index(&self) -> LogIndex;
+    fn stabled_committed_index(&self) -> LogIndex;
     fn initial_state(&self) -> MatrixRaftInitialState;
     fn members(&self) -> Vec<MatrixRaftMemberId>;
-    fn size_until(&self, index: RustRaftLogIndex) -> usize;
-    fn role(&self) -> RustRaftReplicaRole;
+    fn size_until(&self, index: LogIndex) -> usize;
+    fn role(&self) -> ReplicaRole;
     fn file_indexes(&self) -> Vec<u64>;
     fn segments(&self) -> Vec<MatrixRaftLogSegment>;
     fn segment_events(&self) -> Vec<MatrixRaftLogSegmentEvent>;
     fn drain_segment_events(&mut self) -> Vec<MatrixRaftLogSegmentEvent>;
     fn switch_segment(
         &mut self,
-        next_first_index: RustRaftLogIndex,
-    ) -> Result<MatrixRaftLogSegmentEvent, RustRaftError>;
-    fn release_segments_until(&mut self, index: RustRaftLogIndex)
-        -> Vec<MatrixRaftLogSegmentEvent>;
+        next_first_index: LogIndex,
+    ) -> Result<MatrixRaftLogSegmentEvent, RaftError>;
+    fn release_segments_until(&mut self, index: LogIndex) -> Vec<MatrixRaftLogSegmentEvent>;
 }
 
 pub trait MatrixRaftGroupStorage {
@@ -187,42 +177,39 @@ pub trait MatrixRaftGroupStorage {
         &mut self,
         path: impl Into<String>,
         options: MatrixRaftLogStoragePrepareOptions,
-    ) -> Result<(), RustRaftError>;
+    ) -> Result<(), RaftError>;
     fn open(
         &mut self,
         path: impl Into<String>,
         options: MatrixRaftLogStorageOptions,
-    ) -> Result<Self::Log, RustRaftError>;
-    fn setup_node_env(&mut self, options: &crate::MatrixRaftOptions) -> Result<(), RustRaftError>;
-    fn clean_up_node_env(
-        &mut self,
-        options: &crate::MatrixRaftOptions,
-    ) -> Result<(), RustRaftError>;
+    ) -> Result<Self::Log, RaftError>;
+    fn setup_node_env(&mut self, options: &crate::MatrixRaftOptions) -> Result<(), RaftError>;
+    fn clean_up_node_env(&mut self, options: &crate::MatrixRaftOptions) -> Result<(), RaftError>;
     fn begin(&mut self);
-    fn commit(&mut self) -> Result<(), RustRaftError>;
+    fn commit(&mut self) -> Result<(), RaftError>;
     fn overflow(&self) -> bool;
     fn batch_size(&self) -> usize;
-    fn group_id(&self) -> RustRaftGroupId;
-    fn exists(&self, node_id: RustRaftNodeId) -> bool;
-    fn delete(&mut self, node_id: RustRaftNodeId) -> Result<(), RustRaftError>;
+    fn group_id(&self) -> GroupId;
+    fn exists(&self, node_id: NodeId) -> bool;
+    fn delete(&mut self, node_id: NodeId) -> Result<(), RaftError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMemoryLogStorage {
-    peer_id: RustRaftNodeId,
+    peer_id: NodeId,
     max_segment_bytes: usize,
     initial_state: MatrixRaftInitialState,
-    role: RustRaftReplicaRole,
+    role: ReplicaRole,
     local_id: MatrixRaftMemberId,
     members: Vec<MatrixRaftMemberId>,
     hard_state: MatrixRaftHardState,
-    committed_index: RustRaftLogIndex,
-    stabled_committed_index: RustRaftLogIndex,
-    applied_index: RustRaftLogIndex,
+    committed_index: LogIndex,
+    stabled_committed_index: LogIndex,
+    applied_index: LogIndex,
     sync: bool,
-    entries: BTreeMap<RustRaftLogIndex, MatrixRaftEntry>,
+    entries: BTreeMap<LogIndex, MatrixRaftEntry>,
     write_bytes: usize,
-    last_release_hint: RustRaftLogIndex,
+    last_release_hint: LogIndex,
     segments: Vec<MatrixRaftLogSegment>,
     segment_events: Vec<MatrixRaftLogSegmentEvent>,
 }
@@ -256,7 +243,7 @@ impl MatrixRaftMemoryLogStorage {
         }
     }
 
-    pub fn peer_id(&self) -> RustRaftNodeId {
+    pub fn peer_id(&self) -> NodeId {
         self.peer_id
     }
 
@@ -272,7 +259,7 @@ impl MatrixRaftMemoryLogStorage {
         self.sync
     }
 
-    pub fn last_release_hint(&self) -> RustRaftLogIndex {
+    pub fn last_release_hint(&self) -> LogIndex {
         self.last_release_hint
     }
 
@@ -284,7 +271,7 @@ impl MatrixRaftMemoryLogStorage {
         }
     }
 
-    fn open_segment(&mut self, first_index: RustRaftLogIndex) -> MatrixRaftLogSegmentEvent {
+    fn open_segment(&mut self, first_index: LogIndex) -> MatrixRaftLogSegmentEvent {
         let previous_segment_id = self.seal_active_segment();
         let segment = MatrixRaftLogSegment {
             segment_id: first_index,
@@ -315,11 +302,7 @@ impl MatrixRaftMemoryLogStorage {
         })
     }
 
-    fn append_entry_to_segment(
-        &mut self,
-        index: RustRaftLogIndex,
-        bytes: usize,
-    ) -> Result<(), RustRaftError> {
+    fn append_entry_to_segment(&mut self, index: LogIndex, bytes: usize) -> Result<(), RaftError> {
         if self.segments.is_empty() {
             self.open_segment(index);
         }
@@ -344,7 +327,7 @@ impl MatrixRaftMemoryLogStorage {
         Ok(())
     }
 
-    fn trim_segments_from_index(&mut self, index: RustRaftLogIndex) {
+    fn trim_segments_from_index(&mut self, index: LogIndex) {
         let mut retained = Vec::new();
         for mut segment in self.segments.drain(..) {
             if segment.first_index >= index {
@@ -382,7 +365,7 @@ impl MatrixRaftMemoryLogStorage {
 
     fn compact_segments_through(
         &mut self,
-        index: RustRaftLogIndex,
+        index: LogIndex,
     ) -> (
         Vec<MatrixRaftLogSegmentEvent>,
         Vec<MatrixRaftLogSegmentEvent>,
@@ -434,7 +417,7 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
         &mut self,
         initial_state: MatrixRaftInitialState,
         members: Vec<MatrixRaftMemberId>,
-    ) -> Result<(), RustRaftError> {
+    ) -> Result<(), RaftError> {
         self.entries.clear();
         self.initial_state = initial_state.clone();
         self.hard_state.current_term = initial_state.term;
@@ -447,7 +430,7 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
         Ok(())
     }
 
-    fn write(&mut self, task: MatrixRaftLogStorageWriteTask) -> Result<(), RustRaftError> {
+    fn write(&mut self, task: MatrixRaftLogStorageWriteTask) -> Result<(), RaftError> {
         self.committed_index = self.committed_index.max(task.committed_index);
         if task.sync_meta {
             self.stabled_committed_index = self.stabled_committed_index.max(self.committed_index);
@@ -471,17 +454,14 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
         Ok(())
     }
 
-    fn truncate_until(
-        &mut self,
-        initial_state: MatrixRaftInitialState,
-    ) -> Result<(), RustRaftError> {
+    fn truncate_until(&mut self, initial_state: MatrixRaftInitialState) -> Result<(), RaftError> {
         self.compact_until(initial_state).map(|_| ())
     }
 
     fn compact_until(
         &mut self,
         initial_state: MatrixRaftInitialState,
-    ) -> Result<MatrixRaftLogCompactionReport, RustRaftError> {
+    ) -> Result<MatrixRaftLogCompactionReport, RaftError> {
         if initial_state.index <= self.initial_state.index {
             return Ok(MatrixRaftLogCompactionReport {
                 initial_state: self.initial_state.clone(),
@@ -508,27 +488,24 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
         })
     }
 
-    fn truncate_from_index(&mut self, index: RustRaftLogIndex) -> Result<(), RustRaftError> {
+    fn truncate_from_index(&mut self, index: LogIndex) -> Result<(), RaftError> {
         self.entries.retain(|entry_index, _| *entry_index < index);
         self.trim_segments_from_index(index);
         Ok(())
     }
 
-    fn release_hint(&mut self, index: RustRaftLogIndex) {
+    fn release_hint(&mut self, index: LogIndex) {
         self.last_release_hint = self.last_release_hint.max(index);
         self.release_segments_until(index);
     }
 
-    fn set_committed_index(&mut self, committed_index: RustRaftLogIndex) {
+    fn set_committed_index(&mut self, committed_index: LogIndex) {
         self.committed_index = self.committed_index.max(committed_index);
     }
 
-    fn load_entries(
-        &self,
-        range: MatrixRaftLogRange,
-    ) -> Result<Vec<MatrixRaftEntry>, RustRaftError> {
+    fn load_entries(&self, range: MatrixRaftLogRange) -> Result<Vec<MatrixRaftEntry>, RaftError> {
         if range.end_index < range.start_index {
-            return Err(RustRaftError::InvalidRequest(
+            return Err(RaftError::InvalidRequest(
                 "log range end is before start".to_string(),
             ));
         }
@@ -539,17 +516,17 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
             .collect())
     }
 
-    fn term(&self, index: RustRaftLogIndex) -> Result<RustRaftTerm, RustRaftError> {
+    fn term(&self, index: LogIndex) -> Result<Term, RaftError> {
         if index == self.initial_state.index {
             return Ok(self.initial_state.term);
         }
         self.entries
             .get(&index)
             .map(|entry| entry.term)
-            .ok_or_else(|| RustRaftError::Storage(format!("log term for index {index} not found")))
+            .ok_or_else(|| RaftError::Storage(format!("log term for index {index} not found")))
     }
 
-    fn first_index(&self) -> RustRaftLogIndex {
+    fn first_index(&self) -> LogIndex {
         self.entries
             .keys()
             .next()
@@ -557,7 +534,7 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
             .unwrap_or(self.initial_state.index + 1)
     }
 
-    fn last_index(&self) -> RustRaftLogIndex {
+    fn last_index(&self) -> LogIndex {
         self.entries
             .keys()
             .next_back()
@@ -580,19 +557,19 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
         }
     }
 
-    fn voted_for(&self) -> Option<RustRaftNodeId> {
+    fn voted_for(&self) -> Option<NodeId> {
         self.hard_state.voted_for
     }
 
-    fn current_term(&self) -> RustRaftTerm {
+    fn current_term(&self) -> Term {
         self.hard_state.current_term
     }
 
-    fn committed_index(&self) -> RustRaftLogIndex {
+    fn committed_index(&self) -> LogIndex {
         self.committed_index
     }
 
-    fn stabled_committed_index(&self) -> RustRaftLogIndex {
+    fn stabled_committed_index(&self) -> LogIndex {
         self.stabled_committed_index
     }
 
@@ -604,14 +581,14 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
         self.members.clone()
     }
 
-    fn size_until(&self, index: RustRaftLogIndex) -> usize {
+    fn size_until(&self, index: LogIndex) -> usize {
         self.entries
             .range(..=index)
             .map(|(_, entry)| entry.bytes_size as usize)
             .sum()
     }
 
-    fn role(&self) -> RustRaftReplicaRole {
+    fn role(&self) -> ReplicaRole {
         self.role
     }
 
@@ -636,10 +613,10 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
 
     fn switch_segment(
         &mut self,
-        next_first_index: RustRaftLogIndex,
-    ) -> Result<MatrixRaftLogSegmentEvent, RustRaftError> {
+        next_first_index: LogIndex,
+    ) -> Result<MatrixRaftLogSegmentEvent, RaftError> {
         if next_first_index <= self.last_index() {
-            return Err(RustRaftError::InvalidRequest(format!(
+            return Err(RaftError::InvalidRequest(format!(
                 "segment switch index {next_first_index} is not after last log index {}",
                 self.last_index()
             )));
@@ -647,10 +624,7 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
         Ok(self.open_segment(next_first_index))
     }
 
-    fn release_segments_until(
-        &mut self,
-        index: RustRaftLogIndex,
-    ) -> Vec<MatrixRaftLogSegmentEvent> {
+    fn release_segments_until(&mut self, index: LogIndex) -> Vec<MatrixRaftLogSegmentEvent> {
         let mut released = Vec::new();
         let mut retained = Vec::new();
         for segment in self.segments.drain(..) {
@@ -675,12 +649,12 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 struct MatrixRaftLogStorageKey {
     path: String,
-    peer_id: RustRaftNodeId,
+    peer_id: NodeId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMemoryGroupStorage {
-    group_id: RustRaftGroupId,
+    group_id: GroupId,
     prepared: BTreeMap<MatrixRaftLogStorageKey, MatrixRaftLogStoragePrepareOptions>,
     opened: BTreeMap<MatrixRaftLogStorageKey, MatrixRaftMemoryLogStorage>,
     in_batch: bool,
@@ -689,7 +663,7 @@ pub struct MatrixRaftMemoryGroupStorage {
 }
 
 impl MatrixRaftMemoryGroupStorage {
-    pub fn new(group_id: RustRaftGroupId) -> Self {
+    pub fn new(group_id: GroupId) -> Self {
         Self {
             group_id,
             prepared: BTreeMap::new(),
@@ -705,7 +679,7 @@ impl MatrixRaftMemoryGroupStorage {
         self
     }
 
-    fn key(path: impl Into<String>, peer_id: RustRaftNodeId) -> MatrixRaftLogStorageKey {
+    fn key(path: impl Into<String>, peer_id: NodeId) -> MatrixRaftLogStorageKey {
         MatrixRaftLogStorageKey {
             path: path.into(),
             peer_id,
@@ -720,10 +694,10 @@ impl MatrixRaftGroupStorage for MatrixRaftMemoryGroupStorage {
         &mut self,
         path: impl Into<String>,
         options: MatrixRaftLogStoragePrepareOptions,
-    ) -> Result<(), RustRaftError> {
+    ) -> Result<(), RaftError> {
         let key = Self::key(path, options.peer_id);
         if self.prepared.contains_key(&key) {
-            return Err(RustRaftError::InvalidRequest(format!(
+            return Err(RaftError::InvalidRequest(format!(
                 "matrixraft log storage for peer {} is already prepared",
                 key.peer_id
             )));
@@ -737,13 +711,13 @@ impl MatrixRaftGroupStorage for MatrixRaftMemoryGroupStorage {
         &mut self,
         path: impl Into<String>,
         options: MatrixRaftLogStorageOptions,
-    ) -> Result<Self::Log, RustRaftError> {
+    ) -> Result<Self::Log, RaftError> {
         let key = Self::key(path, options.peer_id);
         let prepare = self
             .prepared
             .get(&key)
             .cloned()
-            .ok_or(RustRaftError::NodeNotFound(options.peer_id))?;
+            .ok_or(RaftError::NodeNotFound(options.peer_id))?;
         let log = self
             .opened
             .entry(key)
@@ -751,8 +725,8 @@ impl MatrixRaftGroupStorage for MatrixRaftMemoryGroupStorage {
         Ok(log.clone())
     }
 
-    fn setup_node_env(&mut self, options: &crate::MatrixRaftOptions) -> Result<(), RustRaftError> {
-        let local_id = MatrixRaftMemberId::from(&crate::RustRaftPeer {
+    fn setup_node_env(&mut self, options: &crate::MatrixRaftOptions) -> Result<(), RaftError> {
+        let local_id = MatrixRaftMemberId::from(&crate::Peer {
             node_id: options.peer_id,
             raft_addr: options.raft_addr.clone(),
             snapshot_addr: options.snapshot_addr.clone(),
@@ -772,10 +746,7 @@ impl MatrixRaftGroupStorage for MatrixRaftMemoryGroupStorage {
         )
     }
 
-    fn clean_up_node_env(
-        &mut self,
-        options: &crate::MatrixRaftOptions,
-    ) -> Result<(), RustRaftError> {
+    fn clean_up_node_env(&mut self, options: &crate::MatrixRaftOptions) -> Result<(), RaftError> {
         self.delete(options.peer_id)
     }
 
@@ -784,7 +755,7 @@ impl MatrixRaftGroupStorage for MatrixRaftMemoryGroupStorage {
         self.batch_size = 0;
     }
 
-    fn commit(&mut self) -> Result<(), RustRaftError> {
+    fn commit(&mut self) -> Result<(), RaftError> {
         self.in_batch = false;
         Ok(())
     }
@@ -797,52 +768,50 @@ impl MatrixRaftGroupStorage for MatrixRaftMemoryGroupStorage {
         self.batch_size
     }
 
-    fn group_id(&self) -> RustRaftGroupId {
+    fn group_id(&self) -> GroupId {
         self.group_id
     }
 
-    fn exists(&self, node_id: RustRaftNodeId) -> bool {
+    fn exists(&self, node_id: NodeId) -> bool {
         self.prepared.keys().any(|key| key.peer_id == node_id)
     }
 
-    fn delete(&mut self, node_id: RustRaftNodeId) -> Result<(), RustRaftError> {
+    fn delete(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         let prepared_before = self.prepared.len();
         self.prepared.retain(|key, _| key.peer_id != node_id);
         self.opened.retain(|key, _| key.peer_id != node_id);
         if prepared_before == self.prepared.len() {
-            return Err(RustRaftError::NodeNotFound(node_id));
+            return Err(RaftError::NodeNotFound(node_id));
         }
         Ok(())
     }
 }
 
-pub fn matrixraft_validate_storage_apply_fence(
-    fence: &RustRaftStorageApplyFence,
-) -> Result<(), RustRaftError> {
+pub fn matrixraft_validate_storage_apply_fence(fence: &StorageApplyFence) -> Result<(), RaftError> {
     if fence.applied_index > fence.committed_index {
-        return Err(RustRaftError::Storage(
+        return Err(RaftError::Storage(
             "storage apply fence is ahead of committed index".to_string(),
         ));
     }
     if fence.durable_applied_index > fence.applied_index {
-        return Err(RustRaftError::Storage(
+        return Err(RaftError::Storage(
             "durable applied index is ahead of in-memory applied index".to_string(),
         ));
     }
     if fence.storage_flushed_index < fence.durable_applied_index {
-        return Err(RustRaftError::Storage(
+        return Err(RaftError::Storage(
             "storage flush is behind durable applied index".to_string(),
         ));
     }
     if fence.installed_snapshot_index > fence.applied_index {
-        return Err(RustRaftError::Storage(
+        return Err(RaftError::Storage(
             "installed snapshot is ahead of applied index".to_string(),
         ));
     }
     if fence.installed_snapshot_index > 0
         && fence.first_retained_log_index <= fence.installed_snapshot_index
     {
-        return Err(RustRaftError::Storage(
+        return Err(RaftError::Storage(
             "first retained log index overlaps installed snapshot".to_string(),
         ));
     }

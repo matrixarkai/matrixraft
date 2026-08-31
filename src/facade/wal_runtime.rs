@@ -5,29 +5,27 @@
 // Split from src/lib.rs to keep the crate facade small and focused.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftApplySnapshotFence {
-    pub applied_index: RustRaftLogIndex,
-    pub commit_index: RustRaftLogIndex,
-    pub installed_snapshot_index: RustRaftLogIndex,
-    pub first_retained_log_index: RustRaftLogIndex,
+pub struct ApplySnapshotFence {
+    pub applied_index: LogIndex,
+    pub commit_index: LogIndex,
+    pub installed_snapshot_index: LogIndex,
+    pub first_retained_log_index: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftStorageApplyFence {
-    pub group_id: RustRaftGroupId,
-    pub node_id: RustRaftNodeId,
-    pub committed_index: RustRaftLogIndex,
-    pub applied_index: RustRaftLogIndex,
-    pub durable_applied_index: RustRaftLogIndex,
-    pub storage_flushed_index: RustRaftLogIndex,
-    pub installed_snapshot_index: RustRaftLogIndex,
-    pub first_retained_log_index: RustRaftLogIndex,
+pub struct StorageApplyFence {
+    pub group_id: GroupId,
+    pub node_id: NodeId,
+    pub committed_index: LogIndex,
+    pub applied_index: LogIndex,
+    pub durable_applied_index: LogIndex,
+    pub storage_flushed_index: LogIndex,
+    pub installed_snapshot_index: LogIndex,
+    pub first_retained_log_index: LogIndex,
 }
 
-pub type RaftStorageApplyFence = RustRaftStorageApplyFence;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftDurabilityParityReport {
+pub struct DurabilityParityReport {
     pub ready: bool,
     pub hard_state_persisted: bool,
     pub wal_record_valid: bool,
@@ -44,7 +42,7 @@ pub struct RustRaftDurabilityParityReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalRaftWal {
     pub max_records_per_segment: usize,
-    segments: Vec<RaftWalSegment>,
+    segments: Vec<WalSegment>,
     next_segment_id: u64,
 }
 
@@ -57,7 +55,7 @@ impl LocalRaftWal {
         }
         Ok(Self {
             max_records_per_segment,
-            segments: vec![RaftWalSegment {
+            segments: vec![WalSegment {
                 segment_id: 0,
                 first_index: 0,
                 last_index: 0,
@@ -68,7 +66,7 @@ impl LocalRaftWal {
         })
     }
 
-    pub fn append(&mut self, mut record: RaftWalRecord) -> Result<String, RaftError> {
+    pub fn append(&mut self, mut record: WalRecord) -> Result<String, RaftError> {
         record.checksum = matrixraft_wal_checksum(&record);
         if self
             .segments
@@ -79,7 +77,7 @@ impl LocalRaftWal {
             if let Some(segment) = self.segments.last_mut() {
                 segment.sealed = true;
             }
-            self.segments.push(RaftWalSegment {
+            self.segments.push(WalSegment {
                 segment_id: self.next_segment_id,
                 first_index: 0,
                 last_index: 0,
@@ -109,25 +107,25 @@ impl LocalRaftWal {
         Ok(checksum)
     }
 
-    pub fn segments(&self) -> &[RaftWalSegment] {
+    pub fn segments(&self) -> &[WalSegment] {
         &self.segments
     }
 
-    pub fn records(&self) -> Vec<RaftWalRecord> {
+    pub fn records(&self) -> Vec<WalRecord> {
         self.segments
             .iter()
             .flat_map(|segment| segment.records.iter().cloned())
             .collect()
     }
 
-    pub fn retained_log_range(&self) -> RaftLogRetainedRange {
+    pub fn retained_log_range(&self) -> LogRetainedRange {
         wal_retained_range(&self.segments)
     }
 
-    pub fn segment_index(&self) -> Vec<RaftWalSegmentIndex> {
+    pub fn segment_index(&self) -> Vec<WalSegmentIndex> {
         self.segments
             .iter()
-            .map(|segment| RaftWalSegmentIndex {
+            .map(|segment| WalSegmentIndex {
                 segment_id: segment.segment_id,
                 first_log_index: segment.first_index,
                 last_log_index: segment.last_index,
@@ -138,7 +136,7 @@ impl LocalRaftWal {
             .collect()
     }
 
-    pub fn recover(&mut self) -> Result<RaftWalRecoveryReport, RaftError> {
+    pub fn recover(&mut self) -> Result<WalRecoveryReport, RaftError> {
         let mut records = self.records();
         let original_len = records.len();
         while matches!(records.last(), Some(record) if !matrixraft_wal_checksum_valid(record)) {
@@ -149,7 +147,7 @@ impl LocalRaftWal {
         if truncated_corrupt_tail {
             self.rebuild_from_records(records.clone())?;
         }
-        Ok(RaftWalRecoveryReport {
+        Ok(WalRecoveryReport {
             recovered,
             truncated_corrupt_tail,
             surviving_records: records.len(),
@@ -170,7 +168,7 @@ impl LocalRaftWal {
         Ok(())
     }
 
-    fn rebuild_from_records(&mut self, records: Vec<RaftWalRecord>) -> Result<(), RaftError> {
+    fn rebuild_from_records(&mut self, records: Vec<WalRecord>) -> Result<(), RaftError> {
         let max_records_per_segment = self.max_records_per_segment;
         *self = LocalRaftWal::new(max_records_per_segment)?;
         for record in records {
@@ -223,7 +221,7 @@ impl PersistentRaftWalOptions {
 #[derive(Debug)]
 pub struct PersistentRaftWal {
     options: PersistentRaftWalOptions,
-    segments: Vec<RaftWalSegment>,
+    segments: Vec<WalSegment>,
     active_segment: File,
     next_segment_id: u64,
     released_segment_count: u64,
@@ -234,6 +232,10 @@ pub struct PersistentRaftWal {
     max_fsync_elapsed_ms: u64,
     compacted_after_slow_fsync_count: u64,
     inject_next_fsync_delay_ms: Option<u64>,
+    /// What the active segment's records already describe, as
+    /// (first index, last index, term at the last index). `None` means the
+    /// segment is empty, so the next record has to be stored whole.
+    active_covered: Option<(LogIndex, LogIndex, Term)>,
 }
 
 impl PersistentRaftWal {
@@ -247,7 +249,7 @@ impl PersistentRaftWal {
         })?;
         let (mut segments, truncated_corrupt_tail) = read_wal_segments_from_dir(&options.dir)?;
         if segments.is_empty() {
-            segments.push(RaftWalSegment {
+            segments.push(WalSegment {
                 segment_id: 0,
                 first_index: 0,
                 last_index: 0,
@@ -265,7 +267,7 @@ impl PersistentRaftWal {
         }
         let active_segment = open_segment_for_append(&options.dir, active_id)?;
         let next_segment_id = active_id + 1;
-        Ok(Self {
+        let mut wal = Self {
             options,
             segments,
             active_segment,
@@ -278,7 +280,63 @@ impl PersistentRaftWal {
             max_fsync_elapsed_ms: 0,
             compacted_after_slow_fsync_count: 0,
             inject_next_fsync_delay_ms: None,
-        })
+            active_covered: None,
+        };
+        wal.active_covered = wal.covered_from_active_segment();
+        Ok(wal)
+    }
+
+    /// Advances coverage using the record just appended. The whole-log case
+    /// resets it; a delta only moves the far end.
+    fn advance_active_covered(&mut self) {
+        let Some(record) = self.segments.last().and_then(|s| s.records.last()) else {
+            self.active_covered = None;
+            return;
+        };
+        let last = record.entries.last();
+        if record.entries_are_delta {
+            if let (Some((first_index, _, _)), Some(last)) = (self.active_covered, last) {
+                self.active_covered = Some((first_index, last.log_id.index, last.log_id.term));
+            }
+            return;
+        }
+        self.active_covered = match (record.entries.first(), last) {
+            (Some(first), Some(last)) => {
+                Some((first.log_id.index, last.log_id.index, last.log_id.term))
+            }
+            _ => None,
+        };
+    }
+
+    /// Turns a whole-log record into the delta this segment can store, or
+    /// returns it whole when a delta would not be sound.
+    fn delta_record(&self, record: &WalRecord) -> WalRecord {
+        let Some((first_index, last_index, last_term)) = self.active_covered else {
+            return whole_record(record);
+        };
+        let Some(base) =
+            matrixraft_wal_delta_base(&record.entries, first_index, last_index, last_term)
+        else {
+            return whole_record(record);
+        };
+        let mut delta = record.clone();
+        delta.entries = record.entries[base..].to_vec();
+        delta.entries_are_delta = true;
+        delta.checksum = matrixraft_wal_checksum(&delta);
+        delta
+    }
+
+    /// Rebuilds the active segment's coverage by folding what is already on
+    /// disk, so an appended-to WAL keeps writing deltas after a reopen.
+    fn covered_from_active_segment(
+        &self,
+    ) -> Option<(LogIndex, LogIndex, Term)> {
+        let segment = self.segments.last()?;
+        let folded = matrixraft_fold_wal_records(&segment.records);
+        let entries = &folded.last()?.entries;
+        let first = entries.first()?;
+        let last = entries.last()?;
+        Some((first.log_id.index, last.log_id.index, last.log_id.term))
     }
 
     pub fn set_slow_fsync_threshold_ms(&mut self, threshold_ms: u64) {
@@ -289,19 +347,80 @@ impl PersistentRaftWal {
         self.inject_next_fsync_delay_ms = Some(delay_ms);
     }
 
-    pub fn append(&mut self, record: RaftWalRecord) -> Result<String, RaftError> {
+    /// What the active segment already describes, for a caller that wants to
+    /// build the delta itself rather than hand over the whole log.
+    pub fn active_coverage(&self) -> Option<(LogIndex, LogIndex, Term)> {
+        self.active_covered
+    }
+
+    /// Appends a record the caller builds on demand.
+    ///
+    /// `build` is handed the coverage the record should be written against, or
+    /// `None` when a whole-log record is required -- at the start of a segment,
+    /// and again if rolling turns out to be necessary after the record was
+    /// built. Callers that can produce a delta cheaply should use this instead
+    /// of [`Self::append`], which has to be given the whole log every time.
+    pub fn append_built<F>(&mut self, mut build: F) -> Result<WalWriteReport, RaftError>
+    where
+        F: FnMut(
+            Option<(LogIndex, LogIndex, Term)>,
+        ) -> Result<WalRecord, RaftError>,
+    {
+        let active_records = self
+            .segments
+            .last()
+            .map(|segment| segment.records.len())
+            .unwrap_or_default();
+        let rolling_by_count = active_records >= self.options.max_records_per_segment;
+        let coverage = if rolling_by_count {
+            None
+        } else {
+            self.active_covered
+        };
+        let record = build(coverage)?;
+        self.write_record(record, active_records, rolling_by_count, || build(None))
+    }
+
+    pub fn append(&mut self, record: WalRecord) -> Result<String, RaftError> {
         Ok(self.append_with_report(record)?.checksum)
     }
 
     pub fn append_with_report(
         &mut self,
-        mut record: RaftWalRecord,
-    ) -> Result<RaftWalWriteReport, RaftError> {
-        record.checksum = matrixraft_wal_checksum(&record);
+        record: WalRecord,
+    ) -> Result<WalWriteReport, RaftError> {
+        let active_records = self
+            .segments
+            .last()
+            .map(|segment| segment.records.len())
+            .unwrap_or_default();
+        let rolling_by_count = active_records >= self.options.max_records_per_segment;
+        let stored = if rolling_by_count {
+            whole_record(&record)
+        } else {
+            self.delta_record(&record)
+        };
+        self.write_record(stored, active_records, rolling_by_count, || {
+            Ok(whole_record(&record))
+        })
+    }
+
+    /// Writes a record that has already been reduced to what will be stored.
+    ///
+    /// `whole` is only called when rolling turns out to be necessary after the
+    /// record was built, since the segment it was a delta against is then
+    /// sealed and the new segment has to open with a whole-log record.
+    fn write_record<W>(
+        &mut self,
+        mut record: WalRecord,
+        active_records: usize,
+        rolling_by_count: bool,
+        whole: W,
+    ) -> Result<WalWriteReport, RaftError>
+    where
+        W: FnOnce() -> Result<WalRecord, RaftError>,
+    {
         let hard_state_persisted = matrixraft_validate_hard_state_persistence(&record).is_ok();
-        let encoded = serde_json::to_string(&record)
-            .map_err(|err| RaftError::Storage(format!("failed to encode WAL record: {err}")))?;
-        let record_bytes = encoded.len() as u64 + 1;
         let active_len = self
             .active_segment
             .metadata()
@@ -309,17 +428,22 @@ impl PersistentRaftWal {
                 RaftError::Storage(format!("failed to read WAL active segment metadata: {err}"))
             })?
             .len();
-        let active_records = self
-            .segments
-            .last()
-            .map(|segment| segment.records.len())
-            .unwrap_or_default();
+        let mut encoded = encode_wal_record(&record)?;
+        let mut record_bytes = encoded.len() as u64 + 1;
+
         let mut segment_rolled = false;
-        if active_records >= self.options.max_records_per_segment
+        if rolling_by_count
             || (active_records > 0 && active_len + record_bytes > self.options.max_segment_bytes)
         {
             self.roll_segment()?;
             segment_rolled = true;
+            if record.entries_are_delta {
+                record = whole()?;
+                record.entries_are_delta = false;
+                record.checksum = matrixraft_wal_checksum(&record);
+                encoded = encode_wal_record(&record)?;
+                record_bytes = encoded.len() as u64 + 1;
+            }
         }
 
         self.active_segment
@@ -363,7 +487,8 @@ impl PersistentRaftWal {
         segment.last_index = record_index;
         segment.records.push(record);
         let segment_id = segment.segment_id;
-        Ok(RaftWalWriteReport {
+        self.advance_active_covered();
+        Ok(WalWriteReport {
             segment_id,
             log_index: record_index,
             checksum,
@@ -379,15 +504,16 @@ impl PersistentRaftWal {
         })
     }
 
-    pub fn recover(&mut self) -> Result<RaftWalRecoveryReport, RaftError> {
+    pub fn recover(&mut self) -> Result<WalRecoveryReport, RaftError> {
         let (segments, truncated_corrupt_tail) = read_wal_segments_from_dir(&self.options.dir)?;
         let original_len = self.records().len();
-        let records: Vec<_> = segments
+        let stored: Vec<_> = segments
             .iter()
             .flat_map(|segment| segment.records.iter().cloned())
             .collect();
+        let records = matrixraft_fold_wal_records(&stored);
         self.segments = if segments.is_empty() {
-            vec![RaftWalSegment {
+            vec![WalSegment {
                 segment_id: 0,
                 first_index: 0,
                 last_index: 0,
@@ -407,9 +533,10 @@ impl PersistentRaftWal {
         }
         self.active_segment = open_segment_for_append(&self.options.dir, active_id)?;
         self.next_segment_id = active_id + 1;
+        self.active_covered = self.covered_from_active_segment();
         let observed_corrupt_tail = self.truncated_corrupt_tail || truncated_corrupt_tail;
         self.truncated_corrupt_tail = observed_corrupt_tail;
-        Ok(RaftWalRecoveryReport {
+        Ok(WalRecoveryReport {
             recovered: matrixraft_recover_latest_wal_record(&records).ok(),
             truncated_corrupt_tail: observed_corrupt_tail,
             surviving_records: records.len(),
@@ -420,7 +547,7 @@ impl PersistentRaftWal {
         })
     }
 
-    pub fn compact_through(&mut self, log_index: RustRaftLogIndex) -> Result<u64, RaftError> {
+    pub fn compact_through(&mut self, log_index: LogIndex) -> Result<u64, RaftError> {
         if self.segments.len() <= self.options.min_keep_segments {
             return Ok(0);
         }
@@ -461,11 +588,11 @@ impl PersistentRaftWal {
 
     pub fn compact_through_with_fence(
         &mut self,
-        log_index: RustRaftLogIndex,
-        fence: &RustRaftStorageApplyFence,
-    ) -> Result<RaftWalCompactionReport, RaftError> {
+        log_index: LogIndex,
+        fence: &StorageApplyFence,
+    ) -> Result<WalCompactionReport, RaftError> {
         if let Err(error) = matrixraft_validate_storage_apply_fence(fence) {
-            return Ok(RaftWalCompactionReport {
+            return Ok(WalCompactionReport {
                 requested_log_index: log_index,
                 released_segments: 0,
                 retained_range: self.retained_log_range(),
@@ -474,7 +601,7 @@ impl PersistentRaftWal {
             });
         }
         if fence.durable_applied_index < log_index || fence.storage_flushed_index < log_index {
-            return Ok(RaftWalCompactionReport {
+            return Ok(WalCompactionReport {
                 requested_log_index: log_index,
                 released_segments: 0,
                 retained_range: self.retained_log_range(),
@@ -483,7 +610,7 @@ impl PersistentRaftWal {
             });
         }
         let released_segments = self.compact_through(log_index)?;
-        Ok(RaftWalCompactionReport {
+        Ok(WalCompactionReport {
             requested_log_index: log_index,
             released_segments,
             retained_range: self.retained_log_range(),
@@ -492,7 +619,7 @@ impl PersistentRaftWal {
         })
     }
 
-    pub fn status(&self) -> RustRaftWalLifecycleStatus {
+    pub fn status(&self) -> WalLifecycleStatus {
         let total_records = self.records().len() as u64;
         let total_bytes = self
             .segments
@@ -511,7 +638,7 @@ impl PersistentRaftWal {
             })
             .map(|metadata| metadata.len())
             .unwrap_or_default();
-        RustRaftWalLifecycleStatus {
+        WalLifecycleStatus {
             segment_count: self.segments.len() as u64,
             active_segment_id: self
                 .segments
@@ -561,27 +688,29 @@ impl PersistentRaftWal {
         }
     }
 
-    pub fn segments(&self) -> &[RaftWalSegment] {
+    pub fn segments(&self) -> &[WalSegment] {
         &self.segments
     }
 
-    pub fn segment_index(&self) -> Vec<RaftWalSegmentIndex> {
+    pub fn segment_index(&self) -> Vec<WalSegmentIndex> {
         wal_segment_index(&self.options.dir, &self.segments)
     }
 
-    pub fn retained_log_range(&self) -> RaftLogRetainedRange {
+    pub fn retained_log_range(&self) -> LogRetainedRange {
         wal_retained_range(&self.segments)
     }
 
-    pub fn checksum_format(&self) -> RaftWalChecksumFormat {
+    pub fn checksum_format(&self) -> WalChecksumFormat {
         matrixraft_wal_checksum_format()
     }
 
-    pub fn records(&self) -> Vec<RaftWalRecord> {
-        self.segments
+    pub fn records(&self) -> Vec<WalRecord> {
+        let stored: Vec<_> = self
+            .segments
             .iter()
             .flat_map(|segment| segment.records.iter().cloned())
-            .collect()
+            .collect();
+        matrixraft_fold_wal_records(&stored)
     }
 
     pub fn corrupt_tail_for_test(&mut self) -> Result<(), RaftError> {
@@ -600,7 +729,7 @@ impl PersistentRaftWal {
         }
         let segment_id = self.next_segment_id;
         self.next_segment_id += 1;
-        let segment = RaftWalSegment {
+        let segment = WalSegment {
             segment_id,
             first_index: 0,
             last_index: 0,
@@ -616,11 +745,23 @@ impl PersistentRaftWal {
 
 pub type FileRaftWal = PersistentRaftWal;
 
+fn whole_record(record: &WalRecord) -> WalRecord {
+    let mut whole = record.clone();
+    whole.entries_are_delta = false;
+    whole.checksum = matrixraft_wal_checksum(&whole);
+    whole
+}
+
+fn encode_wal_record(record: &WalRecord) -> Result<String, RaftError> {
+    serde_json::to_string(record)
+        .map_err(|err| RaftError::Storage(format!("failed to encode WAL record: {err}")))
+}
+
 fn wal_segment_path(dir: &Path, segment_id: u64) -> PathBuf {
     dir.join(format!("{segment_id:020}.wal"))
 }
 
-fn wal_record_index(record: &RaftWalRecord) -> RustRaftLogIndex {
+fn wal_record_index(record: &WalRecord) -> LogIndex {
     record
         .hard_state
         .committed
@@ -630,8 +771,8 @@ fn wal_record_index(record: &RaftWalRecord) -> RustRaftLogIndex {
         .unwrap_or_default()
 }
 
-fn wal_retained_range(segments: &[RaftWalSegment]) -> RaftLogRetainedRange {
-    RaftLogRetainedRange {
+fn wal_retained_range(segments: &[WalSegment]) -> LogRetainedRange {
+    LogRetainedRange {
         first_log_index: segments
             .iter()
             .find(|segment| segment.first_index > 0)
@@ -658,10 +799,10 @@ fn wal_retained_range(segments: &[RaftWalSegment]) -> RaftLogRetainedRange {
     }
 }
 
-fn wal_segment_index(dir: &Path, segments: &[RaftWalSegment]) -> Vec<RaftWalSegmentIndex> {
+fn wal_segment_index(dir: &Path, segments: &[WalSegment]) -> Vec<WalSegmentIndex> {
     segments
         .iter()
-        .map(|segment| RaftWalSegmentIndex {
+        .map(|segment| WalSegmentIndex {
             segment_id: segment.segment_id,
             first_log_index: segment.first_index,
             last_log_index: segment.last_index,
@@ -683,7 +824,7 @@ fn open_segment_for_append(dir: &Path, segment_id: u64) -> Result<File, RaftErro
         .map_err(|err| RaftError::Storage(format!("failed to open WAL segment: {err}")))
 }
 
-fn write_wal_segment_file(dir: &Path, segment: &RaftWalSegment) -> Result<(), RaftError> {
+fn write_wal_segment_file(dir: &Path, segment: &WalSegment) -> Result<(), RaftError> {
     let mut file = File::create(wal_segment_path(dir, segment.segment_id))
         .map_err(|err| RaftError::Storage(format!("failed to create WAL segment: {err}")))?;
     for record in &segment.records {
@@ -697,7 +838,7 @@ fn write_wal_segment_file(dir: &Path, segment: &RaftWalSegment) -> Result<(), Ra
         .map_err(|err| RaftError::Storage(format!("failed to fsync WAL segment: {err}")))
 }
 
-fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<RaftWalSegment>, bool), RaftError> {
+fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<WalSegment>, bool), RaftError> {
     let mut files = fs::read_dir(dir)
         .map_err(|err| RaftError::Storage(format!("failed to read WAL directory: {err}")))?
         .filter_map(|entry| entry.ok())
@@ -721,7 +862,7 @@ fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<RaftWalSegment>, bool),
         truncated_corrupt_tail |= truncated;
         let first_index = records.first().map(wal_record_index).unwrap_or_default();
         let last_index = records.last().map(wal_record_index).unwrap_or_default();
-        segments.push(RaftWalSegment {
+        segments.push(WalSegment {
             segment_id,
             first_index,
             last_index,
@@ -732,7 +873,7 @@ fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<RaftWalSegment>, bool),
     Ok((segments, truncated_corrupt_tail))
 }
 
-fn read_wal_segment_file(path: &Path) -> Result<(Vec<RaftWalRecord>, bool), RaftError> {
+fn read_wal_segment_file(path: &Path) -> Result<(Vec<WalRecord>, bool), RaftError> {
     let file = File::open(path)
         .map_err(|err| RaftError::Storage(format!("failed to open WAL segment: {err}")))?;
     let reader = BufReader::new(file);
@@ -752,7 +893,7 @@ fn read_wal_segment_file(path: &Path) -> Result<(Vec<RaftWalRecord>, bool), Raft
             valid_end_offset = current_offset;
             continue;
         }
-        let Ok(record) = serde_json::from_slice::<RaftWalRecord>(&line) else {
+        let Ok(record) = serde_json::from_slice::<WalRecord>(&line) else {
             truncated = true;
             break;
         };

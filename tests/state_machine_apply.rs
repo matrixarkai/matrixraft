@@ -3,11 +3,11 @@
 
 use matrixraft::{
     matrixraft_apply_entry, matrixraft_flexible_apply_with_store,
-    matrixraft_flexible_apply_with_store_report, EntryPayload, MatrixRaftCheckpoint,
-    MatrixRaftConfigurationApplied, MatrixRaftFsm, MatrixRaftFsmEntry, MatrixRaftFsmEntryKind,
-    MatrixRaftStoreFsm, RaftApply, RaftApplyRequest, RaftApplyResponse, RaftLogEntry,
-    RaftStateMachine, RustRaftApplyRequest, RustRaftApplyResponse, RustRaftLogId, RustRaftNodeId,
-    RustRaftSnapshotChunk, RustRaftSnapshotMeta, RustRaftStateMachine,
+    matrixraft_flexible_apply_with_store_report, ApplyRequest, ApplyResponse, EntryPayload, LogId,
+    MatrixRaftCheckpoint, MatrixRaftConfigurationApplied, MatrixRaftFsm, MatrixRaftFsmEntry,
+    MatrixRaftFsmEntryKind, MatrixRaftStoreFsm, NodeId, RaftApply, RaftApplyRequest,
+    RaftApplyResponse, RaftLogEntry, RaftStateMachine, SnapshotChunk, SnapshotMetadata,
+    StateMachine,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,8 +87,8 @@ struct MatrixStyleStateMachine {
     opened: bool,
     closed: bool,
     applied: Vec<(u64, Vec<u8>)>,
-    following: Vec<(u64, RustRaftNodeId)>,
-    stopped_following: Vec<(u64, RustRaftNodeId)>,
+    following: Vec<(u64, NodeId)>,
+    stopped_following: Vec<(u64, NodeId)>,
     leader_terms: Vec<u64>,
     stopped_leader_terms: Vec<u64>,
     configs: Vec<MatrixRaftConfigurationApplied>,
@@ -114,7 +114,7 @@ impl MatrixRaftFsm for MatrixStyleStateMachine {
     fn on_start_following(
         &mut self,
         cur_leader_term: u64,
-        cur_leader_id: RustRaftNodeId,
+        cur_leader_id: NodeId,
     ) -> Result<(), matrixraft::RaftError> {
         self.following.push((cur_leader_term, cur_leader_id));
         Ok(())
@@ -123,7 +123,7 @@ impl MatrixRaftFsm for MatrixStyleStateMachine {
     fn on_stop_following(
         &mut self,
         prev_leader_term: u64,
-        prev_leader_id: RustRaftNodeId,
+        prev_leader_id: NodeId,
     ) -> Result<(), matrixraft::RaftError> {
         self.stopped_following
             .push((prev_leader_term, prev_leader_id));
@@ -184,23 +184,20 @@ impl MatrixRaftStoreFsm for MatrixStyleStore {
     }
 }
 
-impl RustRaftStateMachine for OpaqueBytesStateMachine {
-    fn apply(
-        &mut self,
-        request: RustRaftApplyRequest,
-    ) -> Result<RustRaftApplyResponse, matrixraft::RustRaftError> {
+impl StateMachine for OpaqueBytesStateMachine {
+    fn apply(&mut self, request: ApplyRequest) -> Result<ApplyResponse, matrixraft::RaftError> {
         self.applied.push(request.payload.clone());
-        Ok(RustRaftApplyResponse {
+        Ok(ApplyResponse {
             applied_index: request.log_id.index,
             response: request.payload,
         })
     }
 
-    fn snapshot(&self) -> Result<RustRaftSnapshotChunk, matrixraft::RustRaftError> {
-        Ok(RustRaftSnapshotChunk {
-            meta: RustRaftSnapshotMeta {
+    fn snapshot(&self) -> Result<SnapshotChunk, matrixraft::RaftError> {
+        Ok(SnapshotChunk {
+            meta: SnapshotMetadata {
                 snapshot_id: "opaque".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 1 },
+                last_log_id: LogId { term: 1, index: 1 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
             },
@@ -210,10 +207,7 @@ impl RustRaftStateMachine for OpaqueBytesStateMachine {
         })
     }
 
-    fn install_snapshot(
-        &mut self,
-        chunk: RustRaftSnapshotChunk,
-    ) -> Result<(), matrixraft::RustRaftError> {
+    fn install_snapshot(&mut self, chunk: SnapshotChunk) -> Result<(), matrixraft::RaftError> {
         self.applied = vec![chunk.data];
         Ok(())
     }
@@ -226,7 +220,7 @@ fn generic_apply_trait_accepts_temporalstore_data_shard_payloads() {
         &mut state_machine,
         "tenant-a/shard-7".to_string(),
         RaftLogEntry {
-            log_id: RustRaftLogId { term: 3, index: 11 },
+            log_id: LogId { term: 3, index: 11 },
             payload: DataShardPayload {
                 key: "temperature".to_string(),
                 value: b"72".to_vec(),
@@ -254,7 +248,7 @@ fn generic_apply_trait_accepts_temporalstore_meta_payloads() {
         &mut state_machine,
         42,
         RaftLogEntry {
-            log_id: RustRaftLogId { term: 4, index: 8 },
+            log_id: LogId { term: 4, index: 8 },
             payload: MetaPayload {
                 assignment: "shard-7 -> node-2".to_string(),
             },
@@ -275,7 +269,7 @@ fn opaque_bytes_state_machine_still_uses_compatibility_trait() {
         &mut state_machine,
         7,
         RaftLogEntry {
-            log_id: RustRaftLogId { term: 1, index: 2 },
+            log_id: LogId { term: 1, index: 2 },
             payload: b"opaque temporalstore command bytes".to_vec(),
             is_command: true,
         },
@@ -309,14 +303,8 @@ fn matrix_style_flexible_apply_reports_mixed_meta_and_data_entries() {
     assert_eq!(report.skipped_meta, 1);
     assert_eq!(report.skipped_noop, 1);
     assert_eq!(report.skipped_config_change, 1);
-    assert_eq!(
-        report.first_log_id,
-        Some(RustRaftLogId { term: 2, index: 4 })
-    );
-    assert_eq!(
-        report.last_log_id,
-        Some(RustRaftLogId { term: 2, index: 8 })
-    );
+    assert_eq!(report.first_log_id, Some(LogId { term: 2, index: 4 }));
+    assert_eq!(report.last_log_id, Some(LogId { term: 2, index: 8 }));
     assert_eq!(report.applied_through, 8);
     assert_eq!(report.next_index, 9);
     assert_eq!(
@@ -334,7 +322,7 @@ fn matrix_style_flexible_apply_reports_mixed_meta_and_data_entries() {
         &mut store,
         vec![MatrixRaftFsmEntry {
             batch_id: 99,
-            log_id: RustRaftLogId { term: 3, index: 9 },
+            log_id: LogId { term: 3, index: 9 },
             data: b"put pressure=30".to_vec(),
             kind: MatrixRaftFsmEntryKind::Data,
         }],

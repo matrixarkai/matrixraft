@@ -2,33 +2,32 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    matrixraft_apply_batch_outcome, matrixraft_peer_pipeline_status_from_observed, RaftCluster,
-    RaftReplicationPipeline, RustRaftAppendEntriesResponse, RustRaftApplyBatchStatus,
-    RustRaftLogEntry, RustRaftLogId, RustRaftObservedPeerPipeline, RustRaftPeer,
-    RustRaftPeerProgressState, RustRaftPipelineLimits, RustRaftReplicaRole, RustRaftRole,
-    RustRaftSnapshotState,
+    matrixraft_apply_batch_outcome, matrixraft_peer_pipeline_status_from_observed,
+    AppendEntriesResponse, ApplyBatchStatus, LogEntry, LogId, ObservedPeerPipeline, Peer,
+    PipelineLimits, ProgressState, RaftCluster, ReplicaRole, ReplicationPipeline, SnapshotState,
+    StateRole,
 };
 
-fn entry(index: u64, payload: &[u8]) -> RustRaftLogEntry {
-    RustRaftLogEntry {
-        log_id: RustRaftLogId { term: 1, index },
+fn entry(index: u64, payload: &[u8]) -> LogEntry {
+    LogEntry {
+        log_id: LogId { term: 1, index },
         payload: payload.to_vec(),
         is_command: true,
     }
 }
 
-fn peer(node_id: u64) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 14_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 15_000 + node_id),
-        role: RustRaftReplicaRole::Voter,
+        role: ReplicaRole::Voter,
         auto_promote: false,
     }
 }
 
-fn small_limits() -> RustRaftPipelineLimits {
-    RustRaftPipelineLimits {
+fn small_limits() -> PipelineLimits {
+    PipelineLimits {
         max_inflights_replicate: 1,
         max_memory_replicate_log_bytes: 16,
         max_inflights_apply_task: 2,
@@ -41,7 +40,7 @@ fn small_limits() -> RustRaftPipelineLimits {
 
 #[test]
 fn observed_peer_pipeline_converts_into_full_status_surface() {
-    let observed = RustRaftObservedPeerPipeline {
+    let observed = ObservedPeerPipeline {
         peer_id: 7,
         match_index: 8,
         next_index: 11,
@@ -97,7 +96,7 @@ fn observed_peer_pipeline_converts_into_full_status_surface() {
     let status = matrixraft_peer_pipeline_status_from_observed(&observed);
 
     assert_eq!(status.peer_id, 7);
-    assert_eq!(status.progress_state, RustRaftPeerProgressState::Replicate);
+    assert_eq!(status.progress_state, ProgressState::Replicate);
     assert!(status.paused);
     assert!(status.old_paused);
     assert_eq!(status.follower_lag, 2);
@@ -119,9 +118,8 @@ fn apply_batch_outcome_splits_pending_suffix() {
         entry(12, b"twelve"),
     ];
 
-    let full =
-        matrixraft_apply_batch_outcome(&entries, entries.len(), RustRaftApplyBatchStatus::Applied);
-    assert_eq!(full.status, RustRaftApplyBatchStatus::Applied);
+    let full = matrixraft_apply_batch_outcome(&entries, entries.len(), ApplyBatchStatus::Applied);
+    assert_eq!(full.status, ApplyBatchStatus::Applied);
     assert_eq!(full.first_log_id.as_ref().map(|id| id.index), Some(10));
     assert_eq!(full.last_log_id.as_ref().map(|id| id.index), Some(12));
     assert_eq!(full.applied_through, 12);
@@ -129,8 +127,8 @@ fn apply_batch_outcome_splits_pending_suffix() {
     assert_eq!(full.applied_entries.len(), 3);
     assert!(full.pending_entries.is_empty());
 
-    let partial = matrixraft_apply_batch_outcome(&entries, 2, RustRaftApplyBatchStatus::NotReady);
-    assert_eq!(partial.status, RustRaftApplyBatchStatus::NotReady);
+    let partial = matrixraft_apply_batch_outcome(&entries, 2, ApplyBatchStatus::NotReady);
+    assert_eq!(partial.status, ApplyBatchStatus::NotReady);
     assert_eq!(partial.applied_through, 11);
     assert_eq!(partial.next_index, 12);
     assert_eq!(
@@ -150,15 +148,15 @@ fn apply_batch_outcome_splits_pending_suffix() {
         vec![12]
     );
 
-    let rejected = matrixraft_apply_batch_outcome(&entries, 0, RustRaftApplyBatchStatus::Rejected);
-    assert_eq!(rejected.status, RustRaftApplyBatchStatus::Rejected);
+    let rejected = matrixraft_apply_batch_outcome(&entries, 0, ApplyBatchStatus::Rejected);
+    assert_eq!(rejected.status, ApplyBatchStatus::Rejected);
     assert_eq!(rejected.applied_through, 0);
     assert_eq!(rejected.next_index, 10);
     assert!(rejected.applied_entries.is_empty());
     assert_eq!(rejected.pending_entries, entries);
 
-    let empty = matrixraft_apply_batch_outcome(&[], 4, RustRaftApplyBatchStatus::Applied);
-    assert_eq!(empty.status, RustRaftApplyBatchStatus::Applied);
+    let empty = matrixraft_apply_batch_outcome(&[], 4, ApplyBatchStatus::Applied);
+    assert_eq!(empty.status, ApplyBatchStatus::Applied);
     assert_eq!(empty.first_log_id, None);
     assert_eq!(empty.last_log_id, None);
     assert_eq!(empty.applied_through, 0);
@@ -169,10 +167,10 @@ fn apply_batch_outcome_splits_pending_suffix() {
 
 #[test]
 fn replication_pipeline_batches_retries_backoff_and_lag() {
-    let mut pipeline = RaftReplicationPipeline::new(
+    let mut pipeline = ReplicationPipeline::new(
         2,
         1,
-        RustRaftPipelineLimits {
+        PipelineLimits {
             max_inflights_replicate: 8,
             max_memory_replicate_log_bytes: 1024,
             max_inflights_apply_task: 2,
@@ -182,7 +180,7 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
             reorder_timeout_us: 10,
         },
     );
-    pipeline.set_progress_state(RustRaftPeerProgressState::Replicate);
+    pipeline.set_progress_state(ProgressState::Replicate);
 
     pipeline.queue_append(&entry(1, b"one")).expect("queue one");
     pipeline.queue_append(&entry(2, b"two")).expect("queue two");
@@ -199,14 +197,14 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
     assert_eq!(pipeline.status().max_append_batch_entries, 3);
 
     assert!(pipeline
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: false,
             match_index: 0,
             rejection_hint: Some(0),
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
@@ -220,14 +218,14 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
     assert!(pipeline.record_retry_backoff_tick(remaining));
 
     pipeline
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: true,
             match_index: 3,
             rejection_hint: None,
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
@@ -237,14 +235,14 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
     assert_eq!(pipeline.update_follower_lag(5), 2);
 
     pipeline
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: false,
             match_index: 1,
             rejection_hint: Some(1),
             rejected_index: Some(2),
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
@@ -265,7 +263,7 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
     assert_eq!(pipeline.status().packet_loss_events, 1);
     assert_eq!(pipeline.status().network_error_probe_transitions, 1);
 
-    let mut probing = RaftReplicationPipeline::new(4, 7, RustRaftPipelineLimits::default());
+    let mut probing = ReplicationPipeline::new(4, 7, PipelineLimits::default());
     probing
         .queue_append(&entry(7, b"seven"))
         .expect("queue probe");
@@ -277,7 +275,7 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
     assert_eq!(probe_flush[0].entry_count, 1);
     assert_eq!(probe_flush[0].first_log_id.index, 7);
     assert_eq!(probe_flush[0].last_log_id.index, 7);
-    assert_eq!(probing.progress_state(), RustRaftPeerProgressState::Probe);
+    assert_eq!(probing.progress_state(), ProgressState::Probe);
     assert!(probing.is_paused());
     let before = probing.status();
     assert!(!probing.record_network_error());
@@ -293,10 +291,10 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
 
 #[test]
 fn replication_pipeline_pauses_and_resumes_progress() {
-    let mut probe = RaftReplicationPipeline::new(
+    let mut probe = ReplicationPipeline::new(
         2,
         1,
-        RustRaftPipelineLimits {
+        PipelineLimits {
             max_inflights_replicate: 4,
             max_memory_replicate_log_bytes: 1024,
             max_inflights_apply_task: 2,
@@ -308,7 +306,7 @@ fn replication_pipeline_pauses_and_resumes_progress() {
     );
     probe.queue_append(&entry(1, b"a")).expect("queue 1");
     probe.queue_append(&entry(2, b"b")).expect("queue 2");
-    assert_eq!(probe.progress_state(), RustRaftPeerProgressState::Probe);
+    assert_eq!(probe.progress_state(), ProgressState::Probe);
     assert_eq!(probe.flush_append_batch(1, 256).len(), 1);
     assert!(probe.is_paused());
     assert_eq!(probe.flush_append_batch(1, 256).len(), 0);
@@ -316,47 +314,47 @@ fn replication_pipeline_pauses_and_resumes_progress() {
     assert!(!probe.is_paused());
     assert_eq!(probe.flush_append_batch(1, 256).len(), 1);
     probe
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: true,
             match_index: 2,
             rejection_hint: None,
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
         .expect("probe success promotes replicate");
-    assert_eq!(probe.progress_state(), RustRaftPeerProgressState::Replicate);
-    assert!(probe.no_inflights());
+    assert_eq!(probe.progress_state(), ProgressState::Replicate);
+    assert!(probe.inflight_is_empty());
 
     probe.queue_append(&entry(3, b"c")).expect("queue 3");
     assert_eq!(probe.flush_append_window().len(), 1);
     assert!(probe
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: false,
             match_index: 2,
             rejection_hint: Some(2),
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
         .is_err());
-    assert_eq!(probe.progress_state(), RustRaftPeerProgressState::Probe);
+    assert_eq!(probe.progress_state(), ProgressState::Probe);
 
-    let mut replicate = RaftReplicationPipeline::new(3, 1, small_limits());
-    replicate.set_progress_state(RustRaftPeerProgressState::Replicate);
+    let mut replicate = ReplicationPipeline::new(3, 1, small_limits());
+    replicate.set_progress_state(ProgressState::Replicate);
     replicate.queue_append(&entry(1, b"a")).expect("queue");
     assert_eq!(replicate.flush_append_window().len(), 1);
     assert!(replicate.is_paused());
-    assert!(!replicate.no_inflights());
+    assert!(!replicate.inflight_is_empty());
     replicate.resume();
     assert!(!replicate.is_paused());
-    assert!(replicate.no_inflights());
+    assert!(replicate.inflight_is_empty());
     assert!(replicate.status().old_paused);
     assert!(replicate.take_empty_append_due_to_old_pause());
     assert!(!replicate.status().old_paused);
@@ -365,7 +363,7 @@ fn replication_pipeline_pauses_and_resumes_progress() {
 
 #[test]
 fn heartbeat_response_resumes_paused_peer() {
-    let mut probe = RaftReplicationPipeline::new(2, 1, small_limits());
+    let mut probe = ReplicationPipeline::new(2, 1, small_limits());
     probe.queue_append(&entry(1, b"a")).expect("queue append");
     assert_eq!(probe.flush_append_batch(1, 1024).len(), 1);
     assert!(probe.is_paused());
@@ -373,36 +371,36 @@ fn heartbeat_response_resumes_paused_peer() {
     probe.record_heartbeat_response();
 
     assert!(!probe.is_paused());
-    assert_eq!(probe.progress_state(), RustRaftPeerProgressState::Probe);
+    assert_eq!(probe.progress_state(), ProgressState::Probe);
     assert_eq!(probe.status().next_index, 1);
 }
 
 #[test]
 fn stale_success_does_not_unpause_or_free_inflight() {
-    let mut probe = RaftReplicationPipeline::new(2, 5, RustRaftPipelineLimits::default());
+    let mut probe = ReplicationPipeline::new(2, 5, PipelineLimits::default());
     probe.queue_append(&entry(5, b"five")).expect("queue probe");
     assert_eq!(probe.flush_append_batch(1, 1024).len(), 1);
     assert!(probe.is_paused());
 
     probe
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: true,
             match_index: 4,
             rejection_hint: None,
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
         .expect("stale probe success is accepted but not advanced");
-    assert_eq!(probe.progress_state(), RustRaftPeerProgressState::Probe);
+    assert_eq!(probe.progress_state(), ProgressState::Probe);
     assert!(probe.is_paused());
     assert_eq!(probe.status().next_index, 5);
 
-    let mut replicate = RaftReplicationPipeline::new(3, 5, small_limits());
-    replicate.set_progress_state(RustRaftPeerProgressState::Replicate);
+    let mut replicate = ReplicationPipeline::new(3, 5, small_limits());
+    replicate.set_progress_state(ProgressState::Replicate);
     replicate
         .queue_append(&entry(5, b"five"))
         .expect("queue replicate");
@@ -410,39 +408,36 @@ fn stale_success_does_not_unpause_or_free_inflight() {
     assert!(replicate.is_paused());
 
     replicate
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: true,
             match_index: 4,
             rejection_hint: None,
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
         .expect("stale replicate success is accepted but not advanced");
-    assert_eq!(
-        replicate.progress_state(),
-        RustRaftPeerProgressState::Replicate
-    );
+    assert_eq!(replicate.progress_state(), ProgressState::Replicate);
     assert_eq!(replicate.status().inflight_entries, 1);
     assert!(replicate.is_paused());
 }
 
 #[test]
 fn append_rejection_can_require_snapshot_transfer() {
-    let mut pipeline = RaftReplicationPipeline::new(2, 10, RustRaftPipelineLimits::default());
+    let mut pipeline = ReplicationPipeline::new(2, 10, PipelineLimits::default());
 
     assert!(pipeline
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: false,
             match_index: 4,
             rejection_hint: Some(4),
             rejected_index: None,
             require_snapshot: Some(8),
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
@@ -454,17 +449,16 @@ fn append_rejection_can_require_snapshot_transfer() {
     assert_eq!(status.snapshot_installed_index, 0);
     assert_eq!(status.next_index, 4);
 
-    let mut heartbeat_pipeline =
-        RaftReplicationPipeline::new(3, 10, RustRaftPipelineLimits::default());
+    let mut heartbeat_pipeline = ReplicationPipeline::new(3, 10, PipelineLimits::default());
     heartbeat_pipeline
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: true,
             match_index: 9,
             rejection_hint: None,
             rejected_index: None,
             require_snapshot: Some(12),
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
@@ -475,24 +469,21 @@ fn append_rejection_can_require_snapshot_transfer() {
 
 #[test]
 fn replicate_rejection_falls_back_to_matched_boundary() {
-    let mut pipeline = RaftReplicationPipeline::new(2, 8, RustRaftPipelineLimits::default());
+    let mut pipeline = ReplicationPipeline::new(2, 8, PipelineLimits::default());
     pipeline
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: true,
             match_index: 8,
             rejection_hint: None,
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
         .expect("promote to replicate");
-    assert_eq!(
-        pipeline.progress_state(),
-        RustRaftPeerProgressState::Replicate
-    );
+    assert_eq!(pipeline.progress_state(), ProgressState::Replicate);
     assert_eq!(pipeline.status().next_index, 9);
 
     pipeline
@@ -500,36 +491,36 @@ fn replicate_rejection_falls_back_to_matched_boundary() {
         .expect("queue next");
     assert_eq!(pipeline.flush_append_window().len(), 1);
     assert!(pipeline
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: false,
             match_index: 8,
             rejection_hint: Some(1),
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
         .is_err());
 
-    assert_eq!(pipeline.progress_state(), RustRaftPeerProgressState::Probe);
+    assert_eq!(pipeline.progress_state(), ProgressState::Probe);
     assert_eq!(pipeline.status().next_index, 9);
 }
 
 #[test]
 fn probe_rejection_ignores_stale_index_and_pauses_same_index() {
-    let mut pipeline = RaftReplicationPipeline::new(2, 5, RustRaftPipelineLimits::default());
+    let mut pipeline = ReplicationPipeline::new(2, 5, PipelineLimits::default());
 
     pipeline
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: false,
             match_index: 0,
             rejection_hint: Some(3),
             rejected_index: Some(4),
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
@@ -539,14 +530,14 @@ fn probe_rejection_ignores_stale_index_and_pauses_same_index() {
     assert_eq!(pipeline.status().next_index, 5);
 
     assert!(pipeline
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: false,
             match_index: 0,
             rejection_hint: Some(5),
             rejected_index: Some(5),
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
@@ -559,7 +550,7 @@ fn probe_rejection_ignores_stale_index_and_pauses_same_index() {
 
 #[test]
 fn replication_pipeline_enforces_windows_and_memory_backpressure() {
-    let mut pipeline = RaftReplicationPipeline::new(2, 1, small_limits());
+    let mut pipeline = ReplicationPipeline::new(2, 1, small_limits());
 
     pipeline
         .queue_append(&entry(1, b"12345678"))
@@ -577,14 +568,14 @@ fn replication_pipeline_enforces_windows_and_memory_backpressure() {
     assert_eq!(pipeline.status().apply_backpressure_rejections, 1);
 
     pipeline
-        .handle_append_response(&RustRaftAppendEntriesResponse {
+        .handle_append_response(&AppendEntriesResponse {
             term: 1,
             success: true,
             match_index: 1,
             rejection_hint: None,
             rejected_index: None,
             require_snapshot: None,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch: 0,
             lease_duration_ms: 0,
         })
@@ -592,10 +583,10 @@ fn replication_pipeline_enforces_windows_and_memory_backpressure() {
     assert_eq!(pipeline.status().inflight_entries, 0);
     assert_eq!(pipeline.flush_append_window().len(), 1);
 
-    let mut memory_limited = RaftReplicationPipeline::new(
+    let mut memory_limited = ReplicationPipeline::new(
         3,
         1,
-        RustRaftPipelineLimits {
+        PipelineLimits {
             max_inflights_replicate: 8,
             max_memory_replicate_log_bytes: 10,
             max_inflights_apply_task: 2,
@@ -614,7 +605,7 @@ fn replication_pipeline_enforces_windows_and_memory_backpressure() {
 
 #[test]
 fn replication_pipeline_drains_and_expires_reorder_queue() {
-    let mut pipeline = RaftReplicationPipeline::new(2, 1, small_limits());
+    let mut pipeline = ReplicationPipeline::new(2, 1, small_limits());
 
     pipeline
         .receive_out_of_order(&entry(3, b"three"))
@@ -643,7 +634,7 @@ fn replication_pipeline_drains_and_expires_reorder_queue() {
 
 #[test]
 fn replication_pipeline_tracks_snapshot_sender_and_receiver_state() {
-    let mut sender = RaftReplicationPipeline::new(2, 10, RustRaftPipelineLimits::default());
+    let mut sender = ReplicationPipeline::new(2, 10, PipelineLimits::default());
     sender
         .begin_snapshot_send("snap-20", 20, 2)
         .expect("begin send");
@@ -662,7 +653,7 @@ fn replication_pipeline_tracks_snapshot_sender_and_receiver_state() {
     assert!(!sender.status().snapshot_sending);
     assert_eq!(sender.status().snapshot_installed_index, 20);
 
-    let mut receiver = RaftReplicationPipeline::new(1, 1, RustRaftPipelineLimits::default());
+    let mut receiver = ReplicationPipeline::new(1, 1, PipelineLimits::default());
     receiver
         .begin_snapshot_install("snap-40", 40, 2)
         .expect("begin install");
@@ -679,7 +670,7 @@ fn replication_pipeline_tracks_snapshot_sender_and_receiver_state() {
 
 #[test]
 fn snapshot_finish_advances_or_retries() {
-    let mut accepted = RaftReplicationPipeline::new(2, 10, RustRaftPipelineLimits::default());
+    let mut accepted = ReplicationPipeline::new(2, 10, PipelineLimits::default());
     accepted
         .begin_snapshot_send("snap-20", 20, 2)
         .expect("begin send");
@@ -691,7 +682,7 @@ fn snapshot_finish_advances_or_retries() {
     assert_eq!(accepted.status().match_index, 18);
     assert_eq!(accepted.status().next_index, 19);
 
-    let mut rejected = RaftReplicationPipeline::new(3, 10, RustRaftPipelineLimits::default());
+    let mut rejected = ReplicationPipeline::new(3, 10, PipelineLimits::default());
     rejected
         .begin_snapshot_send("snap-30", 30, 4)
         .expect("begin send");
@@ -705,7 +696,7 @@ fn snapshot_finish_advances_or_retries() {
 
 #[test]
 fn snapshot_require_is_tracked_and_acked() {
-    let mut pipeline = RaftReplicationPipeline::new(2, 10, RustRaftPipelineLimits::default());
+    let mut pipeline = ReplicationPipeline::new(2, 10, PipelineLimits::default());
 
     assert!(pipeline.maybe_require_snapshot(8));
     assert!(pipeline.is_snapshot_required());
@@ -731,7 +722,7 @@ fn snapshot_require_is_tracked_and_acked() {
 
 #[test]
 fn snapshot_progress_times_out_non_receiving_peer() {
-    let mut pipeline = RaftReplicationPipeline::new(2, 10, RustRaftPipelineLimits::default());
+    let mut pipeline = ReplicationPipeline::new(2, 10, PipelineLimits::default());
     pipeline
         .begin_snapshot_send("snap-20", 20, 2)
         .expect("begin send");
@@ -825,7 +816,7 @@ fn raft_cluster_runs_learner_catchup_and_witness_quorum_accounting() {
     cluster.propose(b"b".to_vec()).expect("second write");
 
     let mut learner = peer(4);
-    learner.role = RustRaftReplicaRole::Learner;
+    learner.role = ReplicaRole::Learner;
     cluster.add_learner(learner).expect("add learner");
     let catchup = cluster.learner_catch_up_loop(4).expect("catch up");
     assert!(catchup.caught_up);
@@ -845,7 +836,7 @@ fn raft_cluster_runs_learner_catchup_and_witness_quorum_accounting() {
     assert_eq!(learner_pipeline.follower_lag, 0);
 
     let mut witness = peer(5);
-    witness.role = RustRaftReplicaRole::Witness;
+    witness.role = ReplicaRole::Witness;
     cluster.add_witness(witness).expect("add witness");
     let quorum = cluster.witness_quorum_report([1, 2, 5]);
     assert_eq!(quorum.required, 3);
@@ -876,7 +867,7 @@ fn raft_cluster_peer_catchup_records_snapshot_rejoin_lifecycle() {
         .install_snapshot_with_tail_to(
             2,
             snapshot,
-            matrixraft::RustRaftApplySnapshotFence {
+            matrixraft::ApplySnapshotFence {
                 applied_index: 4,
                 commit_index: 4,
                 installed_snapshot_index: 4,
@@ -904,7 +895,7 @@ fn raft_cluster_auto_promotes_marked_learner_after_catchup() {
     cluster.propose(b"b".to_vec()).expect("second write");
 
     let mut learner = peer(4);
-    learner.role = RustRaftReplicaRole::Learner;
+    learner.role = ReplicaRole::Learner;
     learner.auto_promote = true;
     cluster.add_learner(learner).expect("add learner");
 
@@ -916,6 +907,6 @@ fn raft_cluster_auto_promotes_marked_learner_after_catchup() {
     assert!(!membership.learners.contains(&4));
     assert_eq!(
         cluster.status(4).expect("promoted learner status").role,
-        RustRaftRole::Follower
+        StateRole::Follower
     );
 }

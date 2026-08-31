@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
-use matrixraft::{
-    matrixraft_read_safety_decision, RustRaftReadIndexRequest, RustRaftRole, RustRaftStatusSnapshot,
-};
+use matrixraft::{matrixraft_read_safety_decision, ReadIndexRequest, StateRole, StatusSnapshot};
 
 fn main() {
-    let status = RustRaftStatusSnapshot {
+    let status = StatusSnapshot {
         group_id: 7,
         node_id: 1,
-        role: RustRaftRole::Leader,
+        role: StateRole::Leader,
         term: 9,
         leader_id: Some(1),
         commit_index: 42,
@@ -21,7 +19,7 @@ fn main() {
 
     let decision = matrixraft_read_safety_decision(
         &status,
-        &RustRaftReadIndexRequest {
+        &ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 40,

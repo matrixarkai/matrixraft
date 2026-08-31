@@ -5,16 +5,14 @@ use matrixraft::{
     matrixraft_append_safety_decision, matrixraft_learner_promotion_decision,
     matrixraft_membership_readiness_report, matrixraft_read_safety_decision,
     matrixraft_recover_latest_wal_record, matrixraft_validate_apply_snapshot_fence,
-    matrixraft_wal_checksum, RustRaftAppendEntriesRequest, RustRaftApplySnapshotFence,
-    RustRaftHardState, RustRaftLogEntry, RustRaftLogId, RustRaftMembership,
-    RustRaftMembershipScope, RustRaftMembershipTransitionEvidence,
-    RustRaftMembershipTransitionKind, RustRaftPeerStatus, RustRaftPendingReadIndexQueue,
-    RustRaftReadIndexRequest, RustRaftReplicaRole, RustRaftRole, RustRaftSnapshotMeta,
-    RustRaftStatusSnapshot, RustRaftWalRecord,
+    matrixraft_wal_checksum, AppendEntriesRequest, ApplySnapshotFence, HardState, LogEntry, LogId,
+    Membership, MembershipScope, MembershipTransitionEvidence, MembershipTransitionKind,
+    PeerStatus, PendingReadIndexQueue, ReadIndexRequest, ReplicaRole, SnapshotMetadata, StateRole,
+    StatusSnapshot, WalRecord,
 };
 
-fn status(role: RustRaftRole, applied_index: u64) -> RustRaftStatusSnapshot {
-    RustRaftStatusSnapshot {
+fn status(role: StateRole, applied_index: u64) -> StatusSnapshot {
+    StatusSnapshot {
         group_id: 7,
         node_id: 1,
         role,
@@ -24,7 +22,7 @@ fn status(role: RustRaftRole, applied_index: u64) -> RustRaftStatusSnapshot {
         applied_index,
         last_log_index: 10,
         last_snapshot_index: 4,
-        peers: vec![RustRaftPeerStatus {
+        peers: vec![PeerStatus {
             node_id: 2,
             matched: 10,
             next_index: 11,
@@ -35,33 +33,34 @@ fn status(role: RustRaftRole, applied_index: u64) -> RustRaftStatusSnapshot {
     }
 }
 
-fn wal_record(commit_index: u64, snapshot_index: Option<u64>) -> RustRaftWalRecord {
-    let snapshot = snapshot_index.map(|index| RustRaftSnapshotMeta {
+fn wal_record(commit_index: u64, snapshot_index: Option<u64>) -> WalRecord {
+    let snapshot = snapshot_index.map(|index| SnapshotMetadata {
         snapshot_id: format!("snapshot-{index}"),
-        last_log_id: RustRaftLogId { term: 3, index },
+        last_log_id: LogId { term: 3, index },
         membership: vec![1, 2, 3],
         members: Vec::new(),
     });
-    let mut record = RustRaftWalRecord {
+    let mut record = WalRecord {
+        entries_are_delta: false,
         group_id: 7,
         node_id: 1,
-        hard_state: RustRaftHardState {
+        hard_state: HardState {
             current_term: 3,
             voted_for: Some(1),
-            committed: Some(RustRaftLogId {
+            committed: Some(LogId {
                 term: 3,
                 index: commit_index,
             }),
         },
-        membership: RustRaftMembership {
+        membership: Membership {
             group_id: 7,
             voters: vec![1, 2, 3],
             learners: Vec::new(),
             witnesses: Vec::new(),
             epoch: 1,
         },
-        entries: vec![RustRaftLogEntry {
-            log_id: RustRaftLogId {
+        entries: vec![LogEntry {
+            log_id: LogId {
                 term: 3,
                 index: commit_index,
             },
@@ -69,7 +68,7 @@ fn wal_record(commit_index: u64, snapshot_index: Option<u64>) -> RustRaftWalReco
             is_command: true,
         }],
         installed_snapshot: snapshot,
-        apply_snapshot_fence: RustRaftApplySnapshotFence {
+        apply_snapshot_fence: ApplySnapshotFence {
             applied_index: commit_index,
             commit_index,
             installed_snapshot_index: snapshot_index.unwrap_or_default(),
@@ -82,67 +81,68 @@ fn wal_record(commit_index: u64, snapshot_index: Option<u64>) -> RustRaftWalReco
 }
 
 fn transition(
-    scope: RustRaftMembershipScope,
-    transition: RustRaftMembershipTransitionKind,
-) -> RustRaftMembershipTransitionEvidence {
-    RustRaftMembershipTransitionEvidence {
+    scope: MembershipScope,
+    transition: MembershipTransitionKind,
+) -> MembershipTransitionEvidence {
+    MembershipTransitionEvidence {
         scope,
         transition,
         before_voters: match transition {
-            RustRaftMembershipTransitionKind::ScaleDown => vec![1, 2, 3, 4],
+            MembershipTransitionKind::ScaleDown => vec![1, 2, 3, 4],
             _ => vec![1, 2, 3],
         },
         after_voters: match transition {
-            RustRaftMembershipTransitionKind::ScaleUp => vec![1, 2, 3, 4],
-            RustRaftMembershipTransitionKind::ScaleDown => vec![1, 2, 3],
-            RustRaftMembershipTransitionKind::Failover => vec![1, 2, 3],
+            MembershipTransitionKind::ScaleUp => vec![1, 2, 3, 4],
+            MembershipTransitionKind::ScaleDown => vec![1, 2, 3],
+            MembershipTransitionKind::Failover => vec![1, 2, 3],
         },
         before_learners: match transition {
-            RustRaftMembershipTransitionKind::ScaleUp => vec![4],
+            MembershipTransitionKind::ScaleUp => vec![4],
             _ => Vec::new(),
         },
         after_learners: Vec::new(),
         leader_before: Some(1),
         leader_after: Some(2),
         failed_or_removed_nodes: match transition {
-            RustRaftMembershipTransitionKind::Failover => vec![1],
-            RustRaftMembershipTransitionKind::ScaleDown => vec![4],
-            RustRaftMembershipTransitionKind::ScaleUp => Vec::new(),
+            MembershipTransitionKind::Failover => vec![1],
+            MembershipTransitionKind::ScaleDown => vec![4],
+            MembershipTransitionKind::ScaleUp => Vec::new(),
         },
         added_nodes: match transition {
-            RustRaftMembershipTransitionKind::ScaleUp => vec![4],
+            MembershipTransitionKind::ScaleUp => vec![4],
             _ => Vec::new(),
         },
         caught_up_nodes: vec![1, 2, 3, 4],
         commit_index_before: 10,
         commit_index_after: 12,
         applied_index_after: 12,
-        joint_consensus_used: !matches!(transition, RustRaftMembershipTransitionKind::Failover),
+        joint_consensus_used: !matches!(transition, MembershipTransitionKind::Failover),
         old_majority_preserved: true,
         new_majority_reached: true,
         joint_old_quorum_size: match transition {
-            RustRaftMembershipTransitionKind::ScaleDown => 3,
-            RustRaftMembershipTransitionKind::ScaleUp => 2,
-            RustRaftMembershipTransitionKind::Failover => 0,
+            MembershipTransitionKind::ScaleDown => 3,
+            MembershipTransitionKind::ScaleUp => 2,
+            MembershipTransitionKind::Failover => 0,
         },
         joint_new_quorum_size: match transition {
-            RustRaftMembershipTransitionKind::ScaleUp => 3,
-            RustRaftMembershipTransitionKind::ScaleDown => 2,
-            RustRaftMembershipTransitionKind::Failover => 0,
+            MembershipTransitionKind::ScaleUp => 3,
+            MembershipTransitionKind::ScaleDown => 2,
+            MembershipTransitionKind::Failover => 0,
         },
         joint_acknowledged_voters: match transition {
-            RustRaftMembershipTransitionKind::ScaleUp
-            | RustRaftMembershipTransitionKind::ScaleDown => vec![1, 2, 3, 4],
-            RustRaftMembershipTransitionKind::Failover => Vec::new(),
+            MembershipTransitionKind::ScaleUp | MembershipTransitionKind::ScaleDown => {
+                vec![1, 2, 3, 4]
+            }
+            MembershipTransitionKind::Failover => Vec::new(),
         },
-        joint_old_majority_acked: !matches!(transition, RustRaftMembershipTransitionKind::Failover),
-        joint_new_majority_acked: !matches!(transition, RustRaftMembershipTransitionKind::Failover),
+        joint_old_majority_acked: !matches!(transition, MembershipTransitionKind::Failover),
+        joint_new_majority_acked: !matches!(transition, MembershipTransitionKind::Failover),
         stale_leader_rejected: true,
         read_index_validated_after: true,
         write_validated_after: true,
         snapshot_floor_preserved: true,
         secondary_replication_visible: true,
-        scheduler_generation_advanced: matches!(scope, RustRaftMembershipScope::Metaserver),
+        scheduler_generation_advanced: matches!(scope, MembershipScope::Metaserver),
         blockers: Vec::new(),
     }
 }
@@ -150,8 +150,8 @@ fn transition(
 #[test]
 fn raft_safety_helpers_reject_non_leader_and_apply_lag() {
     let follower_decision = matrixraft_read_safety_decision(
-        &status(RustRaftRole::Follower, 10),
-        &RustRaftReadIndexRequest {
+        &status(StateRole::Follower, 10),
+        &ReadIndexRequest {
             group_id: 7,
             requester_id: 2,
             min_commit_index: 10,
@@ -162,8 +162,8 @@ fn raft_safety_helpers_reject_non_leader_and_apply_lag() {
     assert_eq!(follower_decision.reason, "not_leader");
 
     let lag_decision = matrixraft_read_safety_decision(
-        &status(RustRaftRole::Leader, 9),
-        &RustRaftReadIndexRequest {
+        &status(StateRole::Leader, 9),
+        &ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 10,
@@ -176,9 +176,9 @@ fn raft_safety_helpers_reject_non_leader_and_apply_lag() {
 
 #[test]
 fn pending_read_index_queue_releases_only_after_apply_fence() {
-    let mut queue = RustRaftPendingReadIndexQueue::new();
+    let mut queue = PendingReadIndexQueue::new();
     queue.push(
-        RustRaftReadIndexRequest {
+        ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 10,
@@ -187,7 +187,7 @@ fn pending_read_index_queue_releases_only_after_apply_fence() {
         10,
     );
     queue.push(
-        RustRaftReadIndexRequest {
+        ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 12,
@@ -219,9 +219,9 @@ fn pending_read_index_queue_releases_only_after_apply_fence() {
 
 #[test]
 fn pending_read_index_queue_releases_waiters_on_node_removal() {
-    let mut queue = RustRaftPendingReadIndexQueue::new();
+    let mut queue = PendingReadIndexQueue::new();
     queue.push(
-        RustRaftReadIndexRequest {
+        ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 10,
@@ -230,7 +230,7 @@ fn pending_read_index_queue_releases_waiters_on_node_removal() {
         10,
     );
     queue.push(
-        RustRaftReadIndexRequest {
+        ReadIndexRequest {
             group_id: 7,
             requester_id: 2,
             min_commit_index: 11,
@@ -255,21 +255,18 @@ fn pending_read_index_queue_releases_waiters_on_node_removal() {
 
 #[test]
 fn membership_transitions_require_safe_failover_scale_up_and_scale_down() {
-    let transitions = [
-        RustRaftMembershipScope::Metaserver,
-        RustRaftMembershipScope::DataNode,
-    ]
-    .into_iter()
-    .flat_map(|scope| {
-        [
-            RustRaftMembershipTransitionKind::Failover,
-            RustRaftMembershipTransitionKind::ScaleUp,
-            RustRaftMembershipTransitionKind::ScaleDown,
-        ]
+    let transitions = [MembershipScope::Metaserver, MembershipScope::DataNode]
         .into_iter()
-        .map(move |kind| transition(scope, kind))
-    })
-    .collect::<Vec<_>>();
+        .flat_map(|scope| {
+            [
+                MembershipTransitionKind::Failover,
+                MembershipTransitionKind::ScaleUp,
+                MembershipTransitionKind::ScaleDown,
+            ]
+            .into_iter()
+            .map(move |kind| transition(scope, kind))
+        })
+        .collect::<Vec<_>>();
 
     let report = matrixraft_membership_readiness_report(&transitions);
     assert!(report.ready, "{report:#?}");
@@ -301,11 +298,11 @@ fn compacted_entry_rejection_blocks_prev_log_before_snapshot_floor() {
     let decision = matrixraft_append_safety_decision(
         9,
         8,
-        &RustRaftAppendEntriesRequest {
+        &AppendEntriesRequest {
             group_id: 7,
             term: 3,
             leader_id: 1,
-            prev_log_id: Some(RustRaftLogId { term: 2, index: 8 }),
+            prev_log_id: Some(LogId { term: 2, index: 8 }),
             entries: Vec::new(),
             leader_commit: 10,
             lease_epoch: 0,
@@ -318,10 +315,10 @@ fn compacted_entry_rejection_blocks_prev_log_before_snapshot_floor() {
 
 #[test]
 fn read_safety_and_learner_promotion_accept_caught_up_learner() {
-    let status = status(RustRaftRole::Leader, 10);
+    let status = status(StateRole::Leader, 10);
     let read = matrixraft_read_safety_decision(
         &status,
-        &RustRaftReadIndexRequest {
+        &ReadIndexRequest {
             group_id: 7,
             requester_id: 1,
             min_commit_index: 10,
@@ -333,5 +330,5 @@ fn read_safety_and_learner_promotion_accept_caught_up_learner() {
 
     let learner = matrixraft_learner_promotion_decision(&status, 2, 0);
     assert!(learner.promotable);
-    assert!(RustRaftReplicaRole::Witness.participates_in_quorum());
+    assert!(ReplicaRole::Witness.participates_in_quorum());
 }

@@ -2,15 +2,17 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, MatrixRaftAdminCommand,
-    MatrixRaftAdminCommandType, MatrixRaftAppendEntriesResponse, MatrixRaftApplyResultReport,
-    MatrixRaftAsyncGroupSummary, MatrixRaftAsyncOperation, MatrixRaftAsyncResult,
-    MatrixRaftAsyncResultStatus, MatrixRaftBatchRouteGroupSummary, MatrixRaftBatchRouteResult,
-    MatrixRaftBatchRouteResultStatus, MatrixRaftBoundedStaleReadOptions, MatrixRaftCheckpoint,
-    MatrixRaftConfState, MatrixRaftConfigChange, MatrixRaftConfigChangeType,
-    MatrixRaftConfigurationApplied, MatrixRaftEntry, MatrixRaftEntryType, MatrixRaftFsm,
-    MatrixRaftFsmRuntimeBinding, MatrixRaftGroupContextBuilder, MatrixRaftLeaseRequest,
-    MatrixRaftLeaseResponse, MatrixRaftMessage, MatrixRaftMessageType, MatrixRaftMultiRaftServer,
+    AppendEntriesRequest, AppendEntriesResponse, ApplySnapshotFence, InstallSnapshotRequest,
+    InstallSnapshotResponse, LearnerAutoPromoteState, LogId, LogRetainedRange, MailPriority,
+    MatrixRaftAdminCommand, MatrixRaftAdminCommandType, MatrixRaftAppendEntriesResponse,
+    MatrixRaftApplyResultReport, MatrixRaftAsyncGroupSummary, MatrixRaftAsyncOperation,
+    MatrixRaftAsyncResult, MatrixRaftAsyncResultStatus, MatrixRaftBatchRouteGroupSummary,
+    MatrixRaftBatchRouteResult, MatrixRaftBatchRouteResultStatus,
+    MatrixRaftBoundedStaleReadOptions, MatrixRaftCheckpoint, MatrixRaftConfState,
+    MatrixRaftConfigChange, MatrixRaftConfigChangeType, MatrixRaftConfigurationApplied,
+    MatrixRaftEntry, MatrixRaftEntryType, MatrixRaftFsm, MatrixRaftFsmRuntimeBinding,
+    MatrixRaftGroupContextBuilder, MatrixRaftLeaseRequest, MatrixRaftLeaseResponse,
+    MatrixRaftMessage, MatrixRaftMessageType, MatrixRaftMultiRaftServer,
     MatrixRaftNodeCreatorBuilder, MatrixRaftOldSnapshotFinish, MatrixRaftOldSnapshotFinishState,
     MatrixRaftOptions, MatrixRaftPriorityRoutedAdminCommand, MatrixRaftPriorityRoutedMessage,
     MatrixRaftPropose, MatrixRaftProposeOptions, MatrixRaftRateLimiterConfig,
@@ -19,12 +21,10 @@ use matrixraft::{
     MatrixRaftRouteResultKind, MatrixRaftRouteResultStatus, MatrixRaftRoutedAdminCommand,
     MatrixRaftRoutedMessage, MatrixRaftSnapshotDesc, MatrixRaftSnapshotProgress,
     MatrixRaftStepDownReport, MatrixRaftSyncedReport, MatrixRaftTransferLeaderReport,
-    MatrixRaftTransportBuilder, RaftError, RaftLearnerAutoPromoteState, RaftLogRetainedRange,
-    RaftMembershipOperation, RaftSnapshot, RaftWalCompactionReport, RaftWitnessQuorumReport,
-    ReadIndexResponse, RustRaftApplySnapshotFence, RustRaftInstallSnapshotResponse, RustRaftLogId,
-    RustRaftMailPriority, RustRaftPeer, RustRaftReadIndexRequest, RustRaftReplicaRole,
-    RustRaftRole, RustRaftSnapshotChunk, RustRaftSnapshotMeta, RustRaftSnapshotState,
-    RustRaftStorageApplyFence, TimeoutNowResponse, VoteRequest, VoteResponse,
+    MatrixRaftTransportBuilder, MembershipOperation, Peer, RaftError, RaftSnapshot,
+    ReadIndexRequest, ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata,
+    SnapshotState, StateRole, StorageApplyFence, TimeoutNowResponse, VoteRequest, VoteResponse,
+    WalCompactionReport, WitnessQuorumReport,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -43,12 +43,12 @@ fn temp_dir(name: &str) -> PathBuf {
     ))
 }
 
-fn peer(group_id: u64, node_id: u64) -> RustRaftPeer {
-    peer_with_role(group_id, node_id, RustRaftReplicaRole::Voter)
+fn peer(group_id: u64, node_id: u64) -> Peer {
+    peer_with_role(group_id, node_id, ReplicaRole::Voter)
 }
 
-fn peer_with_role(group_id: u64, node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer_with_role(group_id: u64, node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 30_000 + group_id + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 31_000 + group_id + node_id),
@@ -62,7 +62,7 @@ fn options(
     wal_dir: &std::path::Path,
     snapshot_dir: &std::path::Path,
 ) -> MatrixRaftOptions {
-    options_with_role(group_id, wal_dir, snapshot_dir, RustRaftReplicaRole::Voter)
+    options_with_role(group_id, wal_dir, snapshot_dir, ReplicaRole::Voter)
 }
 
 fn options_for_peer(
@@ -82,7 +82,7 @@ fn options_with_role(
     group_id: u64,
     wal_dir: &std::path::Path,
     snapshot_dir: &std::path::Path,
-    local_role: RustRaftReplicaRole,
+    local_role: ReplicaRole,
 ) -> MatrixRaftOptions {
     MatrixRaftOptions {
         group_id,
@@ -101,7 +101,17 @@ fn options_with_role(
         election_cycle_tick: 4,
         transfer_timeout_tick: 3,
         offline_timeout_tick: 10,
-        tick_interval_ms: 10,
+        // A tick interval far longer than any test here suppresses the
+        // runtime's automatic tick, which fires from the timeout arm of its
+        // command loop whenever the command channel sits idle. That tick is
+        // what made this binary load-sensitive: it advances leases and election
+        // timers between two statements of a test, at a rate set by the
+        // scheduler rather than by the test.
+        //
+        // The lease durations stay small on purpose, so tests that drive a tick
+        // explicitly -- `tick_follower_lease(20)` and friends -- still cross
+        // the expiry boundary exactly as they did.
+        tick_interval_ms: 10_000,
         lease_duration_ms: 20,
         last_lease_duration_ms: 10,
         assume_lease_when_start: false,
@@ -659,7 +669,7 @@ fn matrixraft_async_group_summary_exposes_leadership_payloads_by_status() {
 #[test]
 fn matrixraft_route_summaries_expose_response_payloads_by_route() {
     let key = MatrixRaftRouteKey::new(702, 3);
-    let proposed_log_id = RustRaftLogId { term: 4, index: 9 };
+    let proposed_log_id = LogId { term: 4, index: 9 };
     let read_response = ReadIndexResponse {
         safe: true,
         read_index: 9,
@@ -672,7 +682,7 @@ fn matrixraft_route_summaries_expose_response_payloads_by_route() {
         rejected_hint: None,
         rejected_index: None,
     };
-    let install_response = RustRaftInstallSnapshotResponse {
+    let install_response = InstallSnapshotResponse {
         term: 4,
         accepted: true,
         next_offset: 128,
@@ -717,14 +727,14 @@ fn matrixraft_route_summaries_expose_response_payloads_by_route() {
         peer_id: 4,
         success: true,
     };
-    let retained_range = RaftLogRetainedRange {
+    let retained_range = LogRetainedRange {
         first_log_index: 5,
         last_log_index: 9,
         first_segment_id: 1,
         last_segment_id: 1,
         record_count: 5,
     };
-    let compaction = RaftWalCompactionReport {
+    let compaction = WalCompactionReport {
         requested_log_index: 5,
         released_segments: 1,
         retained_range: retained_range.clone(),
@@ -733,7 +743,7 @@ fn matrixraft_route_summaries_expose_response_payloads_by_route() {
     };
     let checkpoint = RaftSnapshot {
         group_id: 702,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: "checkpoint-702-9".to_string(),
             last_log_id: proposed_log_id.clone(),
             membership: vec![1, 3, 4],
@@ -741,7 +751,7 @@ fn matrixraft_route_summaries_expose_response_payloads_by_route() {
         },
         payload: b"checkpoint payload".to_vec(),
     };
-    let witness = RaftWitnessQuorumReport {
+    let witness = WitnessQuorumReport {
         required: 2,
         acknowledged: 2,
         reached: true,
@@ -2055,7 +2065,7 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
                     rejection_hint: Some(1),
                     rejected_index: Some(1),
                     require_snapshot: Some(1),
-                    snapshot_state: RustRaftSnapshotState::NotReady,
+                    snapshot_state: SnapshotState::NotReady,
                     lease_confirmation_epoch: 7,
                     lease_duration_ms: 11,
                 },
@@ -2164,7 +2174,7 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
             MatrixRaftMessage::install_snapshot_response(
                 2,
                 1,
-                RustRaftInstallSnapshotResponse {
+                InstallSnapshotResponse {
                     term: status_after_vote_response.term + 1,
                     accepted: false,
                     next_offset: 0,
@@ -2219,10 +2229,10 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
                     group_id: 0,
                     term: snapshot_request_term,
                     leader_id: 0,
-                    chunk: RustRaftSnapshotChunk {
-                        meta: RustRaftSnapshotMeta {
+                    chunk: SnapshotChunk {
+                        meta: SnapshotMetadata {
                             snapshot_id: "multi-route-snapshot-12".to_string(),
-                            last_log_id: RustRaftLogId { term: 1, index: 12 },
+                            last_log_id: LogId { term: 1, index: 12 },
                             membership: vec![1, 2, 3],
                             members: Vec::new(),
                         },
@@ -2644,7 +2654,7 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
                 1,
                 MatrixRaftAdminCommand::compact_logs_with_storage_fence(
                     2,
-                    RustRaftStorageApplyFence {
+                    StorageApplyFence {
                         group_id: 810,
                         node_id: 1,
                         committed_index: proposed_log_id.index,
@@ -2726,7 +2736,7 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
             MatrixRaftMessage::read_index(
                 2,
                 1,
-                RustRaftReadIndexRequest {
+                ReadIndexRequest {
                     group_id: 0,
                     requester_id: 0,
                     min_commit_index: 0,
@@ -2860,10 +2870,7 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
     assert_eq!(auto_promote.learner_id, 6);
     assert!(auto_promote.auto_promote);
     assert!(auto_promote.promoted);
-    assert_eq!(
-        auto_promote.state_after,
-        RaftLearnerAutoPromoteState::Promoted
-    );
+    assert_eq!(auto_promote.state_after, LearnerAutoPromoteState::Promoted);
 
     let add_voter_result = server
         .route_message(
@@ -2872,11 +2879,7 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
             MatrixRaftMessage::membership_operation(
                 1,
                 1,
-                RaftMembershipOperation::AddVoter(peer_with_role(
-                    810,
-                    7,
-                    RustRaftReplicaRole::Learner,
-                )),
+                MembershipOperation::AddVoter(peer_with_role(810, 7, ReplicaRole::Learner)),
             ),
         )
         .expect("membership add-voter route");
@@ -2912,7 +2915,7 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
         .route_message(
             810,
             1,
-            MatrixRaftMessage::membership_operation(1, 1, RaftMembershipOperation::Remove(7)),
+            MatrixRaftMessage::membership_operation(1, 1, MembershipOperation::Remove(7)),
         )
         .expect("membership remove route");
     assert!(
@@ -3363,9 +3366,9 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
         .expect("snapshot applied route");
     assert_eq!(applied_result.kind, MatrixRaftRouteResultKind::Delivered);
 
-    let snapshot_meta = RustRaftSnapshotMeta {
+    let snapshot_meta = SnapshotMetadata {
         snapshot_id: "snap-810".to_string(),
-        last_log_id: RustRaftLogId { term: 1, index: 1 },
+        last_log_id: LogId { term: 1, index: 1 },
         membership: vec![1, 2, 3],
         members: vec![peer(810, 1), peer(810, 2), peer(810, 3)],
     };
@@ -3907,10 +3910,10 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                         group_id: 0,
                         term: 1,
                         leader_id: 0,
-                        chunk: RustRaftSnapshotChunk {
-                            meta: RustRaftSnapshotMeta {
+                        chunk: SnapshotChunk {
+                            meta: SnapshotMetadata {
                                 snapshot_id: "batch-route-snapshot-17".to_string(),
-                                last_log_id: RustRaftLogId { term: 1, index: 17 },
+                                last_log_id: LogId { term: 1, index: 17 },
                                 membership: vec![1],
                                 members: vec![peer(815, 1)],
                             },
@@ -4051,10 +4054,10 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                             group_id: 0,
                             term: 1,
                             leader_id: 0,
-                            chunk: RustRaftSnapshotChunk {
-                                meta: RustRaftSnapshotMeta {
+                            chunk: SnapshotChunk {
+                                meta: SnapshotMetadata {
                                     snapshot_id: "batch-route-snapshot-17".to_string(),
-                                    last_log_id: RustRaftLogId { term: 1, index: 17 },
+                                    last_log_id: LogId { term: 1, index: 17 },
                                     membership: vec![1],
                                     members: vec![peer(815, 1)],
                                 },
@@ -4105,10 +4108,10 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                         group_id: 0,
                         term: 1,
                         leader_id: 0,
-                        chunk: RustRaftSnapshotChunk {
-                            meta: RustRaftSnapshotMeta {
+                        chunk: SnapshotChunk {
+                            meta: SnapshotMetadata {
                                 snapshot_id: "batch-route-snapshot-17".to_string(),
-                                last_log_id: RustRaftLogId { term: 1, index: 17 },
+                                last_log_id: LogId { term: 1, index: 17 },
                                 membership: vec![1],
                                 members: vec![peer(815, 1)],
                             },
@@ -4698,7 +4701,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
     let priority_plan = server
         .plan_priority_route_message_batch(vec![
             MatrixRaftPriorityRoutedMessage::new(
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 MatrixRaftRoutedMessage::new(
                     814,
                     1,
@@ -4715,7 +4718,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 ),
             ),
             MatrixRaftPriorityRoutedMessage::new(
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 MatrixRaftRoutedMessage::new(
                     815,
                     1,
@@ -4732,7 +4735,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 ),
             ),
             MatrixRaftPriorityRoutedMessage::new(
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 MatrixRaftRoutedMessage::new(
                     815,
                     1,
@@ -4749,7 +4752,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 ),
             ),
             MatrixRaftPriorityRoutedMessage::new(
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 MatrixRaftRoutedMessage::new(
                     814,
                     1,
@@ -4760,10 +4763,10 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                             group_id: 0,
                             term: 1,
                             leader_id: 0,
-                            chunk: RustRaftSnapshotChunk {
-                                meta: RustRaftSnapshotMeta {
+                            chunk: SnapshotChunk {
+                                meta: SnapshotMetadata {
                                     snapshot_id: "priority-route-snapshot-23".to_string(),
-                                    last_log_id: RustRaftLogId { term: 1, index: 23 },
+                                    last_log_id: LogId { term: 1, index: 23 },
                                     membership: vec![1],
                                     members: vec![peer(814, 1)],
                                 },
@@ -4807,7 +4810,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
             .collect::<Vec<_>>(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 2,
                 2,
                 vec![815, 814],
@@ -4822,7 +4825,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 ],
             ),
             (
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 1,
                 1,
                 vec![814],
@@ -4831,7 +4834,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 vec![MatrixRaftMessageType::Propose],
             ),
             (
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 1,
                 1,
                 vec![815],
@@ -4871,63 +4874,51 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
         priority_plan.route_keys_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![
                     MatrixRaftRouteKey::new(815, 1),
                     MatrixRaftRouteKey::new(814, 1),
                 ]
             ),
-            (
-                RustRaftMailPriority::Normal,
-                vec![MatrixRaftRouteKey::new(814, 1)]
-            ),
-            (
-                RustRaftMailPriority::Slowly,
-                vec![MatrixRaftRouteKey::new(815, 1)]
-            ),
+            (MailPriority::Normal, vec![MatrixRaftRouteKey::new(814, 1)]),
+            (MailPriority::Slowly, vec![MatrixRaftRouteKey::new(815, 1)]),
         ]
     );
     assert_eq!(
         priority_plan.group_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![815, 814]),
-            (RustRaftMailPriority::Normal, vec![814]),
-            (RustRaftMailPriority::Slowly, vec![815]),
+            (MailPriority::Urgent, vec![815, 814]),
+            (MailPriority::Normal, vec![814]),
+            (MailPriority::Slowly, vec![815]),
         ]
     );
     assert_eq!(
         priority_plan.node_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![1]),
-            (RustRaftMailPriority::Normal, vec![1]),
-            (RustRaftMailPriority::Slowly, vec![1]),
+            (MailPriority::Urgent, vec![1]),
+            (MailPriority::Normal, vec![1]),
+            (MailPriority::Slowly, vec![1]),
         ]
     );
     assert_eq!(
         priority_plan.message_types_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![
                     MatrixRaftMessageType::Propose,
                     MatrixRaftMessageType::InstallSnapshotRequest,
                 ]
             ),
-            (
-                RustRaftMailPriority::Normal,
-                vec![MatrixRaftMessageType::Propose]
-            ),
-            (
-                RustRaftMailPriority::Slowly,
-                vec![MatrixRaftMessageType::Propose]
-            ),
+            (MailPriority::Normal, vec![MatrixRaftMessageType::Propose]),
+            (MailPriority::Slowly, vec![MatrixRaftMessageType::Propose]),
         ]
     );
     assert_eq!(
         priority_plan.messages_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![
                     MatrixRaftMessage::propose(
                         1,
@@ -4946,10 +4937,10 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                             group_id: 0,
                             term: 1,
                             leader_id: 0,
-                            chunk: RustRaftSnapshotChunk {
-                                meta: RustRaftSnapshotMeta {
+                            chunk: SnapshotChunk {
+                                meta: SnapshotMetadata {
                                     snapshot_id: "priority-route-snapshot-23".to_string(),
-                                    last_log_id: RustRaftLogId { term: 1, index: 23 },
+                                    last_log_id: LogId { term: 1, index: 23 },
                                     membership: vec![1],
                                     members: vec![peer(814, 1)],
                                 },
@@ -4962,7 +4953,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 ],
             ),
             (
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 vec![MatrixRaftMessage::propose(
                     1,
                     1,
@@ -4975,7 +4966,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 )],
             ),
             (
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 vec![MatrixRaftMessage::propose(
                     1,
                     1,
@@ -4993,145 +4984,145 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
         priority_plan.sender_receiver_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![(Some(1), Some(1)), (Some(1), Some(1))],
             ),
-            (RustRaftMailPriority::Normal, vec![(Some(1), Some(1))]),
-            (RustRaftMailPriority::Slowly, vec![(Some(1), Some(1))]),
+            (MailPriority::Normal, vec![(Some(1), Some(1))]),
+            (MailPriority::Slowly, vec![(Some(1), Some(1))]),
         ]
     );
     assert_eq!(
         priority_plan.terms_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, Some(1)]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, Some(1)]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_plan.committed_indices_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, Some(23)]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, Some(23)]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_plan.message_counts_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, 2),
-            (RustRaftMailPriority::Normal, 1),
-            (RustRaftMailPriority::Slowly, 1),
+            (MailPriority::Urgent, 2),
+            (MailPriority::Normal, 1),
+            (MailPriority::Slowly, 1),
         ]
     );
     assert_eq!(
         priority_plan.route_key_counts_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, 2),
-            (RustRaftMailPriority::Normal, 1),
-            (RustRaftMailPriority::Slowly, 1),
+            (MailPriority::Urgent, 2),
+            (MailPriority::Normal, 1),
+            (MailPriority::Slowly, 1),
         ]
     );
     assert_eq!(
         priority_plan.fanout_counts_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, 2, 2),
-            (RustRaftMailPriority::Normal, 1, 1),
-            (RustRaftMailPriority::Slowly, 1, 1),
+            (MailPriority::Urgent, 2, 2),
+            (MailPriority::Normal, 1, 1),
+            (MailPriority::Slowly, 1, 1),
         ]
     );
     assert_eq!(
         priority_plan.message_bytes_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![26, 0]),
-            (RustRaftMailPriority::Normal, vec![26]),
-            (RustRaftMailPriority::Slowly, vec![24]),
+            (MailPriority::Urgent, vec![26, 0]),
+            (MailPriority::Normal, vec![26]),
+            (MailPriority::Slowly, vec![24]),
         ]
     );
     assert_eq!(
         priority_plan.propose_request_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![Some(47), None]),
-            (RustRaftMailPriority::Normal, vec![Some(45)]),
-            (RustRaftMailPriority::Slowly, vec![Some(46)]),
+            (MailPriority::Urgent, vec![Some(47), None]),
+            (MailPriority::Normal, vec![Some(45)]),
+            (MailPriority::Slowly, vec![Some(46)]),
         ]
     );
     assert_eq!(
         priority_plan.propose_request_id_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![true, false]),
-            (RustRaftMailPriority::Normal, vec![true]),
-            (RustRaftMailPriority::Slowly, vec![true]),
+            (MailPriority::Urgent, vec![true, false]),
+            (MailPriority::Normal, vec![true]),
+            (MailPriority::Slowly, vec![true]),
         ]
     );
     assert_eq!(
         priority_plan.snapshot_ids_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![None, Some("priority-route-snapshot-23".to_string())],
             ),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_plan.snapshot_id_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false, true]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![false, true]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
         priority_plan.snapshot_chunk_offsets_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, Some(0)]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, Some(0)]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_plan.snapshot_chunk_offset_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false, true]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![false, true]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
         priority_plan.snapshot_chunk_done_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, Some(true)]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, Some(true)]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_plan.snapshot_chunk_done_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false, true]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![false, true]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
         priority_plan.snapshot_chunk_payload_bytes_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![None, Some(b"priority route snapshot chunk".len())],
             ),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_plan.snapshot_chunk_payload_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false, true]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![false, true]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
@@ -5201,14 +5192,8 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
     assert_eq!(
         priority_plan.priorities_by_group(),
         vec![
-            (
-                814,
-                vec![RustRaftMailPriority::Urgent, RustRaftMailPriority::Normal]
-            ),
-            (
-                815,
-                vec![RustRaftMailPriority::Urgent, RustRaftMailPriority::Slowly]
-            ),
+            (814, vec![MailPriority::Urgent, MailPriority::Normal]),
+            (815, vec![MailPriority::Urgent, MailPriority::Slowly]),
         ]
     );
     assert_eq!(
@@ -5224,10 +5209,10 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                             group_id: 0,
                             term: 1,
                             leader_id: 0,
-                            chunk: RustRaftSnapshotChunk {
-                                meta: RustRaftSnapshotMeta {
+                            chunk: SnapshotChunk {
+                                meta: SnapshotMetadata {
                                     snapshot_id: "priority-route-snapshot-23".to_string(),
-                                    last_log_id: RustRaftLogId { term: 1, index: 23 },
+                                    last_log_id: LogId { term: 1, index: 23 },
                                     membership: vec![1],
                                     members: vec![peer(814, 1)],
                                 },
@@ -5354,31 +5339,19 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
             .map(|message| message.priority)
             .collect::<Vec<_>>(),
         vec![
-            RustRaftMailPriority::Urgent,
-            RustRaftMailPriority::Urgent,
-            RustRaftMailPriority::Normal,
-            RustRaftMailPriority::Slowly,
+            MailPriority::Urgent,
+            MailPriority::Urgent,
+            MailPriority::Normal,
+            MailPriority::Slowly,
         ]
     );
     assert_eq!(
         priority_plan.priorities_by_route_key(),
         vec![
-            (
-                MatrixRaftRouteKey::new(815, 1),
-                RustRaftMailPriority::Urgent
-            ),
-            (
-                MatrixRaftRouteKey::new(814, 1),
-                RustRaftMailPriority::Urgent
-            ),
-            (
-                MatrixRaftRouteKey::new(814, 1),
-                RustRaftMailPriority::Normal
-            ),
-            (
-                MatrixRaftRouteKey::new(815, 1),
-                RustRaftMailPriority::Slowly
-            ),
+            (MatrixRaftRouteKey::new(815, 1), MailPriority::Urgent),
+            (MatrixRaftRouteKey::new(814, 1), MailPriority::Urgent),
+            (MatrixRaftRouteKey::new(814, 1), MailPriority::Normal),
+            (MatrixRaftRouteKey::new(815, 1), MailPriority::Slowly),
         ]
     );
     assert_eq!(
@@ -5406,10 +5379,10 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                         group_id: 0,
                         term: 1,
                         leader_id: 0,
-                        chunk: RustRaftSnapshotChunk {
-                            meta: RustRaftSnapshotMeta {
+                        chunk: SnapshotChunk {
+                            meta: SnapshotMetadata {
                                 snapshot_id: "priority-route-snapshot-23".to_string(),
-                                last_log_id: RustRaftLogId { term: 1, index: 23 },
+                                last_log_id: LogId { term: 1, index: 23 },
                                 membership: vec![1],
                                 members: vec![peer(814, 1)],
                             },
@@ -5581,7 +5554,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
     let priority_grouped = server
         .route_priority_message_batch_grouped(vec![
             MatrixRaftPriorityRoutedMessage::new(
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 MatrixRaftRoutedMessage::new(
                     815,
                     1,
@@ -5598,7 +5571,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 ),
             ),
             MatrixRaftPriorityRoutedMessage::new(
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 MatrixRaftRoutedMessage::new(
                     814,
                     1,
@@ -5615,7 +5588,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 ),
             ),
             MatrixRaftPriorityRoutedMessage::new(
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 MatrixRaftRoutedMessage::new(
                     815,
                     1,
@@ -5657,7 +5630,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
     );
     let priority_best_effort = server.route_priority_message_batch_best_effort(vec![
         MatrixRaftPriorityRoutedMessage::new(
-            RustRaftMailPriority::Slowly,
+            MailPriority::Slowly,
             MatrixRaftRoutedMessage::new(
                 899,
                 1,
@@ -5674,7 +5647,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
             ),
         ),
         MatrixRaftPriorityRoutedMessage::new(
-            RustRaftMailPriority::Urgent,
+            MailPriority::Urgent,
             MatrixRaftRoutedMessage::new(
                 814,
                 1,
@@ -5699,7 +5672,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
     let priority_grouped_best_effort =
         server.route_priority_message_batch_grouped_best_effort(vec![
             MatrixRaftPriorityRoutedMessage::new(
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 MatrixRaftRoutedMessage::new(
                     899,
                     1,
@@ -5707,7 +5680,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 ),
             ),
             MatrixRaftPriorityRoutedMessage::new(
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 MatrixRaftRoutedMessage::new(
                     815,
                     1,
@@ -5715,7 +5688,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                 ),
             ),
             MatrixRaftPriorityRoutedMessage::new(
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 MatrixRaftRoutedMessage::new(
                     814,
                     1,
@@ -6482,9 +6455,9 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
         .create_node(options(852, &aux_wal, &aux_snap), 1)
         .expect("aux node");
 
-    let snapshot_meta = RustRaftSnapshotMeta {
+    let snapshot_meta = SnapshotMetadata {
         snapshot_id: "snap-818".to_string(),
-        last_log_id: RustRaftLogId { term: 1, index: 1 },
+        last_log_id: LogId { term: 1, index: 1 },
         membership: vec![1, 2, 3],
         members: vec![peer(818, 1), peer(818, 2), peer(818, 3)],
     };
@@ -6496,9 +6469,9 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
         .publish_snapshot_route(
             819,
             1,
-            MatrixRaftSnapshotDesc::from_snapshot_meta(&RustRaftSnapshotMeta {
+            MatrixRaftSnapshotDesc::from_snapshot_meta(&SnapshotMetadata {
                 snapshot_id: "snap-819".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 1 },
+                last_log_id: LogId { term: 1, index: 1 },
                 membership: vec![1, 2, 3],
                 members: vec![peer(819, 1), peer(819, 2), peer(819, 3)],
             }),
@@ -6509,9 +6482,9 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
     assert_eq!(server.runtime_wiring_count(), 4);
     assert_eq!(server.snapshot_route_count(), 2);
 
-    let meta_group_snapshot = MatrixRaftSnapshotDesc::from_snapshot_meta(&RustRaftSnapshotMeta {
+    let meta_group_snapshot = MatrixRaftSnapshotDesc::from_snapshot_meta(&SnapshotMetadata {
         snapshot_id: "snap-818-group".to_string(),
-        last_log_id: RustRaftLogId { term: 1, index: 2 },
+        last_log_id: LogId { term: 1, index: 2 },
         membership: vec![1, 2, 3],
         members: vec![peer(818, 1), peer(818, 2), peer(818, 3)],
     });
@@ -6552,20 +6525,18 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
     assert_eq!(server.snapshot_route(818, 1), Some(&meta_group_snapshot));
     assert_eq!(server.snapshot_route(818, 2), Some(&meta_group_snapshot));
 
-    let selected_meta_snapshot =
-        MatrixRaftSnapshotDesc::from_snapshot_meta(&RustRaftSnapshotMeta {
-            snapshot_id: "snap-818-selected".to_string(),
-            last_log_id: RustRaftLogId { term: 1, index: 3 },
-            membership: vec![1, 2, 3],
-            members: vec![peer(818, 1), peer(818, 2), peer(818, 3)],
-        });
-    let selected_data_snapshot =
-        MatrixRaftSnapshotDesc::from_snapshot_meta(&RustRaftSnapshotMeta {
-            snapshot_id: "snap-819-selected".to_string(),
-            last_log_id: RustRaftLogId { term: 1, index: 3 },
-            membership: vec![1, 2, 3],
-            members: vec![peer(819, 1), peer(819, 2), peer(819, 3)],
-        });
+    let selected_meta_snapshot = MatrixRaftSnapshotDesc::from_snapshot_meta(&SnapshotMetadata {
+        snapshot_id: "snap-818-selected".to_string(),
+        last_log_id: LogId { term: 1, index: 3 },
+        membership: vec![1, 2, 3],
+        members: vec![peer(818, 1), peer(818, 2), peer(818, 3)],
+    });
+    let selected_data_snapshot = MatrixRaftSnapshotDesc::from_snapshot_meta(&SnapshotMetadata {
+        snapshot_id: "snap-819-selected".to_string(),
+        last_log_id: LogId { term: 1, index: 3 },
+        membership: vec![1, 2, 3],
+        members: vec![peer(819, 1), peer(819, 2), peer(819, 3)],
+    });
     let selected_routes = server
         .publish_snapshot_routes_for_groups([
             (818, selected_meta_snapshot.clone()),
@@ -7191,9 +7162,9 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
         .publish_snapshot_route(
             853,
             1,
-            MatrixRaftSnapshotDesc::from_snapshot_meta(&RustRaftSnapshotMeta {
+            MatrixRaftSnapshotDesc::from_snapshot_meta(&SnapshotMetadata {
                 snapshot_id: "snap-853".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 1 },
+                last_log_id: LogId { term: 1, index: 1 },
                 membership: vec![1],
                 members: vec![peer(853, 1)],
             }),
@@ -7203,9 +7174,9 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
         .publish_snapshot_route(
             854,
             1,
-            MatrixRaftSnapshotDesc::from_snapshot_meta(&RustRaftSnapshotMeta {
+            MatrixRaftSnapshotDesc::from_snapshot_meta(&SnapshotMetadata {
                 snapshot_id: "snap-854".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 1 },
+                last_log_id: LogId { term: 1, index: 1 },
                 membership: vec![1],
                 members: vec![peer(854, 1)],
             }),
@@ -8291,7 +8262,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
     let priority_admin_plan = server
         .plan_priority_route_admin_command_batch(vec![
             MatrixRaftPriorityRoutedAdminCommand::new(
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 MatrixRaftRoutedAdminCommand::new(
                     846,
                     1,
@@ -8299,7 +8270,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
                 ),
             ),
             MatrixRaftPriorityRoutedAdminCommand::new(
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 MatrixRaftRoutedAdminCommand::new(
                     847,
                     1,
@@ -8307,7 +8278,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
                 ),
             ),
             MatrixRaftPriorityRoutedAdminCommand::new(
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 MatrixRaftRoutedAdminCommand::new(
                     846,
                     2,
@@ -8315,7 +8286,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
                 ),
             ),
             MatrixRaftPriorityRoutedAdminCommand::new(
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 MatrixRaftRoutedAdminCommand::new(
                     846,
                     1,
@@ -8347,7 +8318,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
             .collect::<Vec<_>>(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 2,
                 1,
                 vec![846],
@@ -8362,7 +8333,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
                 ],
             ),
             (
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 1,
                 1,
                 vec![846],
@@ -8371,7 +8342,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
                 vec![MatrixRaftAdminCommandType::SetNodeHealthy],
             ),
             (
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 1,
                 1,
                 vec![847],
@@ -8388,31 +8359,19 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
             .map(|command| command.priority)
             .collect::<Vec<_>>(),
         vec![
-            RustRaftMailPriority::Urgent,
-            RustRaftMailPriority::Urgent,
-            RustRaftMailPriority::Normal,
-            RustRaftMailPriority::Slowly,
+            MailPriority::Urgent,
+            MailPriority::Urgent,
+            MailPriority::Normal,
+            MailPriority::Slowly,
         ]
     );
     assert_eq!(
         priority_admin_plan.priorities_by_route_key(),
         vec![
-            (
-                MatrixRaftRouteKey::new(846, 2),
-                RustRaftMailPriority::Urgent
-            ),
-            (
-                MatrixRaftRouteKey::new(846, 1),
-                RustRaftMailPriority::Urgent
-            ),
-            (
-                MatrixRaftRouteKey::new(846, 1),
-                RustRaftMailPriority::Normal
-            ),
-            (
-                MatrixRaftRouteKey::new(847, 1),
-                RustRaftMailPriority::Slowly
-            ),
+            (MatrixRaftRouteKey::new(846, 2), MailPriority::Urgent),
+            (MatrixRaftRouteKey::new(846, 1), MailPriority::Urgent),
+            (MatrixRaftRouteKey::new(846, 1), MailPriority::Normal),
+            (MatrixRaftRouteKey::new(847, 1), MailPriority::Slowly),
         ]
     );
     assert_eq!(
@@ -8518,54 +8477,48 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
         priority_admin_plan.route_keys_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![
                     MatrixRaftRouteKey::new(846, 2),
                     MatrixRaftRouteKey::new(846, 1),
                 ]
             ),
-            (
-                RustRaftMailPriority::Normal,
-                vec![MatrixRaftRouteKey::new(846, 1)]
-            ),
-            (
-                RustRaftMailPriority::Slowly,
-                vec![MatrixRaftRouteKey::new(847, 1)]
-            ),
+            (MailPriority::Normal, vec![MatrixRaftRouteKey::new(846, 1)]),
+            (MailPriority::Slowly, vec![MatrixRaftRouteKey::new(847, 1)]),
         ]
     );
     assert_eq!(
         priority_admin_plan.group_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![846]),
-            (RustRaftMailPriority::Normal, vec![846]),
-            (RustRaftMailPriority::Slowly, vec![847]),
+            (MailPriority::Urgent, vec![846]),
+            (MailPriority::Normal, vec![846]),
+            (MailPriority::Slowly, vec![847]),
         ]
     );
     assert_eq!(
         priority_admin_plan.node_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![2, 1]),
-            (RustRaftMailPriority::Normal, vec![1]),
-            (RustRaftMailPriority::Slowly, vec![1]),
+            (MailPriority::Urgent, vec![2, 1]),
+            (MailPriority::Normal, vec![1]),
+            (MailPriority::Slowly, vec![1]),
         ]
     );
     assert_eq!(
         priority_admin_plan.command_types_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![
                     MatrixRaftAdminCommandType::SetLeaderLeaseValid,
                     MatrixRaftAdminCommandType::CheckpointSnapshot,
                 ]
             ),
             (
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 vec![MatrixRaftAdminCommandType::SetNodeHealthy]
             ),
             (
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 vec![MatrixRaftAdminCommandType::SetLeaderLeaseValid]
             ),
         ]
@@ -8574,18 +8527,18 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
         priority_admin_plan.commands_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![
                     MatrixRaftAdminCommand::set_leader_lease_valid(true),
                     MatrixRaftAdminCommand::checkpoint_snapshot(1, "priority-admin-snapshot-41"),
                 ],
             ),
             (
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 vec![MatrixRaftAdminCommand::set_node_healthy(3, true)],
             ),
             (
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 vec![MatrixRaftAdminCommand::set_leader_lease_valid(false)],
             ),
         ]
@@ -8593,156 +8546,156 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
     assert_eq!(
         priority_admin_plan.command_counts_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, 2),
-            (RustRaftMailPriority::Normal, 1),
-            (RustRaftMailPriority::Slowly, 1),
+            (MailPriority::Urgent, 2),
+            (MailPriority::Normal, 1),
+            (MailPriority::Slowly, 1),
         ]
     );
     assert_eq!(
         priority_admin_plan.route_key_counts_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, 2),
-            (RustRaftMailPriority::Normal, 1),
-            (RustRaftMailPriority::Slowly, 1),
+            (MailPriority::Urgent, 2),
+            (MailPriority::Normal, 1),
+            (MailPriority::Slowly, 1),
         ]
     );
     assert_eq!(
         priority_admin_plan.command_fanout_counts_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, 2, 2),
-            (RustRaftMailPriority::Normal, 1, 1),
-            (RustRaftMailPriority::Slowly, 1, 1),
+            (MailPriority::Urgent, 2, 2),
+            (MailPriority::Normal, 1, 1),
+            (MailPriority::Slowly, 1, 1),
         ]
     );
     assert_eq!(
         priority_admin_plan.command_node_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, Some(1)]),
-            (RustRaftMailPriority::Normal, vec![Some(3)]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, Some(1)]),
+            (MailPriority::Normal, vec![Some(3)]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_admin_plan.request_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, None]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_admin_plan.request_id_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false, false]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![false, false]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
         priority_admin_plan.snapshot_ids_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![None, Some("priority-admin-snapshot-41".to_string())],
             ),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_admin_plan.snapshot_id_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false, true]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![false, true]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
         priority_admin_plan.snapshot_peer_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, None]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_admin_plan.snapshot_indices_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, None]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_admin_plan.transferee_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, None]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_admin_plan.forced_campaigns_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false, false]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![false, false]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
         priority_admin_plan.log_indices_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, None]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_admin_plan.storage_fence_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false, false]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![false, false]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
         priority_admin_plan.storage_fences_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, None]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_admin_plan.node_healthy_values_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None, None]),
-            (RustRaftMailPriority::Normal, vec![Some(true)]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None, None]),
+            (MailPriority::Normal, vec![Some(true)]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         priority_admin_plan.node_healthy_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false, false]),
-            (RustRaftMailPriority::Normal, vec![true]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![false, false]),
+            (MailPriority::Normal, vec![true]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
         priority_admin_plan.lease_valid_values_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![Some(true), None]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![Some(false)]),
+            (MailPriority::Urgent, vec![Some(true), None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![Some(false)]),
         ]
     );
     assert_eq!(
         priority_admin_plan.lease_valid_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![true, false]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![true]),
+            (MailPriority::Urgent, vec![true, false]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![true]),
         ]
     );
     assert_eq!(
@@ -8803,12 +8756,12 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
             (
                 846,
                 vec![
-                    RustRaftMailPriority::Urgent,
-                    RustRaftMailPriority::Urgent,
-                    RustRaftMailPriority::Normal
+                    MailPriority::Urgent,
+                    MailPriority::Urgent,
+                    MailPriority::Normal
                 ]
             ),
-            (847, vec![RustRaftMailPriority::Slowly]),
+            (847, vec![MailPriority::Slowly]),
         ]
     );
     assert_eq!(
@@ -8946,7 +8899,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
         ]
     );
 
-    let metadata_fence = RustRaftStorageApplyFence {
+    let metadata_fence = StorageApplyFence {
         group_id: 847,
         node_id: 1,
         applied_index: 18,
@@ -8959,7 +8912,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
     let metadata_admin_plan = server
         .plan_priority_route_admin_command_batch(vec![
             MatrixRaftPriorityRoutedAdminCommand::new(
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 MatrixRaftRoutedAdminCommand::new(
                     846,
                     1,
@@ -8967,7 +8920,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
                 ),
             ),
             MatrixRaftPriorityRoutedAdminCommand::new(
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 MatrixRaftRoutedAdminCommand::new(
                     846,
                     2,
@@ -8975,7 +8928,7 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
                 ),
             ),
             MatrixRaftPriorityRoutedAdminCommand::new(
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 MatrixRaftRoutedAdminCommand::new(
                     847,
                     1,
@@ -8991,15 +8944,15 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
         metadata_admin_plan.command_types_by_priority(),
         vec![
             (
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 vec![MatrixRaftAdminCommandType::Election]
             ),
             (
-                RustRaftMailPriority::Normal,
+                MailPriority::Normal,
                 vec![MatrixRaftAdminCommandType::TransferLeader],
             ),
             (
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 vec![MatrixRaftAdminCommandType::CompactLogsWithStorageFence],
             ),
         ]
@@ -9007,68 +8960,65 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
     assert_eq!(
         metadata_admin_plan.command_node_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![Some(2)]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![Some(2)]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         metadata_admin_plan.transferee_ids_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None]),
-            (RustRaftMailPriority::Normal, vec![Some(1)]),
-            (RustRaftMailPriority::Slowly, vec![None]),
+            (MailPriority::Urgent, vec![None]),
+            (MailPriority::Normal, vec![Some(1)]),
+            (MailPriority::Slowly, vec![None]),
         ]
     );
     assert_eq!(
         metadata_admin_plan.transferee_id_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false]),
-            (RustRaftMailPriority::Normal, vec![true]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![false]),
+            (MailPriority::Normal, vec![true]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
         metadata_admin_plan.forced_campaigns_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![true]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![false]),
+            (MailPriority::Urgent, vec![true]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![false]),
         ]
     );
     assert_eq!(
         metadata_admin_plan.log_indices_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (RustRaftMailPriority::Slowly, vec![Some(18)]),
+            (MailPriority::Urgent, vec![None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![Some(18)]),
         ]
     );
     assert_eq!(
         metadata_admin_plan.log_index_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![true]),
+            (MailPriority::Urgent, vec![false]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![true]),
         ]
     );
     assert_eq!(
         metadata_admin_plan.storage_fence_presence_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![false]),
-            (RustRaftMailPriority::Normal, vec![false]),
-            (RustRaftMailPriority::Slowly, vec![true]),
+            (MailPriority::Urgent, vec![false]),
+            (MailPriority::Normal, vec![false]),
+            (MailPriority::Slowly, vec![true]),
         ]
     );
     assert_eq!(
         metadata_admin_plan.storage_fences_by_priority(),
         vec![
-            (RustRaftMailPriority::Urgent, vec![None]),
-            (RustRaftMailPriority::Normal, vec![None]),
-            (
-                RustRaftMailPriority::Slowly,
-                vec![Some(metadata_fence.clone())]
-            ),
+            (MailPriority::Urgent, vec![None]),
+            (MailPriority::Normal, vec![None]),
+            (MailPriority::Slowly, vec![Some(metadata_fence.clone())]),
         ]
     );
     assert_eq!(
@@ -9101,11 +9051,11 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
     );
     let priority_admin_best_effort = server.route_priority_admin_command_batch_best_effort(vec![
         MatrixRaftPriorityRoutedAdminCommand::new(
-            RustRaftMailPriority::Slowly,
+            MailPriority::Slowly,
             MatrixRaftRoutedAdminCommand::new(899, 1, MatrixRaftAdminCommand::release_memory()),
         ),
         MatrixRaftPriorityRoutedAdminCommand::new(
-            RustRaftMailPriority::Urgent,
+            MailPriority::Urgent,
             MatrixRaftRoutedAdminCommand::new(
                 846,
                 1,
@@ -9121,11 +9071,11 @@ fn matrixraft_multi_raft_server_broadcasts_messages_to_meta_and_data_groups() {
     let priority_admin_grouped_best_effort = server
         .route_priority_admin_command_batch_grouped_best_effort(vec![
             MatrixRaftPriorityRoutedAdminCommand::new(
-                RustRaftMailPriority::Slowly,
+                MailPriority::Slowly,
                 MatrixRaftRoutedAdminCommand::new(899, 1, MatrixRaftAdminCommand::release_memory()),
             ),
             MatrixRaftPriorityRoutedAdminCommand::new(
-                RustRaftMailPriority::Urgent,
+                MailPriority::Urgent,
                 MatrixRaftRoutedAdminCommand::new(
                     847,
                     1,
@@ -10430,9 +10380,9 @@ fn matrixraft_multi_raft_server_reports_group_statuses_and_leaders() {
         .publish_snapshot_route(
             822,
             1,
-            MatrixRaftSnapshotDesc::from_snapshot_meta(&RustRaftSnapshotMeta {
+            MatrixRaftSnapshotDesc::from_snapshot_meta(&SnapshotMetadata {
                 snapshot_id: "topology-meta-snapshot".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 1 },
+                last_log_id: LogId { term: 1, index: 1 },
                 membership: vec![1, 2],
                 members: vec![peer(822, 1), peer(822, 2)],
             }),
@@ -10583,22 +10533,51 @@ fn matrixraft_multi_raft_server_reports_group_statuses_and_leaders() {
         .expect("plan meta and data leaders");
     assert_eq!(leader_plan.operation, "leaders");
     assert_eq!(leader_plan.node_count, 3);
-    let expected_group_leases = statuses
+    // Assert the invariant, not an equality between two live reads.
+    //
+    // This used to compare `in_lease_on_group` against `statuses` captured just
+    // after `start_all`, ~370 lines earlier. The leader lease is wall-clock
+    // based (`leader_lease_ms` defaults to 500) and is established by the
+    // operations in between, so the stale snapshot said "no lease" while the
+    // live call could say "lease held": the assertion passed only when the run
+    // happened to be slow enough for the lease to have lapsed again. Re-reading
+    // the statuses immediately beforehand narrows the window but does not close
+    // it -- two independent reads of a time-based predicate can still straddle
+    // the expiry instant, which was still failing about once in sixty runs.
+    //
+    // What is actually invariant here is that only a leader can hold a lease.
+    // Node 1 leads throughout (asserted above); the follower must never report
+    // one. The leader's own lease is left unasserted because its value is a
+    // function of when the assertion happens to run.
+    let group_leases = server
+        .in_lease_on_group(822, None)
+        .expect("group lease states");
+    assert_eq!(group_leases.len(), 2);
+    let lease_roles = server
+        .group_statuses(822)
+        .expect("group statuses for lease comparison")
         .iter()
-        .map(|status| status.role == RustRaftRole::Leader && status.leader_lease_valid)
+        .map(|status| status.role)
         .collect::<Vec<_>>();
-    assert_eq!(
-        server
-            .in_lease_on_group(822, None)
-            .expect("group lease states"),
-        expected_group_leases
-    );
-    assert_eq!(
-        server
-            .in_lease_on_node(822, 1, Some(1))
-            .expect("node lease state"),
-        expected_group_leases[0]
-    );
+    for (node_index, holds_lease) in group_leases.iter().enumerate() {
+        if *holds_lease {
+            assert_eq!(
+                lease_roles[node_index],
+                StateRole::Leader,
+                "only a leader may report an active lease"
+            );
+        }
+    }
+    // Same race as above -- the leader's own lease value depends on when the
+    // call lands, so assert the two things that hold whenever it lands: the
+    // follower never reports a lease, and a term that does not match the
+    // leader's never does either.
+    assert!(!server
+        .in_lease_on_node(822, 2, None)
+        .expect("follower node lease state"));
+    assert!(!server
+        .in_lease_on_node(822, 1, Some(u64::MAX))
+        .expect("mismatched term lease state"));
     assert_eq!(
         server
             .in_lease_for_groups([822, 823], None)
@@ -11048,7 +11027,7 @@ fn matrixraft_multi_raft_server_syncs_fsm_runtime_bindings_by_group() {
         selected_data_sync.roles_by_route_key(),
         vec![(
             MatrixRaftRouteKey::new(845, 1),
-            Some(matrixraft::RustRaftRole::Leader)
+            Some(matrixraft::StateRole::Leader)
         )]
     );
     assert_eq!(
@@ -11063,7 +11042,7 @@ fn matrixraft_multi_raft_server_syncs_fsm_runtime_bindings_by_group() {
             .collect::<Vec<_>>(),
         vec![(
             MatrixRaftRouteKey::new(845, 1),
-            Some(matrixraft::RustRaftRole::Leader)
+            Some(matrixraft::StateRole::Leader)
         )]
     );
     assert_eq!(
@@ -12479,7 +12458,7 @@ fn matrixraft_multi_raft_server_exposes_direct_group_propose_and_read_paths() {
         })
     }));
     let propose_callback_hits =
-        std::cell::RefCell::new(Vec::<(MatrixRaftRouteKey, bool, Option<RustRaftLogId>)>::new());
+        std::cell::RefCell::new(Vec::<(MatrixRaftRouteKey, bool, Option<LogId>)>::new());
     let propose_callback_results = server
         .propose_with_options_callbacks_for_groups(
             [826, 827],
@@ -12506,17 +12485,17 @@ fn matrixraft_multi_raft_server_exposes_direct_group_propose_and_read_paths() {
     );
     assert!(propose_callback_results.iter().all(|(_, results)| {
         results.iter().all(|(_, result)| {
-            result.node_id_presence()
-                && result.request_id_presence()
-                && result.deadline_presence()
+            result.has_node_id()
+                && result.has_request_id()
+                && result.has_deadline()
                 && result.status()
                     == if result.ok {
                         MatrixRaftAsyncResultStatus::Ok
                     } else {
                         MatrixRaftAsyncResultStatus::Error
                     }
-                && result.log_id_presence() == result.ok
-                && result.error_presence() != result.ok
+                && result.has_log_id() == result.ok
+                && result.has_error() != result.ok
                 && !result.read_index_presence()
                 && !result.membership_presence()
                 && !result.snapshot_presence()
@@ -12858,7 +12837,7 @@ fn matrixraft_multi_raft_server_exposes_direct_group_propose_and_read_paths() {
             && *ok
             && log_id.is_some()));
     let group_callback_hits =
-        std::cell::RefCell::new(Vec::<(MatrixRaftRouteKey, bool, Option<RustRaftLogId>)>::new());
+        std::cell::RefCell::new(Vec::<(MatrixRaftRouteKey, bool, Option<LogId>)>::new());
     let group_callback_results = server
         .propose_callbacks_on_group(
             827,
@@ -13995,12 +13974,9 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
         .expect("data node");
     server.start_all(1).expect("start membership server");
 
-    let learner = peer_with_role(828, 4, RustRaftReplicaRole::Learner);
+    let learner = peer_with_role(828, 4, ReplicaRole::Learner);
     let add_reports = server
-        .route_membership_operation_to_group(
-            828,
-            RaftMembershipOperation::AddLearner(learner.clone()),
-        )
+        .route_membership_operation_to_group(828, MembershipOperation::AddLearner(learner.clone()))
         .expect("add learner to group");
     assert_eq!(add_reports.len(), 2);
     assert!(add_reports.iter().all(|report| report.success));
@@ -14020,11 +13996,7 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
     let selected_membership_plan = server
         .plan_membership_operation_for_groups(
             [828, 829],
-            RaftMembershipOperation::AddLearner(peer_with_role(
-                828,
-                6,
-                RustRaftReplicaRole::Learner,
-            )),
+            MembershipOperation::AddLearner(peer_with_role(828, 6, ReplicaRole::Learner)),
         )
         .expect("plan selected membership fanout");
     assert_eq!(selected_membership_plan.group_count, 2);
@@ -14048,17 +14020,15 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
     );
     assert!(matches!(
         selected_membership_plan.operation,
-        RaftMembershipOperation::AddLearner(_)
+        MembershipOperation::AddLearner(_)
     ));
-    assert!(
-        selected_membership_plan
-            .operations_by_group()
-            .iter()
-            .all(|(group_id, operation)| {
-                [828, 829].contains(group_id)
-                    && matches!(operation, RaftMembershipOperation::AddLearner(peer) if peer.node_id == 6)
-            })
-    );
+    assert!(selected_membership_plan
+        .operations_by_group()
+        .iter()
+        .all(|(group_id, operation)| {
+            [828, 829].contains(group_id)
+                && matches!(operation, MembershipOperation::AddLearner(peer) if peer.node_id == 6)
+        }));
     assert_eq!(
         selected_membership_plan.operation_types_by_route_key(),
         vec![
@@ -14083,28 +14053,22 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
             (MatrixRaftRouteKey::new(829, 1), 1),
         ]
     );
-    assert!(
-        selected_membership_plan
-            .operations_by_route_key()
-            .iter()
-            .all(|(route_key, operation)| {
-                [
-                    MatrixRaftRouteKey::new(828, 1),
-                    MatrixRaftRouteKey::new(828, 2),
-                    MatrixRaftRouteKey::new(829, 1),
-                ]
-                .contains(route_key)
-                    && matches!(operation, RaftMembershipOperation::AddLearner(peer) if peer.node_id == 6)
-            })
-    );
+    assert!(selected_membership_plan
+        .operations_by_route_key()
+        .iter()
+        .all(|(route_key, operation)| {
+            [
+                MatrixRaftRouteKey::new(828, 1),
+                MatrixRaftRouteKey::new(828, 2),
+                MatrixRaftRouteKey::new(829, 1),
+            ]
+            .contains(route_key)
+                && matches!(operation, MembershipOperation::AddLearner(peer) if peer.node_id == 6)
+        }));
     let selected_add_reports = server
         .route_membership_operation_to_groups(
             [828, 829],
-            RaftMembershipOperation::AddLearner(peer_with_role(
-                828,
-                6,
-                RustRaftReplicaRole::Learner,
-            )),
+            MembershipOperation::AddLearner(peer_with_role(828, 6, ReplicaRole::Learner)),
         )
         .expect("add learner to selected groups");
     assert_eq!(
@@ -14122,11 +14086,7 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
     let selected_membership_callbacks = server
         .membership_operation_callbacks_for_groups(
             [828, 829],
-            RaftMembershipOperation::AddLearner(peer_with_role(
-                828,
-                7,
-                RustRaftReplicaRole::Learner,
-            )),
+            MembershipOperation::AddLearner(peer_with_role(828, 7, ReplicaRole::Learner)),
             |key| {
                 let hits = &membership_callback_hits;
                 move |result: MatrixRaftAsyncResult| {
@@ -14183,11 +14143,7 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
     let witness_callbacks = server
         .membership_operation_callbacks_on_group(
             829,
-            RaftMembershipOperation::AddWitness(peer_with_role(
-                829,
-                8,
-                RustRaftReplicaRole::Witness,
-            )),
+            MembershipOperation::AddWitness(peer_with_role(829, 8, ReplicaRole::Witness)),
             |key| {
                 let hits = &witness_callback_hits;
                 move |result: MatrixRaftAsyncResult| {
@@ -14213,7 +14169,7 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
     let selected_remove_callbacks = server
         .membership_operation_callbacks_for_groups(
             [828, 829],
-            RaftMembershipOperation::Remove(7),
+            MembershipOperation::Remove(7),
             |key| {
                 let hits = &remove_callback_hits;
                 move |result: MatrixRaftAsyncResult| {
@@ -14272,14 +14228,14 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
     let duplicate_add = server
         .route_membership_operation_to_group_best_effort(
             828,
-            RaftMembershipOperation::AddLearner(learner),
+            MembershipOperation::AddLearner(learner),
         )
         .expect("duplicate add learner best effort");
     assert_eq!(duplicate_add.len(), 2);
     assert!(duplicate_add.iter().all(|result| result.error.is_some()));
 
     let remove_reports = server
-        .route_membership_operation_to_group_best_effort(828, RaftMembershipOperation::Remove(4))
+        .route_membership_operation_to_group_best_effort(828, MembershipOperation::Remove(4))
         .expect("remove learner best effort");
     assert_eq!(remove_reports.len(), 2);
     assert!(remove_reports.iter().all(|result| result.is_ok()));
@@ -14293,7 +14249,7 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
     let selected_remove_reports = server
         .route_membership_operation_to_groups_best_effort(
             [828, 829],
-            RaftMembershipOperation::Remove(6),
+            MembershipOperation::Remove(6),
         )
         .expect("remove learner from selected groups");
     assert_eq!(
@@ -14326,9 +14282,9 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
     }));
 
     let membership_workflow = vec![
-        RaftMembershipOperation::AddLearner(peer_with_role(828, 10, RustRaftReplicaRole::Learner)),
-        RaftMembershipOperation::Promote(10),
-        RaftMembershipOperation::Remove(10),
+        MembershipOperation::AddLearner(peer_with_role(828, 10, ReplicaRole::Learner)),
+        MembershipOperation::Promote(10),
+        MembershipOperation::Remove(10),
     ];
     let workflow_plan = server
         .plan_membership_workflow_for_groups([828, 829], membership_workflow.clone())
@@ -14440,13 +14396,9 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
         .route_membership_workflow_to_groups_best_effort(
             [828, 829],
             [
-                RaftMembershipOperation::AddLearner(peer_with_role(
-                    828,
-                    14,
-                    RustRaftReplicaRole::Learner,
-                )),
-                RaftMembershipOperation::Promote(14),
-                RaftMembershipOperation::Remove(14),
+                MembershipOperation::AddLearner(peer_with_role(828, 14, ReplicaRole::Learner)),
+                MembershipOperation::Promote(14),
+                MembershipOperation::Remove(14),
             ],
         )
         .expect("best-effort selected membership workflow result metadata");
@@ -14543,12 +14495,8 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
             829,
             1,
             [
-                RaftMembershipOperation::AddLearner(peer_with_role(
-                    829,
-                    11,
-                    RustRaftReplicaRole::Learner,
-                )),
-                RaftMembershipOperation::Remove(11),
+                MembershipOperation::AddLearner(peer_with_role(829, 11, ReplicaRole::Learner)),
+                MembershipOperation::Remove(11),
             ],
         )
         .expect("direct data membership workflow");
@@ -14558,12 +14506,8 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
         .route_membership_workflow_to_group_best_effort(
             829,
             [
-                RaftMembershipOperation::AddWitness(peer_with_role(
-                    829,
-                    12,
-                    RustRaftReplicaRole::Witness,
-                )),
-                RaftMembershipOperation::Remove(99),
+                MembershipOperation::AddWitness(peer_with_role(829, 12, ReplicaRole::Witness)),
+                MembershipOperation::Remove(99),
             ],
         )
         .expect("best-effort rollback workflow");
@@ -14582,11 +14526,7 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
         .route_membership_operation_to_node(
             829,
             1,
-            RaftMembershipOperation::AddWitness(peer_with_role(
-                829,
-                5,
-                RustRaftReplicaRole::Witness,
-            )),
+            MembershipOperation::AddWitness(peer_with_role(829, 5, ReplicaRole::Witness)),
         )
         .expect("data group direct witness");
     assert!(node_report.success);
@@ -14599,12 +14539,8 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
         .route_membership_workflow_to_groups_best_effort(
             [828, 829],
             [
-                RaftMembershipOperation::AddLearner(peer_with_role(
-                    829,
-                    13,
-                    RustRaftReplicaRole::Learner,
-                )),
-                RaftMembershipOperation::Remove(13),
+                MembershipOperation::AddLearner(peer_with_role(829, 13, ReplicaRole::Learner)),
+                MembershipOperation::Remove(13),
             ],
         )
         .expect("best-effort membership workflow with shutdown meta group");
@@ -14742,20 +14678,19 @@ fn matrixraft_multi_raft_server_routes_membership_operations_to_group_nodes() {
     );
 
     assert_invalid_request_contains(
-        server.plan_membership_operation_for_groups([899, 828], RaftMembershipOperation::Remove(4)),
+        server.plan_membership_operation_for_groups([899, 828], MembershipOperation::Remove(4)),
         "group 899 is not registered",
     );
     assert_invalid_request_contains(
-        server
-            .plan_membership_workflow_for_groups([899, 828], [RaftMembershipOperation::Remove(4)]),
+        server.plan_membership_workflow_for_groups([899, 828], [MembershipOperation::Remove(4)]),
         "group 899 is not registered",
     );
     assert_eq!(
-        server.route_membership_operation_to_node(828, 99, RaftMembershipOperation::Remove(4)),
+        server.route_membership_operation_to_node(828, 99, MembershipOperation::Remove(4)),
         Err(RaftError::NodeNotFound(99))
     );
     assert_eq!(
-        server.route_membership_workflow_to_node(828, 99, [RaftMembershipOperation::Remove(4)]),
+        server.route_membership_workflow_to_node(828, 99, [MembershipOperation::Remove(4)]),
         Err(RaftError::NodeNotFound(99))
     );
 
@@ -15217,21 +15152,13 @@ fn matrixraft_multi_raft_server_controls_peer_catchup_and_promotion_by_group() {
     server
         .route_membership_operation_to_group(
             832,
-            RaftMembershipOperation::AddLearner(peer_with_role(
-                832,
-                4,
-                RustRaftReplicaRole::Learner,
-            )),
+            MembershipOperation::AddLearner(peer_with_role(832, 4, ReplicaRole::Learner)),
         )
         .expect("add learner");
     server
         .route_membership_operation_to_group(
             833,
-            RaftMembershipOperation::AddLearner(peer_with_role(
-                833,
-                4,
-                RustRaftReplicaRole::Learner,
-            )),
+            MembershipOperation::AddLearner(peer_with_role(833, 4, ReplicaRole::Learner)),
         )
         .expect("add data learner");
     let catchups = server
@@ -15264,11 +15191,7 @@ fn matrixraft_multi_raft_server_controls_peer_catchup_and_promotion_by_group() {
         server
             .route_membership_operation_to_group(
                 group_id,
-                RaftMembershipOperation::AddLearner(peer_with_role(
-                    group_id,
-                    6,
-                    RustRaftReplicaRole::Learner,
-                )),
+                MembershipOperation::AddLearner(peer_with_role(group_id, 6, ReplicaRole::Learner)),
             )
             .expect("add selected learner");
     }
@@ -15363,11 +15286,7 @@ fn matrixraft_multi_raft_server_controls_peer_catchup_and_promotion_by_group() {
         server
             .route_membership_operation_to_group(
                 group_id,
-                RaftMembershipOperation::AddLearner(peer_with_role(
-                    group_id,
-                    10,
-                    RustRaftReplicaRole::Learner,
-                )),
+                MembershipOperation::AddLearner(peer_with_role(group_id, 10, ReplicaRole::Learner)),
             )
             .expect("add best-effort promote learner");
     }
@@ -15405,11 +15324,7 @@ fn matrixraft_multi_raft_server_controls_peer_catchup_and_promotion_by_group() {
         server
             .route_membership_operation_to_group(
                 group_id,
-                RaftMembershipOperation::AddLearner(peer_with_role(
-                    group_id,
-                    8,
-                    RustRaftReplicaRole::Learner,
-                )),
+                MembershipOperation::AddLearner(peer_with_role(group_id, 8, ReplicaRole::Learner)),
             )
             .expect("add callback learner");
     }
@@ -15502,7 +15417,7 @@ fn matrixraft_multi_raft_server_controls_peer_catchup_and_promotion_by_group() {
         report.learner_id == 5
             && report.auto_promote
             && report.promoted
-            && report.state_after == RaftLearnerAutoPromoteState::Promoted
+            && report.state_after == LearnerAutoPromoteState::Promoted
     }));
     assert!(
         server
@@ -15551,7 +15466,7 @@ fn matrixraft_multi_raft_server_controls_peer_catchup_and_promotion_by_group() {
             report.learner_id == 7
                 && report.auto_promote
                 && report.promoted
-                && report.state_after == RaftLearnerAutoPromoteState::Promoted
+                && report.state_after == LearnerAutoPromoteState::Promoted
         })
     }));
     for group_id in [832, 833] {
@@ -15653,7 +15568,7 @@ fn matrixraft_multi_raft_server_controls_peer_catchup_and_promotion_by_group() {
                     report.learner_id == 9
                         && report.auto_promote
                         && report.promoted
-                        && report.state_after == RaftLearnerAutoPromoteState::Promoted
+                        && report.state_after == LearnerAutoPromoteState::Promoted
                 })
         })
     }));
@@ -16603,11 +16518,31 @@ fn matrixraft_multi_raft_server_controls_leadership_by_group() {
         server.transfer_leader_on_node(834, 99, 2),
         Err(RaftError::NodeNotFound(99))
     );
-    assert!(server
+    // A transfer to an unknown peer is *ignored*, not rejected: the admission
+    // returns `IgnoredUnknownPeer` ("ignored_unknown_transferee") and
+    // `transfer_leader` reports `Ok`, which matches how etcd/raft drops a
+    // `MsgTransferLeader` naming a peer it does not know.
+    //
+    // This used to assert that every routed result carried an error. That only
+    // held when the nodes happened to answer `NoLeader` first -- a state that
+    // depends on where the wall-clock leader lease sits when the call lands --
+    // so it failed roughly twice in sixty runs. The guarantee worth asserting
+    // is the one the ignore exists to provide: an unknown transferee cannot
+    // move leadership.
+    let invalid_transfer = server
         .transfer_leader_on_group_best_effort(834, 99)
-        .expect("invalid transfer target best effort")
+        .expect("invalid transfer target best effort");
+    assert!(!invalid_transfer.is_empty());
+    // Comparing leadership before and after would NOT be stable: leadership
+    // converges asynchronously, so two reads can differ for reasons unrelated
+    // to the transfer -- under CPU load this was seen going from [None, None]
+    // to [Some(1), Some(2)]. What does hold regardless of timing is that a peer
+    // the group does not know can never become its leader.
+    assert!(server
+        .group_leaders(834)
+        .expect("group leaders after invalid transfer")
         .iter()
-        .all(|result| result.error.is_some()));
+        .all(|leader| leader.as_ref().map(|node| node.peer_id) != Some(99)));
 
     server.shutdown_all().expect("shutdown leadership server");
 
@@ -17677,7 +17612,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
         .iter()
         .all(|status| status.group_id == 837));
 
-    let install_fence = RustRaftApplySnapshotFence {
+    let install_fence = ApplySnapshotFence {
         applied_index: 10_000,
         commit_index: 10_000,
         installed_snapshot_index: 10_000,
@@ -17685,16 +17620,16 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
     };
     let meta_install_snapshot = RaftSnapshot {
         group_id: 836,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: "direct-install-836".to_string(),
-            last_log_id: RustRaftLogId {
+            last_log_id: LogId {
                 term: 1,
                 index: 10_000,
             },
             membership: vec![1, 2],
             members: vec![
-                peer_with_role(836, 1, RustRaftReplicaRole::Voter),
-                peer_with_role(836, 2, RustRaftReplicaRole::Voter),
+                peer_with_role(836, 1, ReplicaRole::Voter),
+                peer_with_role(836, 2, ReplicaRole::Voter),
             ],
         },
         payload: b"direct meta install snapshot".to_vec(),
@@ -17714,21 +17649,21 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
     assert_eq!(direct_install.snapshot_id, "direct-install-836");
     let meta_group_install_snapshot = RaftSnapshot {
         group_id: 836,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: "group-install-836".to_string(),
-            last_log_id: RustRaftLogId {
+            last_log_id: LogId {
                 term: 1,
                 index: 10_010,
             },
             membership: vec![1, 2],
             members: vec![
-                peer_with_role(836, 1, RustRaftReplicaRole::Voter),
-                peer_with_role(836, 2, RustRaftReplicaRole::Voter),
+                peer_with_role(836, 1, ReplicaRole::Voter),
+                peer_with_role(836, 2, ReplicaRole::Voter),
             ],
         },
         payload: b"group meta install snapshot".to_vec(),
     };
-    let meta_group_fence = RustRaftApplySnapshotFence {
+    let meta_group_fence = ApplySnapshotFence {
         applied_index: 10_010,
         commit_index: 10_010,
         installed_snapshot_index: 10_010,
@@ -17757,7 +17692,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
         .expect("install full snapshot on meta group");
     assert_eq!(meta_group_installs.len(), 2);
     assert!(meta_group_installs.iter().all(|result| result.is_ok()));
-    let selected_install_fence = RustRaftApplySnapshotFence {
+    let selected_install_fence = ApplySnapshotFence {
         applied_index: 10_020,
         commit_index: 10_020,
         installed_snapshot_index: 10_020,
@@ -17765,32 +17700,32 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
     };
     let selected_meta_snapshot = RaftSnapshot {
         group_id: 836,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: "selected-install-836".to_string(),
-            last_log_id: RustRaftLogId {
+            last_log_id: LogId {
                 term: 1,
                 index: 10_020,
             },
             membership: vec![1, 2],
             members: vec![
-                peer_with_role(836, 1, RustRaftReplicaRole::Voter),
-                peer_with_role(836, 2, RustRaftReplicaRole::Voter),
+                peer_with_role(836, 1, ReplicaRole::Voter),
+                peer_with_role(836, 2, ReplicaRole::Voter),
             ],
         },
         payload: b"selected meta install snapshot".to_vec(),
     };
     let selected_data_snapshot = RaftSnapshot {
         group_id: 837,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: "selected-install-837".to_string(),
-            last_log_id: RustRaftLogId {
+            last_log_id: LogId {
                 term: 1,
                 index: 10_020,
             },
             membership: vec![1, 2],
             members: vec![
-                peer_with_role(837, 1, RustRaftReplicaRole::Voter),
-                peer_with_role(837, 2, RustRaftReplicaRole::Voter),
+                peer_with_role(837, 1, ReplicaRole::Voter),
+                peer_with_role(837, 2, ReplicaRole::Voter),
             ],
         },
         payload: b"selected data install snapshot".to_vec(),
@@ -17961,7 +17896,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
     server
         .shutdown_group_best_effort(836)
         .expect("shutdown meta group before best-effort full snapshot install");
-    let retry_install_fence = RustRaftApplySnapshotFence {
+    let retry_install_fence = ApplySnapshotFence {
         applied_index: 10_030,
         commit_index: 10_030,
         installed_snapshot_index: 10_030,
@@ -17969,32 +17904,32 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
     };
     let retry_meta_snapshot = RaftSnapshot {
         group_id: 836,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: "retry-install-836".to_string(),
-            last_log_id: RustRaftLogId {
+            last_log_id: LogId {
                 term: 1,
                 index: 10_030,
             },
             membership: vec![1, 2],
             members: vec![
-                peer_with_role(836, 1, RustRaftReplicaRole::Voter),
-                peer_with_role(836, 2, RustRaftReplicaRole::Voter),
+                peer_with_role(836, 1, ReplicaRole::Voter),
+                peer_with_role(836, 2, ReplicaRole::Voter),
             ],
         },
         payload: b"retry meta install snapshot".to_vec(),
     };
     let retry_data_snapshot = RaftSnapshot {
         group_id: 837,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: "retry-install-837".to_string(),
-            last_log_id: RustRaftLogId {
+            last_log_id: LogId {
                 term: 1,
                 index: 10_030,
             },
             membership: vec![1, 2],
             members: vec![
-                peer_with_role(837, 1, RustRaftReplicaRole::Voter),
-                peer_with_role(837, 2, RustRaftReplicaRole::Voter),
+                peer_with_role(837, 1, ReplicaRole::Voter),
+                peer_with_role(837, 2, ReplicaRole::Voter),
             ],
         },
         payload: b"retry data install snapshot".to_vec(),
@@ -18245,9 +18180,9 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
             2,
             RaftSnapshot {
                 group_id: 836,
-                meta: RustRaftSnapshotMeta {
+                meta: SnapshotMetadata {
                     snapshot_id: "missing-install-node".to_string(),
-                    last_log_id: RustRaftLogId {
+                    last_log_id: LogId {
                         term: 1,
                         index: 10_040,
                     },
@@ -18256,7 +18191,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
                 },
                 payload: Vec::new(),
             },
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 10_040,
                 commit_index: 10_040,
                 installed_snapshot_index: 10_040,
@@ -18467,6 +18402,26 @@ fn matrixraft_multi_raft_server_controls_lease_and_attributes_by_group() {
             })
         })));
 
+    // KNOWN LOAD-SENSITIVE, and not fixable from here.
+    //
+    // This samples the data group's lease before and after invalidating the
+    // meta group's, and requires the two to match. The lease clock advances on
+    // its own, so the samples can differ for reasons unrelated to the meta
+    // group: under 2x CPU oversubscription this fails roughly 3% of runs.
+    //
+    // Pinning the lease first does NOT help, and was tried: neither `true` nor
+    // `false` is a stable state while the automatic tick runs, because with
+    // `lease_duration_ms: 20` against a 10ms tick the lease both expires and
+    // renews within a couple of ticks. The assertion two below
+    // (`!status.leader_lease_valid` on the meta group) fails for the same
+    // reason and predates this note.
+    //
+    // Making this deterministic needs the automatic tick suppressed for this
+    // binary -- `tick_interval_ms` far larger than the test. That is a change
+    // to the shared `options()` helper affecting all 33 tests here, several of
+    // which rely on tick-driven timeouts (`election_cycle_tick`,
+    // `transfer_timeout_tick`, `offline_timeout_tick`), so it needs doing
+    // deliberately rather than as a drive-by.
     let data_lease_before: Vec<_> = server
         .group_statuses(839)
         .expect("data statuses before meta lease invalidation")
@@ -19236,7 +19191,7 @@ fn matrixraft_multi_raft_server_controls_storage_apply_and_witness_by_group() {
             .iter()
             .all(|(_, present)| *present)));
 
-    let fence = RustRaftStorageApplyFence {
+    let fence = StorageApplyFence {
         group_id: 840,
         node_id: 1,
         committed_index: log_id.index,
@@ -19256,7 +19211,7 @@ fn matrixraft_multi_raft_server_controls_storage_apply_and_witness_by_group() {
             .as_ref()
             .is_some_and(|report| report.requested_log_index == applied_index && report.fence_valid)
     }));
-    let data_fence = RustRaftStorageApplyFence {
+    let data_fence = StorageApplyFence {
         group_id: 841,
         node_id: 1,
         committed_index: data_log_id.index,
@@ -19266,7 +19221,7 @@ fn matrixraft_multi_raft_server_controls_storage_apply_and_witness_by_group() {
         installed_snapshot_index: 0,
         first_retained_log_index: 1,
     };
-    let selected_fence = RustRaftStorageApplyFence {
+    let selected_fence = StorageApplyFence {
         group_id: 840,
         node_id: 1,
         committed_index: log_id.index,
@@ -19335,7 +19290,7 @@ fn matrixraft_multi_raft_server_controls_storage_apply_and_witness_by_group() {
                 .iter()
                 .all(|(_, present)| !*present)
     }));
-    let selected_fence_best_effort = RustRaftStorageApplyFence {
+    let selected_fence_best_effort = StorageApplyFence {
         group_id: 840,
         node_id: 1,
         committed_index: log_id.index,
@@ -19345,7 +19300,7 @@ fn matrixraft_multi_raft_server_controls_storage_apply_and_witness_by_group() {
         installed_snapshot_index: 0,
         first_retained_log_index: 1,
     };
-    let data_fence_best_effort = RustRaftStorageApplyFence {
+    let data_fence_best_effort = StorageApplyFence {
         group_id: 841,
         node_id: 1,
         committed_index: data_log_id.index,
@@ -20352,7 +20307,7 @@ fn matrixraft_multi_raft_server_fans_out_append_rpc_by_group() {
         rejection_hint: None,
         rejected_index: None,
         require_snapshot: None,
-        snapshot_state: RustRaftSnapshotState::None,
+        snapshot_state: SnapshotState::None,
         lease_confirmation_epoch: 8,
         lease_duration_ms: 25,
     };
@@ -20653,14 +20608,14 @@ fn matrixraft_multi_raft_server_fans_out_snapshot_chunk_rpc_by_group() {
         group_id: 0,
         term: 1,
         leader_id: 0,
-        chunk: RustRaftSnapshotChunk {
-            meta: RustRaftSnapshotMeta {
+        chunk: SnapshotChunk {
+            meta: SnapshotMetadata {
                 snapshot_id: "selected-snapshot-rpc-22".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 22 },
+                last_log_id: LogId { term: 1, index: 22 },
                 membership: vec![1, 2],
                 members: vec![
-                    peer_with_role(846, 1, RustRaftReplicaRole::Voter),
-                    peer_with_role(846, 2, RustRaftReplicaRole::Voter),
+                    peer_with_role(846, 1, ReplicaRole::Voter),
+                    peer_with_role(846, 2, ReplicaRole::Voter),
                 ],
             },
             offset: 0,
@@ -20742,10 +20697,10 @@ fn matrixraft_multi_raft_server_fans_out_snapshot_chunk_rpc_by_group() {
         group_id: 0,
         term: 1,
         leader_id: 0,
-        chunk: RustRaftSnapshotChunk {
-            meta: RustRaftSnapshotMeta {
+        chunk: SnapshotChunk {
+            meta: SnapshotMetadata {
                 snapshot_id: "selected-snapshot-rpc-32".to_string(),
-                last_log_id: RustRaftLogId { term: 1, index: 32 },
+                last_log_id: LogId { term: 1, index: 32 },
                 membership: vec![1, 2],
                 members: Vec::new(),
             },
@@ -20785,7 +20740,7 @@ fn matrixraft_multi_raft_server_fans_out_snapshot_chunk_rpc_by_group() {
         .iter()
         .all(|result| result.error.is_some()));
 
-    let snapshot_response = RustRaftInstallSnapshotResponse {
+    let snapshot_response = InstallSnapshotResponse {
         term: 2,
         accepted: false,
         next_offset: 0,
@@ -20912,7 +20867,7 @@ fn matrixraft_multi_raft_server_fans_out_read_index_rpc_by_group() {
         .expect("data node 2");
     server.start_all(1).expect("start read-index rpc server");
 
-    let request = RustRaftReadIndexRequest {
+    let request = ReadIndexRequest {
         group_id: 0,
         requester_id: 2,
         min_commit_index: 0,
@@ -20994,7 +20949,7 @@ fn matrixraft_multi_raft_server_fans_out_read_index_rpc_by_group() {
             [899, 848],
             2,
             1,
-            RustRaftReadIndexRequest {
+            ReadIndexRequest {
                 group_id: 0,
                 requester_id: 2,
                 min_commit_index: 0,
@@ -21211,7 +21166,7 @@ fn matrixraft_multi_raft_server_rejects_vote_traffic_to_learners_but_accepts_app
     let snapshot_dir = temp_dir("learner-snapshot");
     server
         .create_node(
-            options_with_role(812, &wal_dir, &snapshot_dir, RustRaftReplicaRole::Learner),
+            options_with_role(812, &wal_dir, &snapshot_dir, ReplicaRole::Learner),
             1,
         )
         .expect("learner node");

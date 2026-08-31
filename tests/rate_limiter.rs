@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
-use matrixraft::{RustRaftByteQuotaLimiter, RustRaftRateLimiter};
+use matrixraft::{ByteQuotaLimiter, RateLimiter};
 
 #[test]
 fn byte_quota_limiter_grants_rejects_and_refills_like_baseline_raft_quota_gate() {
-    let mut limiter = RustRaftByteQuotaLimiter::new(10);
+    let mut limiter = ByteQuotaLimiter::new(10);
 
     let first = limiter.reserve_bytes(7);
     assert!(first.allowed);
@@ -36,7 +36,7 @@ fn byte_quota_limiter_grants_rejects_and_refills_like_baseline_raft_quota_gate()
 
 #[test]
 fn byte_quota_limiter_can_grant_partial_quota_streaming() {
-    let mut limiter = RustRaftByteQuotaLimiter::with_available(10, 3);
+    let mut limiter = ByteQuotaLimiter::with_available(10, 3);
 
     let partial = limiter.reserve_limited_bytes(8);
     assert!(partial.allowed);

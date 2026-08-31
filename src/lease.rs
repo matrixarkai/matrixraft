@@ -6,18 +6,18 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{RustRaftNodeId, RustRaftReplicaRole, RustRaftTerm};
+use crate::{NodeId, ReplicaRole, Term};
 
-pub type RustRaftLeaseEpochId = u64;
+pub type LeaseEpochId = u64;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftLeasePeer {
-    pub node_id: RustRaftNodeId,
-    pub role: RustRaftReplicaRole,
+pub struct LeasePeer {
+    pub node_id: NodeId,
+    pub role: ReplicaRole,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftLeaderLeaseStatus {
+pub struct LeaderLeaseStatus {
     pub in_lease: bool,
     pub lease_end_ms: Option<u64>,
     pub quorum_size: usize,
@@ -26,24 +26,24 @@ pub struct RustRaftLeaderLeaseStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct RustRaftPeerLeaseInfo {
-    role: RustRaftReplicaRole,
-    max_send_epoch_ms: RustRaftLeaseEpochId,
+struct PeerLeaseInfo {
+    role: ReplicaRole,
+    max_send_epoch_ms: LeaseEpochId,
     lease_end_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftLeaderLease {
-    peer_id: RustRaftNodeId,
+pub struct LeaderLease {
+    peer_id: NodeId,
     lease_duration_ms: u64,
-    current_term: RustRaftTerm,
-    peers: BTreeMap<RustRaftNodeId, RustRaftPeerLeaseInfo>,
+    current_term: Term,
+    peers: BTreeMap<NodeId, PeerLeaseInfo>,
     last_active_lease_end_ms: Option<u64>,
     have_new_confirm: bool,
 }
 
-impl RustRaftLeaderLease {
-    pub fn new(peer_id: RustRaftNodeId, lease_duration_ms: u64) -> Self {
+impl LeaderLease {
+    pub fn new(peer_id: NodeId, lease_duration_ms: u64) -> Self {
         Self {
             peer_id,
             lease_duration_ms,
@@ -54,7 +54,7 @@ impl RustRaftLeaderLease {
         }
     }
 
-    pub fn reset(&mut self, new_term: RustRaftTerm) {
+    pub fn reset(&mut self, new_term: Term) {
         self.current_term = new_term;
         self.have_new_confirm = false;
         for info in self.peers.values_mut() {
@@ -65,7 +65,7 @@ impl RustRaftLeaderLease {
 
     pub fn update_members<I>(&mut self, peers: I)
     where
-        I: IntoIterator<Item = RustRaftLeasePeer>,
+        I: IntoIterator<Item = LeasePeer>,
     {
         let mut live = BTreeSet::new();
         for peer in peers {
@@ -78,7 +78,7 @@ impl RustRaftLeaderLease {
             if reset_role {
                 self.peers.insert(
                     peer.node_id,
-                    RustRaftPeerLeaseInfo {
+                    PeerLeaseInfo {
                         role: peer.role,
                         max_send_epoch_ms: 0,
                         lease_end_ms: None,
@@ -91,19 +91,24 @@ impl RustRaftLeaderLease {
         self.peers.retain(|node_id, _| live.contains(node_id));
     }
 
-    pub fn epoch_id_from_send_time(send_time_ms: u64) -> RustRaftLeaseEpochId {
+    pub fn epoch_id_from_send_time(send_time_ms: u64) -> LeaseEpochId {
         send_time_ms
     }
 
     pub fn on_recv_lease_confirm(
         &mut self,
-        term: RustRaftTerm,
-        from: RustRaftNodeId,
-        epoch_id: RustRaftLeaseEpochId,
+        term: Term,
+        from: NodeId,
+        epoch_id: LeaseEpochId,
         lease_duration_ms: u64,
     ) -> bool {
-        assert_eq!(term, self.current_term, "lease confirm term mismatch");
-        assert_ne!(from, self.peer_id, "leader must not confirm itself");
+        // A confirmation carrying a term we have moved past, or one we appear
+        // to have sent ourselves, is a message to drop -- the same answer this
+        // function already gives for a peer it does not know and for an epoch
+        // it has already seen, a few lines below.
+        if term != self.current_term || from == self.peer_id {
+            return false;
+        }
         let Some(info) = self.peers.get_mut(&from) else {
             return false;
         };
@@ -120,12 +125,17 @@ impl RustRaftLeaderLease {
         true
     }
 
-    pub fn in_lease(&mut self, term: RustRaftTerm, now_ms: u64) -> bool {
+    pub fn in_lease(&mut self, term: Term, now_ms: u64) -> bool {
         self.status(term, now_ms).in_lease
     }
 
-    pub fn status(&mut self, term: RustRaftTerm, now_ms: u64) -> RustRaftLeaderLeaseStatus {
-        assert_eq!(term, self.current_term, "leader lease term mismatch");
+    pub fn status(&mut self, term: Term, now_ms: u64) -> LeaderLeaseStatus {
+        // No lease is held for a term that is not the current one. Reported
+        // rather than asserted: this is reachable from any caller holding a
+        // stale term, which in Raft is ordinary.
+        if term != self.current_term {
+            return self.status_for_mismatched_term();
+        }
         if self
             .last_active_lease_end_ms
             .map(|lease_end| now_ms < lease_end)
@@ -173,13 +183,31 @@ impl RustRaftLeaderLease {
         Some(end_times[safe_idx])
     }
 
-    fn status_with_reason(&self, now_ms: u64, reason: &str) -> RustRaftLeaderLeaseStatus {
+    /// Status for a term this lease does not track: never in lease, and with
+    /// no lease end to report. The quorum figures still describe the current
+    /// peer set, so a caller inspecting the status can tell the two apart.
+    fn status_for_mismatched_term(&self) -> LeaderLeaseStatus {
         let voting_peer_count = self
             .peers
             .values()
             .filter(|info| info.role.participates_in_quorum())
             .count();
-        RustRaftLeaderLeaseStatus {
+        LeaderLeaseStatus {
+            in_lease: false,
+            lease_end_ms: None,
+            quorum_size: voting_peer_count / 2 + 1,
+            voting_peer_count,
+            reason: "term_mismatch".to_string(),
+        }
+    }
+
+    fn status_with_reason(&self, now_ms: u64, reason: &str) -> LeaderLeaseStatus {
+        let voting_peer_count = self
+            .peers
+            .values()
+            .filter(|info| info.role.participates_in_quorum())
+            .count();
+        LeaderLeaseStatus {
             in_lease: self
                 .last_active_lease_end_ms
                 .map(|lease_end| now_ms < lease_end)
@@ -191,29 +219,25 @@ impl RustRaftLeaderLease {
         }
     }
 
-    fn need_reset_node_role(
-        &self,
-        before: RustRaftReplicaRole,
-        after: RustRaftReplicaRole,
-    ) -> bool {
+    fn need_reset_node_role(&self, before: ReplicaRole, after: ReplicaRole) -> bool {
         before != after
             && (!before.participates_in_quorum() || !after.participates_in_quorum())
-            && (before == RustRaftReplicaRole::Learner || after == RustRaftReplicaRole::Learner)
+            && (before == ReplicaRole::Learner || after == ReplicaRole::Learner)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftFollowerLease {
-    peer_id: RustRaftNodeId,
+pub struct FollowerLease {
+    peer_id: NodeId,
     lease_duration_ms: u64,
-    current_term: RustRaftTerm,
+    current_term: Term,
     received_lease_end_ms: Option<u64>,
-    max_received_epoch_id: RustRaftLeaseEpochId,
+    max_received_epoch_id: LeaseEpochId,
 }
 
-impl RustRaftFollowerLease {
+impl FollowerLease {
     pub fn new(
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         lease_duration_ms: u64,
         last_lease_duration_ms: u64,
         now_ms: u64,
@@ -228,25 +252,27 @@ impl RustRaftFollowerLease {
         }
     }
 
-    pub fn reset(&mut self, new_term: RustRaftTerm) {
+    pub fn reset(&mut self, new_term: Term) {
         self.current_term = new_term;
         self.max_received_epoch_id = 0;
     }
 
-    pub fn in_lease(&self, term: RustRaftTerm, now_ms: u64) -> bool {
-        assert_eq!(term, self.current_term, "follower lease term mismatch");
+    pub fn in_lease(&self, term: Term, now_ms: u64) -> bool {
+        // Not in lease for a term that is not the current one.
+        if term != self.current_term {
+            return false;
+        }
         self.received_lease_end_ms
             .map(|lease_end| now_ms < lease_end)
             .unwrap_or(false)
     }
 
-    pub fn on_recv_lease_item(
-        &mut self,
-        term: RustRaftTerm,
-        epoch_id: RustRaftLeaseEpochId,
-        now_ms: u64,
-    ) -> bool {
-        assert_eq!(term, self.current_term, "follower lease item term mismatch");
+    pub fn on_recv_lease_item(&mut self, term: Term, epoch_id: LeaseEpochId, now_ms: u64) -> bool {
+        // A stale term is a rejected message, exactly as a stale epoch is on
+        // the very next line.
+        if term != self.current_term {
+            return false;
+        }
         if epoch_id <= self.max_received_epoch_id {
             return false;
         }
@@ -255,8 +281,12 @@ impl RustRaftFollowerLease {
         true
     }
 
-    pub fn max_met_epoch_id(&self, term: RustRaftTerm) -> RustRaftLeaseEpochId {
-        assert_eq!(term, self.current_term, "follower lease term mismatch");
+    /// Highest lease epoch met for `term`. Nothing has been met for a term
+    /// this lease does not track, which is the initial value anyway.
+    pub fn max_met_epoch_id(&self, term: Term) -> LeaseEpochId {
+        if term != self.current_term {
+            return 0;
+        }
         self.max_received_epoch_id
     }
 
@@ -268,7 +298,7 @@ impl RustRaftFollowerLease {
         self.lease_duration_ms
     }
 
-    pub fn peer_id(&self) -> RustRaftNodeId {
+    pub fn peer_id(&self) -> NodeId {
         self.peer_id
     }
 }

@@ -5,13 +5,13 @@
 // Split from src/lib.rs to keep the crate facade small and focused.
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftDataNodeProcessRolloutReport {
+pub struct DataNodeProcessRolloutReport {
     pub shard_id: u64,
     #[serde(default)]
     pub voters: Vec<u64>,
     #[serde(default)]
     pub learners: Vec<u64>,
-    pub nodes: Vec<RustRaftProcessNodeEvidence>,
+    pub nodes: Vec<ProcessNodeEvidence>,
     #[serde(default)]
     pub spawned_process_count: u64,
     #[serde(default)]
@@ -68,18 +68,18 @@ pub struct RustRaftDataNodeProcessRolloutReport {
     pub apply_fence_recovered_after_restart: bool,
     pub multi_process_log_store_validated: bool,
     #[serde(default)]
-    pub operational_semantics: RustRaftProcessOperationalSemanticsEvidence,
+    pub operational_semantics: ProcessOperationalSemanticsEvidence,
     pub ready: bool,
     pub blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftMetaProcessRolloutReport {
+pub struct MetaProcessRolloutReport {
     #[serde(default)]
     pub voters: Vec<u64>,
     #[serde(default)]
     pub learners: Vec<u64>,
-    pub nodes: Vec<RustRaftProcessNodeEvidence>,
+    pub nodes: Vec<ProcessNodeEvidence>,
     #[serde(default)]
     pub spawned_process_count: u64,
     #[serde(default)]
@@ -137,13 +137,13 @@ pub struct RustRaftMetaProcessRolloutReport {
     pub meta_apply_fence_recovered_after_restart: bool,
     pub multi_process_log_store_validated: bool,
     #[serde(default)]
-    pub operational_semantics: RustRaftProcessOperationalSemanticsEvidence,
+    pub operational_semantics: ProcessOperationalSemanticsEvidence,
     pub ready: bool,
     pub blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftCrossPlaneProcessReadinessReport {
+pub struct CrossPlaneProcessReadinessReport {
     pub ready: bool,
     pub multi_process_data_node_and_metaserver_raft: bool,
     pub failover_on_both_planes: bool,
@@ -155,7 +155,7 @@ pub struct RustRaftCrossPlaneProcessReadinessReport {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftCrossPlaneProcessReadinessBlockerReport {
+pub struct CrossPlaneProcessReadinessBlockerReport {
     pub ready: bool,
     pub multi_process_data_node_and_metaserver_raft: bool,
     pub failover_on_both_planes: bool,
@@ -163,11 +163,11 @@ pub struct RustRaftCrossPlaneProcessReadinessBlockerReport {
     pub secondary_lag_and_catchup: bool,
     pub snapshot_restart_after_compaction: bool,
     #[serde(default)]
-    pub remaining_blockers: Vec<RustRaftProcessReadinessBlocker>,
+    pub remaining_blockers: Vec<ProcessReadinessBlocker>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftCrossPlaneProcessEvidenceSummary {
+pub struct CrossPlaneProcessEvidenceSummary {
     pub data_node_spawned_process_count: u64,
     pub metaserver_spawned_process_count: u64,
     pub total_spawned_process_count: u64,
@@ -192,15 +192,15 @@ pub struct RustRaftCrossPlaneProcessEvidenceSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftCrossPlaneProcessEvidenceArtifact {
+pub struct CrossPlaneProcessEvidenceArtifact {
     pub schema: String,
-    pub readiness: RustRaftCrossPlaneProcessReadinessBlockerReport,
-    pub summary: RustRaftCrossPlaneProcessEvidenceSummary,
-    pub prometheus: RustRaftPrometheusMetricSet,
+    pub readiness: CrossPlaneProcessReadinessBlockerReport,
+    pub summary: CrossPlaneProcessEvidenceSummary,
+    pub prometheus: PrometheusMetricSet,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftCrossPlaneProcessEvidenceArtifactValidationReport {
+pub struct CrossPlaneProcessEvidenceArtifactValidationReport {
     pub valid: bool,
     pub schema_valid: bool,
     pub readiness_ready: bool,

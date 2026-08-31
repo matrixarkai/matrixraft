@@ -3,9 +3,7 @@
 
 //! MatrixRaft-style heartbeat merge queue for multi-group store transports.
 
-use crate::{
-    AppendEntriesRequest, AppendEntriesResponse, RaftError, RustRaftMessage, RustRaftNodeId,
-};
+use crate::{AppendEntriesRequest, AppendEntriesResponse, Message, NodeId, RaftError};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
@@ -13,66 +11,58 @@ use std::hash::{Hash, Hasher};
 
 pub const MATRIXRAFT_HEARTBEAT_MERGE_BUCKETS: usize = 16;
 
-pub trait RustRaftHeartbeatAddressResolver {
-    fn resolve_raft_addr(
-        &self,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
-    ) -> Result<String, RaftError>;
+pub trait HeartbeatAddressResolver {
+    fn resolve_raft_addr(&self, from: NodeId, to: NodeId) -> Result<String, RaftError>;
 }
 
-impl<F> RustRaftHeartbeatAddressResolver for F
+impl<F> HeartbeatAddressResolver for F
 where
-    F: Fn(RustRaftNodeId, RustRaftNodeId) -> Result<String, RaftError>,
+    F: Fn(NodeId, NodeId) -> Result<String, RaftError>,
 {
-    fn resolve_raft_addr(
-        &self,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
-    ) -> Result<String, RaftError> {
+    fn resolve_raft_addr(&self, from: NodeId, to: NodeId) -> Result<String, RaftError> {
         self(from, to)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
-pub enum RustRaftHeartbeatMergeMessage {
+pub enum HeartbeatMergeMessage {
     AppendEntriesRequest {
-        target: RustRaftNodeId,
+        target: NodeId,
         request: AppendEntriesRequest,
     },
     AppendEntriesResponse {
-        local_node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        local_node_id: NodeId,
+        peer_id: NodeId,
         response: AppendEntriesResponse,
     },
 }
 
-impl RustRaftHeartbeatMergeMessage {
-    pub fn from_node_id(&self) -> RustRaftNodeId {
+impl HeartbeatMergeMessage {
+    pub fn from_node_id(&self) -> NodeId {
         match self {
             Self::AppendEntriesRequest { request, .. } => request.leader_id,
             Self::AppendEntriesResponse { local_node_id, .. } => *local_node_id,
         }
     }
 
-    pub fn to_node_id(&self) -> RustRaftNodeId {
+    pub fn to_node_id(&self) -> NodeId {
         match self {
             Self::AppendEntriesRequest { target, .. } => *target,
             Self::AppendEntriesResponse { peer_id, .. } => *peer_id,
         }
     }
 
-    pub fn into_raft_message(self) -> RustRaftMessage {
+    pub fn into_raft_message(self) -> Message {
         match self {
             Self::AppendEntriesRequest { target, request } => {
-                RustRaftMessage::AppendEntries { target, request }
+                Message::AppendEntries { target, request }
             }
             Self::AppendEntriesResponse {
                 local_node_id,
                 peer_id,
                 response,
-            } => RustRaftMessage::AppendEntriesResponse {
+            } => Message::AppendEntriesResponse {
                 local_node_id,
                 peer_id,
                 response,
@@ -82,7 +72,7 @@ impl RustRaftHeartbeatMergeMessage {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftHeartbeatMergeStats {
+pub struct HeartbeatMergeStats {
     pub queued_requests: u64,
     pub queued_responses: u64,
     pub flushed_requests: u64,
@@ -92,19 +82,19 @@ pub struct RustRaftHeartbeatMergeStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftMergedHeartbeatBatch {
+pub struct MergedHeartbeatBatch {
     pub raft_addr: String,
-    pub messages: Vec<RustRaftHeartbeatMergeMessage>,
+    pub messages: Vec<HeartbeatMergeMessage>,
 }
 
 #[derive(Debug, Clone)]
-pub struct RustRaftHeartbeatMerger {
+pub struct HeartbeatMerger {
     enabled: bool,
-    buckets: Vec<BTreeMap<String, Vec<RustRaftHeartbeatMergeMessage>>>,
-    stats: RustRaftHeartbeatMergeStats,
+    buckets: Vec<BTreeMap<String, Vec<HeartbeatMergeMessage>>>,
+    stats: HeartbeatMergeStats,
 }
 
-impl RustRaftHeartbeatMerger {
+impl HeartbeatMerger {
     pub fn new(enabled: bool) -> Self {
         Self::with_bucket_count(enabled, MATRIXRAFT_HEARTBEAT_MERGE_BUCKETS)
     }
@@ -122,7 +112,7 @@ impl RustRaftHeartbeatMerger {
         Self {
             enabled,
             buckets: vec![BTreeMap::new(); bucket_count],
-            stats: RustRaftHeartbeatMergeStats::default(),
+            stats: HeartbeatMergeStats::default(),
         }
     }
 
@@ -130,7 +120,7 @@ impl RustRaftHeartbeatMerger {
         self.enabled
     }
 
-    pub fn stats(&self) -> &RustRaftHeartbeatMergeStats {
+    pub fn stats(&self) -> &HeartbeatMergeStats {
         &self.stats
     }
 
@@ -144,11 +134,11 @@ impl RustRaftHeartbeatMerger {
 
     pub fn maybe_merge<R>(
         &mut self,
-        message: RustRaftMessage,
+        message: Message,
         resolver: &R,
-    ) -> Result<Option<RustRaftMessage>, RaftError>
+    ) -> Result<Option<Message>, RaftError>
     where
-        R: RustRaftHeartbeatAddressResolver,
+        R: HeartbeatAddressResolver,
     {
         if !self.enabled {
             self.stats.bypassed_messages = self.stats.bypassed_messages.saturating_add(1);
@@ -156,8 +146,8 @@ impl RustRaftHeartbeatMerger {
         }
 
         let heartbeat = match message {
-            RustRaftMessage::AppendEntries { target, request } if request.entries.is_empty() => {
-                RustRaftHeartbeatMergeMessage::AppendEntriesRequest { target, request }
+            Message::AppendEntries { target, request } if request.entries.is_empty() => {
+                HeartbeatMergeMessage::AppendEntriesRequest { target, request }
             }
             other => {
                 self.stats.bypassed_messages = self.stats.bypassed_messages.saturating_add(1);
@@ -171,20 +161,20 @@ impl RustRaftHeartbeatMerger {
 
     pub fn merge_heartbeat_response<R>(
         &mut self,
-        local_node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        local_node_id: NodeId,
+        peer_id: NodeId,
         response: AppendEntriesResponse,
         resolver: &R,
     ) -> Result<(), RaftError>
     where
-        R: RustRaftHeartbeatAddressResolver,
+        R: HeartbeatAddressResolver,
     {
         if !self.enabled {
             self.stats.bypassed_messages = self.stats.bypassed_messages.saturating_add(1);
             return Ok(());
         }
         self.queue_heartbeat(
-            RustRaftHeartbeatMergeMessage::AppendEntriesResponse {
+            HeartbeatMergeMessage::AppendEntriesResponse {
                 local_node_id,
                 peer_id,
                 response,
@@ -195,11 +185,11 @@ impl RustRaftHeartbeatMerger {
 
     fn queue_heartbeat<R>(
         &mut self,
-        heartbeat: RustRaftHeartbeatMergeMessage,
+        heartbeat: HeartbeatMergeMessage,
         resolver: &R,
     ) -> Result<(), RaftError>
     where
-        R: RustRaftHeartbeatAddressResolver,
+        R: HeartbeatAddressResolver,
     {
         let from = heartbeat.from_node_id();
         let to = heartbeat.to_node_id();
@@ -212,14 +202,14 @@ impl RustRaftHeartbeatMerger {
         };
         let bucket = bucket_for_addr(&raft_addr, self.buckets.len());
         match heartbeat {
-            RustRaftHeartbeatMergeMessage::AppendEntriesRequest { .. } => {
+            HeartbeatMergeMessage::AppendEntriesRequest { .. } => {
                 self.stats.queued_requests = self.stats.queued_requests.saturating_add(1);
                 self.buckets[bucket]
                     .entry(raft_addr)
                     .or_default()
                     .push(heartbeat);
             }
-            RustRaftHeartbeatMergeMessage::AppendEntriesResponse { .. } => {
+            HeartbeatMergeMessage::AppendEntriesResponse { .. } => {
                 self.stats.queued_responses = self.stats.queued_responses.saturating_add(1);
                 self.buckets[bucket]
                     .entry(raft_addr)
@@ -230,24 +220,24 @@ impl RustRaftHeartbeatMerger {
         Ok(())
     }
 
-    pub fn flush(&mut self) -> Vec<RustRaftMergedHeartbeatBatch> {
+    pub fn flush(&mut self) -> Vec<MergedHeartbeatBatch> {
         let mut batches = Vec::new();
         for bucket in &mut self.buckets {
             let drained = std::mem::take(bucket);
             for (raft_addr, messages) in drained {
                 for message in &messages {
                     match message {
-                        RustRaftHeartbeatMergeMessage::AppendEntriesRequest { .. } => {
+                        HeartbeatMergeMessage::AppendEntriesRequest { .. } => {
                             self.stats.flushed_requests =
                                 self.stats.flushed_requests.saturating_add(1);
                         }
-                        RustRaftHeartbeatMergeMessage::AppendEntriesResponse { .. } => {
+                        HeartbeatMergeMessage::AppendEntriesResponse { .. } => {
                             self.stats.flushed_responses =
                                 self.stats.flushed_responses.saturating_add(1);
                         }
                     }
                 }
-                batches.push(RustRaftMergedHeartbeatBatch {
+                batches.push(MergedHeartbeatBatch {
                     raft_addr,
                     messages,
                 });
@@ -256,21 +246,17 @@ impl RustRaftHeartbeatMerger {
         batches
     }
 
-    pub fn flush_messages(&mut self) -> Vec<RustRaftMessage> {
+    pub fn flush_messages(&mut self) -> Vec<Message> {
         self.flush()
             .into_iter()
             .flat_map(|batch| batch.messages)
-            .map(RustRaftHeartbeatMergeMessage::into_raft_message)
+            .map(HeartbeatMergeMessage::into_raft_message)
             .collect()
     }
 }
 
-impl RustRaftHeartbeatAddressResolver for HashMap<(RustRaftNodeId, RustRaftNodeId), String> {
-    fn resolve_raft_addr(
-        &self,
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
-    ) -> Result<String, RaftError> {
+impl HeartbeatAddressResolver for HashMap<(NodeId, NodeId), String> {
+    fn resolve_raft_addr(&self, from: NodeId, to: NodeId) -> Result<String, RaftError> {
         self.get(&(from, to)).cloned().ok_or_else(|| {
             RaftError::Transport(format!(
                 "raft address for heartbeat {from}->{to} was not found"

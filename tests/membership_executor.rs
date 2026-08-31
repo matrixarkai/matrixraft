@@ -2,13 +2,12 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    RaftAdminCommand, RaftCluster, RaftConfig, RaftMembershipExecutor, RaftMembershipOperation,
-    RaftSnapshot, RustRaftApplySnapshotFence, RustRaftLogId, RustRaftMessage, RustRaftPeer,
-    RustRaftReplicaRole, RustRaftSnapshotMeta, RustRaftStepResult,
+    AdminCommand, ApplySnapshotFence, Config, LogId, MembershipExecutor, MembershipOperation,
+    Message, Peer, RaftCluster, RaftSnapshot, ReplicaRole, SnapshotMetadata, StepResult,
 };
 
-fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 18_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 19_000 + node_id),
@@ -23,20 +22,20 @@ fn membership_executor_runs_full_runtime_workflow() {
         66,
         Default::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("cluster");
     cluster.start().expect("start");
     cluster.propose(b"a".to_vec()).expect("write");
 
-    let mut executor = RaftMembershipExecutor::new();
+    let mut executor = MembershipExecutor::new();
     executor
         .execute(
             &mut cluster,
-            RaftMembershipOperation::AddLearner(peer(4, RustRaftReplicaRole::Voter)),
+            MembershipOperation::AddLearner(peer(4, ReplicaRole::Voter)),
         )
         .expect("add learner");
     assert!(cluster.membership().learners.contains(&4));
@@ -44,7 +43,7 @@ fn membership_executor_runs_full_runtime_workflow() {
     let promoted = executor
         .execute(
             &mut cluster,
-            RaftMembershipOperation::AddVoter(peer(4, RustRaftReplicaRole::Voter)),
+            MembershipOperation::AddVoter(peer(4, ReplicaRole::Voter)),
         )
         .expect("add-voter config change promotes existing learner");
     assert!(promoted.success);
@@ -63,9 +62,9 @@ fn membership_executor_runs_full_runtime_workflow() {
         .execute_all(
             &mut cluster,
             vec![
-                RaftMembershipOperation::AddWitness(peer(5, RustRaftReplicaRole::Voter)),
-                RaftMembershipOperation::TransferLeader(4),
-                RaftMembershipOperation::Remove(2),
+                MembershipOperation::AddWitness(peer(5, ReplicaRole::Voter)),
+                MembershipOperation::TransferLeader(4),
+                MembershipOperation::Remove(2),
             ],
         )
         .expect("execute workflow");
@@ -86,20 +85,20 @@ fn membership_executor_validates_reports_joint_changes_and_rolls_back() {
         67,
         Default::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("cluster");
     cluster.start().expect("start");
     cluster.propose(b"a".to_vec()).expect("write");
 
-    let mut executor = RaftMembershipExecutor::new();
+    let mut executor = MembershipExecutor::new();
     let add_voter = executor
         .execute(
             &mut cluster,
-            RaftMembershipOperation::AddVoter(peer(4, RustRaftReplicaRole::Learner)),
+            MembershipOperation::AddVoter(peer(4, ReplicaRole::Learner)),
         )
         .expect("add voter");
     assert!(add_voter.validation_passed);
@@ -115,7 +114,7 @@ fn membership_executor_validates_reports_joint_changes_and_rolls_back() {
     assert!(cluster.membership().voters.contains(&4));
 
     let remove_leader = executor
-        .execute(&mut cluster, RaftMembershipOperation::Remove(1))
+        .execute(&mut cluster, MembershipOperation::Remove(1))
         .expect("leader removal transfers to closest follower");
     assert!(remove_leader.validation_passed);
     assert!(remove_leader.success);
@@ -135,8 +134,8 @@ fn membership_executor_validates_reports_joint_changes_and_rolls_back() {
     let rollback = executor.execute_all_with_rollback(
         &mut cluster,
         vec![
-            RaftMembershipOperation::AddWitness(peer(5, RustRaftReplicaRole::Witness)),
-            RaftMembershipOperation::Remove(99),
+            MembershipOperation::AddWitness(peer(5, ReplicaRole::Witness)),
+            MembershipOperation::Remove(99),
         ],
     );
     assert!(rollback.is_err());
@@ -153,24 +152,24 @@ fn committed_membership_apply_is_idempotent_like_baseline_raft_replay() {
         68,
         Default::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("cluster");
     cluster.start().expect("start");
 
     assert!(cluster
-        .add_peer(peer(2, RustRaftReplicaRole::Voter))
+        .add_peer(peer(2, ReplicaRole::Voter))
         .expect_err("strict operator add rejects duplicate")
         .to_string()
         .contains("duplicate raft node id"));
 
     assert!(!cluster
-        .apply_committed_membership_operation(RaftMembershipOperation::AddVoter(peer(
+        .apply_committed_membership_operation(MembershipOperation::AddVoter(peer(
             2,
-            RustRaftReplicaRole::Voter,
+            ReplicaRole::Voter,
         )))
         .expect("duplicate committed add is skipped"));
 
@@ -178,22 +177,22 @@ fn committed_membership_apply_is_idempotent_like_baseline_raft_replay() {
         .remove_peer(99)
         .expect("missing remove is skipped like MatrixRaft");
     assert!(!cluster
-        .apply_committed_membership_operation(RaftMembershipOperation::Remove(99))
+        .apply_committed_membership_operation(MembershipOperation::Remove(99))
         .expect("duplicate committed remove is skipped"));
 
     assert!(cluster
-        .apply_committed_membership_operation(RaftMembershipOperation::AddLearner(peer(
+        .apply_committed_membership_operation(MembershipOperation::AddLearner(peer(
             4,
-            RustRaftReplicaRole::Voter,
+            ReplicaRole::Voter,
         )))
         .expect("committed learner add"));
     assert!(cluster.membership().learners.contains(&4));
 
-    let mut executor = RaftMembershipExecutor::new();
+    let mut executor = MembershipExecutor::new();
     let add_node_promote = executor
         .execute(
             &mut cluster,
-            RaftMembershipOperation::AddNode(peer(4, RustRaftReplicaRole::Voter)),
+            MembershipOperation::AddNode(peer(4, ReplicaRole::Voter)),
         )
         .expect("add-node config change promotes existing learner");
     assert!(add_node_promote.success);
@@ -202,16 +201,16 @@ fn committed_membership_apply_is_idempotent_like_baseline_raft_replay() {
     assert!(!cluster.membership().learners.contains(&4));
 
     assert!(cluster
-        .apply_committed_membership_operation(RaftMembershipOperation::AddLearner(peer(
+        .apply_committed_membership_operation(MembershipOperation::AddLearner(peer(
             5,
-            RustRaftReplicaRole::Voter,
+            ReplicaRole::Voter,
         )))
         .expect("second committed learner add"));
 
     assert!(cluster
-        .apply_committed_membership_operation(RaftMembershipOperation::AddVoter(peer(
+        .apply_committed_membership_operation(MembershipOperation::AddVoter(peer(
             5,
-            RustRaftReplicaRole::Learner,
+            ReplicaRole::Learner,
         )))
         .expect("committed add voter promotes existing learner"));
     let membership = cluster.membership();
@@ -219,7 +218,7 @@ fn committed_membership_apply_is_idempotent_like_baseline_raft_replay() {
     assert!(!membership.learners.contains(&5));
 
     assert!(!cluster
-        .apply_committed_membership_operation(RaftMembershipOperation::Remove(99))
+        .apply_committed_membership_operation(MembershipOperation::Remove(99))
         .expect("missing committed remove is skipped"));
 }
 
@@ -229,9 +228,9 @@ fn pending_membership_change_fence_matches_baseline_raft_config_change_rule() {
         69,
         Default::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("cluster");
@@ -264,9 +263,9 @@ fn saving_membership_change_blocks_next_config_until_stabled() {
         70,
         Default::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("cluster");
@@ -297,15 +296,15 @@ fn saving_membership_change_blocks_next_config_until_stabled() {
         .contains("saving_membership_change_index:5"));
 
     let stabled = cluster
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::StabledResult {
+        .step(Message::Admin {
+            command: AdminCommand::StabledResult {
                 first_index: None,
                 last_index: None,
                 stabled_membership_change_index: 5,
             },
         })
         .expect("stable first config change through step");
-    assert_eq!(stabled, RustRaftStepResult::Handled);
+    assert_eq!(stabled, StepResult::Handled);
     assert_eq!(cluster.saving_membership_change_index(), None);
     assert_eq!(cluster.stabled_membership_change_index(), 5);
     assert_eq!(cluster.pending_membership_change_index(), None);
@@ -319,11 +318,11 @@ fn saving_membership_change_blocks_next_config_until_stabled() {
 fn snapshot_applied_clears_covered_membership_change() {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("cluster");
@@ -340,15 +339,15 @@ fn snapshot_applied_clears_covered_membership_change() {
             2,
             RaftSnapshot {
                 group_id: 7,
-                meta: RustRaftSnapshotMeta {
+                meta: SnapshotMetadata {
                     snapshot_id: "membership-floor-5".to_string(),
-                    last_log_id: RustRaftLogId { term: 1, index: 5 },
+                    last_log_id: LogId { term: 1, index: 5 },
                     membership: vec![1, 2, 3],
                     members: Vec::new(),
                 },
                 payload: b"membership snapshot".to_vec(),
             },
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 5,
                 commit_index: 5,
                 installed_snapshot_index: 5,

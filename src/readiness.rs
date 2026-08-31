@@ -8,21 +8,20 @@ use thiserror::Error;
 
 use crate::matrixraft_metric_names;
 use crate::{
-    fault, RustRaftAdminStatusSurfaceEvidence, RustRaftBaselineRaftBenchmarkEvidence,
-    RustRaftDataNodeProcessRolloutReport, RustRaftMembershipTransitionEvidence,
-    RustRaftMetaProcessRolloutReport, RustRaftMetricNames, RustRaftPipelineEvidence,
-    RustRaftSnapshotLifecycleEvidence, RustRaftWalLifecycleEvidence,
+    fault, AdminStatusSurfaceEvidence, BaselineRaftBenchmarkEvidence, DataNodeProcessRolloutReport,
+    MembershipTransitionEvidence, MetaProcessRolloutReport, MetricNames, PipelineEvidence,
+    SnapshotLifecycleEvidence, WalLifecycleEvidence,
 };
 
 pub use crate::{
     matrixraft_data_node_process_rollout_readiness_report,
     matrixraft_meta_process_rollout_readiness_report, matrixraft_production_readiness_report,
-    RustRaftBaselineRaftParitySurface,
+    BaselineRaftParitySurface,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftRequirementCategory {
+pub enum RequirementCategory {
     Safety,
     Durability,
     Observability,
@@ -31,23 +30,23 @@ pub enum RustRaftRequirementCategory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftSemanticRequirement {
+pub struct SemanticRequirement {
     pub id: String,
-    pub category: RustRaftRequirementCategory,
+    pub category: RequirementCategory,
     pub readiness_field: String,
     pub required_for_production: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftProductionStatus {
+pub enum ProductionStatus {
     ProductionReady,
     Blocked,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftDeploymentMode {
+pub enum DeploymentMode {
     /// Backward-compatible deserialization variant only.
     ///
     /// Runtime validation rejects local Raft deployment. Local clusters are
@@ -58,36 +57,36 @@ pub enum RustRaftDeploymentMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]
 #[error("{message}")]
-pub struct RustRaftProductionReadinessError {
-    pub mode: RustRaftDeploymentMode,
+pub struct ProductionReadinessError {
+    pub mode: DeploymentMode,
     pub message: String,
     pub missing: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftParityContract {
+pub struct ParityContract {
     pub library_name: String,
     pub consensus_backend_boundary: String,
     pub openraft_dependency_removed: bool,
-    pub requirements: Vec<RustRaftSemanticRequirement>,
+    pub requirements: Vec<SemanticRequirement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftParityReport {
-    pub contract: RustRaftParityContract,
-    pub baseline_raft_reference_policy: RustRaftBaselineRaftReferencePolicy,
+pub struct ParityReport {
+    pub contract: ParityContract,
+    pub baseline_raft_reference_policy: BaselineRaftReferencePolicy,
     pub ready: bool,
-    pub production_status: RustRaftProductionStatus,
+    pub production_status: ProductionStatus,
     pub satisfied: Vec<String>,
     pub missing: Vec<String>,
     pub production_blockers: Vec<String>,
-    pub baseline_raft_parity_matrix: Vec<RustRaftBaselineRaftParityItem>,
+    pub baseline_raft_parity_matrix: Vec<BaselineRaftParityItem>,
     pub baseline_raft_gaps: Vec<String>,
     pub baseline_raft_intentional_differences: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftBaselineRaftReferencePolicy {
+pub struct BaselineRaftReferencePolicy {
     pub feature_reference: String,
     pub performance_reference: String,
     pub rust_api_policy: String,
@@ -96,50 +95,50 @@ pub struct RustRaftBaselineRaftReferencePolicy {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftBaselineRaftParityStatus {
+pub enum BaselineRaftParityStatus {
     Satisfied,
     Gap,
     IntentionalDifference,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftBaselineRaftParityItem {
+pub struct BaselineRaftParityItem {
     pub id: String,
     pub required: bool,
-    pub status: RustRaftBaselineRaftParityStatus,
+    pub status: BaselineRaftParityStatus,
     pub evidence: Vec<String>,
     pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftProductionReadinessInput {
-    pub readiness: RustRaftReadinessSnapshot,
+pub struct ProductionReadinessInput {
+    pub readiness: ReadinessSnapshot,
     #[serde(default)]
-    pub peer_pipeline: Option<RustRaftPipelineEvidence>,
+    pub peer_pipeline: Option<PipelineEvidence>,
     #[serde(default)]
-    pub snapshot_lifecycle: Option<RustRaftSnapshotLifecycleEvidence>,
+    pub snapshot_lifecycle: Option<SnapshotLifecycleEvidence>,
     #[serde(default)]
-    pub wal_lifecycle: Option<RustRaftWalLifecycleEvidence>,
+    pub wal_lifecycle: Option<WalLifecycleEvidence>,
     #[serde(default)]
-    pub admin_status_surface: Option<RustRaftAdminStatusSurfaceEvidence>,
+    pub admin_status_surface: Option<AdminStatusSurfaceEvidence>,
     #[serde(default)]
-    pub fault_harness: Option<fault::RustRaftFaultHarnessReadinessReport>,
+    pub fault_harness: Option<fault::FaultHarnessReadinessReport>,
     #[serde(default)]
-    pub data_node_rollout: Option<RustRaftDataNodeProcessRolloutReport>,
+    pub data_node_rollout: Option<DataNodeProcessRolloutReport>,
     #[serde(default)]
-    pub metaserver_rollout: Option<RustRaftMetaProcessRolloutReport>,
+    pub metaserver_rollout: Option<MetaProcessRolloutReport>,
     #[serde(default)]
-    pub membership_transitions: Vec<RustRaftMembershipTransitionEvidence>,
+    pub membership_transitions: Vec<MembershipTransitionEvidence>,
     #[serde(default)]
-    pub baseline_raft_benchmark: Option<RustRaftBaselineRaftBenchmarkEvidence>,
+    pub baseline_raft_benchmark: Option<BaselineRaftBenchmarkEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftProductionReadinessReport {
-    pub parity: RustRaftParityReport,
-    pub public_api: RustRaftPublicApiContract,
+pub struct ProductionReadinessReport {
+    pub parity: ParityReport,
+    pub public_api: PublicApiContract,
     pub ready: bool,
-    pub production_status: RustRaftProductionStatus,
+    pub production_status: ProductionStatus,
     pub satisfied: Vec<String>,
     pub missing: Vec<String>,
     pub production_blockers: Vec<String>,
@@ -147,10 +146,10 @@ pub struct RustRaftProductionReadinessReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftProcessRolloutReadinessReport {
+pub struct ProcessRolloutReadinessReport {
     pub scope: String,
     pub ready: bool,
-    pub production_status: RustRaftProductionStatus,
+    pub production_status: ProductionStatus,
     pub satisfied: Vec<String>,
     pub missing: Vec<String>,
     pub blockers: Vec<String>,
@@ -158,14 +157,14 @@ pub struct RustRaftProcessRolloutReadinessReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftReadinessEvidence {
+pub struct ReadinessEvidence {
     pub requirement_id: String,
     pub readiness_field: String,
     pub present: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftReadinessSnapshot {
+pub struct ReadinessSnapshot {
     pub matrixraft_leader_write_authority_present: bool,
     pub matrixraft_operator_observability_present: bool,
     pub matrixraft_rpc_transport_contract_present: bool,
@@ -181,7 +180,7 @@ pub struct RustRaftReadinessSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftPublicApiContract {
+pub struct PublicApiContract {
     pub storage_trait: String,
     pub transport_trait: String,
     pub public_modules: Vec<String>,
@@ -191,11 +190,11 @@ pub struct RustRaftPublicApiContract {
     pub parity_reports: Vec<String>,
     pub benchmark_interfaces: Vec<String>,
     pub compatibility_reports: Vec<String>,
-    pub metrics: RustRaftMetricNames,
+    pub metrics: MetricNames,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftStandaloneCapability {
+pub struct StandaloneCapability {
     pub id: String,
     pub ready: bool,
     pub evidence: Vec<String>,
@@ -203,16 +202,16 @@ pub struct RustRaftStandaloneCapability {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftStandaloneReadinessReport {
+pub struct StandaloneReadinessReport {
     pub standalone: bool,
-    pub production_status: RustRaftProductionStatus,
-    pub capabilities: Vec<RustRaftStandaloneCapability>,
+    pub production_status: ProductionStatus,
+    pub capabilities: Vec<StandaloneCapability>,
     pub missing: Vec<String>,
     pub evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftOpenSourceSurface {
+pub struct OpenSourceSurface {
     pub crate_name: String,
     pub public_modules: Vec<String>,
     pub embedding_docs: Vec<String>,
@@ -225,7 +224,7 @@ pub struct RustRaftOpenSourceSurface {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftTemporalStoreAdapterShape {
+pub struct TemporalStoreAdapterShape {
     pub backend_type: String,
     pub node_field: String,
     pub node_runtime_type: String,
@@ -240,31 +239,31 @@ pub struct RustRaftTemporalStoreAdapterShape {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftExtractionStatus {
+pub enum ExtractionStatus {
     InLibrary,
     AdapterOnly,
     PendingMigration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftExtractionSlice {
+pub struct ExtractionSlice {
     pub id: String,
-    pub status: RustRaftExtractionStatus,
+    pub status: ExtractionStatus,
     pub matrixraft_owner: String,
     pub temporalstore_boundary: String,
     pub next_evidence: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftTemporalStoreExtractionPlan {
+pub struct TemporalStoreExtractionPlan {
     pub policy: String,
-    pub slices: Vec<RustRaftExtractionSlice>,
+    pub slices: Vec<ExtractionSlice>,
 }
 
 pub fn matrixraft_validate_deployment_mode(
-    mode: RustRaftDeploymentMode,
-    readiness: &RustRaftProductionReadinessReport,
-) -> Result<(), RustRaftProductionReadinessError> {
+    mode: DeploymentMode,
+    readiness: &ProductionReadinessReport,
+) -> Result<(), ProductionReadinessError> {
     matrixraft_validate_deployment_readiness(
         mode,
         readiness.ready,
@@ -273,20 +272,20 @@ pub fn matrixraft_validate_deployment_mode(
 }
 
 pub fn matrixraft_validate_deployment_readiness(
-    mode: RustRaftDeploymentMode,
+    mode: DeploymentMode,
     production_ready: bool,
     missing: Vec<String>,
-) -> Result<(), RustRaftProductionReadinessError> {
+) -> Result<(), ProductionReadinessError> {
     match mode {
-        RustRaftDeploymentMode::LocalModel => Err(RustRaftProductionReadinessError {
+        DeploymentMode::LocalModel => Err(ProductionReadinessError {
             mode,
             message:
                 "local Raft deployment mode is disabled; production distributed Raft is required"
                     .to_string(),
             missing,
         }),
-        RustRaftDeploymentMode::ProductionDistributed if production_ready => Ok(()),
-        RustRaftDeploymentMode::ProductionDistributed => Err(RustRaftProductionReadinessError {
+        DeploymentMode::ProductionDistributed if production_ready => Ok(()),
+        DeploymentMode::ProductionDistributed => Err(ProductionReadinessError {
             mode,
             message: "distributed Raft is not production-ready".to_string(),
             missing,
@@ -295,12 +294,12 @@ pub fn matrixraft_validate_deployment_readiness(
 }
 
 pub fn matrixraft_require_production_ready(
-    readiness: &RustRaftProductionReadinessReport,
-) -> Result<(), RustRaftProductionReadinessError> {
-    matrixraft_validate_deployment_mode(RustRaftDeploymentMode::ProductionDistributed, readiness)
+    readiness: &ProductionReadinessReport,
+) -> Result<(), ProductionReadinessError> {
+    matrixraft_validate_deployment_mode(DeploymentMode::ProductionDistributed, readiness)
 }
 
-fn readiness_missing_reasons(readiness: &RustRaftProductionReadinessReport) -> Vec<String> {
+fn readiness_missing_reasons(readiness: &ProductionReadinessReport) -> Vec<String> {
     let mut missing = readiness.missing.clone();
     for blocker in &readiness.production_blockers {
         if !missing.contains(blocker) {
@@ -313,12 +312,10 @@ fn readiness_missing_reasons(readiness: &RustRaftProductionReadinessReport) -> V
     missing
 }
 
-pub fn matrixraft_readiness_evidence(
-    snapshot: &RustRaftReadinessSnapshot,
-) -> Vec<RustRaftReadinessEvidence> {
+pub fn matrixraft_readiness_evidence(snapshot: &ReadinessSnapshot) -> Vec<ReadinessEvidence> {
     matrixraft_requirements()
         .into_iter()
-        .map(|requirement| RustRaftReadinessEvidence {
+        .map(|requirement| ReadinessEvidence {
             present: readiness_field_present(snapshot, &requirement.readiness_field),
             requirement_id: requirement.id,
             readiness_field: requirement.readiness_field,
@@ -326,8 +323,8 @@ pub fn matrixraft_readiness_evidence(
         .collect()
 }
 
-pub fn matrixraft_requirements() -> Vec<RustRaftSemanticRequirement> {
-    use RustRaftRequirementCategory::*;
+pub fn matrixraft_requirements() -> Vec<SemanticRequirement> {
+    use RequirementCategory::*;
     [
         (
             "leader_write_authority",
@@ -391,18 +388,16 @@ pub fn matrixraft_requirements() -> Vec<RustRaftSemanticRequirement> {
         ),
     ]
     .into_iter()
-    .map(
-        |(id, category, readiness_field)| RustRaftSemanticRequirement {
-            id: id.to_string(),
-            category,
-            readiness_field: readiness_field.to_string(),
-            required_for_production: true,
-        },
-    )
+    .map(|(id, category, readiness_field)| SemanticRequirement {
+        id: id.to_string(),
+        category,
+        readiness_field: readiness_field.to_string(),
+        required_for_production: true,
+    })
     .collect()
 }
 
-fn readiness_field_present(snapshot: &RustRaftReadinessSnapshot, field: &str) -> bool {
+fn readiness_field_present(snapshot: &ReadinessSnapshot, field: &str) -> bool {
     match field {
         "rustraft_leader_write_authority_present" => {
             snapshot.matrixraft_leader_write_authority_present
@@ -436,8 +431,8 @@ fn readiness_field_present(snapshot: &RustRaftReadinessSnapshot, field: &str) ->
     }
 }
 
-pub fn matrixraft_parity_contract() -> RustRaftParityContract {
-    RustRaftParityContract {
+pub fn matrixraft_parity_contract() -> ParityContract {
+    ParityContract {
         library_name: "rustraft".to_string(),
         consensus_backend_boundary: "temporalstore_rust::raft::DataRaftConsensusBackend"
             .to_string(),
@@ -446,8 +441,8 @@ pub fn matrixraft_parity_contract() -> RustRaftParityContract {
     }
 }
 
-pub fn matrixraft_baseline_raft_parity_surface() -> RustRaftBaselineRaftParitySurface {
-    RustRaftBaselineRaftParitySurface {
+pub fn matrixraft_baseline_raft_parity_surface() -> BaselineRaftParitySurface {
+    BaselineRaftParitySurface {
         node_lifecycle: vec![
             "create".to_string(),
             "start".to_string(),
@@ -499,8 +494,8 @@ pub fn matrixraft_baseline_raft_parity_surface() -> RustRaftBaselineRaftParitySu
     }
 }
 
-pub fn matrixraft_baseline_raft_reference_policy() -> RustRaftBaselineRaftReferencePolicy {
-    RustRaftBaselineRaftReferencePolicy {
+pub fn matrixraft_baseline_raft_reference_policy() -> BaselineRaftReferencePolicy {
+    BaselineRaftReferencePolicy {
         feature_reference: "BaselineRaft is the feature reference for Raft behavior parity.".to_string(),
         performance_reference:
             "BaselineRaft is the performance reference; RustRaft parity requires p50/p99 latency and throughput within the configured threshold."
@@ -515,17 +510,17 @@ pub fn matrixraft_baseline_raft_reference_policy() -> RustRaftBaselineRaftRefere
 }
 
 pub fn matrixraft_baseline_raft_parity_matrix(
-    snapshot: &RustRaftReadinessSnapshot,
-) -> Vec<RustRaftBaselineRaftParityItem> {
-    use RustRaftBaselineRaftParityStatus::*;
+    snapshot: &ReadinessSnapshot,
+) -> Vec<BaselineRaftParityItem> {
+    use BaselineRaftParityStatus::*;
 
     fn item(
         id: &str,
-        status: RustRaftBaselineRaftParityStatus,
+        status: BaselineRaftParityStatus,
         evidence: &[&str],
         note: &str,
-    ) -> RustRaftBaselineRaftParityItem {
-        RustRaftBaselineRaftParityItem {
+    ) -> BaselineRaftParityItem {
+        BaselineRaftParityItem {
             id: id.to_string(),
             required: true,
             status,
@@ -534,7 +529,7 @@ pub fn matrixraft_baseline_raft_parity_matrix(
         }
     }
 
-    fn status(ready: bool) -> RustRaftBaselineRaftParityStatus {
+    fn status(ready: bool) -> BaselineRaftParityStatus {
         if ready {
             Satisfied
         } else {
@@ -570,7 +565,7 @@ pub fn matrixraft_baseline_raft_parity_matrix(
         item(
             "pre_vote",
             status(snapshot.matrixraft_rpc_transport_contract_present),
-            &["rustraft_rpc_transport_contract_present", "RustRaftVoteRequest.pre_vote"],
+            &["rustraft_rpc_transport_contract_present", "VoteRequest.pre_vote"],
             "pre-vote is represented in the vote RPC contract",
         ),
         item(
@@ -578,7 +573,7 @@ pub fn matrixraft_baseline_raft_parity_matrix(
             status(snapshot.matrixraft_leader_write_authority_present),
             &[
                 "rustraft_leader_write_authority_present",
-                "RustRaftReadIndexRequest.allow_lease_read",
+                "ReadIndexRequest.allow_lease_read",
             ],
             "lease reads are admitted only through leader/read-safety helpers",
         ),
@@ -587,8 +582,8 @@ pub fn matrixraft_baseline_raft_parity_matrix(
             status(snapshot.matrixraft_operator_observability_present),
             &[
                 "rustraft_operator_observability_present",
-                "RustRaftReadIndexRequest",
-                "RustRaftReadIndexResponse",
+                "ReadIndexRequest",
+                "ReadIndexResponse",
             ],
             "read-index request/response and metrics are part of the public contract",
         ),
@@ -607,7 +602,7 @@ pub fn matrixraft_baseline_raft_parity_matrix(
         item(
             "witness_quorum_behavior",
             Satisfied,
-            &["RustRaftReplicaRole::Witness.participates_in_quorum"],
+            &["ReplicaRole::Witness.participates_in_quorum"],
             "witnesses count for quorum but are not data-serving leaders",
         ),
         item(
@@ -651,19 +646,19 @@ pub fn matrixraft_baseline_raft_parity_matrix(
         item(
             "leader_transfer",
             IntentionalDifference,
-            &["RustRaftConsensus::transfer_leader"],
+            &["Consensus::transfer_leader"],
             "RustRaft exposes the transfer contract; process validation is attached by the consuming runtime",
         ),
         item(
             "observability_status",
             status(snapshot.matrixraft_operator_observability_present),
-            &["rustraft_operator_observability_present", "RustRaftStatusSnapshot"],
+            &["rustraft_operator_observability_present", "StatusSnapshot"],
             "status snapshots and metric names are part of the public contract",
         ),
     ]
 }
 
-pub fn matrixraft_parity_report(snapshot: &RustRaftReadinessSnapshot) -> RustRaftParityReport {
+pub fn matrixraft_parity_report(snapshot: &ReadinessSnapshot) -> ParityReport {
     let contract = matrixraft_parity_contract();
     let evidence = matrixraft_readiness_evidence(snapshot);
     let satisfied = evidence
@@ -687,23 +682,23 @@ pub fn matrixraft_parity_report(snapshot: &RustRaftReadinessSnapshot) -> RustRaf
     let baseline_raft_parity_matrix = matrixraft_baseline_raft_parity_matrix(snapshot);
     let baseline_raft_gaps = baseline_raft_parity_matrix
         .iter()
-        .filter(|item| item.status == RustRaftBaselineRaftParityStatus::Gap)
+        .filter(|item| item.status == BaselineRaftParityStatus::Gap)
         .map(|item| item.id.clone())
         .collect::<Vec<_>>();
     let baseline_raft_intentional_differences = baseline_raft_parity_matrix
         .iter()
-        .filter(|item| item.status == RustRaftBaselineRaftParityStatus::IntentionalDifference)
+        .filter(|item| item.status == BaselineRaftParityStatus::IntentionalDifference)
         .map(|item| item.id.clone())
         .collect::<Vec<_>>();
     let ready = missing.is_empty() && production_blockers.is_empty();
-    RustRaftParityReport {
+    ParityReport {
         contract,
         baseline_raft_reference_policy: matrixraft_baseline_raft_reference_policy(),
         ready,
         production_status: if ready {
-            RustRaftProductionStatus::ProductionReady
+            ProductionStatus::ProductionReady
         } else {
-            RustRaftProductionStatus::Blocked
+            ProductionStatus::Blocked
         },
         satisfied,
         missing,
@@ -714,10 +709,10 @@ pub fn matrixraft_parity_report(snapshot: &RustRaftReadinessSnapshot) -> RustRaf
     }
 }
 
-pub fn matrixraft_public_api_contract() -> RustRaftPublicApiContract {
-    RustRaftPublicApiContract {
-        storage_trait: "RustRaftStorage".to_string(),
-        transport_trait: "RaftTransport".to_string(),
+pub fn matrixraft_public_api_contract() -> PublicApiContract {
+    PublicApiContract {
+        storage_trait: "Storage".to_string(),
+        transport_trait: "Transport".to_string(),
         public_modules: matrixraft_public_module_names(),
         rpc_messages: vec![
             "AppendEntriesRequest".to_string(),
@@ -728,11 +723,11 @@ pub fn matrixraft_public_api_contract() -> RustRaftPublicApiContract {
             "PreVoteResponse".to_string(),
             "InstallSnapshotRequest".to_string(),
             "InstallSnapshotResponse".to_string(),
-            "RustRaftSnapshotChunk".to_string(),
+            "SnapshotChunk".to_string(),
             "ReadIndexRequest".to_string(),
             "ReadIndexResponse".to_string(),
             "AuthenticatedRaftRpc".to_string(),
-            "RustRaftTransportValidationReport".to_string(),
+            "TransportValidationReport".to_string(),
             "InMemoryRaftTransport".to_string(),
             "TcpRaftTransport".to_string(),
         ],
@@ -801,11 +796,11 @@ pub fn matrixraft_parity_report_names() -> Vec<String> {
 
 pub fn matrixraft_benchmark_interface_names() -> Vec<String> {
     [
-        "RustRaftBenchmarkRunner",
-        "RustRaftExternalBaselineRaftRunner",
-        "RustRaftRuntimeBenchmarkRunner",
-        "RustRaftBenchmarkOptions",
-        "RustRaftBenchmarkReport",
+        "BenchmarkRunner",
+        "ExternalBaselineRaftRunner",
+        "RuntimeBenchmarkRunner",
+        "BenchmarkOptions",
+        "BenchmarkReport",
         "matrixraft_baseline_raft_benchmark_workloads",
         "matrixraft_run_baseline_raft_parity_benchmark",
         "matrixraft_assert_baseline_raft_parity",
@@ -836,7 +831,7 @@ pub fn matrixraft_compatibility_report_names() -> Vec<String> {
     .collect()
 }
 
-pub fn matrixraft_standalone_readiness_report() -> RustRaftStandaloneReadinessReport {
+pub fn matrixraft_standalone_readiness_report() -> StandaloneReadinessReport {
     let capabilities = matrixraft_standalone_capabilities();
     let missing = capabilities
         .iter()
@@ -858,12 +853,12 @@ pub fn matrixraft_standalone_readiness_report() -> RustRaftStandaloneReadinessRe
         .collect::<Vec<_>>();
     let standalone = capabilities.iter().all(|capability| capability.ready);
 
-    RustRaftStandaloneReadinessReport {
+    StandaloneReadinessReport {
         standalone,
         production_status: if standalone {
-            RustRaftProductionStatus::ProductionReady
+            ProductionStatus::ProductionReady
         } else {
-            RustRaftProductionStatus::Blocked
+            ProductionStatus::Blocked
         },
         capabilities,
         missing,
@@ -871,13 +866,13 @@ pub fn matrixraft_standalone_readiness_report() -> RustRaftStandaloneReadinessRe
     }
 }
 
-fn matrixraft_standalone_capabilities() -> Vec<RustRaftStandaloneCapability> {
+fn matrixraft_standalone_capabilities() -> Vec<StandaloneCapability> {
     vec![
         standalone_capability(
             "node_lifecycle",
             &[
-                "node::RaftNodeRuntime exposes start, stop, restart, and shutdown",
-                "cluster::RustRaftConsensus exposes start, stop, propose, campaign, and transfer_leader",
+                "node::NodeRuntime exposes start, stop, restart, and shutdown",
+                "cluster::Consensus exposes start, stop, propose, campaign, and transfer_leader",
             ],
         ),
         standalone_capability(
@@ -885,8 +880,8 @@ fn matrixraft_standalone_capabilities() -> Vec<RustRaftStandaloneCapability> {
             &[
                 "cluster::RaftCluster::propose appends opaque payload entries",
                 "transport::AppendEntriesRequest and AppendEntriesResponse define the replication RPC",
-                "RaftReplicationPipeline tracks inflight entries, backoff, reorder, and lag status",
-                "RustRaftByteQuotaLimiter provides BaselineRaft-style byte quota gating for snapshot and replication transfer",
+                "ReplicationPipeline tracks inflight entries, backoff, reorder, and lag status",
+                "ByteQuotaLimiter provides BaselineRaft-style byte quota gating for snapshot and replication transfer",
             ],
         ),
         standalone_capability(
@@ -900,8 +895,8 @@ fn matrixraft_standalone_capabilities() -> Vec<RustRaftStandaloneCapability> {
         standalone_capability(
             "membership",
             &[
-                "membership::RaftMembershipExecutor owns add learner, auto-promote learner, promote, witness, remove, and joint consensus operations",
-                "RaftMembership and JointConsensusMembership model voter, learner, and witness roles",
+                "membership::MembershipExecutor owns add learner, auto-promote learner, promote, witness, remove, and joint consensus operations",
+                "Membership and JointConsensusMembership model voter, learner, and witness roles",
             ],
         ),
         standalone_capability(
@@ -909,15 +904,15 @@ fn matrixraft_standalone_capabilities() -> Vec<RustRaftStandaloneCapability> {
             &[
                 "wal::LocalRaftWal and PersistentRaftWalOptions provide segmented WAL persistence",
                 "matrixraft_recover_latest_wal_record validates checksums and corrupt-tail truncation",
-                "RaftHardState and RaftWalRecord preserve term, vote, commit, and log records",
+                "HardState and WalRecord preserve term, vote, commit, and log records",
             ],
         ),
         standalone_capability(
             "snapshots",
             &[
-                "snapshot::RaftSnapshotLifecycle chunks, retries, quota-throttles, and installs snapshots",
+                "snapshot::SnapshotLifecycle chunks, retries, quota-throttles, and installs snapshots",
                 "PersistentRaftSnapshotStore persists checkpoints and reloads snapshot payloads",
-                "RustRaftApplySnapshotFence validates snapshot floor and tail catch-up safety",
+                "ApplySnapshotFence validates snapshot floor and tail catch-up safety",
             ],
         ),
         standalone_capability(
@@ -925,13 +920,13 @@ fn matrixraft_standalone_capabilities() -> Vec<RustRaftStandaloneCapability> {
             &[
                 "cluster::RaftCluster::read_index enforces quorum read-index safety",
                 "RaftCluster::lease_read_eligible rejects stale leaders and unapplied reads",
-                "RustRaftReadIndexRequest and RustRaftReadIndexResponse expose the public read path",
+                "ReadIndexRequest and ReadIndexResponse expose the public read path",
             ],
         ),
         standalone_capability(
             "status_metrics_readiness",
             &[
-                "status::RustRaftStatusSnapshot and cluster status reports expose runtime state",
+                "status::StatusSnapshot and cluster status reports expose runtime state",
                 "metrics::matrixraft_metric_names names replication, WAL, snapshot, read, and blocker metrics",
                 "readiness reports cover BaselineRaft parity, production gates, and fatal blockers",
             ],
@@ -939,8 +934,8 @@ fn matrixraft_standalone_capabilities() -> Vec<RustRaftStandaloneCapability> {
     ]
 }
 
-fn standalone_capability(id: &str, evidence: &[&str]) -> RustRaftStandaloneCapability {
-    RustRaftStandaloneCapability {
+fn standalone_capability(id: &str, evidence: &[&str]) -> StandaloneCapability {
+    StandaloneCapability {
         id: id.to_string(),
         ready: !evidence.is_empty(),
         evidence: evidence.iter().map(|item| item.to_string()).collect(),
@@ -948,28 +943,26 @@ fn standalone_capability(id: &str, evidence: &[&str]) -> RustRaftStandaloneCapab
     }
 }
 
-pub fn matrixraft_open_source_surface() -> RustRaftOpenSourceSurface {
-    RustRaftOpenSourceSurface {
+pub fn matrixraft_open_source_surface() -> OpenSourceSurface {
+    OpenSourceSurface {
         crate_name: "rustraft".to_string(),
         public_modules: matrixraft_public_module_names(),
         embedding_docs: vec!["README.md".to_string(), "docs/gap_plan.md".to_string()],
         embedding_examples: matrixraft_embedding_examples(),
-        baseline_raft_parity_matrix: matrixraft_baseline_raft_parity_matrix(
-            &RustRaftReadinessSnapshot {
-                matrixraft_leader_write_authority_present: true,
-                matrixraft_operator_observability_present: true,
-                matrixraft_rpc_transport_contract_present: true,
-                matrixraft_log_retention_snapshot_trigger_present: true,
-                matrixraft_apply_snapshot_fence_present: true,
-                raft_storage_apply_fence_present: true,
-                matrixraft_snapshot_floor_log_matching_present: true,
-                matrixraft_snapshot_tail_catchup_present: true,
-                matrixraft_compacted_entry_rejection_present: true,
-                matrixraft_metaserver_snapshot_floor_election_present: true,
-                learner_catchup_promotion_present: true,
-                metaserver_membership_workflow_present: true,
-            },
-        )
+        baseline_raft_parity_matrix: matrixraft_baseline_raft_parity_matrix(&ReadinessSnapshot {
+            matrixraft_leader_write_authority_present: true,
+            matrixraft_operator_observability_present: true,
+            matrixraft_rpc_transport_contract_present: true,
+            matrixraft_log_retention_snapshot_trigger_present: true,
+            matrixraft_apply_snapshot_fence_present: true,
+            raft_storage_apply_fence_present: true,
+            matrixraft_snapshot_floor_log_matching_present: true,
+            matrixraft_snapshot_tail_catchup_present: true,
+            matrixraft_compacted_entry_rejection_present: true,
+            matrixraft_metaserver_snapshot_floor_election_present: true,
+            learner_catchup_promotion_present: true,
+            metaserver_membership_workflow_present: true,
+        })
         .into_iter()
         .map(|item| item.id)
         .collect(),
@@ -992,12 +985,12 @@ pub fn matrixraft_open_source_surface() -> RustRaftOpenSourceSurface {
     }
 }
 
-pub fn matrixraft_temporalstore_adapter_shape() -> RustRaftTemporalStoreAdapterShape {
-    RustRaftTemporalStoreAdapterShape {
+pub fn matrixraft_temporalstore_adapter_shape() -> TemporalStoreAdapterShape {
+    TemporalStoreAdapterShape {
         backend_type: "TemporalRaftConsensusBackend".to_string(),
         node_field: "node".to_string(),
         node_runtime_type:
-            "matrixraft::node::RaftNodeRuntime<TemporalStoreStateMachine, TemporalTransport>"
+            "matrixraft::node::NodeRuntime<TemporalStoreStateMachine, TemporalTransport>"
                 .to_string(),
         state_machine_type_parameter: "TemporalStoreStateMachine".to_string(),
         transport_type_parameter: "TemporalTransport".to_string(),
@@ -1018,7 +1011,7 @@ pub fn matrixraft_temporalstore_adapter_shape() -> RustRaftTemporalStoreAdapterS
         ],
         example: [
             "struct TemporalRaftConsensusBackend {",
-            "    node: matrixraft::node::RaftNodeRuntime<TemporalStoreStateMachine, TemporalTransport>,",
+            "    node: matrixraft::node::NodeRuntime<TemporalStoreStateMachine, TemporalTransport>,",
             "    codec: TemporalCommandCodec,",
             "    engine: TemporalEngine,",
             "}",
@@ -1027,55 +1020,55 @@ pub fn matrixraft_temporalstore_adapter_shape() -> RustRaftTemporalStoreAdapterS
     }
 }
 
-pub fn matrixraft_temporalstore_extraction_plan() -> RustRaftTemporalStoreExtractionPlan {
-    RustRaftTemporalStoreExtractionPlan {
+pub fn matrixraft_temporalstore_extraction_plan() -> TemporalStoreExtractionPlan {
+    TemporalStoreExtractionPlan {
         policy: "RustRaft owns reusable consensus contracts, safety decisions, membership state, WAL/snapshot models, transport/storage traits, pipeline metrics, and deterministic harness logic; TemporalStore keeps only command codecs, process startup, shard FSM adapters, and storage-engine integration.".to_string(),
         slices: vec![
-            RustRaftExtractionSlice {
+            ExtractionSlice {
                 id: "read_safety".to_string(),
-                status: RustRaftExtractionStatus::InLibrary,
+                status: ExtractionStatus::InLibrary,
                 matrixraft_owner: "read-index, lease-read, bounded-stale, lagging-follower, stale-leader, and minority-partition decisions".to_string(),
                 temporalstore_boundary: "translate data-node and metaserver runtime status into RustRaft read-safety inputs".to_string(),
                 next_evidence: "multi-process TemporalStore harness must attach observed read-index and lease responses".to_string(),
             },
-            RustRaftExtractionSlice {
+            ExtractionSlice {
                 id: "membership_workflow".to_string(),
-                status: RustRaftExtractionStatus::InLibrary,
+                status: ExtractionStatus::InLibrary,
                 matrixraft_owner: "learner add/catch-up/promote, voter add/remove, witness add, leader transfer validation, rollback reports, and joint consensus summaries".to_string(),
                 temporalstore_boundary: "metaserver scheduler invokes RustRaft workflow and applies accepted operations through data-node process APIs".to_string(),
                 next_evidence: "scheduler-owned data-node membership report with stale-token rejection and restart replay".to_string(),
             },
-            RustRaftExtractionSlice {
+            ExtractionSlice {
                 id: "wal_snapshot_models".to_string(),
-                status: RustRaftExtractionStatus::InLibrary,
+                status: ExtractionStatus::InLibrary,
                 matrixraft_owner: "hard state, WAL records, segment status, snapshot metadata, apply snapshot fences, and snapshot lifecycle reports".to_string(),
                 temporalstore_boundary: "persist records in TemporalStore-owned directories and bind apply fences to storage mutations".to_string(),
                 next_evidence: "crash between WAL persistence, storage mutation, and snapshot install recovers deterministically".to_string(),
             },
-            RustRaftExtractionSlice {
+            ExtractionSlice {
                 id: "transport_storage_traits".to_string(),
-                status: RustRaftExtractionStatus::InLibrary,
+                status: ExtractionStatus::InLibrary,
                 matrixraft_owner: "generic storage and transport traits plus AppendEntries, Vote, PreVote, InstallSnapshot, snapshot chunk, and ReadIndex messages".to_string(),
                 temporalstore_boundary: "HTTP/tonic/process adapters implement the traits without leaking TemporalStore command types into RustRaft".to_string(),
                 next_evidence: "data-node and metaserver process paths consume trait adapters in scale/failover harnesses".to_string(),
             },
-            RustRaftExtractionSlice {
+            ExtractionSlice {
                 id: "fault_harness_contract".to_string(),
-                status: RustRaftExtractionStatus::InLibrary,
+                status: ExtractionStatus::InLibrary,
                 matrixraft_owner: "BaselineRaft-derived fault scenario catalog and readiness report for process-path evidence".to_string(),
                 temporalstore_boundary: "TemporalStore process harnesses run the real data-node and metaserver binaries and feed observed evidence into RustRaft reports".to_string(),
                 next_evidence: "packet loss, slow WAL, snapshot during membership, leader transfer under load, compacted-log rejoin, and rolling restart reports all pass".to_string(),
             },
-            RustRaftExtractionSlice {
+            ExtractionSlice {
                 id: "replication_pipeline_runtime".to_string(),
-                status: RustRaftExtractionStatus::PendingMigration,
+                status: ExtractionStatus::PendingMigration,
                 matrixraft_owner: "inflight limits, append/apply queue limits, max replicate bytes, oversized-log rejection, reorder queue, and pressure counters".to_string(),
                 temporalstore_boundary: "runtime should feed per-peer process observations into RustRaft pipeline evidence".to_string(),
                 next_evidence: "BaselineRaft-derived packet-loss, out-of-order append, slow WAL, and pressure tests pass through process harnesses".to_string(),
             },
-            RustRaftExtractionSlice {
+            ExtractionSlice {
                 id: "domain_fsm_adapters".to_string(),
-                status: RustRaftExtractionStatus::AdapterOnly,
+                status: ExtractionStatus::AdapterOnly,
                 matrixraft_owner: "opaque bytes/state-machine trait contracts only".to_string(),
                 temporalstore_boundary: "TemporalStore owns data-shard commands, metaserver mutations, object/block storage, and admin surfaces".to_string(),
                 next_evidence: "integration tests prove adapters implement RustRaft traits without moving domain codecs into the library".to_string(),

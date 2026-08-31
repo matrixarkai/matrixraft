@@ -26,19 +26,17 @@ use matrixraft::{
     matrixraft_validate_replication_pipeline_evidence_artifact,
     matrixraft_validate_snapshot_lifecycle_evidence_artifact,
     matrixraft_validate_wal_lifecycle_evidence_artifact,
-    matrixraft_wal_lifecycle_evidence_artifact, RaftCapabilityEvidence,
-    RustRaftAdminStatusSurfaceEvidence, RustRaftAdminStatusSurfaceInput,
-    RustRaftDataNodeProcessRolloutReport, RustRaftDeploymentMode, RustRaftLearnerPromotionDecision,
-    RustRaftMembershipScope, RustRaftMembershipTransitionEvidence,
-    RustRaftMembershipTransitionKind, RustRaftMetaProcessRolloutReport, RustRaftPeerPipelineStatus,
-    RustRaftPipelineEvidence, RustRaftPipelineLimits, RustRaftProcessNodeEvidence,
-    RustRaftProcessOperationalSemanticsEvidence, RustRaftProductionReadinessInput,
-    RustRaftReadinessSnapshot, RustRaftSnapshotLifecycleEvidence, RustRaftWalLifecycleEvidence,
-    RustRaftWalLifecycleStatus,
+    matrixraft_wal_lifecycle_evidence_artifact, AdminStatusSurfaceEvidence,
+    AdminStatusSurfaceInput, CapabilityEvidence, DataNodeProcessRolloutReport, DeploymentMode,
+    LearnerPromotionDecision, MembershipScope, MembershipTransitionEvidence,
+    MembershipTransitionKind, MetaProcessRolloutReport, PeerProgress, PipelineEvidence,
+    PipelineLimits, ProcessNodeEvidence, ProcessOperationalSemanticsEvidence,
+    ProductionReadinessInput, ReadinessSnapshot, SnapshotLifecycleEvidence, WalLifecycleEvidence,
+    WalLifecycleStatus,
 };
 
-fn ready_snapshot() -> RustRaftReadinessSnapshot {
-    RustRaftReadinessSnapshot {
+fn ready_snapshot() -> ReadinessSnapshot {
+    ReadinessSnapshot {
         matrixraft_leader_write_authority_present: true,
         matrixraft_operator_observability_present: true,
         matrixraft_rpc_transport_contract_present: true,
@@ -54,8 +52,8 @@ fn ready_snapshot() -> RustRaftReadinessSnapshot {
     }
 }
 
-fn ready_semantics() -> RustRaftProcessOperationalSemanticsEvidence {
-    RustRaftProcessOperationalSemanticsEvidence {
+fn ready_semantics() -> ProcessOperationalSemanticsEvidence {
+    ProcessOperationalSemanticsEvidence {
         api_presence_only_rejected: true,
         process_path_validated: true,
         read_index_validated: true,
@@ -87,9 +85,9 @@ fn ready_semantics() -> RustRaftProcessOperationalSemanticsEvidence {
     }
 }
 
-fn process_nodes() -> Vec<RustRaftProcessNodeEvidence> {
+fn process_nodes() -> Vec<ProcessNodeEvidence> {
     vec![
-        RustRaftProcessNodeEvidence {
+        ProcessNodeEvidence {
             node_id: 1,
             addr: "127.0.0.1:21001".to_string(),
             wal_dir: "/tmp/rustraft/capability/node-1/wal".to_string(),
@@ -100,7 +98,7 @@ fn process_nodes() -> Vec<RustRaftProcessNodeEvidence> {
             restarted: true,
             log_store_validated: true,
         },
-        RustRaftProcessNodeEvidence {
+        ProcessNodeEvidence {
             node_id: 2,
             addr: "127.0.0.1:21002".to_string(),
             wal_dir: "/tmp/rustraft/capability/node-2/wal".to_string(),
@@ -114,9 +112,9 @@ fn process_nodes() -> Vec<RustRaftProcessNodeEvidence> {
     ]
 }
 
-fn process_nodes_three() -> Vec<RustRaftProcessNodeEvidence> {
+fn process_nodes_three() -> Vec<ProcessNodeEvidence> {
     let mut nodes = process_nodes();
-    nodes.push(RustRaftProcessNodeEvidence {
+    nodes.push(ProcessNodeEvidence {
         node_id: 3,
         addr: "127.0.0.1:21003".to_string(),
         wal_dir: "/tmp/rustraft/capability/node-3/wal".to_string(),
@@ -130,8 +128,8 @@ fn process_nodes_three() -> Vec<RustRaftProcessNodeEvidence> {
     nodes
 }
 
-fn ready_data_rollout() -> RustRaftDataNodeProcessRolloutReport {
-    RustRaftDataNodeProcessRolloutReport {
+fn ready_data_rollout() -> DataNodeProcessRolloutReport {
+    DataNodeProcessRolloutReport {
         shard_id: 11,
         voters: vec![1, 2, 3],
         learners: vec![4],
@@ -172,7 +170,7 @@ fn ready_data_rollout() -> RustRaftDataNodeProcessRolloutReport {
     }
 }
 
-fn ready_data_rollout_three_processes() -> RustRaftDataNodeProcessRolloutReport {
+fn ready_data_rollout_three_processes() -> DataNodeProcessRolloutReport {
     let mut rollout = ready_data_rollout();
     rollout.nodes = process_nodes_three();
     rollout.spawned_process_count = 3;
@@ -182,8 +180,8 @@ fn ready_data_rollout_three_processes() -> RustRaftDataNodeProcessRolloutReport 
     rollout
 }
 
-fn ready_meta_rollout() -> RustRaftMetaProcessRolloutReport {
-    RustRaftMetaProcessRolloutReport {
+fn ready_meta_rollout() -> MetaProcessRolloutReport {
+    MetaProcessRolloutReport {
         voters: vec![1, 2, 3],
         learners: vec![4],
         nodes: process_nodes(),
@@ -224,7 +222,7 @@ fn ready_meta_rollout() -> RustRaftMetaProcessRolloutReport {
     }
 }
 
-fn ready_meta_rollout_three_processes() -> RustRaftMetaProcessRolloutReport {
+fn ready_meta_rollout_three_processes() -> MetaProcessRolloutReport {
     let mut rollout = ready_meta_rollout();
     rollout.nodes = process_nodes_three();
     rollout.spawned_process_count = 3;
@@ -235,12 +233,12 @@ fn ready_meta_rollout_three_processes() -> RustRaftMetaProcessRolloutReport {
 }
 
 fn transition(
-    scope: RustRaftMembershipScope,
-    transition: RustRaftMembershipTransitionKind,
-) -> RustRaftMembershipTransitionEvidence {
+    scope: MembershipScope,
+    transition: MembershipTransitionKind,
+) -> MembershipTransitionEvidence {
     let (before_voters, after_voters, before_learners, after_learners, added, removed) =
         match transition {
-            RustRaftMembershipTransitionKind::Failover => (
+            MembershipTransitionKind::Failover => (
                 vec![1, 2, 3],
                 vec![1, 2, 3],
                 Vec::new(),
@@ -248,7 +246,7 @@ fn transition(
                 Vec::new(),
                 vec![1],
             ),
-            RustRaftMembershipTransitionKind::ScaleUp => (
+            MembershipTransitionKind::ScaleUp => (
                 vec![1, 2, 3],
                 vec![1, 2, 3, 4],
                 vec![4],
@@ -256,7 +254,7 @@ fn transition(
                 vec![4],
                 Vec::new(),
             ),
-            RustRaftMembershipTransitionKind::ScaleDown => (
+            MembershipTransitionKind::ScaleDown => (
                 vec![1, 2, 3, 4],
                 vec![1, 2, 3],
                 Vec::new(),
@@ -265,7 +263,7 @@ fn transition(
                 vec![4],
             ),
         };
-    RustRaftMembershipTransitionEvidence {
+    MembershipTransitionEvidence {
         scope,
         transition,
         before_voters: before_voters.clone(),
@@ -283,70 +281,67 @@ fn transition(
         joint_consensus_used: true,
         old_majority_preserved: true,
         new_majority_reached: true,
-        joint_old_quorum_size: if matches!(transition, RustRaftMembershipTransitionKind::Failover) {
+        joint_old_quorum_size: if matches!(transition, MembershipTransitionKind::Failover) {
             0
         } else {
             before_voters.len() / 2 + 1
         },
-        joint_new_quorum_size: if matches!(transition, RustRaftMembershipTransitionKind::Failover) {
+        joint_new_quorum_size: if matches!(transition, MembershipTransitionKind::Failover) {
             0
         } else {
             after_voters.len() / 2 + 1
         },
         joint_acknowledged_voters: if matches!(
             transition,
-            RustRaftMembershipTransitionKind::ScaleUp | RustRaftMembershipTransitionKind::ScaleDown
+            MembershipTransitionKind::ScaleUp | MembershipTransitionKind::ScaleDown
         ) {
             vec![1, 2, 3, 4]
         } else {
             Vec::new()
         },
-        joint_old_majority_acked: !matches!(transition, RustRaftMembershipTransitionKind::Failover),
-        joint_new_majority_acked: !matches!(transition, RustRaftMembershipTransitionKind::Failover),
+        joint_old_majority_acked: !matches!(transition, MembershipTransitionKind::Failover),
+        joint_new_majority_acked: !matches!(transition, MembershipTransitionKind::Failover),
         stale_leader_rejected: true,
         read_index_validated_after: true,
         write_validated_after: true,
         snapshot_floor_preserved: true,
         secondary_replication_visible: true,
-        scheduler_generation_advanced: matches!(scope, RustRaftMembershipScope::Metaserver),
+        scheduler_generation_advanced: matches!(scope, MembershipScope::Metaserver),
         blockers: Vec::new(),
     }
 }
 
-fn transitions() -> Vec<RustRaftMembershipTransitionEvidence> {
-    [
-        RustRaftMembershipScope::Metaserver,
-        RustRaftMembershipScope::DataNode,
-    ]
-    .into_iter()
-    .flat_map(|scope| {
-        [
-            RustRaftMembershipTransitionKind::Failover,
-            RustRaftMembershipTransitionKind::ScaleUp,
-            RustRaftMembershipTransitionKind::ScaleDown,
-        ]
+fn transitions() -> Vec<MembershipTransitionEvidence> {
+    [MembershipScope::Metaserver, MembershipScope::DataNode]
         .into_iter()
-        .map(move |kind| transition(scope, kind))
-    })
-    .collect()
+        .flat_map(|scope| {
+            [
+                MembershipTransitionKind::Failover,
+                MembershipTransitionKind::ScaleUp,
+                MembershipTransitionKind::ScaleDown,
+            ]
+            .into_iter()
+            .map(move |kind| transition(scope, kind))
+        })
+        .collect()
 }
 
-fn ready_admin_status_surface() -> RustRaftAdminStatusSurfaceEvidence {
-    let limits = RustRaftPipelineLimits::production_default();
-    let mut peer_2 = RustRaftPeerPipelineStatus::new(2, 105, limits);
+fn ready_admin_status_surface() -> AdminStatusSurfaceEvidence {
+    let limits = PipelineLimits::production_default();
+    let mut peer_2 = PeerProgress::new(2, 105, limits);
     peer_2.match_index = 104;
     peer_2.append_requests = 8;
     peer_2.append_accepted = 8;
     peer_2.append_queue_max_depth = 4;
 
-    let mut peer_3 = RustRaftPeerPipelineStatus::new(3, 105, limits);
+    let mut peer_3 = PeerProgress::new(3, 105, limits);
     peer_3.match_index = 104;
     peer_3.append_requests = 7;
     peer_3.append_accepted = 7;
     peer_3.inflight_entries = 1;
     peer_3.inflight_bytes = 128;
 
-    matrixraft_admin_status_surface_evidence(&RustRaftAdminStatusSurfaceInput {
+    matrixraft_admin_status_surface_evidence(&AdminStatusSurfaceInput {
         commit_index: 104,
         max_observed_node_commit_index: 104,
         quorum_size: 2,
@@ -357,9 +352,9 @@ fn ready_admin_status_surface() -> RustRaftAdminStatusSurfaceEvidence {
     })
 }
 
-fn complete_replication_pipeline_peers() -> Vec<RustRaftPeerPipelineStatus> {
-    let limits = RustRaftPipelineLimits::production_default();
-    let mut peer_2 = RustRaftPeerPipelineStatus::new(2, 105, limits);
+fn complete_replication_pipeline_peers() -> Vec<PeerProgress> {
+    let limits = PipelineLimits::production_default();
+    let mut peer_2 = PeerProgress::new(2, 105, limits);
     peer_2.append_queue_depth = limits.max_inflights_replicate;
     peer_2.append_queue_max_depth = limits.max_inflights_replicate;
     peer_2.apply_queue_max_depth = limits.max_inflights_apply_task;
@@ -368,7 +363,7 @@ fn complete_replication_pipeline_peers() -> Vec<RustRaftPeerPipelineStatus> {
     peer_2.stale_term_rejections = 1;
     peer_2.reorder_queue_depth = 1;
 
-    let mut peer_3 = RustRaftPeerPipelineStatus::new(3, 105, limits);
+    let mut peer_3 = PeerProgress::new(3, 105, limits);
     peer_3.reorder_queue_depth = 1;
     peer_3.reorder_entry_timeouts = 1;
     peer_3.reorder_dropped_packages = 1;
@@ -383,9 +378,9 @@ fn complete_replication_pipeline_peers() -> Vec<RustRaftPeerPipelineStatus> {
     vec![peer_2, peer_3]
 }
 
-fn complete_snapshot_lifecycle_peers() -> Vec<RustRaftPeerPipelineStatus> {
-    let limits = RustRaftPipelineLimits::production_default();
-    let mut sender = RustRaftPeerPipelineStatus::new(2, 105, limits);
+fn complete_snapshot_lifecycle_peers() -> Vec<PeerProgress> {
+    let limits = PipelineLimits::production_default();
+    let mut sender = PeerProgress::new(2, 105, limits);
     sender.snapshot_sending = true;
     sender.snapshot_send_attempts = 2;
     sender.snapshot_install_total_chunks = 8;
@@ -398,7 +393,7 @@ fn complete_snapshot_lifecycle_peers() -> Vec<RustRaftPeerPipelineStatus> {
     sender.required_snapshot_index = 128;
     sender.acked_snapshot_index = 128;
 
-    let mut installer = RustRaftPeerPipelineStatus::new(3, 105, limits);
+    let mut installer = PeerProgress::new(3, 105, limits);
     installer.snapshot_install_total_chunks = 4;
     installer.snapshot_install_progress_per_mille = 1000;
     installer.snapshot_installed_index = 128;
@@ -408,8 +403,8 @@ fn complete_snapshot_lifecycle_peers() -> Vec<RustRaftPeerPipelineStatus> {
     vec![sender, installer]
 }
 
-fn complete_wal_lifecycle_status() -> RustRaftWalLifecycleStatus {
-    RustRaftWalLifecycleStatus {
+fn complete_wal_lifecycle_status() -> WalLifecycleStatus {
+    WalLifecycleStatus {
         segment_count: 3,
         active_segment_id: 7,
         first_retained_segment_id: 5,
@@ -431,10 +426,10 @@ fn complete_wal_lifecycle_status() -> RustRaftWalLifecycleStatus {
     }
 }
 
-fn ready_fault_harness() -> fault::RustRaftFaultHarnessReadinessReport {
+fn ready_fault_harness() -> fault::FaultHarnessReadinessReport {
     let evidence = fault::matrixraft_baseline_raft_fault_scenarios()
         .into_iter()
-        .map(|requirement| fault::RustRaftFaultScenarioEvidence {
+        .map(|requirement| fault::FaultScenarioEvidence {
             scenario: requirement.scenario,
             process_path_observed: true,
             spawned_process_count: 3,
@@ -454,10 +449,10 @@ fn ready_fault_harness() -> fault::RustRaftFaultHarnessReadinessReport {
     fault::matrixraft_fault_harness_readiness_report(&evidence)
 }
 
-fn ready_input() -> RustRaftProductionReadinessInput {
-    RustRaftProductionReadinessInput {
+fn ready_input() -> ProductionReadinessInput {
+    ProductionReadinessInput {
         readiness: ready_snapshot(),
-        peer_pipeline: Some(RustRaftPipelineEvidence {
+        peer_pipeline: Some(PipelineEvidence {
             per_peer_pipeline_state_present: true,
             append_backpressure_enforced: true,
             apply_backpressure_enforced: true,
@@ -472,7 +467,7 @@ fn ready_input() -> RustRaftProductionReadinessInput {
             stale_term_rejection_present: true,
             reorder_queue_enabled: true,
         }),
-        snapshot_lifecycle: Some(RustRaftSnapshotLifecycleEvidence {
+        snapshot_lifecycle: Some(SnapshotLifecycleEvidence {
             sender_lifecycle_present: true,
             downloader_lifecycle_present: true,
             retry_backpressure_present: true,
@@ -488,7 +483,7 @@ fn ready_input() -> RustRaftProductionReadinessInput {
             membership_change_present: true,
             rejoin_after_compacted_log_present: true,
         }),
-        wal_lifecycle: Some(RustRaftWalLifecycleEvidence {
+        wal_lifecycle: Some(WalLifecycleEvidence {
             segment_lifecycle_present: true,
             retained_range_present: true,
             sequence_range_present: true,
@@ -502,7 +497,7 @@ fn ready_input() -> RustRaftProductionReadinessInput {
         data_node_rollout: Some(ready_data_rollout()),
         metaserver_rollout: Some(ready_meta_rollout()),
         membership_transitions: transitions(),
-        baseline_raft_benchmark: Some(matrixraft::RustRaftBaselineRaftBenchmarkEvidence {
+        baseline_raft_benchmark: Some(matrixraft::BaselineRaftBenchmarkEvidence {
             real_baseline_raft: true,
             matrixraft_runtime: true,
             baseline_raft_reference: true,
@@ -563,13 +558,13 @@ fn capability_evidence_from_fields_formats_present_and_missing_rows() {
 fn runtime_capability_report_builder_accepts_product_evidence_rows() {
     let report = matrixraft_runtime_capability_report_from_evidence(
         vec![
-            RaftCapabilityEvidence {
+            CapabilityEvidence {
                 capability: "process_path_rollout_evidence".to_string(),
                 present: true,
                 evidence: vec!["present:data_node.ready".to_string()],
                 source_reference: "product_admin_report".to_string(),
             },
-            RaftCapabilityEvidence {
+            CapabilityEvidence {
                 capability: "wal_segment_lifecycle".to_string(),
                 present: false,
                 evidence: vec![
@@ -602,7 +597,7 @@ fn runtime_capability_report_builder_accepts_product_evidence_rows() {
 #[test]
 fn baseline_raft_runtime_capability_report_fails_closed_on_missing_wal_lifecycle() {
     let mut input = ready_input();
-    input.wal_lifecycle = Some(RustRaftWalLifecycleEvidence {
+    input.wal_lifecycle = Some(WalLifecycleEvidence {
         segment_lifecycle_present: true,
         retained_range_present: true,
         sequence_range_present: true,
@@ -1014,7 +1009,7 @@ fn membership_semantics_evidence_artifact_validator_reports_missing_fields() {
 
     let mut broken = artifact;
     broken.schema = "old.schema".to_string();
-    broken.learner_catchup = RustRaftLearnerPromotionDecision {
+    broken.learner_catchup = LearnerPromotionDecision {
         promotable: false,
         learner_id: 4,
         learner_match_index: 120,
@@ -1085,7 +1080,7 @@ fn membership_semantics_evidence_requires_joint_quorum_commit_proof() {
 
 #[test]
 fn replication_pipeline_evidence_artifact_is_library_owned() {
-    let limits = RustRaftPipelineLimits::production_default();
+    let limits = PipelineLimits::production_default();
     let artifact = matrixraft_replication_pipeline_evidence_artifact(
         complete_replication_pipeline_peers(),
         limits,
@@ -1111,7 +1106,7 @@ fn replication_pipeline_evidence_artifact_is_library_owned() {
 
 #[test]
 fn replication_pipeline_evidence_artifact_validator_reports_missing_fields() {
-    let limits = RustRaftPipelineLimits::production_default();
+    let limits = PipelineLimits::production_default();
     let artifact = matrixraft_replication_pipeline_evidence_artifact(
         complete_replication_pipeline_peers(),
         limits,
@@ -1157,7 +1152,7 @@ fn replication_pipeline_evidence_artifact_validator_reports_missing_fields() {
 
 #[test]
 fn replication_pipeline_evidence_requires_recovery_after_packet_loss_and_reorder() {
-    let limits = RustRaftPipelineLimits::production_default();
+    let limits = PipelineLimits::production_default();
     let mut peers = complete_replication_pipeline_peers();
     let recovered_peer = peers
         .iter_mut()
@@ -1185,7 +1180,7 @@ fn replication_pipeline_evidence_requires_recovery_after_packet_loss_and_reorder
 
 #[test]
 fn replication_pipeline_evidence_rejects_split_peer_packet_loss_and_reorder_recovery() {
-    let limits = RustRaftPipelineLimits::production_default();
+    let limits = PipelineLimits::production_default();
     let mut peers = complete_replication_pipeline_peers();
     let packet_loss_peer = peers
         .iter_mut()
@@ -1388,7 +1383,7 @@ fn wal_lifecycle_evidence_artifact_validator_reports_missing_fields() {
 fn baseline_raft_operational_evidence_bundle_is_library_owned() {
     let bundle = matrixraft_baseline_raft_operational_evidence_bundle(
         complete_replication_pipeline_peers(),
-        RustRaftPipelineLimits::production_default(),
+        PipelineLimits::production_default(),
         complete_snapshot_lifecycle_peers(),
         1_000,
         1,
@@ -1413,7 +1408,7 @@ fn baseline_raft_operational_evidence_bundle_is_library_owned() {
 fn baseline_raft_operational_evidence_bundle_validator_prefixes_missing_fields() {
     let mut bundle = matrixraft_baseline_raft_operational_evidence_bundle(
         complete_replication_pipeline_peers(),
-        RustRaftPipelineLimits::production_default(),
+        PipelineLimits::production_default(),
         complete_snapshot_lifecycle_peers(),
         1_000,
         1,
@@ -1516,16 +1511,14 @@ fn baseline_raft_runtime_capability_prometheus_exports_generic_metrics() {
 fn deployment_mode_validation_is_library_owned_and_fails_closed() {
     let ready = matrixraft_production_readiness_report(&ready_input());
     assert!(ready.ready);
-    assert!(matrixraft_validate_deployment_mode(
-        RustRaftDeploymentMode::ProductionDistributed,
-        &ready
-    )
-    .is_ok());
+    assert!(
+        matrixraft_validate_deployment_mode(DeploymentMode::ProductionDistributed, &ready).is_ok()
+    );
     assert!(matrixraft_require_production_ready(&ready).is_ok());
 
-    let local_err = matrixraft_validate_deployment_mode(RustRaftDeploymentMode::LocalModel, &ready)
-        .unwrap_err();
-    assert_eq!(local_err.mode, RustRaftDeploymentMode::LocalModel);
+    let local_err =
+        matrixraft_validate_deployment_mode(DeploymentMode::LocalModel, &ready).unwrap_err();
+    assert_eq!(local_err.mode, DeploymentMode::LocalModel);
     assert!(local_err
         .message
         .contains("local Raft deployment mode is disabled"));
@@ -1533,15 +1526,10 @@ fn deployment_mode_validation_is_library_owned_and_fails_closed() {
     let mut blocked_input = ready_input();
     blocked_input.peer_pipeline = None;
     let blocked = matrixraft_production_readiness_report(&blocked_input);
-    let production_err = matrixraft_validate_deployment_mode(
-        RustRaftDeploymentMode::ProductionDistributed,
-        &blocked,
-    )
-    .unwrap_err();
-    assert_eq!(
-        production_err.mode,
-        RustRaftDeploymentMode::ProductionDistributed
-    );
+    let production_err =
+        matrixraft_validate_deployment_mode(DeploymentMode::ProductionDistributed, &blocked)
+            .unwrap_err();
+    assert_eq!(production_err.mode, DeploymentMode::ProductionDistributed);
     assert!(production_err
         .message
         .contains("distributed Raft is not production-ready"));
@@ -1550,7 +1538,7 @@ fn deployment_mode_validation_is_library_owned_and_fails_closed() {
         .contains(&"pipeline:evidence_present".to_string()));
 
     let direct_err = matrixraft_validate_deployment_readiness(
-        RustRaftDeploymentMode::ProductionDistributed,
+        DeploymentMode::ProductionDistributed,
         false,
         vec!["process_path:missing".to_string()],
     )

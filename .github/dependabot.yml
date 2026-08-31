@@ -15,3 +15,12 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # The tag on dtolnay/rust-toolchain selects the *Rust* version, not a
+      # version of the action, so bumping it does not update a dependency -- it
+      # raises the MSRV the job is supposed to be guarding. Left unignored,
+      # dependabot proposes the newest compiler (it opened #1 for 1.100.0
+      # against the job named "msrv (1.82)"), which would make the job pass
+      # trivially and stop checking anything. The tag tracks `rust-version` in
+      # Cargo.toml and moves only when that does.
+      - dependency-name: dtolnay/rust-toolchain

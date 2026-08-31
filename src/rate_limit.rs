@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftRateLimitDecision {
+pub struct RateLimitDecision {
     pub allowed: bool,
     pub requested_bytes: u64,
     pub granted_bytes: u64,
@@ -16,7 +16,7 @@ pub struct RustRaftRateLimitDecision {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftRateLimiterStats {
+pub struct RateLimiterStats {
     pub total_granted_bytes: u64,
     pub total_rejected_bytes: u64,
     pub total_refilled_bytes: u64,
@@ -24,21 +24,21 @@ pub struct RustRaftRateLimiterStats {
     pub rejection_count: u64,
 }
 
-pub trait RustRaftRateLimiter {
-    fn reserve_bytes(&mut self, requested_bytes: u64) -> RustRaftRateLimitDecision;
-    fn reserve_limited_bytes(&mut self, requested_bytes: u64) -> RustRaftRateLimitDecision;
+pub trait RateLimiter {
+    fn reserve_bytes(&mut self, requested_bytes: u64) -> RateLimitDecision;
+    fn reserve_limited_bytes(&mut self, requested_bytes: u64) -> RateLimitDecision;
     fn refill_bytes(&mut self, bytes: u64);
     fn available_bytes(&self) -> u64;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftByteQuotaLimiter {
+pub struct ByteQuotaLimiter {
     capacity_bytes: u64,
     available_bytes: u64,
-    stats: RustRaftRateLimiterStats,
+    stats: RateLimiterStats,
 }
 
-impl RustRaftByteQuotaLimiter {
+impl ByteQuotaLimiter {
     pub fn new(capacity_bytes: u64) -> Self {
         Self::with_available(capacity_bytes, capacity_bytes)
     }
@@ -47,7 +47,7 @@ impl RustRaftByteQuotaLimiter {
         Self {
             capacity_bytes,
             available_bytes: available_bytes.min(capacity_bytes),
-            stats: RustRaftRateLimiterStats::default(),
+            stats: RateLimiterStats::default(),
         }
     }
 
@@ -55,7 +55,7 @@ impl RustRaftByteQuotaLimiter {
         self.capacity_bytes
     }
 
-    pub fn stats(&self) -> RustRaftRateLimiterStats {
+    pub fn stats(&self) -> RateLimiterStats {
         self.stats.clone()
     }
 
@@ -67,8 +67,8 @@ impl RustRaftByteQuotaLimiter {
         available_before: u64,
         available_after: u64,
         reason: &str,
-    ) -> RustRaftRateLimitDecision {
-        RustRaftRateLimitDecision {
+    ) -> RateLimitDecision {
+        RateLimitDecision {
             allowed,
             requested_bytes,
             granted_bytes,
@@ -79,8 +79,8 @@ impl RustRaftByteQuotaLimiter {
     }
 }
 
-impl RustRaftRateLimiter for RustRaftByteQuotaLimiter {
-    fn reserve_bytes(&mut self, requested_bytes: u64) -> RustRaftRateLimitDecision {
+impl RateLimiter for ByteQuotaLimiter {
+    fn reserve_bytes(&mut self, requested_bytes: u64) -> RateLimitDecision {
         let available_before = self.available_bytes;
         if requested_bytes == 0 {
             return self.decision(
@@ -138,7 +138,7 @@ impl RustRaftRateLimiter for RustRaftByteQuotaLimiter {
         )
     }
 
-    fn reserve_limited_bytes(&mut self, requested_bytes: u64) -> RustRaftRateLimitDecision {
+    fn reserve_limited_bytes(&mut self, requested_bytes: u64) -> RateLimitDecision {
         let available_before = self.available_bytes;
         if requested_bytes == 0 {
             return self.decision(

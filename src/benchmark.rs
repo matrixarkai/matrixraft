@@ -9,11 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::{
-    matrixraft_production_readiness_report, PersistentRaftWal, PersistentRaftWalOptions,
-    RaftCluster, RaftConfig, RaftError, RustRaftApplySnapshotFence, RustRaftHardState,
-    RustRaftLogEntry, RustRaftLogId, RustRaftMembership, RustRaftPeer,
-    RustRaftProductionReadinessInput, RustRaftProductionReadinessReport, RustRaftReplicaRole,
-    RustRaftSnapshotMeta, RustRaftWalRecord,
+    matrixraft_production_readiness_report, ApplySnapshotFence, Config, HardState, LogEntry, LogId,
+    Membership, Peer, PersistentRaftWal, PersistentRaftWalOptions, ProductionReadinessInput,
+    ProductionReadinessReport, RaftCluster, RaftError, ReplicaRole, SnapshotMetadata, WalRecord,
 };
 
 const MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
@@ -29,7 +27,7 @@ pub const MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA: &str = "rustraft.baseline_raft_be
 static MATRIXRAFT_BENCHMARK_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftBaselineRaftBenchmarkEvidence {
+pub struct BaselineRaftBenchmarkEvidence {
     pub real_baseline_raft: bool,
     pub matrixraft_runtime: bool,
     #[serde(default)]
@@ -52,14 +50,14 @@ pub struct RustRaftBaselineRaftBenchmarkEvidence {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftBenchmarkEngine {
+pub enum BenchmarkEngine {
     BaselineRaft,
     RustRaft,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftBenchmarkEngineSource {
+pub enum BenchmarkEngineSource {
     RealBaselineRaft,
     RustRaftRuntime,
     Model,
@@ -68,7 +66,7 @@ pub enum RustRaftBenchmarkEngineSource {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
-pub enum RustRaftBenchmarkImplementation {
+pub enum BenchmarkImplementation {
     #[serde(rename = "baseline_raft")]
     BaselineRaft,
     #[serde(rename = "rustraft_rust")]
@@ -78,7 +76,7 @@ pub enum RustRaftBenchmarkImplementation {
     Unknown,
 }
 
-impl RustRaftBenchmarkImplementation {
+impl BenchmarkImplementation {
     pub fn id(self) -> &'static str {
         match self {
             Self::BaselineRaft => "baseline_raft",
@@ -92,7 +90,7 @@ impl RustRaftBenchmarkImplementation {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
-pub enum RustRaftBenchmarkHarnessKind {
+pub enum BenchmarkHarnessKind {
     #[serde(rename = "full_baseline_raft_harness")]
     FullBaselineRaftHarness,
     NativeKvbenchPartial,
@@ -103,7 +101,7 @@ pub enum RustRaftBenchmarkHarnessKind {
     Unknown,
 }
 
-impl RustRaftBenchmarkHarnessKind {
+impl BenchmarkHarnessKind {
     pub fn id(self) -> &'static str {
         match self {
             Self::FullBaselineRaftHarness => "full_baseline_raft_harness",
@@ -117,7 +115,7 @@ impl RustRaftBenchmarkHarnessKind {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftBenchmarkWorkload {
+pub enum BenchmarkWorkload {
     SingleKeyWrites,
     BatchedWrites,
     ReplicationBatching,
@@ -129,7 +127,7 @@ pub enum RustRaftBenchmarkWorkload {
     LeaderTransferUnderLoad,
 }
 
-impl RustRaftBenchmarkWorkload {
+impl BenchmarkWorkload {
     pub fn id(self) -> &'static str {
         match self {
             Self::SingleKeyWrites => "single_key_writes",
@@ -145,17 +143,17 @@ impl RustRaftBenchmarkWorkload {
     }
 }
 
-pub fn matrixraft_baseline_raft_benchmark_workloads() -> Vec<RustRaftBenchmarkWorkload> {
+pub fn matrixraft_baseline_raft_benchmark_workloads() -> Vec<BenchmarkWorkload> {
     vec![
-        RustRaftBenchmarkWorkload::SingleKeyWrites,
-        RustRaftBenchmarkWorkload::BatchedWrites,
-        RustRaftBenchmarkWorkload::ReplicationBatching,
-        RustRaftBenchmarkWorkload::WalFsync,
-        RustRaftBenchmarkWorkload::ReadIndexReads,
-        RustRaftBenchmarkWorkload::LeaseReads,
-        RustRaftBenchmarkWorkload::SnapshotInstallCatchup,
-        RustRaftBenchmarkWorkload::SnapshotStreaming,
-        RustRaftBenchmarkWorkload::LeaderTransferUnderLoad,
+        BenchmarkWorkload::SingleKeyWrites,
+        BenchmarkWorkload::BatchedWrites,
+        BenchmarkWorkload::ReplicationBatching,
+        BenchmarkWorkload::WalFsync,
+        BenchmarkWorkload::ReadIndexReads,
+        BenchmarkWorkload::LeaseReads,
+        BenchmarkWorkload::SnapshotInstallCatchup,
+        BenchmarkWorkload::SnapshotStreaming,
+        BenchmarkWorkload::LeaderTransferUnderLoad,
     ]
 }
 
@@ -167,10 +165,10 @@ pub fn matrixraft_baseline_raft_benchmark_required_workloads() -> Vec<String> {
 }
 
 pub fn matrixraft_production_readiness_input_with_benchmark_artifacts(
-    mut input: RustRaftProductionReadinessInput,
-    report: &RustRaftBenchmarkReport,
-    summary: &RustRaftBenchmarkFailureSummary,
-) -> Result<RustRaftProductionReadinessInput, String> {
+    mut input: ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+) -> Result<ProductionReadinessInput, String> {
     input.baseline_raft_benchmark = Some(
         matrixraft_baseline_raft_benchmark_evidence_from_artifacts(report, summary)?,
     );
@@ -178,9 +176,9 @@ pub fn matrixraft_production_readiness_input_with_benchmark_artifacts(
 }
 
 pub fn matrixraft_production_readiness_input_with_benchmark_summary(
-    mut input: RustRaftProductionReadinessInput,
-    summary: &RustRaftBenchmarkFailureSummary,
-) -> RustRaftProductionReadinessInput {
+    mut input: ProductionReadinessInput,
+    summary: &BenchmarkFailureSummary,
+) -> ProductionReadinessInput {
     input.baseline_raft_benchmark = Some(matrixraft_baseline_raft_benchmark_evidence_from_summary(
         summary,
     ));
@@ -188,10 +186,10 @@ pub fn matrixraft_production_readiness_input_with_benchmark_summary(
 }
 
 pub fn matrixraft_production_readiness_report_with_benchmark_artifacts(
-    input: &RustRaftProductionReadinessInput,
-    report: &RustRaftBenchmarkReport,
-    summary: &RustRaftBenchmarkFailureSummary,
-) -> Result<RustRaftProductionReadinessReport, String> {
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+) -> Result<ProductionReadinessReport, String> {
     let input = matrixraft_production_readiness_input_with_benchmark_artifacts(
         input.clone(),
         report,
@@ -201,7 +199,7 @@ pub fn matrixraft_production_readiness_report_with_benchmark_artifacts(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RustRaftBenchmarkOptions {
+pub struct BenchmarkOptions {
     pub node_count: usize,
     pub iterations_per_workload: usize,
     pub batch_size: usize,
@@ -209,7 +207,7 @@ pub struct RustRaftBenchmarkOptions {
     pub pass_tolerance_percent: f64,
 }
 
-impl Default for RustRaftBenchmarkOptions {
+impl Default for BenchmarkOptions {
     fn default() -> Self {
         Self {
             node_count: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT,
@@ -222,14 +220,14 @@ impl Default for RustRaftBenchmarkOptions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RustRaftBenchmarkSample {
-    pub workload: RustRaftBenchmarkWorkload,
-    pub engine: RustRaftBenchmarkEngine,
-    pub engine_source: RustRaftBenchmarkEngineSource,
+pub struct BenchmarkSample {
+    pub workload: BenchmarkWorkload,
+    pub engine: BenchmarkEngine,
+    pub engine_source: BenchmarkEngineSource,
     #[serde(default)]
     pub benchmark_run_id: String,
     #[serde(default)]
-    pub implementation: RustRaftBenchmarkImplementation,
+    pub implementation: BenchmarkImplementation,
     #[serde(default)]
     pub binary_path: Option<String>,
     #[serde(default)]
@@ -237,7 +235,7 @@ pub struct RustRaftBenchmarkSample {
     #[serde(default)]
     pub build_profile: String,
     #[serde(default)]
-    pub harness_kind: RustRaftBenchmarkHarnessKind,
+    pub harness_kind: BenchmarkHarnessKind,
     pub node_count: usize,
     #[serde(default)]
     pub iterations_per_workload: usize,
@@ -261,10 +259,10 @@ pub struct RustRaftBenchmarkSample {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RustRaftBenchmarkComparison {
-    pub workload: RustRaftBenchmarkWorkload,
-    pub baseline_raft: RustRaftBenchmarkSample,
-    pub rustraft: RustRaftBenchmarkSample,
+pub struct BenchmarkComparison {
+    pub workload: BenchmarkWorkload,
+    pub baseline_raft: BenchmarkSample,
+    pub rustraft: BenchmarkSample,
     pub p50_ratio: f64,
     pub p99_ratio: f64,
     pub throughput_ratio: f64,
@@ -273,7 +271,7 @@ pub struct RustRaftBenchmarkComparison {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RustRaftBenchmarkReport {
+pub struct BenchmarkReport {
     #[serde(default)]
     pub schema: String,
     #[serde(default)]
@@ -283,17 +281,17 @@ pub struct RustRaftBenchmarkReport {
     #[serde(default)]
     pub environment_fingerprint: String,
     pub node_count: usize,
-    pub options: RustRaftBenchmarkOptions,
+    pub options: BenchmarkOptions,
     pub pass_tolerance_percent: f64,
     pub correctness_required: bool,
     #[serde(default)]
     pub required_workloads: Vec<String>,
     pub passed: bool,
-    pub comparisons: Vec<RustRaftBenchmarkComparison>,
+    pub comparisons: Vec<BenchmarkComparison>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RustRaftBenchmarkFailureSummary {
+pub struct BenchmarkFailureSummary {
     #[serde(default)]
     pub schema: String,
     #[serde(default)]
@@ -304,12 +302,12 @@ pub struct RustRaftBenchmarkFailureSummary {
     pub environment_fingerprint: String,
     pub passed: bool,
     pub production_evidence_ready: bool,
-    pub options: RustRaftBenchmarkOptions,
+    pub options: BenchmarkOptions,
     #[serde(default)]
     pub required_workloads: Vec<String>,
     pub workload_count: usize,
     pub failed_workload_count: usize,
-    pub workloads: Vec<RustRaftBenchmarkWorkloadSummary>,
+    pub workloads: Vec<BenchmarkWorkloadSummary>,
     pub missing_baseline_raft_binary_count: usize,
     pub unsupported_workload_count: usize,
     pub correctness_blocker_count: usize,
@@ -322,21 +320,21 @@ pub struct RustRaftBenchmarkFailureSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RustRaftBenchmarkWorkloadSummary {
-    pub workload: RustRaftBenchmarkWorkload,
+pub struct BenchmarkWorkloadSummary {
+    pub workload: BenchmarkWorkload,
     pub passed: bool,
     pub baseline_raft_correctness_passed: bool,
     pub matrixraft_correctness_passed: bool,
-    pub baseline_raft_engine_source: RustRaftBenchmarkEngineSource,
-    pub matrixraft_engine_source: RustRaftBenchmarkEngineSource,
+    pub baseline_raft_engine_source: BenchmarkEngineSource,
+    pub matrixraft_engine_source: BenchmarkEngineSource,
     #[serde(default)]
     pub baseline_raft_benchmark_run_id: String,
     #[serde(default)]
     pub matrixraft_benchmark_run_id: String,
     #[serde(default)]
-    pub baseline_raft_implementation: RustRaftBenchmarkImplementation,
+    pub baseline_raft_implementation: BenchmarkImplementation,
     #[serde(default)]
-    pub matrixraft_implementation: RustRaftBenchmarkImplementation,
+    pub matrixraft_implementation: BenchmarkImplementation,
     #[serde(default)]
     pub baseline_raft_binary_path: Option<String>,
     #[serde(default)]
@@ -350,9 +348,9 @@ pub struct RustRaftBenchmarkWorkloadSummary {
     #[serde(default)]
     pub matrixraft_build_profile: String,
     #[serde(default)]
-    pub baseline_raft_harness_kind: RustRaftBenchmarkHarnessKind,
+    pub baseline_raft_harness_kind: BenchmarkHarnessKind,
     #[serde(default)]
-    pub matrixraft_harness_kind: RustRaftBenchmarkHarnessKind,
+    pub matrixraft_harness_kind: BenchmarkHarnessKind,
     pub node_count: usize,
     #[serde(default)]
     pub baseline_raft_node_count: usize,
@@ -397,7 +395,7 @@ pub struct RustRaftBenchmarkWorkloadSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftBaselineRaftNativeBenchmarkCapability {
+pub struct BaselineRaftNativeBenchmarkCapability {
     pub baseline_raft_root: String,
     #[serde(default)]
     pub kvserver_binary_path: Option<String>,
@@ -414,10 +412,10 @@ pub struct RustRaftBaselineRaftNativeBenchmarkCapability {
     pub blockers: Vec<String>,
 }
 
-pub trait RustRaftBenchmarkRunner {
-    fn engine(&self) -> RustRaftBenchmarkEngine;
-    fn engine_source(&self) -> RustRaftBenchmarkEngineSource {
-        RustRaftBenchmarkEngineSource::Model
+pub trait BenchmarkRunner {
+    fn engine(&self) -> BenchmarkEngine;
+    fn engine_source(&self) -> BenchmarkEngineSource {
+        BenchmarkEngineSource::Model
     }
     fn binary_path(&self) -> Option<String> {
         None
@@ -431,51 +429,51 @@ pub trait RustRaftBenchmarkRunner {
 
     fn run_workload(
         &mut self,
-        workload: RustRaftBenchmarkWorkload,
-        options: &RustRaftBenchmarkOptions,
-    ) -> RustRaftBenchmarkSample;
+        workload: BenchmarkWorkload,
+        options: &BenchmarkOptions,
+    ) -> BenchmarkSample;
 }
 
 #[derive(Debug, Clone)]
-pub struct RustRaftSameMachineModelRunner {
-    engine: RustRaftBenchmarkEngine,
+pub struct SameMachineModelRunner {
+    engine: BenchmarkEngine,
 }
 
-impl RustRaftSameMachineModelRunner {
+impl SameMachineModelRunner {
     pub fn baseline_raft_baseline() -> Self {
         Self {
-            engine: RustRaftBenchmarkEngine::BaselineRaft,
+            engine: BenchmarkEngine::BaselineRaft,
         }
     }
 
     pub fn matrixraft_candidate() -> Self {
         Self {
-            engine: RustRaftBenchmarkEngine::RustRaft,
+            engine: BenchmarkEngine::RustRaft,
         }
     }
 }
 
-impl RustRaftBenchmarkRunner for RustRaftSameMachineModelRunner {
-    fn engine(&self) -> RustRaftBenchmarkEngine {
+impl BenchmarkRunner for SameMachineModelRunner {
+    fn engine(&self) -> BenchmarkEngine {
         self.engine
     }
 
     fn run_workload(
         &mut self,
-        workload: RustRaftBenchmarkWorkload,
-        options: &RustRaftBenchmarkOptions,
-    ) -> RustRaftBenchmarkSample {
+        workload: BenchmarkWorkload,
+        options: &BenchmarkOptions,
+    ) -> BenchmarkSample {
         run_same_machine_model_workload(self.engine, workload, options)
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct RustRaftRuntimeBenchmarkRunner {
+pub struct RuntimeBenchmarkRunner {
     build_profile: String,
     git_revision: Option<String>,
 }
 
-impl RustRaftRuntimeBenchmarkRunner {
+impl RuntimeBenchmarkRunner {
     pub fn new(build_profile: impl Into<String>) -> Self {
         Self {
             build_profile: build_profile.into(),
@@ -487,19 +485,19 @@ impl RustRaftRuntimeBenchmarkRunner {
     }
 }
 
-impl Default for RustRaftRuntimeBenchmarkRunner {
+impl Default for RuntimeBenchmarkRunner {
     fn default() -> Self {
         Self::new("debug")
     }
 }
 
-impl RustRaftBenchmarkRunner for RustRaftRuntimeBenchmarkRunner {
-    fn engine(&self) -> RustRaftBenchmarkEngine {
-        RustRaftBenchmarkEngine::RustRaft
+impl BenchmarkRunner for RuntimeBenchmarkRunner {
+    fn engine(&self) -> BenchmarkEngine {
+        BenchmarkEngine::RustRaft
     }
 
-    fn engine_source(&self) -> RustRaftBenchmarkEngineSource {
-        RustRaftBenchmarkEngineSource::RustRaftRuntime
+    fn engine_source(&self) -> BenchmarkEngineSource {
+        BenchmarkEngineSource::RustRaftRuntime
     }
 
     fn binary_path(&self) -> Option<String> {
@@ -518,22 +516,22 @@ impl RustRaftBenchmarkRunner for RustRaftRuntimeBenchmarkRunner {
 
     fn run_workload(
         &mut self,
-        workload: RustRaftBenchmarkWorkload,
-        options: &RustRaftBenchmarkOptions,
-    ) -> RustRaftBenchmarkSample {
+        workload: BenchmarkWorkload,
+        options: &BenchmarkOptions,
+    ) -> BenchmarkSample {
         run_rustraft_runtime_workload(workload, options, self)
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct RustRaftExternalBaselineRaftRunner {
+pub struct ExternalBaselineRaftRunner {
     binary_path: PathBuf,
     baseline_raft_root: Option<PathBuf>,
     git_revision: Option<String>,
     build_profile: String,
 }
 
-impl RustRaftExternalBaselineRaftRunner {
+impl ExternalBaselineRaftRunner {
     pub fn new(
         binary_path: impl Into<PathBuf>,
         baseline_raft_root: Option<impl Into<PathBuf>>,
@@ -572,13 +570,13 @@ impl RustRaftExternalBaselineRaftRunner {
     }
 }
 
-impl RustRaftBenchmarkRunner for RustRaftExternalBaselineRaftRunner {
-    fn engine(&self) -> RustRaftBenchmarkEngine {
-        RustRaftBenchmarkEngine::BaselineRaft
+impl BenchmarkRunner for ExternalBaselineRaftRunner {
+    fn engine(&self) -> BenchmarkEngine {
+        BenchmarkEngine::BaselineRaft
     }
 
-    fn engine_source(&self) -> RustRaftBenchmarkEngineSource {
-        RustRaftBenchmarkEngineSource::RealBaselineRaft
+    fn engine_source(&self) -> BenchmarkEngineSource {
+        BenchmarkEngineSource::RealBaselineRaft
     }
 
     fn binary_path(&self) -> Option<String> {
@@ -595,9 +593,9 @@ impl RustRaftBenchmarkRunner for RustRaftExternalBaselineRaftRunner {
 
     fn run_workload(
         &mut self,
-        workload: RustRaftBenchmarkWorkload,
-        options: &RustRaftBenchmarkOptions,
-    ) -> RustRaftBenchmarkSample {
+        workload: BenchmarkWorkload,
+        options: &BenchmarkOptions,
+    ) -> BenchmarkSample {
         let state_dir = temp_benchmark_dir(&format!("baseline_raft-{}", workload.id()));
         let wal_dir = state_dir.join("wal");
         let snapshot_dir = state_dir.join("snapshot");
@@ -678,7 +676,7 @@ impl RustRaftBenchmarkRunner for RustRaftExternalBaselineRaftRunner {
                 ),
             );
         }
-        let mut sample: RustRaftBenchmarkSample = match serde_json::from_slice(&output.stdout) {
+        let mut sample: BenchmarkSample = match serde_json::from_slice(&output.stdout) {
             Ok(sample) => sample,
             Err(err) => {
                 let _ = fs::remove_dir_all(&state_dir);
@@ -696,14 +694,14 @@ impl RustRaftBenchmarkRunner for RustRaftExternalBaselineRaftRunner {
         let _ = fs::remove_dir_all(&state_dir);
         apply_external_baseline_raft_sample_identity_validation(&mut sample, workload);
         sample.workload = workload;
-        sample.engine = RustRaftBenchmarkEngine::BaselineRaft;
-        sample.engine_source = RustRaftBenchmarkEngineSource::RealBaselineRaft;
+        sample.engine = BenchmarkEngine::BaselineRaft;
+        sample.engine_source = BenchmarkEngineSource::RealBaselineRaft;
         apply_external_baseline_raft_sample_provenance_validation(&mut sample, workload, self);
         sample.git_revision = sample.git_revision.or_else(|| self.git_revision());
-        if sample.harness_kind == RustRaftBenchmarkHarnessKind::Unknown
+        if sample.harness_kind == BenchmarkHarnessKind::Unknown
             && sample.build_profile == "native-kvbench-partial"
         {
-            sample.harness_kind = RustRaftBenchmarkHarnessKind::NativeKvbenchPartial;
+            sample.harness_kind = BenchmarkHarnessKind::NativeKvbenchPartial;
         }
         apply_external_baseline_raft_sample_shape_validation(&mut sample, workload, options);
         sample
@@ -711,8 +709,8 @@ impl RustRaftBenchmarkRunner for RustRaftExternalBaselineRaftRunner {
 }
 
 fn apply_external_baseline_raft_sample_identity_validation(
-    sample: &mut RustRaftBenchmarkSample,
-    expected_workload: RustRaftBenchmarkWorkload,
+    sample: &mut BenchmarkSample,
+    expected_workload: BenchmarkWorkload,
 ) {
     if sample.workload != expected_workload {
         sample.blockers.push(format!(
@@ -721,21 +719,21 @@ fn apply_external_baseline_raft_sample_identity_validation(
             sample.workload.id()
         ));
     }
-    if sample.engine != RustRaftBenchmarkEngine::BaselineRaft {
+    if sample.engine != BenchmarkEngine::BaselineRaft {
         sample.blockers.push(format!(
             "benchmark:real_baseline_raft_harness_engine_mismatch:{}:{:?}",
             expected_workload.id(),
             sample.engine
         ));
     }
-    if sample.engine_source != RustRaftBenchmarkEngineSource::RealBaselineRaft {
+    if sample.engine_source != BenchmarkEngineSource::RealBaselineRaft {
         sample.blockers.push(format!(
             "benchmark:real_baseline_raft_harness_engine_source_mismatch:{}:{:?}",
             expected_workload.id(),
             sample.engine_source
         ));
     }
-    if sample.implementation != RustRaftBenchmarkImplementation::BaselineRaft {
+    if sample.implementation != BenchmarkImplementation::BaselineRaft {
         sample.blockers.push(format!(
             "benchmark:real_baseline_raft_harness_implementation_mismatch:{}:{}:baseline_raft",
             expected_workload.id(),
@@ -745,9 +743,9 @@ fn apply_external_baseline_raft_sample_identity_validation(
 }
 
 fn apply_external_baseline_raft_sample_provenance_validation(
-    sample: &mut RustRaftBenchmarkSample,
-    expected_workload: RustRaftBenchmarkWorkload,
-    runner: &RustRaftExternalBaselineRaftRunner,
+    sample: &mut BenchmarkSample,
+    expected_workload: BenchmarkWorkload,
+    runner: &ExternalBaselineRaftRunner,
 ) {
     let expected_binary = runner.binary_path();
     if sample.binary_path.is_some() && sample.binary_path != expected_binary {
@@ -787,9 +785,9 @@ fn apply_external_baseline_raft_sample_provenance_validation(
 }
 
 fn apply_external_baseline_raft_sample_shape_validation(
-    sample: &mut RustRaftBenchmarkSample,
-    expected_workload: RustRaftBenchmarkWorkload,
-    options: &RustRaftBenchmarkOptions,
+    sample: &mut BenchmarkSample,
+    expected_workload: BenchmarkWorkload,
+    options: &BenchmarkOptions,
 ) {
     let expected_operation_count = operation_count_for(expected_workload, options);
     if sample.node_count != options.node_count {
@@ -926,21 +924,21 @@ fn apply_external_baseline_raft_sample_shape_validation(
 }
 
 fn failed_real_baseline_raft_sample(
-    workload: RustRaftBenchmarkWorkload,
-    options: &RustRaftBenchmarkOptions,
-    runner: &RustRaftExternalBaselineRaftRunner,
+    workload: BenchmarkWorkload,
+    options: &BenchmarkOptions,
+    runner: &ExternalBaselineRaftRunner,
     blocker: String,
-) -> RustRaftBenchmarkSample {
-    RustRaftBenchmarkSample {
+) -> BenchmarkSample {
+    BenchmarkSample {
         workload,
-        engine: RustRaftBenchmarkEngine::BaselineRaft,
-        engine_source: RustRaftBenchmarkEngineSource::RealBaselineRaft,
+        engine: BenchmarkEngine::BaselineRaft,
+        engine_source: BenchmarkEngineSource::RealBaselineRaft,
         benchmark_run_id: String::new(),
-        implementation: RustRaftBenchmarkImplementation::BaselineRaft,
+        implementation: BenchmarkImplementation::BaselineRaft,
         binary_path: runner.binary_path(),
         git_revision: runner.git_revision(),
         build_profile: runner.build_profile(),
-        harness_kind: RustRaftBenchmarkHarnessKind::FullBaselineRaftHarness,
+        harness_kind: BenchmarkHarnessKind::FullBaselineRaftHarness,
         node_count: options.node_count,
         iterations_per_workload: options.iterations_per_workload,
         batch_size: options.batch_size,
@@ -1019,7 +1017,7 @@ fn matrixraft_baseline_raft_harness_executable_blocker(_path: &Path) -> Option<S
 
 pub fn matrixraft_probe_baseline_raft_native_benchmark(
     baseline_raft_root: impl AsRef<Path>,
-) -> RustRaftBaselineRaftNativeBenchmarkCapability {
+) -> BaselineRaftNativeBenchmarkCapability {
     let root = baseline_raft_root.as_ref();
     let kvserver_binary = matrixraft_find_baseline_raft_kvserver(root).ok();
     let kvbench_binary = matrixraft_find_baseline_raft_kvbench(root).ok();
@@ -1036,15 +1034,11 @@ pub fn matrixraft_probe_baseline_raft_native_benchmark(
 
     let mut supported_workloads = Vec::new();
     if kvserver_binary.is_some() && kvbench_binary.is_some() {
-        supported_workloads.push(RustRaftBenchmarkWorkload::SingleKeyWrites.id().to_string());
-        supported_workloads.push(RustRaftBenchmarkWorkload::BatchedWrites.id().to_string());
-        supported_workloads.push(
-            RustRaftBenchmarkWorkload::ReplicationBatching
-                .id()
-                .to_string(),
-        );
-        supported_workloads.push(RustRaftBenchmarkWorkload::ReadIndexReads.id().to_string());
-        supported_workloads.push(RustRaftBenchmarkWorkload::LeaseReads.id().to_string());
+        supported_workloads.push(BenchmarkWorkload::SingleKeyWrites.id().to_string());
+        supported_workloads.push(BenchmarkWorkload::BatchedWrites.id().to_string());
+        supported_workloads.push(BenchmarkWorkload::ReplicationBatching.id().to_string());
+        supported_workloads.push(BenchmarkWorkload::ReadIndexReads.id().to_string());
+        supported_workloads.push(BenchmarkWorkload::LeaseReads.id().to_string());
     }
 
     let required = matrixraft_baseline_raft_benchmark_workloads()
@@ -1075,7 +1069,7 @@ pub fn matrixraft_probe_baseline_raft_native_benchmark(
             .map(|workload| format!("benchmark:workload_missing:{workload}")),
     );
 
-    RustRaftBaselineRaftNativeBenchmarkCapability {
+    BaselineRaftNativeBenchmarkCapability {
         baseline_raft_root: root.display().to_string(),
         kvserver_binary_path: kvserver_binary.map(|path| path.display().to_string()),
         kvbench_binary_path: kvbench_binary.map(|path| path.display().to_string()),
@@ -1281,15 +1275,12 @@ fn try_baseline_raft_bazel_target(root: &Path, _build_profile: &str) -> Result<(
 }
 
 pub fn matrixraft_run_baseline_raft_parity_benchmark(
-    baseline_raft: &mut impl RustRaftBenchmarkRunner,
-    rustraft: &mut impl RustRaftBenchmarkRunner,
-    options: &RustRaftBenchmarkOptions,
-) -> RustRaftBenchmarkReport {
-    assert_eq!(
-        baseline_raft.engine(),
-        RustRaftBenchmarkEngine::BaselineRaft
-    );
-    assert_eq!(rustraft.engine(), RustRaftBenchmarkEngine::RustRaft);
+    baseline_raft: &mut impl BenchmarkRunner,
+    rustraft: &mut impl BenchmarkRunner,
+    options: &BenchmarkOptions,
+) -> BenchmarkReport {
+    assert_eq!(baseline_raft.engine(), BenchmarkEngine::BaselineRaft);
+    assert_eq!(rustraft.engine(), BenchmarkEngine::RustRaft);
     let benchmark_run_id = benchmark_run_id();
     let comparisons = matrixraft_baseline_raft_benchmark_workloads()
         .into_iter()
@@ -1303,7 +1294,7 @@ pub fn matrixraft_run_baseline_raft_parity_benchmark(
         .collect::<Vec<_>>();
     let passed = comparisons.len() == matrixraft_baseline_raft_benchmark_workloads().len()
         && comparisons.iter().all(|comparison| comparison.passed);
-    RustRaftBenchmarkReport {
+    BenchmarkReport {
         schema: MATRIXRAFT_BENCHMARK_REPORT_SCHEMA.to_string(),
         generated_at_unix_ms: benchmark_now_unix_ms(),
         benchmark_run_id,
@@ -1318,9 +1309,7 @@ pub fn matrixraft_run_baseline_raft_parity_benchmark(
     }
 }
 
-pub fn matrixraft_assert_baseline_raft_parity(
-    report: &RustRaftBenchmarkReport,
-) -> Result<(), String> {
+pub fn matrixraft_assert_baseline_raft_parity(report: &BenchmarkReport) -> Result<(), String> {
     if report.passed {
         return Ok(());
     }
@@ -1339,7 +1328,7 @@ pub fn matrixraft_assert_baseline_raft_parity(
 }
 
 pub fn matrixraft_assert_production_baseline_raft_parity(
-    report: &RustRaftBenchmarkReport,
+    report: &BenchmarkReport,
 ) -> Result<(), String> {
     let parity_error = matrixraft_assert_baseline_raft_parity(report).err();
     let evidence = matrixraft_baseline_raft_benchmark_evidence(report);
@@ -1366,8 +1355,8 @@ pub fn matrixraft_assert_production_baseline_raft_parity(
 }
 
 pub fn matrixraft_assert_production_baseline_raft_artifacts(
-    report: &RustRaftBenchmarkReport,
-    summary: &RustRaftBenchmarkFailureSummary,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
 ) -> Result<(), String> {
     let expected = matrixraft_baseline_raft_benchmark_failure_summary(report);
     if summary != &expected {
@@ -1390,7 +1379,7 @@ pub fn matrixraft_assert_production_baseline_raft_artifacts(
 }
 
 pub fn matrixraft_assert_production_baseline_raft_summary(
-    summary: &RustRaftBenchmarkFailureSummary,
+    summary: &BenchmarkFailureSummary,
 ) -> Result<(), String> {
     let mut blockers = Vec::new();
     if summary.schema != MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA {
@@ -1638,13 +1627,13 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
                 workload.workload.id()
             ));
         }
-        if workload.baseline_raft_engine_source != RustRaftBenchmarkEngineSource::RealBaselineRaft {
+        if workload.baseline_raft_engine_source != BenchmarkEngineSource::RealBaselineRaft {
             blockers.push(format!(
                 "benchmark:summary_real_baseline_raft_missing:{}",
                 workload.workload.id()
             ));
         }
-        if workload.matrixraft_engine_source != RustRaftBenchmarkEngineSource::RustRaftRuntime {
+        if workload.matrixraft_engine_source != BenchmarkEngineSource::RustRaftRuntime {
             blockers.push(format!(
                 "benchmark:summary_rustraft_runtime_missing:{}",
                 workload.workload.id()
@@ -1687,14 +1676,14 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
                 workload.matrixraft_benchmark_run_id
             ));
         }
-        if workload.baseline_raft_implementation != RustRaftBenchmarkImplementation::BaselineRaft {
+        if workload.baseline_raft_implementation != BenchmarkImplementation::BaselineRaft {
             blockers.push(format!(
                 "benchmark:summary_baseline_raft_implementation_mismatch:{}:{}:baseline_raft",
                 workload.workload.id(),
                 workload.baseline_raft_implementation.id()
             ));
         }
-        if workload.matrixraft_implementation != RustRaftBenchmarkImplementation::RustRaftRust {
+        if workload.matrixraft_implementation != BenchmarkImplementation::RustRaftRust {
             blockers.push(format!(
                 "benchmark:summary_rustraft_implementation_mismatch:{}:{}:rustraft_rust",
                 workload.workload.id(),
@@ -1776,16 +1765,14 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
                 workload.matrixraft_build_profile
             ));
         }
-        if workload.baseline_raft_harness_kind
-            != RustRaftBenchmarkHarnessKind::FullBaselineRaftHarness
-        {
+        if workload.baseline_raft_harness_kind != BenchmarkHarnessKind::FullBaselineRaftHarness {
             blockers.push(format!(
                 "benchmark:summary_baseline_raft_full_harness_missing:{}:{}",
                 workload.workload.id(),
                 workload.baseline_raft_harness_kind.id()
             ));
         }
-        if workload.matrixraft_harness_kind != RustRaftBenchmarkHarnessKind::RustRaftRuntime {
+        if workload.matrixraft_harness_kind != BenchmarkHarnessKind::RustRaftRuntime {
             blockers.push(format!(
                 "benchmark:summary_rustraft_runtime_harness_missing:{}:{}",
                 workload.workload.id(),
@@ -2062,9 +2049,9 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
 }
 
 pub fn matrixraft_baseline_raft_benchmark_evidence_from_artifacts(
-    report: &RustRaftBenchmarkReport,
-    summary: &RustRaftBenchmarkFailureSummary,
-) -> Result<RustRaftBaselineRaftBenchmarkEvidence, String> {
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+) -> Result<BaselineRaftBenchmarkEvidence, String> {
     let expected = matrixraft_baseline_raft_benchmark_failure_summary(report);
     if summary != &expected {
         return Err("benchmark:summary_artifact_mismatch".to_string());
@@ -2073,27 +2060,25 @@ pub fn matrixraft_baseline_raft_benchmark_evidence_from_artifacts(
 }
 
 pub fn matrixraft_baseline_raft_benchmark_evidence_from_summary(
-    summary: &RustRaftBenchmarkFailureSummary,
-) -> RustRaftBaselineRaftBenchmarkEvidence {
+    summary: &BenchmarkFailureSummary,
+) -> BaselineRaftBenchmarkEvidence {
     let has_required_workloads = benchmark_summary_has_required_workload_set(summary);
-    RustRaftBaselineRaftBenchmarkEvidence {
+    BaselineRaftBenchmarkEvidence {
         real_baseline_raft: has_required_workloads
             && summary.workloads.iter().all(|workload| {
-                workload.baseline_raft_engine_source
-                    == RustRaftBenchmarkEngineSource::RealBaselineRaft
+                workload.baseline_raft_engine_source == BenchmarkEngineSource::RealBaselineRaft
             }),
         matrixraft_runtime: has_required_workloads
             && summary.workloads.iter().all(|workload| {
-                workload.matrixraft_engine_source == RustRaftBenchmarkEngineSource::RustRaftRuntime
+                workload.matrixraft_engine_source == BenchmarkEngineSource::RustRaftRuntime
             }),
         baseline_raft_reference: has_required_workloads
             && summary.workloads.iter().all(|workload| {
-                workload.baseline_raft_implementation
-                    == RustRaftBenchmarkImplementation::BaselineRaft
+                workload.baseline_raft_implementation == BenchmarkImplementation::BaselineRaft
             }),
         matrixraft_rust_candidate: has_required_workloads
             && summary.workloads.iter().all(|workload| {
-                workload.matrixraft_implementation == RustRaftBenchmarkImplementation::RustRaftRust
+                workload.matrixraft_implementation == BenchmarkImplementation::RustRaftRust
             }),
         correctness_passed: has_required_workloads
             && summary.correctness_blocker_count == 0
@@ -2128,9 +2113,7 @@ pub fn matrixraft_baseline_raft_benchmark_evidence_from_summary(
     }
 }
 
-fn matrixraft_baseline_raft_summary_blockers(
-    summary: &RustRaftBenchmarkFailureSummary,
-) -> Vec<String> {
+fn matrixraft_baseline_raft_summary_blockers(summary: &BenchmarkFailureSummary) -> Vec<String> {
     match matrixraft_assert_production_baseline_raft_summary(summary) {
         Ok(()) => Vec::new(),
         Err(error) => error
@@ -2141,10 +2124,7 @@ fn matrixraft_baseline_raft_summary_blockers(
     }
 }
 
-fn summary_blockers_with_prefix(
-    summary: &RustRaftBenchmarkFailureSummary,
-    prefix: &str,
-) -> Vec<String> {
+fn summary_blockers_with_prefix(summary: &BenchmarkFailureSummary, prefix: &str) -> Vec<String> {
     matrixraft_baseline_raft_summary_blockers(summary)
         .into_iter()
         .filter(|blocker| blocker.starts_with(prefix))
@@ -2152,8 +2132,8 @@ fn summary_blockers_with_prefix(
 }
 
 pub fn matrixraft_baseline_raft_benchmark_failure_summary(
-    report: &RustRaftBenchmarkReport,
-) -> RustRaftBenchmarkFailureSummary {
+    report: &BenchmarkReport,
+) -> BenchmarkFailureSummary {
     let evidence = matrixraft_baseline_raft_benchmark_evidence(report);
     let classified = evidence
         .missing_baseline_raft_binaries
@@ -2187,7 +2167,7 @@ pub fn matrixraft_baseline_raft_benchmark_failure_summary(
     } else {
         0.0
     };
-    RustRaftBenchmarkFailureSummary {
+    BenchmarkFailureSummary {
         schema: MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA.to_string(),
         generated_at_unix_ms: report.generated_at_unix_ms,
         benchmark_run_id: report.benchmark_run_id.clone(),
@@ -2226,9 +2206,9 @@ pub fn matrixraft_baseline_raft_benchmark_failure_summary(
 }
 
 fn matrixraft_baseline_raft_workload_summary(
-    comparison: &RustRaftBenchmarkComparison,
-) -> RustRaftBenchmarkWorkloadSummary {
-    RustRaftBenchmarkWorkloadSummary {
+    comparison: &BenchmarkComparison,
+) -> BenchmarkWorkloadSummary {
+    BenchmarkWorkloadSummary {
         workload: comparison.workload,
         passed: comparison.passed,
         baseline_raft_correctness_passed: comparison.baseline_raft.correctness_passed,
@@ -2286,8 +2266,8 @@ fn matrixraft_baseline_raft_workload_summary(
 }
 
 pub fn matrixraft_baseline_raft_benchmark_evidence(
-    report: &RustRaftBenchmarkReport,
-) -> RustRaftBaselineRaftBenchmarkEvidence {
+    report: &BenchmarkReport,
+) -> BaselineRaftBenchmarkEvidence {
     let mut blockers = Vec::new();
     let mut workloads = Vec::new();
     let mut missing_baseline_raft_binaries = Vec::new();
@@ -2297,20 +2277,19 @@ pub fn matrixraft_baseline_raft_benchmark_evidence(
     let has_required_workloads = benchmark_report_has_required_workload_set(report);
     let real_baseline_raft = has_required_workloads
         && report.comparisons.iter().all(|comparison| {
-            comparison.baseline_raft.engine_source
-                == RustRaftBenchmarkEngineSource::RealBaselineRaft
+            comparison.baseline_raft.engine_source == BenchmarkEngineSource::RealBaselineRaft
         });
     let matrixraft_runtime = has_required_workloads
         && report.comparisons.iter().all(|comparison| {
-            comparison.rustraft.engine_source == RustRaftBenchmarkEngineSource::RustRaftRuntime
+            comparison.rustraft.engine_source == BenchmarkEngineSource::RustRaftRuntime
         });
     let baseline_raft_reference = has_required_workloads
         && report.comparisons.iter().all(|comparison| {
-            comparison.baseline_raft.implementation == RustRaftBenchmarkImplementation::BaselineRaft
+            comparison.baseline_raft.implementation == BenchmarkImplementation::BaselineRaft
         });
     let matrixraft_rust_candidate = has_required_workloads
         && report.comparisons.iter().all(|comparison| {
-            comparison.rustraft.implementation == RustRaftBenchmarkImplementation::RustRaftRust
+            comparison.rustraft.implementation == BenchmarkImplementation::RustRaftRust
         });
     let option_blockers = benchmark_options_blockers(report);
     let correctness_passed = has_required_workloads
@@ -2335,20 +2314,19 @@ pub fn matrixraft_baseline_raft_benchmark_evidence(
     }
     for comparison in &report.comparisons {
         workloads.push(comparison.workload.id().to_string());
-        if comparison.baseline_raft.engine_source == RustRaftBenchmarkEngineSource::Model {
+        if comparison.baseline_raft.engine_source == BenchmarkEngineSource::Model {
             blockers.push(format!(
                 "benchmark:model_baseline_raft:{}",
                 comparison.workload.id()
             ));
         }
-        if comparison.rustraft.engine_source == RustRaftBenchmarkEngineSource::Model {
+        if comparison.rustraft.engine_source == BenchmarkEngineSource::Model {
             blockers.push(format!(
                 "benchmark:model_rustraft:{}",
                 comparison.workload.id()
             ));
         }
-        if comparison.baseline_raft.implementation != RustRaftBenchmarkImplementation::BaselineRaft
-        {
+        if comparison.baseline_raft.implementation != BenchmarkImplementation::BaselineRaft {
             let blocker = format!(
                 "{}:benchmark:baseline_raft_implementation_mismatch:{}:baseline_raft",
                 comparison.workload.id(),
@@ -2363,7 +2341,7 @@ pub fn matrixraft_baseline_raft_benchmark_evidence(
             );
             blockers.push(blocker);
         }
-        if comparison.rustraft.implementation != RustRaftBenchmarkImplementation::RustRaftRust {
+        if comparison.rustraft.implementation != BenchmarkImplementation::RustRaftRust {
             let blocker = format!(
                 "{}:benchmark:rustraft_implementation_mismatch:{}:rustraft_rust",
                 comparison.workload.id(),
@@ -2486,7 +2464,7 @@ pub fn matrixraft_baseline_raft_benchmark_evidence(
     if !matrixraft_runtime {
         blockers.push("benchmark:rustraft_runtime_missing".to_string());
     }
-    RustRaftBaselineRaftBenchmarkEvidence {
+    BaselineRaftBenchmarkEvidence {
         real_baseline_raft,
         matrixraft_runtime,
         baseline_raft_reference,
@@ -2502,7 +2480,7 @@ pub fn matrixraft_baseline_raft_benchmark_evidence(
     }
 }
 
-fn benchmark_report_has_required_workload_set(report: &RustRaftBenchmarkReport) -> bool {
+fn benchmark_report_has_required_workload_set(report: &BenchmarkReport) -> bool {
     let required_workloads = matrixraft_baseline_raft_benchmark_required_workloads()
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
@@ -2514,7 +2492,7 @@ fn benchmark_report_has_required_workload_set(report: &RustRaftBenchmarkReport) 
     report.comparisons.len() == required_workloads.len() && observed_workloads == required_workloads
 }
 
-fn benchmark_summary_has_required_workload_set(summary: &RustRaftBenchmarkFailureSummary) -> bool {
+fn benchmark_summary_has_required_workload_set(summary: &BenchmarkFailureSummary) -> bool {
     let required_workloads = matrixraft_baseline_raft_benchmark_required_workloads()
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
@@ -2526,11 +2504,8 @@ fn benchmark_summary_has_required_workload_set(summary: &RustRaftBenchmarkFailur
     summary.workloads.len() == required_workloads.len() && observed_workloads == required_workloads
 }
 
-fn benchmark_sample_provenance_blockers(
-    engine: &str,
-    sample: &RustRaftBenchmarkSample,
-) -> Vec<String> {
-    if sample.engine_source == RustRaftBenchmarkEngineSource::Model {
+fn benchmark_sample_provenance_blockers(engine: &str, sample: &BenchmarkSample) -> Vec<String> {
+    if sample.engine_source == BenchmarkEngineSource::Model {
         return Vec::new();
     }
     let mut blockers = Vec::new();
@@ -2548,15 +2523,14 @@ fn benchmark_sample_provenance_blockers(
         ));
     }
     if engine == "baseline_raft"
-        && sample.harness_kind != RustRaftBenchmarkHarnessKind::FullBaselineRaftHarness
+        && sample.harness_kind != BenchmarkHarnessKind::FullBaselineRaftHarness
     {
         blockers.push(format!(
             "benchmark:baseline_raft_full_harness_missing:{}",
             sample.harness_kind.id()
         ));
     }
-    if engine == "rustraft" && sample.harness_kind != RustRaftBenchmarkHarnessKind::RustRaftRuntime
-    {
+    if engine == "rustraft" && sample.harness_kind != BenchmarkHarnessKind::RustRaftRuntime {
         blockers.push(format!(
             "benchmark:rustraft_runtime_harness_missing:{}",
             sample.harness_kind.id()
@@ -2583,7 +2557,7 @@ fn benchmark_git_revision_blockers(engine: &str, git_revision: Option<&str>) -> 
 
 fn summary_git_revision_blockers(
     engine: &str,
-    workload: RustRaftBenchmarkWorkload,
+    workload: BenchmarkWorkload,
     git_revision: Option<&str>,
 ) -> Vec<String> {
     let mut blockers = Vec::new();
@@ -2633,7 +2607,7 @@ fn benchmark_binary_path_blockers(engine: &str, binary_path: Option<&str>) -> Ve
 
 fn summary_binary_path_blockers(
     engine: &str,
-    workload: RustRaftBenchmarkWorkload,
+    workload: BenchmarkWorkload,
     binary_path: Option<&str>,
 ) -> Vec<String> {
     let mut blockers = Vec::new();
@@ -2677,8 +2651,8 @@ fn benchmark_binary_path_is_executable(_path: &Path) -> bool {
 }
 
 fn benchmark_sample_pair_provenance_blockers(
-    baseline_raft: &RustRaftBenchmarkSample,
-    rustraft: &RustRaftBenchmarkSample,
+    baseline_raft: &BenchmarkSample,
+    rustraft: &BenchmarkSample,
 ) -> Vec<String> {
     let mut blockers = Vec::new();
     if !baseline_raft.build_profile.is_empty()
@@ -2719,19 +2693,19 @@ fn benchmark_sample_pair_provenance_blockers(
 
 fn benchmark_sample_shape_blockers(
     engine: &str,
-    sample: &RustRaftBenchmarkSample,
-    expected_workload: RustRaftBenchmarkWorkload,
-    options: &RustRaftBenchmarkOptions,
+    sample: &BenchmarkSample,
+    expected_workload: BenchmarkWorkload,
+    options: &BenchmarkOptions,
 ) -> Vec<String> {
     let mut blockers = Vec::new();
     let expected_engine = match engine {
-        "baseline_raft" => Some(RustRaftBenchmarkEngine::BaselineRaft),
-        "rustraft" => Some(RustRaftBenchmarkEngine::RustRaft),
+        "baseline_raft" => Some(BenchmarkEngine::BaselineRaft),
+        "rustraft" => Some(BenchmarkEngine::RustRaft),
         _ => None,
     };
     let expected_engine_source = match engine {
-        "baseline_raft" => Some(RustRaftBenchmarkEngineSource::RealBaselineRaft),
-        "rustraft" => Some(RustRaftBenchmarkEngineSource::RustRaftRuntime),
+        "baseline_raft" => Some(BenchmarkEngineSource::RealBaselineRaft),
+        "rustraft" => Some(BenchmarkEngineSource::RustRaftRuntime),
         _ => None,
     };
     if let Some(expected_engine) = expected_engine {
@@ -2855,8 +2829,8 @@ fn benchmark_sample_shape_blockers(
 }
 
 fn benchmark_comparison_integrity_blockers(
-    comparison: &RustRaftBenchmarkComparison,
-    options: &RustRaftBenchmarkOptions,
+    comparison: &BenchmarkComparison,
+    options: &BenchmarkOptions,
 ) -> Vec<String> {
     let mut blockers = Vec::new();
     let expected_p50 = ratio(
@@ -3001,7 +2975,7 @@ fn push_summary_ratio_mismatch(
 
 fn push_workload_summary_ratio_finite_blocker(
     blockers: &mut Vec<String>,
-    workload: RustRaftBenchmarkWorkload,
+    workload: BenchmarkWorkload,
     label: &str,
     declared: f64,
     expected: f64,
@@ -3022,7 +2996,7 @@ fn push_workload_summary_ratio_finite_blocker(
 
 fn push_workload_summary_ratio_mismatch(
     blockers: &mut Vec<String>,
-    workload: RustRaftBenchmarkWorkload,
+    workload: BenchmarkWorkload,
     label: &str,
     declared: f64,
     expected: f64,
@@ -3041,7 +3015,7 @@ fn push_workload_summary_ratio_mismatch(
 
 fn summary_sample_metric_blockers(
     engine: &str,
-    workload: RustRaftBenchmarkWorkload,
+    workload: BenchmarkWorkload,
     p50_latency_micros: u64,
     p99_latency_micros: u64,
     throughput_ops_per_sec: f64,
@@ -3182,7 +3156,7 @@ fn benchmark_environment_release_blockers(
     Vec::new()
 }
 
-fn benchmark_options_blockers(report: &RustRaftBenchmarkReport) -> Vec<String> {
+fn benchmark_options_blockers(report: &BenchmarkReport) -> Vec<String> {
     let mut blockers = Vec::new();
     if report.schema != MATRIXRAFT_BENCHMARK_REPORT_SCHEMA {
         blockers.push(format!(
@@ -3318,7 +3292,7 @@ fn benchmark_options_blockers(report: &RustRaftBenchmarkReport) -> Vec<String> {
     blockers
 }
 
-fn benchmark_production_option_blockers(options: &RustRaftBenchmarkOptions) -> Vec<String> {
+fn benchmark_production_option_blockers(options: &BenchmarkOptions) -> Vec<String> {
     let mut blockers = Vec::new();
     if options.node_count < MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT {
         blockers.push(format!(
@@ -3367,7 +3341,7 @@ fn benchmark_production_option_blockers(options: &RustRaftBenchmarkOptions) -> V
 }
 
 pub fn matrixraft_validate_production_baseline_raft_benchmark_options(
-    options: &RustRaftBenchmarkOptions,
+    options: &BenchmarkOptions,
 ) -> Result<(), String> {
     let mut blockers = benchmark_production_option_blockers(options);
     blockers.sort();
@@ -3584,10 +3558,10 @@ fn classify_benchmark_blocker(
 }
 
 fn compare_samples(
-    baseline_raft: RustRaftBenchmarkSample,
-    rustraft: RustRaftBenchmarkSample,
+    baseline_raft: BenchmarkSample,
+    rustraft: BenchmarkSample,
     tolerance_percent: f64,
-) -> RustRaftBenchmarkComparison {
+) -> BenchmarkComparison {
     let tolerance_valid = tolerance_percent.is_finite()
         && (0.0..=MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT)
             .contains(&tolerance_percent);
@@ -3666,13 +3640,13 @@ fn compare_samples(
             baseline_raft.operations_per_timed_iteration, rustraft.operations_per_timed_iteration
         ));
     }
-    if baseline_raft.implementation != RustRaftBenchmarkImplementation::BaselineRaft {
+    if baseline_raft.implementation != BenchmarkImplementation::BaselineRaft {
         blockers.push(format!(
             "baseline_raft_implementation_mismatch_{}_baseline_raft",
             baseline_raft.implementation.id()
         ));
     }
-    if rustraft.implementation != RustRaftBenchmarkImplementation::RustRaftRust {
+    if rustraft.implementation != BenchmarkImplementation::RustRaftRust {
         blockers.push(format!(
             "rustraft_implementation_mismatch_{}_rustraft_rust",
             rustraft.implementation.id()
@@ -3699,7 +3673,7 @@ fn compare_samples(
         ));
     }
 
-    RustRaftBenchmarkComparison {
+    BenchmarkComparison {
         workload: baseline_raft.workload,
         baseline_raft,
         rustraft,
@@ -3719,13 +3693,12 @@ fn ratio(numerator: f64, denominator: f64) -> f64 {
 }
 
 fn run_same_machine_model_workload(
-    engine: RustRaftBenchmarkEngine,
-    workload: RustRaftBenchmarkWorkload,
-    options: &RustRaftBenchmarkOptions,
-) -> RustRaftBenchmarkSample {
+    engine: BenchmarkEngine,
+    workload: BenchmarkWorkload,
+    options: &BenchmarkOptions,
+) -> BenchmarkSample {
     let operation_count = match workload {
-        RustRaftBenchmarkWorkload::BatchedWrites
-        | RustRaftBenchmarkWorkload::ReplicationBatching => options
+        BenchmarkWorkload::BatchedWrites | BenchmarkWorkload::ReplicationBatching => options
             .iterations_per_workload
             .saturating_mul(options.batch_size),
         _ => options.iterations_per_workload,
@@ -3736,16 +3709,16 @@ fn run_same_machine_model_workload(
     let total_micros = latency.iter().sum::<u64>().max(1);
     let throughput_ops_per_sec = throughput_from_duration(operation_count, total_micros);
 
-    RustRaftBenchmarkSample {
+    BenchmarkSample {
         workload,
         engine,
-        engine_source: RustRaftBenchmarkEngineSource::Model,
+        engine_source: BenchmarkEngineSource::Model,
         benchmark_run_id: String::new(),
-        implementation: RustRaftBenchmarkImplementation::Model,
+        implementation: BenchmarkImplementation::Model,
         binary_path: None,
         git_revision: None,
         build_profile: "model".to_string(),
-        harness_kind: RustRaftBenchmarkHarnessKind::Model,
+        harness_kind: BenchmarkHarnessKind::Model,
         node_count: options.node_count,
         iterations_per_workload: options.iterations_per_workload,
         batch_size: options.batch_size,
@@ -3763,16 +3736,16 @@ fn run_same_machine_model_workload(
 }
 
 fn run_rustraft_runtime_workload(
-    workload: RustRaftBenchmarkWorkload,
-    options: &RustRaftBenchmarkOptions,
-    runner: &RustRaftRuntimeBenchmarkRunner,
-) -> RustRaftBenchmarkSample {
+    workload: BenchmarkWorkload,
+    options: &BenchmarkOptions,
+    runner: &RuntimeBenchmarkRunner,
+) -> BenchmarkSample {
     let operation_count = operation_count_for(workload, options);
     let mut latencies = Vec::new();
     let correctness_passed = match workload {
-        RustRaftBenchmarkWorkload::SingleKeyWrites
-        | RustRaftBenchmarkWorkload::BatchedWrites
-        | RustRaftBenchmarkWorkload::ReplicationBatching => {
+        BenchmarkWorkload::SingleKeyWrites
+        | BenchmarkWorkload::BatchedWrites
+        | BenchmarkWorkload::ReplicationBatching => {
             let mut cluster = benchmark_cluster(options.node_count);
             let payload = benchmark_payload(options);
             cluster.start().is_ok()
@@ -3784,7 +3757,7 @@ fn run_rustraft_runtime_workload(
                 })
                 .is_ok()
         }
-        RustRaftBenchmarkWorkload::WalFsync => {
+        BenchmarkWorkload::WalFsync => {
             let dir = temp_benchmark_dir("wal");
             let mut wal = PersistentRaftWal::open(PersistentRaftWalOptions {
                 dir: dir.clone(),
@@ -3807,16 +3780,16 @@ fn run_rustraft_runtime_workload(
             let _ = std::fs::remove_dir_all(dir);
             ok
         }
-        RustRaftBenchmarkWorkload::ReadIndexReads | RustRaftBenchmarkWorkload::LeaseReads => {
+        BenchmarkWorkload::ReadIndexReads | BenchmarkWorkload::LeaseReads => {
             let mut cluster = benchmark_cluster(options.node_count);
             let started = cluster.start().is_ok() && cluster.propose(b"seed".to_vec()).is_ok();
             started
                 && run_timed(options.iterations_per_workload, &mut latencies, |_| {
-                    let response = cluster.read_index(crate::RustRaftReadIndexRequest {
+                    let response = cluster.read_index(crate::ReadIndexRequest {
                         group_id: 10,
                         requester_id: 1,
                         min_commit_index: 1,
-                        allow_lease_read: matches!(workload, RustRaftBenchmarkWorkload::LeaseReads),
+                        allow_lease_read: matches!(workload, BenchmarkWorkload::LeaseReads),
                     })?;
                     if !response.safe {
                         return Err(RaftError::InvalidRequest(response.reason));
@@ -3825,8 +3798,7 @@ fn run_rustraft_runtime_workload(
                 })
                 .is_ok()
         }
-        RustRaftBenchmarkWorkload::SnapshotInstallCatchup
-        | RustRaftBenchmarkWorkload::SnapshotStreaming => {
+        BenchmarkWorkload::SnapshotInstallCatchup | BenchmarkWorkload::SnapshotStreaming => {
             let mut cluster = benchmark_cluster(options.node_count);
             let started = cluster.start().is_ok();
             let payload = benchmark_payload(options);
@@ -3840,15 +3812,15 @@ fn run_rustraft_runtime_workload(
                             2,
                             crate::RaftSnapshot {
                                 group_id: 10,
-                                meta: RustRaftSnapshotMeta {
+                                meta: SnapshotMetadata {
                                     snapshot_id: format!("bench-snap-{index}"),
-                                    last_log_id: RustRaftLogId { term: 1, index },
+                                    last_log_id: LogId { term: 1, index },
                                     membership: benchmark_voters(options.node_count),
                                     members: Vec::new(),
                                 },
                                 payload: payload.clone(),
                             },
-                            RustRaftApplySnapshotFence {
+                            ApplySnapshotFence {
                                 applied_index: index,
                                 commit_index: index,
                                 installed_snapshot_index: index,
@@ -3861,7 +3833,7 @@ fn run_rustraft_runtime_workload(
                 )
                 .is_ok()
         }
-        RustRaftBenchmarkWorkload::LeaderTransferUnderLoad => {
+        BenchmarkWorkload::LeaderTransferUnderLoad => {
             let mut cluster = benchmark_cluster(options.node_count);
             let started = cluster.start().is_ok();
             let payload = benchmark_payload(options);
@@ -3877,16 +3849,16 @@ fn run_rustraft_runtime_workload(
     };
     let total_micros = latencies.iter().sum::<u64>().max(1);
     let throughput_ops_per_sec = throughput_from_duration(operation_count, total_micros);
-    RustRaftBenchmarkSample {
+    BenchmarkSample {
         workload,
-        engine: RustRaftBenchmarkEngine::RustRaft,
-        engine_source: RustRaftBenchmarkEngineSource::RustRaftRuntime,
+        engine: BenchmarkEngine::RustRaft,
+        engine_source: BenchmarkEngineSource::RustRaftRuntime,
         benchmark_run_id: String::new(),
-        implementation: RustRaftBenchmarkImplementation::RustRaftRust,
+        implementation: BenchmarkImplementation::RustRaftRust,
         binary_path: runner.binary_path(),
         git_revision: runner.git_revision(),
         build_profile: runner.build_profile(),
-        harness_kind: RustRaftBenchmarkHarnessKind::RustRaftRuntime,
+        harness_kind: BenchmarkHarnessKind::RustRaftRuntime,
         node_count: options.node_count,
         iterations_per_workload: options.iterations_per_workload,
         batch_size: options.batch_size,
@@ -3916,38 +3888,32 @@ fn run_timed(
     Ok(())
 }
 
-fn operation_count_for(
-    workload: RustRaftBenchmarkWorkload,
-    options: &RustRaftBenchmarkOptions,
-) -> usize {
+fn operation_count_for(workload: BenchmarkWorkload, options: &BenchmarkOptions) -> usize {
     match workload {
-        RustRaftBenchmarkWorkload::BatchedWrites
-        | RustRaftBenchmarkWorkload::ReplicationBatching => options
+        BenchmarkWorkload::BatchedWrites | BenchmarkWorkload::ReplicationBatching => options
             .iterations_per_workload
             .saturating_mul(options.batch_size),
         _ => options.iterations_per_workload,
     }
 }
 
-fn writes_per_iteration(
-    workload: RustRaftBenchmarkWorkload,
-    options: &RustRaftBenchmarkOptions,
-) -> usize {
+fn writes_per_iteration(workload: BenchmarkWorkload, options: &BenchmarkOptions) -> usize {
     match workload {
-        RustRaftBenchmarkWorkload::BatchedWrites
-        | RustRaftBenchmarkWorkload::ReplicationBatching => options.batch_size.max(1),
+        BenchmarkWorkload::BatchedWrites | BenchmarkWorkload::ReplicationBatching => {
+            options.batch_size.max(1)
+        }
         _ => 1,
     }
 }
 
-fn benchmark_payload(options: &RustRaftBenchmarkOptions) -> Vec<u8> {
+fn benchmark_payload(options: &BenchmarkOptions) -> Vec<u8> {
     vec![42; options.payload_size_bytes.max(1)]
 }
 
 fn benchmark_cluster(node_count: usize) -> RaftCluster {
     RaftCluster::new(
         10,
-        RaftConfig::default(),
+        Config::default(),
         benchmark_voters(node_count.max(3))
             .into_iter()
             .map(benchmark_peer)
@@ -3960,39 +3926,40 @@ fn benchmark_voters(node_count: usize) -> Vec<u64> {
     (1..=node_count.max(3) as u64).collect()
 }
 
-fn benchmark_peer(node_id: u64) -> RustRaftPeer {
-    RustRaftPeer {
+fn benchmark_peer(node_id: u64) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 40_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 41_000 + node_id),
-        role: RustRaftReplicaRole::Voter,
+        role: ReplicaRole::Voter,
         auto_promote: false,
     }
 }
 
-fn benchmark_wal_record(index: u64, payload: Vec<u8>) -> RustRaftWalRecord {
-    RustRaftWalRecord {
+fn benchmark_wal_record(index: u64, payload: Vec<u8>) -> WalRecord {
+    WalRecord {
+        entries_are_delta: false,
         group_id: 10,
         node_id: 1,
-        hard_state: RustRaftHardState {
+        hard_state: HardState {
             current_term: 1,
             voted_for: Some(1),
-            committed: Some(RustRaftLogId { term: 1, index }),
+            committed: Some(LogId { term: 1, index }),
         },
-        membership: RustRaftMembership {
+        membership: Membership {
             group_id: 10,
             voters: benchmark_voters(3),
             learners: Vec::new(),
             witnesses: Vec::new(),
             epoch: 1,
         },
-        entries: vec![RustRaftLogEntry {
-            log_id: RustRaftLogId { term: 1, index },
+        entries: vec![LogEntry {
+            log_id: LogId { term: 1, index },
             payload,
             is_command: true,
         }],
         installed_snapshot: None,
-        apply_snapshot_fence: RustRaftApplySnapshotFence {
+        apply_snapshot_fence: ApplySnapshotFence {
             applied_index: index,
             commit_index: index,
             installed_snapshot_index: 0,
@@ -4028,24 +3995,24 @@ fn git_revision_for(root: &Path) -> Result<String, String> {
 }
 
 fn synthetic_latency_series(
-    engine: RustRaftBenchmarkEngine,
-    workload: RustRaftBenchmarkWorkload,
+    engine: BenchmarkEngine,
+    workload: BenchmarkWorkload,
     iterations: usize,
 ) -> Vec<u64> {
     let base = match workload {
-        RustRaftBenchmarkWorkload::SingleKeyWrites => 900,
-        RustRaftBenchmarkWorkload::BatchedWrites => 1_600,
-        RustRaftBenchmarkWorkload::ReplicationBatching => 1_250,
-        RustRaftBenchmarkWorkload::WalFsync => 2_200,
-        RustRaftBenchmarkWorkload::ReadIndexReads => 320,
-        RustRaftBenchmarkWorkload::LeaseReads => 120,
-        RustRaftBenchmarkWorkload::SnapshotInstallCatchup => 8_000,
-        RustRaftBenchmarkWorkload::SnapshotStreaming => 6_500,
-        RustRaftBenchmarkWorkload::LeaderTransferUnderLoad => 4_500,
+        BenchmarkWorkload::SingleKeyWrites => 900,
+        BenchmarkWorkload::BatchedWrites => 1_600,
+        BenchmarkWorkload::ReplicationBatching => 1_250,
+        BenchmarkWorkload::WalFsync => 2_200,
+        BenchmarkWorkload::ReadIndexReads => 320,
+        BenchmarkWorkload::LeaseReads => 120,
+        BenchmarkWorkload::SnapshotInstallCatchup => 8_000,
+        BenchmarkWorkload::SnapshotStreaming => 6_500,
+        BenchmarkWorkload::LeaderTransferUnderLoad => 4_500,
     };
     let engine_multiplier = match engine {
-        RustRaftBenchmarkEngine::BaselineRaft => 100,
-        RustRaftBenchmarkEngine::RustRaft => 108,
+        BenchmarkEngine::BaselineRaft => 100,
+        BenchmarkEngine::RustRaft => 108,
     };
     (0..iterations.max(1))
         .map(|index| {
@@ -4064,8 +4031,8 @@ fn percentile(values: &[u64], percentile: f64) -> u64 {
 }
 
 fn same_machine_correctness_passes(
-    workload: RustRaftBenchmarkWorkload,
-    options: &RustRaftBenchmarkOptions,
+    workload: BenchmarkWorkload,
+    options: &BenchmarkOptions,
 ) -> bool {
     let production_scale = options.node_count >= MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT;
     let iterations_present = options.iterations_per_workload > 0;
@@ -4073,7 +4040,7 @@ fn same_machine_correctness_passes(
         options.payload_size_bytes >= MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES;
     let batch_valid = !matches!(
         workload,
-        RustRaftBenchmarkWorkload::BatchedWrites | RustRaftBenchmarkWorkload::ReplicationBatching
+        BenchmarkWorkload::BatchedWrites | BenchmarkWorkload::ReplicationBatching
     ) || options.batch_size > 1;
     production_scale && iterations_present && payload_present && batch_valid
 }

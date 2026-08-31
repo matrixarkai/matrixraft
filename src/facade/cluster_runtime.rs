@@ -5,15 +5,15 @@
 // Split from src/lib.rs to keep the crate facade small and focused.
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum RustRaftError {
+pub enum RaftError {
     #[error("configuration error: {0}")]
     Config(String),
     #[error("node {0} not found")]
-    NodeNotFound(RustRaftNodeId),
+    NodeNotFound(NodeId),
     #[error("no leader is available")]
     NoLeader,
     #[error("node {0} is not the leader")]
-    NotLeader(RustRaftNodeId),
+    NotLeader(NodeId),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
     #[error("transport error: {0}")]
@@ -22,48 +22,46 @@ pub enum RustRaftError {
     Storage(String),
 }
 
-impl From<RaftConfigError> for RustRaftError {
-    fn from(error: RaftConfigError) -> Self {
+impl From<ConfigError> for RaftError {
+    fn from(error: ConfigError) -> Self {
         Self::Config(error.to_string())
     }
 }
 
-pub type RaftError = RustRaftError;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct RaftNode {
-    id: RustRaftNodeId,
-    replica_role: RustRaftReplicaRole,
-    raft_role: RustRaftRole,
-    hard_state: RustRaftHardState,
-    log: Vec<RustRaftLogEntry>,
+struct Node {
+    id: NodeId,
+    replica_role: ReplicaRole,
+    raft_role: StateRole,
+    hard_state: HardState,
+    log: Vec<LogEntry>,
     // Running total of `log` payload bytes. Maintained by every log mutation so
     // that the admission checks on the propose path do not sum the log.
     #[serde(default)]
     retained_log_bytes: u64,
-    installed_snapshot: Option<RustRaftSnapshotMeta>,
-    commit_index: RustRaftLogIndex,
-    applied_index: RustRaftLogIndex,
-    safety_applied_index: RustRaftLogIndex,
-    rejected_apply_index: Option<RustRaftLogIndex>,
-    witness_ack_index: RustRaftLogIndex,
+    installed_snapshot: Option<SnapshotMetadata>,
+    commit_index: LogIndex,
+    applied_index: LogIndex,
+    safety_applied_index: LogIndex,
+    rejected_apply_index: Option<LogIndex>,
+    witness_ack_index: LogIndex,
     healthy: bool,
     liveness_elapsed_ms: u64,
     auto_promote: bool,
-    auto_promote_state: RaftLearnerAutoPromoteState,
+    auto_promote_state: LearnerAutoPromoteState,
 }
 
-impl RaftNode {
-    fn new(id: RustRaftNodeId, replica_role: RustRaftReplicaRole, auto_promote: bool) -> Self {
+impl Node {
+    fn new(id: NodeId, replica_role: ReplicaRole, auto_promote: bool) -> Self {
         Self {
             id,
             replica_role,
-            raft_role: if replica_role == RustRaftReplicaRole::Learner {
-                RustRaftRole::Learner
+            raft_role: if replica_role == ReplicaRole::Learner {
+                StateRole::Learner
             } else {
-                RustRaftRole::Follower
+                StateRole::Follower
             },
-            hard_state: RustRaftHardState {
+            hard_state: HardState {
                 current_term: 0,
                 voted_for: None,
                 committed: None,
@@ -78,13 +76,13 @@ impl RaftNode {
             witness_ack_index: 0,
             healthy: true,
             liveness_elapsed_ms: 0,
-            auto_promote: replica_role == RustRaftReplicaRole::Learner && auto_promote,
-            auto_promote_state: RaftLearnerAutoPromoteState::Stop,
+            auto_promote: replica_role == ReplicaRole::Learner && auto_promote,
+            auto_promote_state: LearnerAutoPromoteState::Stop,
         }
     }
 
-    fn match_index(&self) -> RustRaftLogIndex {
-        if self.replica_role == RustRaftReplicaRole::Witness {
+    fn match_index(&self) -> LogIndex {
+        if self.replica_role == ReplicaRole::Witness {
             return self.witness_ack_index;
         }
         let log_index = self
@@ -106,7 +104,7 @@ impl RaftNode {
     /// `log` is ordered by index, so a contiguous log answers by subtracting
     /// the first retained index. The binary search only runs if a gap ever puts
     /// the entry somewhere other than its arithmetic slot.
-    fn log_position(&self, log_index: RustRaftLogIndex) -> Option<usize> {
+    fn log_position(&self, log_index: LogIndex) -> Option<usize> {
         let first_index = self.log.first()?.log_id.index;
         let offset = log_index.checked_sub(first_index)? as usize;
         if self.log.get(offset).map(|entry| entry.log_id.index) == Some(log_index) {
@@ -119,7 +117,7 @@ impl RaftNode {
 
     /// Slot of the first entry at or after `log_index`, or `None` when every
     /// retained entry is below it.
-    fn log_position_at_or_after(&self, log_index: RustRaftLogIndex) -> Option<usize> {
+    fn log_position_at_or_after(&self, log_index: LogIndex) -> Option<usize> {
         if self
             .log
             .last()
@@ -144,7 +142,7 @@ impl RaftNode {
 
     /// Drops every retained entry at or below `log_index` and reports how many
     /// went away.
-    fn discard_log_through(&mut self, log_index: RustRaftLogIndex) -> usize {
+    fn discard_log_through(&mut self, log_index: LogIndex) -> usize {
         let cut = self
             .log
             .partition_point(|entry| entry.log_id.index <= log_index);
@@ -160,12 +158,12 @@ impl RaftNode {
         cut
     }
 
-    fn set_log(&mut self, log: Vec<RustRaftLogEntry>) {
+    fn set_log(&mut self, log: Vec<LogEntry>) {
         self.retained_log_bytes = log.iter().map(|entry| entry.payload.len() as u64).sum();
         self.log = log;
     }
 
-    fn log_term_at(&self, log_index: RustRaftLogIndex) -> Option<RustRaftTerm> {
+    fn log_term_at(&self, log_index: LogIndex) -> Option<Term> {
         if log_index == 0 {
             return Some(0);
         }
@@ -178,17 +176,17 @@ impl RaftNode {
             .map(|position| self.log[position].log_id.term)
     }
 
-    fn is_fresh_candidate_log(&self, candidate_last_log_id: Option<&RustRaftLogId>) -> bool {
+    fn is_fresh_candidate_log(&self, candidate_last_log_id: Option<&LogId>) -> bool {
         let candidate = candidate_last_log_id
             .cloned()
-            .unwrap_or(RustRaftLogId { term: 0, index: 0 });
+            .unwrap_or(LogId { term: 0, index: 0 });
         let local_index = self.match_index();
         let local_term = self.log_term_at(local_index).unwrap_or_default();
         candidate.term > local_term
             || (candidate.term == local_term && candidate.index >= local_index)
     }
 
-    fn append_entry(&mut self, entry: RustRaftLogEntry) {
+    fn append_entry(&mut self, entry: LogEntry) {
         // An entry past the tail cannot collide with a retained index, so the
         // steady-state append never looks at the rest of the log.
         let extends_tail = self
@@ -206,13 +204,13 @@ impl RaftNode {
         self.log.push(entry);
     }
 
-    fn truncate_log_from(&mut self, log_index: RustRaftLogIndex) {
+    fn truncate_log_from(&mut self, log_index: LogIndex) {
         if let Some(position) = self.log_position_at_or_after(log_index) {
             self.truncate_log_at(position);
         }
     }
 
-    fn conflict_next_index(&self, prev_index: RustRaftLogIndex) -> RustRaftLogIndex {
+    fn conflict_next_index(&self, prev_index: LogIndex) -> LogIndex {
         let local_last_index = self.match_index();
         if prev_index > local_last_index {
             return local_last_index.saturating_add(1);
@@ -230,22 +228,22 @@ impl RaftNode {
         self.commit_index.saturating_add(1)
     }
 
-    fn acknowledge_witness_index(&mut self, log_index: RustRaftLogIndex) {
-        if self.replica_role == RustRaftReplicaRole::Witness {
+    fn acknowledge_witness_index(&mut self, log_index: LogIndex) {
+        if self.replica_role == ReplicaRole::Witness {
             self.witness_ack_index = self.witness_ack_index.max(log_index);
         }
     }
 
-    fn append_witness_entry(&mut self, entry: RustRaftLogEntry, preserve_payload: bool) {
+    fn append_witness_entry(&mut self, entry: LogEntry, preserve_payload: bool) {
         self.acknowledge_witness_index(entry.log_id.index);
         let entry = if preserve_payload {
-            RustRaftLogEntry {
+            LogEntry {
                 log_id: entry.log_id,
                 payload: entry.payload,
                 is_command: false,
             }
         } else {
-            RustRaftLogEntry {
+            LogEntry {
                 log_id: entry.log_id,
                 payload: Vec::new(),
                 is_command: false,
@@ -254,9 +252,9 @@ impl RaftNode {
         self.append_entry(entry);
     }
 
-    fn advance_commit(&mut self, commit_index: RustRaftLogIndex) {
+    fn advance_commit(&mut self, commit_index: LogIndex) {
         self.commit_index = self.commit_index.max(commit_index.min(self.match_index()));
-        if (self.replica_role.can_serve_data() || self.replica_role == RustRaftReplicaRole::Witness)
+        if (self.replica_role.can_serve_data() || self.replica_role == ReplicaRole::Witness)
             && self.rejected_apply_index.is_none()
         {
             let has_inflight_apply = self.safety_applied_index < self.applied_index;
@@ -268,7 +266,7 @@ impl RaftNode {
         let committed_term = self
             .log_term_at(self.commit_index)
             .unwrap_or(self.hard_state.current_term);
-        self.hard_state.committed = (self.commit_index > 0).then_some(RustRaftLogId {
+        self.hard_state.committed = (self.commit_index > 0).then_some(LogId {
             term: committed_term,
             index: self.commit_index,
         });
@@ -279,7 +277,7 @@ impl RaftNode {
         let snapshot_log_id = snapshot.meta.last_log_id.clone();
         self.installed_snapshot = Some(snapshot.meta);
         self.discard_log_through(snapshot_index);
-        if self.replica_role == RustRaftReplicaRole::Witness {
+        if self.replica_role == ReplicaRole::Witness {
             self.witness_ack_index = self.witness_ack_index.max(snapshot_index);
         }
         self.commit_index = self.commit_index.max(snapshot_index);
@@ -296,7 +294,7 @@ impl RaftNode {
         self.hard_state.committed = Some(snapshot_log_id);
     }
 
-    fn compact_log_through(&mut self, log_index: RustRaftLogIndex) -> u64 {
+    fn compact_log_through(&mut self, log_index: LogIndex) -> u64 {
         let safe_compaction_index = if self.replica_role.can_serve_data() {
             self.safety_applied_index
         } else {
@@ -312,18 +310,18 @@ impl RaftNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftSnapshotTriggerState {
-    pub meta: RustRaftSnapshotMeta,
+pub struct SnapshotTriggerState {
+    pub meta: SnapshotMetadata,
     pub elapsed_ticks: u64,
     pub timeout_ticks: u64,
     pub timed_out: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftSnapshotTriggerStatus {
+pub struct SnapshotTriggerStatus {
     pub in_progress: bool,
-    pub snapshot_id: Option<RustRaftSnapshotId>,
-    pub last_log_id: Option<RustRaftLogId>,
+    pub snapshot_id: Option<SnapshotId>,
+    pub last_log_id: Option<LogId>,
     pub elapsed_ticks: u64,
     pub timeout_ticks: u64,
     pub timed_out: bool,
@@ -331,8 +329,8 @@ pub struct RustRaftSnapshotTriggerStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct RustRaftLeaderLeaseConfirmation {
-    role: RustRaftReplicaRole,
+struct LeaderLeaseConfirmation {
+    role: ReplicaRole,
     epoch: u64,
     confirmation_epoch: u64,
     #[serde(default)]
@@ -342,40 +340,40 @@ struct RustRaftLeaderLeaseConfirmation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct RustRaftReorderedAppend {
-    request: RustRaftAppendEntriesRequest,
-    membership_change_indexes: Vec<RustRaftLogIndex>,
+struct ReorderedAppend {
+    request: AppendEntriesRequest,
+    membership_change_indexes: Vec<LogIndex>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct RustRaftPendingSnapshotInstall {
+struct PendingSnapshotInstall {
     snapshot: RaftSnapshot,
-    fence: RustRaftApplySnapshotFence,
+    fence: ApplySnapshotFence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RaftCluster {
-    pub group_id: RustRaftGroupId,
-    pub config: RaftConfig,
-    nodes: BTreeMap<RustRaftNodeId, RaftNode>,
-    peer_pipelines: BTreeMap<RustRaftNodeId, RaftReplicationPipeline>,
+    pub group_id: GroupId,
+    pub config: Config,
+    nodes: BTreeMap<NodeId, Node>,
+    peer_pipelines: BTreeMap<NodeId, ReplicationPipeline>,
     #[serde(default)]
-    snapshot_installers: BTreeMap<RustRaftNodeId, RaftSnapshotInstallState>,
+    snapshot_installers: BTreeMap<NodeId, SnapshotInstallState>,
     #[serde(default)]
-    pending_snapshots: BTreeMap<RustRaftNodeId, RustRaftPendingSnapshotInstall>,
-    leader_id: Option<RustRaftNodeId>,
-    current_term: RustRaftTerm,
-    commit_index: RustRaftLogIndex,
-    applied_index: RustRaftLogIndex,
-    last_log_index: RustRaftLogIndex,
-    last_index_before_current_term: RustRaftLogIndex,
-    pending_membership_change_index: Option<RustRaftLogIndex>,
+    pending_snapshots: BTreeMap<NodeId, PendingSnapshotInstall>,
+    leader_id: Option<NodeId>,
+    current_term: Term,
+    commit_index: LogIndex,
+    applied_index: LogIndex,
+    last_log_index: LogIndex,
+    last_index_before_current_term: LogIndex,
+    pending_membership_change_index: Option<LogIndex>,
     #[serde(default)]
-    membership_change_indexes: BTreeSet<RustRaftLogIndex>,
+    membership_change_indexes: BTreeSet<LogIndex>,
     #[serde(default)]
-    saving_membership_change_index: Option<RustRaftLogIndex>,
+    saving_membership_change_index: Option<LogIndex>,
     #[serde(default)]
-    stabled_membership_change_index: RustRaftLogIndex,
+    stabled_membership_change_index: LogIndex,
     running: bool,
     leader_lease_valid: bool,
     #[serde(default)]
@@ -386,28 +384,28 @@ pub struct RaftCluster {
     follower_lease_duration_ms: u64,
     follower_lease_epoch: u64,
     leader_lease_epoch: u64,
-    leader_lease_confirmations: BTreeMap<RustRaftNodeId, RustRaftLeaderLeaseConfirmation>,
-    leader_lease_confirmation_epochs: BTreeMap<RustRaftNodeId, u64>,
+    leader_lease_confirmations: BTreeMap<NodeId, LeaderLeaseConfirmation>,
+    leader_lease_confirmation_epochs: BTreeMap<NodeId, u64>,
     #[serde(default)]
-    reorder_queues: BTreeMap<RustRaftNodeId, BTreeMap<RustRaftLogIndex, RustRaftReorderedAppend>>,
+    reorder_queues: BTreeMap<NodeId, BTreeMap<LogIndex, ReorderedAppend>>,
     ignore_witness: bool,
     count_witness_in_commit_quorum: bool,
     prohibits_election: bool,
-    leader_transfer: Option<RaftLeaderTransferState>,
+    leader_transfer: Option<LeaderTransferState>,
     leader_transfer_timeout_ticks: u64,
     aborted_leader_transfers: u64,
     duplicate_leader_transfer_requests: u64,
-    snapshot_trigger: Option<RustRaftSnapshotTriggerState>,
+    snapshot_trigger: Option<SnapshotTriggerState>,
     duplicate_snapshot_trigger_requests: u64,
-    vote_responses: BTreeMap<RustRaftNodeId, bool>,
-    pre_vote_responses: BTreeMap<RustRaftNodeId, bool>,
+    vote_responses: BTreeMap<NodeId, bool>,
+    pre_vote_responses: BTreeMap<NodeId, bool>,
 }
 
 impl RaftCluster {
     pub fn new(
-        group_id: RustRaftGroupId,
-        config: RaftConfig,
-        peers: Vec<RustRaftPeer>,
+        group_id: GroupId,
+        config: Config,
+        peers: Vec<Peer>,
     ) -> Result<Self, RaftError> {
         config.validate()?;
         if peers.is_empty() {
@@ -421,7 +419,7 @@ impl RaftCluster {
             if nodes
                 .insert(
                     peer.node_id,
-                    RaftNode::new(peer.node_id, peer.role, peer.auto_promote),
+                    Node::new(peer.node_id, peer.role, peer.auto_promote),
                 )
                 .is_some()
             {
@@ -443,7 +441,7 @@ impl RaftCluster {
             .map(|node_id| {
                 (
                     node_id,
-                    RaftReplicationPipeline::new(node_id, 1, RustRaftPipelineLimits::default()),
+                    ReplicationPipeline::new(node_id, 1, PipelineLimits::default()),
                 )
             })
             .collect();
@@ -524,13 +522,13 @@ impl RaftCluster {
         Ok(())
     }
 
-    pub fn leader_id(&self) -> Option<RustRaftNodeId> {
+    pub fn leader_id(&self) -> Option<NodeId> {
         self.leader_id
     }
 
     pub fn set_node_healthy(
         &mut self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         healthy: bool,
     ) -> Result<(), RaftError> {
         let node = self
@@ -550,19 +548,19 @@ impl RaftCluster {
         Ok(())
     }
 
-    pub fn partition_peer(&mut self, node_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn partition_peer(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         self.set_node_healthy(node_id, false)
     }
 
     pub fn heal_peer(
         &mut self,
-        node_id: RustRaftNodeId,
-    ) -> Result<RaftLearnerCatchUpLoopReport, RaftError> {
+        node_id: NodeId,
+    ) -> Result<LearnerCatchUpLoopReport, RaftError> {
         self.set_node_healthy(node_id, true)?;
         self.catch_up_peer_with_reason(node_id, "healed_peer")
     }
 
-    fn mark_peer_active(&mut self, node_id: RustRaftNodeId) -> Result<(), RaftError> {
+    fn mark_peer_active(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         let node = self
             .nodes
             .get_mut(&node_id)
@@ -575,14 +573,14 @@ impl RaftCluster {
         Ok(())
     }
 
-    fn peer_response_is_active(&self, node_id: RustRaftNodeId) -> Result<bool, RaftError> {
+    fn peer_response_is_active(&self, node_id: NodeId) -> Result<bool, RaftError> {
         self.nodes
             .get(&node_id)
             .map(|node| node.healthy)
             .ok_or(RaftError::NodeNotFound(node_id))
     }
 
-    pub fn tick_peer_liveness(&mut self, elapsed_ms: u64) -> Vec<RustRaftNodeId> {
+    pub fn tick_peer_liveness(&mut self, elapsed_ms: u64) -> Vec<NodeId> {
         let Some(leader_id) = self.leader_id else {
             return Vec::new();
         };
@@ -661,9 +659,9 @@ impl RaftCluster {
             let peer_match_index = self
                 .nodes
                 .get(&peer_id)
-                .map(RaftNode::match_index)
+                .map(Node::match_index)
                 .unwrap_or_default();
-            let request = RustRaftAppendEntriesRequest {
+            let request = AppendEntriesRequest {
                 group_id: self.group_id,
                 term: self.current_term,
                 leader_id,
@@ -711,12 +709,12 @@ impl RaftCluster {
         }
     }
 
-    pub fn follower_lease_valid(&self) -> bool {
+    pub fn is_follower_lease_valid(&self) -> bool {
         self.config.enable_lease_read && self.follower_lease_valid
     }
 
     pub fn tick_follower_lease(&mut self, elapsed_ms: u64) -> bool {
-        if !self.follower_lease_valid() {
+        if !self.is_follower_lease_valid() {
             return false;
         }
         self.follower_lease_elapsed_ms = self.follower_lease_elapsed_ms.saturating_add(elapsed_ms);
@@ -735,7 +733,7 @@ impl RaftCluster {
         self.follower_lease_valid = self.config.enable_lease_read;
         self.follower_lease_elapsed_ms = 0;
         self.follower_lease_duration_ms = self.config.leader_lease_ms;
-        self.follower_lease_valid()
+        self.is_follower_lease_valid()
     }
 
     fn renew_follower_lease(&mut self) {
@@ -784,7 +782,7 @@ impl RaftCluster {
             .filter(|node| {
                 node.healthy
                     && node.replica_role.participates_in_quorum()
-                    && !(self.ignore_witness && node.replica_role == RustRaftReplicaRole::Witness)
+                    && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness)
             })
             .map(|node| node.id)
             .collect::<Vec<_>>();
@@ -830,7 +828,7 @@ impl RaftCluster {
 
     pub fn receive_leader_lease_confirmation(
         &mut self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         confirmation_epoch: u64,
     ) -> bool {
         self.receive_leader_lease_confirmation_with_duration(
@@ -842,7 +840,7 @@ impl RaftCluster {
 
     pub fn receive_leader_lease_confirmation_with_duration(
         &mut self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         confirmation_epoch: u64,
         duration_ms: u64,
     ) -> bool {
@@ -856,7 +854,7 @@ impl RaftCluster {
             return false;
         };
         if !node.replica_role.participates_in_quorum()
-            || (self.ignore_witness && node.replica_role == RustRaftReplicaRole::Witness)
+            || (self.ignore_witness && node.replica_role == ReplicaRole::Witness)
         {
             return false;
         }
@@ -887,7 +885,7 @@ impl RaftCluster {
         self.leader_lease_elapsed_ms = 0;
         self.leader_lease_confirmations.insert(
             node_id,
-            RustRaftLeaderLeaseConfirmation {
+            LeaderLeaseConfirmation {
                 role: node.replica_role,
                 epoch: self.leader_lease_epoch,
                 confirmation_epoch,
@@ -899,7 +897,7 @@ impl RaftCluster {
         true
     }
 
-    fn record_leader_lease_confirmation(&mut self, node_id: RustRaftNodeId) {
+    fn record_leader_lease_confirmation(&mut self, node_id: NodeId) {
         let confirmation_epoch = self
             .leader_lease_confirmation_epochs
             .get(&node_id)
@@ -911,7 +909,7 @@ impl RaftCluster {
 
     fn renew_leader_lease_from_acknowledgements<I>(&mut self, acknowledgements: I) -> bool
     where
-        I: IntoIterator<Item = RustRaftNodeId>,
+        I: IntoIterator<Item = NodeId>,
     {
         if self.leader_id.is_none() {
             self.invalidate_leader_lease();
@@ -951,7 +949,7 @@ impl RaftCluster {
                     && confirmation.role == node.replica_role
                     && confirmation.elapsed_ms < confirmation.duration_ms
                     && node.replica_role.participates_in_quorum()
-                    && !(self.ignore_witness && node.replica_role == RustRaftReplicaRole::Witness))
+                    && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness))
                     .then_some(*node_id)
             },
         ));
@@ -1027,22 +1025,22 @@ impl RaftCluster {
         self.invalidate_leader_lease();
         self.abort_leader_transfer("lost_quorum");
         for node in self.nodes.values_mut() {
-            if node.raft_role == RustRaftRole::Leader {
-                node.raft_role = RustRaftRole::Follower;
+            if node.raft_role == StateRole::Leader {
+                node.raft_role = StateRole::Follower;
             }
         }
         true
     }
 
-    pub fn pending_membership_change_index(&self) -> Option<RustRaftLogIndex> {
+    pub fn pending_membership_change_index(&self) -> Option<LogIndex> {
         self.pending_membership_change_index
     }
 
-    pub fn saving_membership_change_index(&self) -> Option<RustRaftLogIndex> {
+    pub fn saving_membership_change_index(&self) -> Option<LogIndex> {
         self.saving_membership_change_index
     }
 
-    pub fn stabled_membership_change_index(&self) -> RustRaftLogIndex {
+    pub fn stabled_membership_change_index(&self) -> LogIndex {
         self.stabled_membership_change_index
     }
 
@@ -1056,7 +1054,7 @@ impl RaftCluster {
 
     pub fn begin_pending_membership_change(
         &mut self,
-        log_index: RustRaftLogIndex,
+        log_index: LogIndex,
     ) -> Result<(), RaftError> {
         if log_index == 0 {
             return Err(RaftError::InvalidRequest(
@@ -1084,7 +1082,7 @@ impl RaftCluster {
 
     pub fn begin_saving_membership_change(
         &mut self,
-        log_index: RustRaftLogIndex,
+        log_index: LogIndex,
     ) -> Result<(), RaftError> {
         if log_index == 0 {
             return Err(RaftError::InvalidRequest(
@@ -1111,7 +1109,7 @@ impl RaftCluster {
         Ok(())
     }
 
-    pub fn mark_membership_change_stabled(&mut self, log_index: RustRaftLogIndex) {
+    pub fn mark_membership_change_stabled(&mut self, log_index: LogIndex) {
         self.stabled_membership_change_index = self.stabled_membership_change_index.max(log_index);
         if self
             .saving_membership_change_index
@@ -1126,9 +1124,9 @@ impl RaftCluster {
 
     pub fn submit_stabled_result(
         &mut self,
-        first_index: Option<RustRaftLogIndex>,
-        last_index: Option<RustRaftLogIndex>,
-        stabled_membership_change_index: RustRaftLogIndex,
+        first_index: Option<LogIndex>,
+        last_index: Option<LogIndex>,
+        stabled_membership_change_index: LogIndex,
     ) -> Result<bool, RaftError> {
         match (first_index, last_index) {
             (Some(first), Some(last)) if first == 0 || last == 0 || first > last => {
@@ -1153,7 +1151,7 @@ impl RaftCluster {
         Ok(false)
     }
 
-    pub fn mark_membership_change_applied(&mut self, log_index: RustRaftLogIndex) {
+    pub fn mark_membership_change_applied(&mut self, log_index: LogIndex) {
         self.applied_index = self.applied_index.max(log_index);
         if self
             .pending_membership_change_index
@@ -1166,7 +1164,7 @@ impl RaftCluster {
         }
     }
 
-    pub fn mark_snapshot_membership_floor_applied(&mut self, snapshot_index: RustRaftLogIndex) {
+    pub fn mark_snapshot_membership_floor_applied(&mut self, snapshot_index: LogIndex) {
         self.applied_index = self.applied_index.max(snapshot_index);
         self.membership_change_indexes
             .retain(|index| *index > snapshot_index);
@@ -1184,8 +1182,8 @@ impl RaftCluster {
 
     pub fn reset_pending_membership_change_after_truncation(
         &mut self,
-        last_retained_log_index: RustRaftLogIndex,
-        committed_index: RustRaftLogIndex,
+        last_retained_log_index: LogIndex,
+        committed_index: LogIndex,
     ) {
         self.membership_change_indexes
             .retain(|index| *index <= last_retained_log_index);
@@ -1205,8 +1203,8 @@ impl RaftCluster {
 
     pub fn rejected_apply_index(
         &self,
-        node_id: RustRaftNodeId,
-    ) -> Result<Option<RustRaftLogIndex>, RaftError> {
+        node_id: NodeId,
+    ) -> Result<Option<LogIndex>, RaftError> {
         Ok(self
             .nodes
             .get(&node_id)
@@ -1216,8 +1214,8 @@ impl RaftCluster {
 
     pub fn safety_applied_index(
         &self,
-        node_id: RustRaftNodeId,
-    ) -> Result<RustRaftLogIndex, RaftError> {
+        node_id: NodeId,
+    ) -> Result<LogIndex, RaftError> {
         Ok(self
             .nodes
             .get(&node_id)
@@ -1227,14 +1225,14 @@ impl RaftCluster {
 
     pub fn min_replicated_index(
         &self,
-        node_id: RustRaftNodeId,
-    ) -> Result<RustRaftLogIndex, RaftError> {
+        node_id: NodeId,
+    ) -> Result<LogIndex, RaftError> {
         let node = self
             .nodes
             .get(&node_id)
             .ok_or(RaftError::NodeNotFound(node_id))?;
         let mut replicated_index = node.safety_applied_index;
-        if node.raft_role == RustRaftRole::Leader {
+        if node.raft_role == StateRole::Leader {
             for peer in self.nodes.values() {
                 if peer.id != node_id && peer.healthy {
                     replicated_index = replicated_index.min(peer.match_index());
@@ -1246,8 +1244,8 @@ impl RaftCluster {
 
     pub fn mark_apply_task_inflight(
         &mut self,
-        node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        node_id: NodeId,
+        applied_index: LogIndex,
     ) -> Result<(), RaftError> {
         let node = self
             .nodes
@@ -1275,8 +1273,8 @@ impl RaftCluster {
 
     pub fn submit_apply_result(
         &mut self,
-        node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        node_id: NodeId,
+        applied_index: LogIndex,
         apply_task_rejected: bool,
     ) -> Result<(), RaftError> {
         let leader_apply_rejected = {
@@ -1294,12 +1292,12 @@ impl RaftCluster {
             if apply_task_rejected {
                 node.rejected_apply_index = Some(node.safety_applied_index.saturating_add(1));
             }
-            apply_task_rejected && node.raft_role == RustRaftRole::Leader
+            apply_task_rejected && node.raft_role == StateRole::Leader
         };
         if leader_apply_rejected {
             let transfer_target = self.closest_follower();
             if let Some(node) = self.nodes.get_mut(&node_id) {
-                node.raft_role = RustRaftRole::Follower;
+                node.raft_role = StateRole::Follower;
             }
             if !transfer_target
                 .map(|target| self.campaign(target, true).is_ok())
@@ -1325,7 +1323,7 @@ impl RaftCluster {
 
     pub fn campaign(
         &mut self,
-        candidate_id: RustRaftNodeId,
+        candidate_id: NodeId,
         forced: bool,
     ) -> Result<(), RaftError> {
         if !self.running && !forced {
@@ -1338,7 +1336,7 @@ impl RaftCluster {
                 "election is prohibited".to_string(),
             ));
         }
-        if self.follower_lease_valid() && !forced {
+        if self.is_follower_lease_valid() && !forced {
             return Err(RaftError::InvalidRequest(
                 "follower is still in leader lease".to_string(),
             ));
@@ -1359,7 +1357,7 @@ impl RaftCluster {
                 candidate_id
             )));
         }
-        if self.leader_id == Some(candidate_id) && candidate.raft_role == RustRaftRole::Leader {
+        if self.leader_id == Some(candidate_id) && candidate.raft_role == StateRole::Leader {
             return Ok(());
         }
 
@@ -1387,11 +1385,11 @@ impl RaftCluster {
             node.hard_state.current_term = self.current_term;
             node.hard_state.voted_for = Some(candidate_id);
             node.raft_role = if node.id == candidate_id {
-                RustRaftRole::Leader
-            } else if node.replica_role == RustRaftReplicaRole::Learner {
-                RustRaftRole::Learner
+                StateRole::Leader
+            } else if node.replica_role == ReplicaRole::Learner {
+                StateRole::Learner
             } else {
-                RustRaftRole::Follower
+                StateRole::Follower
             };
         }
         self.reset_replication_pipelines_for_leader(candidate_id);
@@ -1401,13 +1399,13 @@ impl RaftCluster {
         Ok(())
     }
 
-    fn broadcast_leader_noop(&mut self) -> Result<RustRaftLogId, RaftError> {
+    fn broadcast_leader_noop(&mut self) -> Result<LogId, RaftError> {
         let leader_id = self.leader_id.ok_or(RaftError::NoLeader)?;
-        let log_id = RustRaftLogId {
+        let log_id = LogId {
             term: self.current_term,
             index: self.last_log_index + 1,
         };
-        let entry = RustRaftLogEntry {
+        let entry = LogEntry {
             log_id: log_id.clone(),
             payload: b"no-op".to_vec(),
             is_command: true,
@@ -1426,7 +1424,7 @@ impl RaftCluster {
             if node.healthy && node.match_index().saturating_add(1) == entry.log_id.index {
                 if node.replica_role.can_serve_data() {
                     node.append_entry(entry.clone());
-                } else if node.replica_role == RustRaftReplicaRole::Witness {
+                } else if node.replica_role == ReplicaRole::Witness {
                     node.append_witness_entry(entry.clone(), false);
                 }
             }
@@ -1440,7 +1438,7 @@ impl RaftCluster {
         self.pre_vote_responses.clear();
     }
 
-    fn remove_election_response_from(&mut self, node_id: RustRaftNodeId) {
+    fn remove_election_response_from(&mut self, node_id: NodeId) {
         self.vote_responses.remove(&node_id);
         self.pre_vote_responses.remove(&node_id);
     }
@@ -1449,13 +1447,13 @@ impl RaftCluster {
         self.reorder_queues.clear();
     }
 
-    fn clear_reorder_queue_for(&mut self, node_id: RustRaftNodeId) {
+    fn clear_reorder_queue_for(&mut self, node_id: NodeId) {
         self.reorder_queues.remove(&node_id);
     }
 
     fn become_leader_current_term(
         &mut self,
-        candidate_id: RustRaftNodeId,
+        candidate_id: NodeId,
     ) -> Result<(), RaftError> {
         let candidate = self
             .nodes
@@ -1483,11 +1481,11 @@ impl RaftCluster {
             node.hard_state.current_term = self.current_term;
             node.hard_state.voted_for = Some(candidate_id);
             node.raft_role = if node.id == candidate_id {
-                RustRaftRole::Leader
-            } else if node.replica_role == RustRaftReplicaRole::Learner {
-                RustRaftRole::Learner
+                StateRole::Leader
+            } else if node.replica_role == ReplicaRole::Learner {
+                StateRole::Learner
             } else {
-                RustRaftRole::Follower
+                StateRole::Follower
             };
         }
         self.reset_replication_pipelines_for_leader(candidate_id);
@@ -1499,7 +1497,7 @@ impl RaftCluster {
 
     fn start_vote_after_pre_vote_quorum(
         &mut self,
-        candidate_id: RustRaftNodeId,
+        candidate_id: NodeId,
     ) -> Result<(), RaftError> {
         let candidate = self
             .nodes
@@ -1529,11 +1527,11 @@ impl RaftCluster {
             node.hard_state.current_term = self.current_term;
             node.hard_state.voted_for = Some(candidate_id);
             node.raft_role = if node.id == candidate_id {
-                RustRaftRole::Candidate
-            } else if node.replica_role == RustRaftReplicaRole::Learner {
-                RustRaftRole::Learner
+                StateRole::Candidate
+            } else if node.replica_role == ReplicaRole::Learner {
+                StateRole::Learner
             } else {
-                RustRaftRole::Follower
+                StateRole::Follower
             };
         }
         self.vote_responses.insert(candidate_id, true);
@@ -1542,9 +1540,9 @@ impl RaftCluster {
 
     pub fn timeout_now(
         &mut self,
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
-    ) -> Result<RustRaftTimeoutNowResponse, RaftError> {
+        from: NodeId,
+        target: NodeId,
+    ) -> Result<TimeoutNowResponse, RaftError> {
         let (role, replica_role, term) = {
             let node = self
                 .nodes
@@ -1556,8 +1554,8 @@ impl RaftCluster {
                 node.hard_state.current_term,
             )
         };
-        if role != RustRaftRole::Follower || !replica_role.can_be_leader() {
-            return Ok(RustRaftTimeoutNowResponse {
+        if role != StateRole::Follower || !replica_role.can_be_leader() {
+            return Ok(TimeoutNowResponse {
                 node_id: target,
                 from,
                 campaigned: false,
@@ -1568,7 +1566,7 @@ impl RaftCluster {
         }
 
         self.campaign(target, true)?;
-        Ok(RustRaftTimeoutNowResponse {
+        Ok(TimeoutNowResponse {
             node_id: target,
             from,
             campaigned: true,
@@ -1578,41 +1576,41 @@ impl RaftCluster {
         })
     }
 
-    pub fn step(&mut self, message: RustRaftMessage) -> Result<RustRaftStepResult, RaftError> {
+    pub fn step(&mut self, message: Message) -> Result<StepResult, RaftError> {
         match message {
-            RustRaftMessage::Admin { command } => self.step_admin(command),
-            RustRaftMessage::Propose { payload, options } => self
+            Message::Admin { command } => self.step_admin(command),
+            Message::Propose { payload, options } => self
                 .propose_with_options(payload, options)
-                .map(RustRaftStepResult::Proposed),
-            RustRaftMessage::Membership { operation } => {
-                let mut executor = RaftMembershipExecutor::new();
+                .map(StepResult::Proposed),
+            Message::Membership { operation } => {
+                let mut executor = MembershipExecutor::new();
                 executor
                     .execute(self, operation)
-                    .map(RustRaftStepResult::Membership)
+                    .map(StepResult::Membership)
             }
-            RustRaftMessage::AutoPromoteLearner { learner_id } => self
+            Message::AutoPromoteLearner { learner_id } => self
                 .auto_promote_learner(learner_id)
-                .map(RustRaftStepResult::AutoPromoteLearner),
-            RustRaftMessage::CatchUpPeer { peer_id } => self
+                .map(StepResult::AutoPromoteLearner),
+            Message::CatchUpPeer { peer_id } => self
                 .catch_up_peer(peer_id)
-                .map(RustRaftStepResult::CatchUpPeer),
-            RustRaftMessage::PreVote { candidate_id } => {
-                self.pre_vote(candidate_id).map(RustRaftStepResult::PreVote)
+                .map(StepResult::CatchUpPeer),
+            Message::PreVote { candidate_id } => {
+                self.pre_vote(candidate_id).map(StepResult::PreVote)
             }
-            RustRaftMessage::AppendEntries { target, request } => self
+            Message::AppendEntries { target, request } => self
                 .append_entries_to(target, request)
-                .map(RustRaftStepResult::AppendEntries),
-            RustRaftMessage::AppendEntriesResponse {
+                .map(StepResult::AppendEntries),
+            Message::AppendEntriesResponse {
                 local_node_id,
                 peer_id,
                 response,
             } => self
                 .handle_append_entries_response(local_node_id, peer_id, response)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftMessage::Vote { target, request } => {
-                self.vote_to(target, request).map(RustRaftStepResult::Vote)
+                .map(|()| StepResult::Handled),
+            Message::Vote { target, request } => {
+                self.vote_to(target, request).map(StepResult::Vote)
             }
-            RustRaftMessage::VoteResponse {
+            Message::VoteResponse {
                 local_node_id,
                 peer_id,
                 response,
@@ -1620,32 +1618,32 @@ impl RaftCluster {
             } => match peer_id {
                 Some(peer_id) => self
                     .handle_vote_response_from(local_node_id, peer_id, response, pre_vote)
-                    .map(|()| RustRaftStepResult::Handled),
+                    .map(|()| StepResult::Handled),
                 None => self
                     .handle_vote_response(local_node_id, response, pre_vote)
-                    .map(|()| RustRaftStepResult::Handled),
+                    .map(|()| StepResult::Handled),
             },
-            RustRaftMessage::InstallSnapshot { target, request } => self
+            Message::InstallSnapshot { target, request } => self
                 .install_snapshot_chunk_to(target, request)
-                .map(RustRaftStepResult::InstallSnapshot),
-            RustRaftMessage::InstallSnapshotResponse {
+                .map(StepResult::InstallSnapshot),
+            Message::InstallSnapshotResponse {
                 local_node_id,
                 peer_id,
                 response,
             } => self
                 .handle_install_snapshot_response(local_node_id, peer_id, response)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftMessage::NetworkError { peer_id } => self
+                .map(|()| StepResult::Handled),
+            Message::NetworkError { peer_id } => self
                 .record_network_error_for(peer_id)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftMessage::SnapshotFinish {
+                .map(|()| StepResult::Handled),
+            Message::SnapshotFinish {
                 peer_id,
                 accepted,
                 committed_index,
             } => self
                 .handle_snapshot_finish_from(peer_id, accepted, committed_index)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftMessage::SnapshotProgress {
+                .map(|()| StepResult::Handled),
+            Message::SnapshotProgress {
                 peer_id,
                 remote_receiving,
                 elapsed_since_last_receiving_ms,
@@ -1657,159 +1655,159 @@ impl RaftCluster {
                     elapsed_since_last_receiving_ms,
                     send_timeout_ms,
                 )
-                .map(|_| RustRaftStepResult::Handled),
-            RustRaftMessage::ReadIndex { request } => {
-                self.read_index(request).map(RustRaftStepResult::ReadIndex)
+                .map(|_| StepResult::Handled),
+            Message::ReadIndex { request } => {
+                self.read_index(request).map(StepResult::ReadIndex)
             }
-            RustRaftMessage::TimeoutNow { from, target } => self
+            Message::TimeoutNow { from, target } => self
                 .timeout_now(from, target)
-                .map(RustRaftStepResult::TimeoutNow),
+                .map(StepResult::TimeoutNow),
         }
     }
 
     fn step_admin(
         &mut self,
-        command: RustRaftAdminCommand,
-    ) -> Result<RustRaftStepResult, RaftError> {
+        command: AdminCommand,
+    ) -> Result<StepResult, RaftError> {
         match command {
-            RustRaftAdminCommand::Campaign {
+            AdminCommand::Campaign {
                 candidate_id,
                 forced,
             } => self
                 .campaign(candidate_id, forced)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::TransferLeader { target } => self
+                .map(|()| StepResult::Handled),
+            AdminCommand::TransferLeader { target } => self
                 .transfer_leader(target)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::CompleteLeaderTransfer => self
+                .map(|()| StepResult::Handled),
+            AdminCommand::CompleteLeaderTransfer => self
                 .try_complete_leader_transfer()
-                .map(RustRaftStepResult::LeaderTransferCompleted),
-            RustRaftAdminCommand::AbortLeaderTransfer { reason } => Ok(
-                RustRaftStepResult::LeaderTransferAborted(self.abort_leader_transfer(reason)),
+                .map(StepResult::LeaderTransferCompleted),
+            AdminCommand::AbortLeaderTransfer { reason } => Ok(
+                StepResult::LeaderTransferAborted(self.abort_leader_transfer(reason)),
             ),
-            RustRaftAdminCommand::FireFatalEvent { node_id, .. } => {
+            AdminCommand::FireFatalEvent { node_id, .. } => {
                 let target = if self.leader_id() == Some(node_id) {
                     self.step_down(None)?
                 } else {
                     None
                 };
                 self.set_node_healthy(node_id, false)?;
-                Ok(RustRaftStepResult::FatalEvent(target))
+                Ok(StepResult::FatalEvent(target))
             }
-            RustRaftAdminCommand::StepDown { transferee } => {
-                self.step_down(transferee).map(RustRaftStepResult::StepDown)
+            AdminCommand::StepDown { transferee } => {
+                self.step_down(transferee).map(StepResult::StepDown)
             }
-            RustRaftAdminCommand::Resign { reason } => self
+            AdminCommand::Resign { reason } => self
                 .resign_leader(&reason)
-                .map(RustRaftStepResult::LeaderResigned),
-            RustRaftAdminCommand::TriggerSnapshot => self
+                .map(StepResult::LeaderResigned),
+            AdminCommand::TriggerSnapshot => self
                 .trigger_snapshot()
-                .map(RustRaftStepResult::SnapshotTriggered),
-            RustRaftAdminCommand::SnapshotReady {
+                .map(StepResult::SnapshotTriggered),
+            AdminCommand::SnapshotReady {
                 snapshot_id,
                 success,
             } => self
                 .handle_snapshot_ready(&snapshot_id, success)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::SnapshotApplied { snapshot_id } => self
+                .map(|()| StepResult::Handled),
+            AdminCommand::SnapshotApplied { snapshot_id } => self
                 .complete_snapshot_trigger(&snapshot_id)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::BeginSnapshotSend {
+                .map(|()| StepResult::Handled),
+            AdminCommand::BeginSnapshotSend {
                 peer_id,
                 snapshot_id,
                 snapshot_index,
                 total_chunks,
             } => self
                 .begin_snapshot_send_to(peer_id, snapshot_id, snapshot_index, total_chunks)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::RecordSnapshotChunkSent { peer_id, bytes } => self
+                .map(|()| StepResult::Handled),
+            AdminCommand::RecordSnapshotChunkSent { peer_id, bytes } => self
                 .record_snapshot_chunk_sent_to(peer_id, bytes)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::AcknowledgeSnapshotChunk { peer_id } => self
+                .map(|()| StepResult::Handled),
+            AdminCommand::AcknowledgeSnapshotChunk { peer_id } => self
                 .acknowledge_snapshot_chunk_to(peer_id)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::RetrySnapshotChunk { peer_id } => self
+                .map(|()| StepResult::Handled),
+            AdminCommand::RetrySnapshotChunk { peer_id } => self
                 .retry_snapshot_chunk_to(peer_id)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::CancelSnapshotSend { peer_id } => self
+                .map(|()| StepResult::Handled),
+            AdminCommand::CancelSnapshotSend { peer_id } => self
                 .cancel_snapshot_send_to(peer_id)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::BeginSnapshotInstall {
+                .map(|()| StepResult::Handled),
+            AdminCommand::BeginSnapshotInstall {
                 peer_id,
                 snapshot_id,
                 snapshot_index,
                 total_chunks,
             } => self
                 .begin_snapshot_install_from(peer_id, snapshot_id, snapshot_index, total_chunks)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::ReceiveSnapshotChunk {
+                .map(|()| StepResult::Handled),
+            AdminCommand::ReceiveSnapshotChunk {
                 peer_id,
                 bytes,
                 done,
             } => self
                 .receive_snapshot_chunk_from(peer_id, bytes, done)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::RollbackSnapshotInstall { peer_id } => self
+                .map(|()| StepResult::Handled),
+            AdminCommand::RollbackSnapshotInstall { peer_id } => self
                 .rollback_snapshot_install_from(peer_id)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::ApplyResult {
+                .map(|()| StepResult::Handled),
+            AdminCommand::ApplyResult {
                 node_id,
                 applied_index,
                 rejected,
             } => self
                 .submit_apply_result(node_id, applied_index, rejected)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::ApplyTaskInflight {
+                .map(|()| StepResult::Handled),
+            AdminCommand::ApplyTaskInflight {
                 node_id,
                 applied_index,
             } => self
                 .mark_apply_task_inflight(node_id, applied_index)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::StabledResult {
+                .map(|()| StepResult::Handled),
+            AdminCommand::StabledResult {
                 first_index,
                 last_index,
                 stabled_membership_change_index,
             } => self
                 .submit_stabled_result(first_index, last_index, stabled_membership_change_index)
-                .map(|_| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::Replicated { peer_id, success } => self
+                .map(|_| StepResult::Handled),
+            AdminCommand::Replicated { peer_id, success } => self
                 .record_replication_task_result_for(peer_id, success)
-                .map(|_| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::CompactLogsThrough { log_index } => Ok(
-                RustRaftStepResult::CompactedLogs(self.compact_logs_through(log_index)),
+                .map(|_| StepResult::Handled),
+            AdminCommand::CompactLogsThrough { log_index } => Ok(
+                StepResult::CompactedLogs(self.compact_logs_through(log_index)),
             ),
-            RustRaftAdminCommand::CompactLogsWithStorageFence { log_index, fence } => self
+            AdminCommand::CompactLogsWithStorageFence { log_index, fence } => self
                 .compact_logs_with_storage_fence(log_index, fence)
-                .map(RustRaftStepResult::FencedCompaction),
-            RustRaftAdminCommand::CheckpointSnapshot {
+                .map(StepResult::FencedCompaction),
+            AdminCommand::CheckpointSnapshot {
                 target,
                 snapshot_id,
             } => self
                 .checkpoint_snapshot(target, snapshot_id)
-                .map(RustRaftStepResult::CheckpointedSnapshot),
-            RustRaftAdminCommand::WitnessQuorum { acknowledgements } => Ok(
-                RustRaftStepResult::WitnessQuorum(self.witness_quorum_report(acknowledgements)),
+                .map(StepResult::CheckpointedSnapshot),
+            AdminCommand::WitnessQuorum { acknowledgements } => Ok(
+                StepResult::WitnessQuorum(self.witness_quorum_report(acknowledgements)),
             ),
-            RustRaftAdminCommand::PartitionPeer { peer_id } => self
+            AdminCommand::PartitionPeer { peer_id } => self
                 .partition_peer(peer_id)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::HealPeer { peer_id } => {
-                self.heal_peer(peer_id).map(RustRaftStepResult::CatchUpPeer)
+                .map(|()| StepResult::Handled),
+            AdminCommand::HealPeer { peer_id } => {
+                self.heal_peer(peer_id).map(StepResult::CatchUpPeer)
             }
-            RustRaftAdminCommand::ReceiveOutOfOrderAppend { peer_id, entry } => self
+            AdminCommand::ReceiveOutOfOrderAppend { peer_id, entry } => self
                 .receive_out_of_order_append_for(peer_id, entry)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::ExpirePeerReorderQueue { peer_id } => self
+                .map(|()| StepResult::Handled),
+            AdminCommand::ExpirePeerReorderQueue { peer_id } => self
                 .expire_peer_reorder_queue(peer_id)
-                .map(RustRaftStepResult::CompactedLogs),
-            RustRaftAdminCommand::SetNodeHealthy { node_id, healthy } => self
+                .map(StepResult::CompactedLogs),
+            AdminCommand::SetNodeHealthy { node_id, healthy } => self
                 .set_node_healthy(node_id, healthy)
-                .map(|()| RustRaftStepResult::Handled),
-            RustRaftAdminCommand::SetLeaderLeaseValid { valid } => {
+                .map(|()| StepResult::Handled),
+            AdminCommand::SetLeaderLeaseValid { valid } => {
                 self.set_leader_lease_valid(valid);
-                Ok(RustRaftStepResult::Handled)
+                Ok(StepResult::Handled)
             }
-            RustRaftAdminCommand::ReceiveLeaderLeaseConfirmation {
+            AdminCommand::ReceiveLeaderLeaseConfirmation {
                 node_id,
                 confirmation_epoch,
                 duration_ms,
@@ -1822,42 +1820,42 @@ impl RaftCluster {
                     ),
                     None => self.receive_leader_lease_confirmation(node_id, confirmation_epoch),
                 };
-                Ok(RustRaftStepResult::LeaderLeaseConfirmed(confirmed))
+                Ok(StepResult::LeaderLeaseConfirmed(confirmed))
             }
-            RustRaftAdminCommand::TickLeaderLease { elapsed_ms } => Ok(
-                RustRaftStepResult::LeaderLeaseExpired(self.tick_leader_lease(elapsed_ms)),
+            AdminCommand::TickLeaderLease { elapsed_ms } => Ok(
+                StepResult::LeaderLeaseExpired(self.tick_leader_lease(elapsed_ms)),
             ),
-            RustRaftAdminCommand::ReceiveFollowerLease { epoch } => Ok(
-                RustRaftStepResult::FollowerLeaseReceived(self.receive_follower_lease_item(epoch)),
+            AdminCommand::ReceiveFollowerLease { epoch } => Ok(
+                StepResult::FollowerLeaseReceived(self.receive_follower_lease_item(epoch)),
             ),
-            RustRaftAdminCommand::TickFollowerLease { elapsed_ms } => Ok(
-                RustRaftStepResult::FollowerLeaseExpired(self.tick_follower_lease(elapsed_ms)),
+            AdminCommand::TickFollowerLease { elapsed_ms } => Ok(
+                StepResult::FollowerLeaseExpired(self.tick_follower_lease(elapsed_ms)),
             ),
-            RustRaftAdminCommand::ProhibitsElection { prohibits } => {
+            AdminCommand::ProhibitsElection { prohibits } => {
                 self.set_prohibits_election(prohibits);
-                Ok(RustRaftStepResult::Handled)
+                Ok(StepResult::Handled)
             }
-            RustRaftAdminCommand::IgnoreWitness { ignore } => {
+            AdminCommand::IgnoreWitness { ignore } => {
                 self.set_ignore_witness(ignore);
-                Ok(RustRaftStepResult::Handled)
+                Ok(StepResult::Handled)
             }
-            RustRaftAdminCommand::ReleaseMemory => self
+            AdminCommand::ReleaseMemory => self
                 .release_memory()
-                .map(RustRaftStepResult::ReleasedMemory),
+                .map(StepResult::ReleasedMemory),
         }
     }
 
     pub fn step_batch(
         &mut self,
-        messages: Vec<RustRaftMessage>,
-    ) -> Result<Vec<RustRaftStepResult>, RaftError> {
+        messages: Vec<Message>,
+    ) -> Result<Vec<StepResult>, RaftError> {
         messages
             .into_iter()
             .map(|message| self.step(message))
             .collect()
     }
 
-    pub fn pre_vote(&self, candidate_id: RustRaftNodeId) -> Result<VoteResponse, RaftError> {
+    pub fn pre_vote(&self, candidate_id: NodeId) -> Result<VoteResponse, RaftError> {
         let candidate = self
             .nodes
             .get(&candidate_id)
@@ -1899,11 +1897,11 @@ impl RaftCluster {
 
     pub fn vote_to(
         &mut self,
-        target: RustRaftNodeId,
-        request: RustRaftVoteRequest,
-    ) -> Result<RustRaftVoteResponse, RaftError> {
+        target: NodeId,
+        request: VoteRequest,
+    ) -> Result<VoteResponse, RaftError> {
         if request.group_id != self.group_id {
-            return Ok(RustRaftVoteResponse {
+            return Ok(VoteResponse {
                 term: self.current_term.max(request.term),
                 vote_granted: false,
                 reason: "group_id_mismatch".to_string(),
@@ -1917,7 +1915,7 @@ impl RaftCluster {
             target_node.replica_role
         };
         if !target_replica_role.participates_in_quorum() {
-            return Ok(RustRaftVoteResponse {
+            return Ok(VoteResponse {
                 term: self.current_term.max(request.term),
                 vote_granted: false,
                 reason: "target_cannot_vote".to_string(),
@@ -1933,16 +1931,16 @@ impl RaftCluster {
                 request.term > target_node.hard_state.current_term
                     && !request.force
                     && self.config.enable_lease_read
-                    && if target_node.raft_role == RustRaftRole::Leader {
+                    && if target_node.raft_role == StateRole::Leader {
                         self.leader_lease_valid
                     } else {
-                        self.follower_lease_valid()
+                        self.is_follower_lease_valid()
                     },
                 target_node.hard_state.current_term,
             )
         };
         if target_in_lease {
-            return Ok(RustRaftVoteResponse {
+            return Ok(VoteResponse {
                 term: target_current_term,
                 vote_granted: false,
                 reason: "in_lease".to_string(),
@@ -1950,28 +1948,28 @@ impl RaftCluster {
         }
         if request.pre_vote {
             if !self.config.enable_pre_vote {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: target_current_term,
                     vote_granted: false,
                     reason: "pre_vote_disabled".to_string(),
                 });
             }
             let Some(candidate) = self.nodes.get(&request.candidate_id) else {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: target_current_term,
                     vote_granted: false,
                     reason: "candidate_not_member".to_string(),
                 });
             };
             if !candidate.replica_role.can_be_leader() {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: target_current_term,
                     vote_granted: false,
                     reason: "candidate_cannot_be_leader".to_string(),
                 });
             }
             if !candidate.healthy {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: target_current_term,
                     vote_granted: false,
                     reason: "candidate_unhealthy".to_string(),
@@ -1982,20 +1980,20 @@ impl RaftCluster {
                 .get(&target)
                 .ok_or(RaftError::NodeNotFound(target))?;
             if request.term <= target_node.hard_state.current_term {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: target_node.hard_state.current_term,
                     vote_granted: false,
                     reason: "stale_pre_vote_term".to_string(),
                 });
             }
             if !target_node.is_fresh_candidate_log(request.last_log_id.as_ref()) {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: target_node.hard_state.current_term,
                     vote_granted: false,
                     reason: "candidate_log_stale".to_string(),
                 });
             }
-            return Ok(RustRaftVoteResponse {
+            return Ok(VoteResponse {
                 term: request.term,
                 vote_granted: true,
                 reason: "pre_vote_granted".to_string(),
@@ -2003,21 +2001,21 @@ impl RaftCluster {
         }
         {
             let Some(candidate) = self.nodes.get(&request.candidate_id) else {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: self.current_term.max(request.term),
                     vote_granted: false,
                     reason: "candidate_not_member".to_string(),
                 });
             };
             if !candidate.replica_role.can_be_leader() {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: self.current_term.max(request.term),
                     vote_granted: false,
                     reason: "candidate_cannot_be_leader".to_string(),
                 });
             }
             if !candidate.healthy {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: self.current_term.max(request.term),
                     vote_granted: false,
                     reason: "candidate_unhealthy".to_string(),
@@ -2037,10 +2035,10 @@ impl RaftCluster {
             target_node.hard_state.current_term = request.term;
             target_node.hard_state.voted_for = None;
             for node in self.nodes.values_mut() {
-                if node.replica_role == RustRaftReplicaRole::Learner {
-                    node.raft_role = RustRaftRole::Learner;
+                if node.replica_role == ReplicaRole::Learner {
+                    node.raft_role = StateRole::Learner;
                 } else {
-                    node.raft_role = RustRaftRole::Follower;
+                    node.raft_role = StateRole::Follower;
                 }
             }
         }
@@ -2052,14 +2050,14 @@ impl RaftCluster {
         if known_leader_blocks_vote
             && target_node.hard_state.voted_for != Some(request.candidate_id)
         {
-            return Ok(RustRaftVoteResponse {
+            return Ok(VoteResponse {
                 term: target_node.hard_state.current_term,
                 vote_granted: false,
                 reason: "known_leader".to_string(),
             });
         }
         if !target_node.is_fresh_candidate_log(request.last_log_id.as_ref()) {
-            return Ok(RustRaftVoteResponse {
+            return Ok(VoteResponse {
                 term: self.current_term.max(request.term),
                 vote_granted: false,
                 reason: "candidate_log_stale".to_string(),
@@ -2072,7 +2070,7 @@ impl RaftCluster {
                 .get_mut(&target)
                 .ok_or(RaftError::NodeNotFound(target))?;
             if request.term < target_node.hard_state.current_term {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: target_node.hard_state.current_term,
                     vote_granted: false,
                     reason: "stale_term".to_string(),
@@ -2086,7 +2084,7 @@ impl RaftCluster {
             if known_leader_blocks_vote
                 && target_node.hard_state.voted_for != Some(request.candidate_id)
             {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: target_node.hard_state.current_term,
                     vote_granted: false,
                     reason: "known_leader".to_string(),
@@ -2097,7 +2095,7 @@ impl RaftCluster {
                 .voted_for
                 .is_some_and(|voted_for| voted_for != request.candidate_id)
             {
-                return Ok(RustRaftVoteResponse {
+                return Ok(VoteResponse {
                     term: target_node.hard_state.current_term,
                     vote_granted: false,
                     reason: "already_voted".to_string(),
@@ -2112,7 +2110,7 @@ impl RaftCluster {
             self.invalidate_leader_lease();
         }
         self.current_term = self.current_term.max(response_term);
-        Ok(RustRaftVoteResponse {
+        Ok(VoteResponse {
             term: response_term,
             vote_granted: true,
             reason: "vote_granted".to_string(),
@@ -2121,23 +2119,23 @@ impl RaftCluster {
 
     fn observe_vote_request_candidate(
         &mut self,
-        target: RustRaftNodeId,
-        candidate_id: RustRaftNodeId,
+        target: NodeId,
+        candidate_id: NodeId,
         pre_vote: bool,
     ) {
         let target_is_leader = self
             .nodes
             .get(&target)
-            .is_some_and(|node| node.raft_role == RustRaftRole::Leader);
+            .is_some_and(|node| node.raft_role == StateRole::Leader);
         if !target_is_leader {
             return;
         }
         if let Some(candidate) = self.nodes.get_mut(&candidate_id) {
             if candidate.replica_role.can_be_leader() {
                 candidate.raft_role = if pre_vote {
-                    RustRaftRole::PreCandidate
+                    StateRole::PreCandidate
                 } else {
-                    RustRaftRole::Candidate
+                    StateRole::Candidate
                 };
             }
         }
@@ -2145,8 +2143,8 @@ impl RaftCluster {
 
     pub fn handle_vote_response(
         &mut self,
-        local_node_id: RustRaftNodeId,
-        response: RustRaftVoteResponse,
+        local_node_id: NodeId,
+        response: VoteResponse,
         pre_vote: bool,
     ) -> Result<(), RaftError> {
         self.handle_vote_response_inner(local_node_id, None, response, pre_vote)
@@ -2154,9 +2152,9 @@ impl RaftCluster {
 
     pub fn handle_vote_response_from(
         &mut self,
-        local_node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
-        response: RustRaftVoteResponse,
+        local_node_id: NodeId,
+        peer_id: NodeId,
+        response: VoteResponse,
         pre_vote: bool,
     ) -> Result<(), RaftError> {
         self.handle_vote_response_inner(local_node_id, Some(peer_id), response, pre_vote)
@@ -2164,9 +2162,9 @@ impl RaftCluster {
 
     fn handle_vote_response_inner(
         &mut self,
-        local_node_id: RustRaftNodeId,
-        peer_id: Option<RustRaftNodeId>,
-        response: RustRaftVoteResponse,
+        local_node_id: NodeId,
+        peer_id: Option<NodeId>,
+        response: VoteResponse,
         pre_vote: bool,
     ) -> Result<(), RaftError> {
         self.nodes
@@ -2198,10 +2196,10 @@ impl RaftCluster {
         for node in self.nodes.values_mut() {
             node.hard_state.current_term = response.term;
             node.hard_state.voted_for = None;
-            node.raft_role = if node.replica_role == RustRaftReplicaRole::Learner {
-                RustRaftRole::Learner
+            node.raft_role = if node.replica_role == ReplicaRole::Learner {
+                StateRole::Learner
             } else {
-                RustRaftRole::Follower
+                StateRole::Follower
             };
         }
         Ok(())
@@ -2209,8 +2207,8 @@ impl RaftCluster {
 
     fn record_vote_response(
         &mut self,
-        local_node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        local_node_id: NodeId,
+        peer_id: NodeId,
         granted: bool,
         pre_vote: bool,
     ) -> Result<(), RaftError> {
@@ -2219,7 +2217,7 @@ impl RaftCluster {
             .get(&peer_id)
             .ok_or(RaftError::NodeNotFound(peer_id))?;
         if !peer.replica_role.participates_in_quorum()
-            || (self.ignore_witness && peer.replica_role == RustRaftReplicaRole::Witness)
+            || (self.ignore_witness && peer.replica_role == ReplicaRole::Witness)
         {
             return Ok(());
         }
@@ -2260,7 +2258,7 @@ impl RaftCluster {
             self.invalidate_leader_lease();
             self.clear_election_responses();
             if let Some(node) = self.nodes.get_mut(&local_node_id) {
-                node.raft_role = RustRaftRole::Follower;
+                node.raft_role = StateRole::Follower;
             }
         }
         Ok(())
@@ -2268,9 +2266,9 @@ impl RaftCluster {
 
     pub fn handle_append_entries_response(
         &mut self,
-        local_node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
-        response: RustRaftAppendEntriesResponse,
+        local_node_id: NodeId,
+        peer_id: NodeId,
+        response: AppendEntriesResponse,
     ) -> Result<(), RaftError> {
         self.nodes
             .get(&local_node_id)
@@ -2281,9 +2279,9 @@ impl RaftCluster {
         self.mark_peer_active(peer_id)?;
         if let Some(peer) = self.nodes.get_mut(&peer_id) {
             if peer_id != local_node_id && peer.replica_role.can_be_leader() {
-                peer.raft_role = RustRaftRole::Follower;
-            } else if peer.replica_role == RustRaftReplicaRole::Learner {
-                peer.raft_role = RustRaftRole::Learner;
+                peer.raft_role = StateRole::Follower;
+            } else if peer.replica_role == ReplicaRole::Learner {
+                peer.raft_role = StateRole::Learner;
             }
         }
         if response.term > self.current_term {
@@ -2296,10 +2294,10 @@ impl RaftCluster {
             for node in self.nodes.values_mut() {
                 node.hard_state.current_term = response.term;
                 node.hard_state.voted_for = None;
-                node.raft_role = if node.replica_role == RustRaftReplicaRole::Learner {
-                    RustRaftRole::Learner
+                node.raft_role = if node.replica_role == ReplicaRole::Learner {
+                    StateRole::Learner
                 } else {
-                    RustRaftRole::Follower
+                    StateRole::Follower
                 };
             }
             return Ok(());
@@ -2316,7 +2314,7 @@ impl RaftCluster {
         let mut append_response_result = Ok(());
         if let Some(pipeline) = self.peer_pipelines.get_mut(&peer_id) {
             pipeline.update_snapshot_progress(
-                response.snapshot_state == RustRaftSnapshotState::Receiving,
+                response.snapshot_state == SnapshotState::Receiving,
                 self.config.heartbeat_interval_ms.max(1),
                 self.config.election_timeout_ms.max(1),
             );
@@ -2373,8 +2371,8 @@ impl RaftCluster {
 
     fn trigger_new_snapshot_if_leader_snapshot_is_stale(
         &mut self,
-        peer_id: RustRaftNodeId,
-        required_snapshot_index: RustRaftLogIndex,
+        peer_id: NodeId,
+        required_snapshot_index: LogIndex,
     ) -> Result<(), RaftError> {
         let Some(leader_id) = self.leader_id else {
             return Ok(());
@@ -2399,13 +2397,13 @@ impl RaftCluster {
 
     fn maybe_auto_promote_zero_lag_learner(
         &mut self,
-        learner_id: RustRaftNodeId,
+        learner_id: NodeId,
     ) -> Result<(), RaftError> {
         let should_promote = self
             .nodes
             .get(&learner_id)
             .map(|node| {
-                node.replica_role == RustRaftReplicaRole::Learner
+                node.replica_role == ReplicaRole::Learner
                     && node.auto_promote
                     && node.match_index() > 0
                     && node.match_index() >= self.last_log_index
@@ -2414,7 +2412,7 @@ impl RaftCluster {
         if should_promote {
             if self.membership_change_fence_active() {
                 if let Some(learner) = self.nodes.get_mut(&learner_id) {
-                    learner.auto_promote_state = RaftLearnerAutoPromoteState::Promoting;
+                    learner.auto_promote_state = LearnerAutoPromoteState::Promoting;
                 }
             } else {
                 self.promote_peer(learner_id)?;
@@ -2425,9 +2423,9 @@ impl RaftCluster {
 
     pub fn handle_install_snapshot_response(
         &mut self,
-        local_node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
-        response: RustRaftInstallSnapshotResponse,
+        local_node_id: NodeId,
+        peer_id: NodeId,
+        response: InstallSnapshotResponse,
     ) -> Result<(), RaftError> {
         self.nodes
             .get(&local_node_id)
@@ -2464,24 +2462,24 @@ impl RaftCluster {
         for node in self.nodes.values_mut() {
             node.hard_state.current_term = response.term;
             node.hard_state.voted_for = None;
-            node.raft_role = if node.replica_role == RustRaftReplicaRole::Learner {
-                RustRaftRole::Learner
+            node.raft_role = if node.replica_role == ReplicaRole::Learner {
+                StateRole::Learner
             } else {
-                RustRaftRole::Follower
+                StateRole::Follower
             };
         }
         Ok(())
     }
 
-    pub fn propose(&mut self, payload: RustRaftPayload) -> Result<RustRaftLogId, RaftError> {
-        self.propose_with_options(payload, RustRaftProposeOptions::default())
+    pub fn propose(&mut self, payload: Payload) -> Result<LogId, RaftError> {
+        self.propose_with_options(payload, ProposeOptions::default())
     }
 
     pub fn propose_with_options(
         &mut self,
-        payload: RustRaftPayload,
-        options: RustRaftProposeOptions,
-    ) -> Result<RustRaftLogId, RaftError> {
+        payload: Payload,
+        options: ProposeOptions,
+    ) -> Result<LogId, RaftError> {
         if !options.is_membership_change {
             if let Some(expected_term) = options.expected_term {
                 if expected_term != self.current_term {
@@ -2520,7 +2518,7 @@ impl RaftCluster {
             ));
         }
 
-        let log_id = RustRaftLogId {
+        let log_id = LogId {
             term: self.current_term,
             index: self.last_log_index + 1,
         };
@@ -2533,7 +2531,7 @@ impl RaftCluster {
             self.pending_membership_change_index = Some(log_id.index);
             self.membership_change_indexes.insert(log_id.index);
         }
-        let entry = RustRaftLogEntry {
+        let entry = LogEntry {
             log_id: log_id.clone(),
             payload,
             is_command: options.is_command && !proposed_as_membership_change,
@@ -2559,12 +2557,12 @@ impl RaftCluster {
                     if append_is_contiguous {
                         if node.replica_role.can_serve_data() {
                             node.append_entry(entry.clone());
-                        } else if node.replica_role == RustRaftReplicaRole::Witness {
+                        } else if node.replica_role == ReplicaRole::Witness {
                             node.append_witness_entry(entry.clone(), proposed_as_membership_change);
                         }
                     }
                     let match_index = node.match_index();
-                    Some(RustRaftAppendEntriesResponse {
+                    Some(AppendEntriesResponse {
                         term: node.hard_state.current_term,
                         success: append_is_contiguous,
                         match_index,
@@ -2572,7 +2570,7 @@ impl RaftCluster {
                             .then_some(match_index.saturating_add(1)),
                         rejected_index: (!append_is_contiguous).then_some(entry.log_id.index),
                         require_snapshot: None,
-                        snapshot_state: RustRaftSnapshotState::None,
+                        snapshot_state: SnapshotState::None,
                         lease_confirmation_epoch: 0,
                         lease_duration_ms: 0,
                     })
@@ -2594,7 +2592,7 @@ impl RaftCluster {
         Ok(log_id)
     }
 
-    pub fn wal_record_for(&self, node_id: RustRaftNodeId) -> Result<RaftWalRecord, RaftError> {
+    pub fn wal_record_for(&self, node_id: NodeId) -> Result<WalRecord, RaftError> {
         let node = self
             .nodes
             .get(&node_id)
@@ -2604,14 +2602,15 @@ impl RaftCluster {
             .as_ref()
             .map(|snapshot| snapshot.last_log_id.index)
             .unwrap_or_default();
-        let mut record = RaftWalRecord {
+        let mut record = WalRecord {
+            entries_are_delta: false,
             group_id: self.group_id,
             node_id,
             hard_state: node.hard_state.clone(),
             membership: self.membership(),
             entries: node.log.clone(),
             installed_snapshot,
-            apply_snapshot_fence: RustRaftApplySnapshotFence {
+            apply_snapshot_fence: ApplySnapshotFence {
                 applied_index: node.applied_index,
                 commit_index: node.commit_index,
                 installed_snapshot_index: snapshot_index,
@@ -2630,7 +2629,83 @@ impl RaftCluster {
         Ok(record)
     }
 
-    pub fn restore_wal_record(&mut self, record: RaftWalRecord) -> Result<(), RaftError> {
+    /// Builds a WAL record carrying only the entries a WAL does not already
+    /// hold.
+    ///
+    /// `coverage` is what the WAL's active segment already describes, as
+    /// (first index, last index, term at the last index). When the node's log
+    /// still extends that, only the tail past it is copied; otherwise -- a log
+    /// truncated and rewritten, a tail rewritten under a newer term, or a log
+    /// compacted past where the segment starts -- the whole log is copied, and
+    /// the record says so. Passing `None` always copies the whole log.
+    ///
+    /// This is what keeps the per-proposal cost off the length of the log: the
+    /// whole log is only materialised when a whole record is actually needed.
+    pub fn wal_record_for_coverage(
+        &self,
+        node_id: NodeId,
+        coverage: Option<(LogIndex, LogIndex, Term)>,
+    ) -> Result<WalRecord, RaftError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(RaftError::NodeNotFound(node_id))?;
+        let extends = coverage.and_then(|(first_index, last_index, last_term)| {
+            let log_first = node.log.first()?.log_id.index;
+            if log_first > first_index {
+                return None;
+            }
+            let position = node.log_position(last_index)?;
+            if node.log[position].log_id.term != last_term {
+                return None;
+            }
+            Some(position + 1)
+        });
+        let mut record = self.wal_record_shell(node_id, node);
+        match extends {
+            Some(from) => {
+                record.entries = node.log[from..].to_vec();
+                record.entries_are_delta = true;
+            }
+            None => record.entries = node.log.clone(),
+        }
+        record.checksum = matrixraft_wal_checksum(&record);
+        Ok(record)
+    }
+
+    /// Everything in a WAL record except the entries and the checksum.
+    fn wal_record_shell(&self, node_id: NodeId, node: &Node) -> WalRecord {
+        let installed_snapshot = node.installed_snapshot.clone();
+        let snapshot_index = installed_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.last_log_id.index)
+            .unwrap_or_default();
+        WalRecord {
+            entries_are_delta: false,
+            group_id: self.group_id,
+            node_id,
+            hard_state: node.hard_state.clone(),
+            membership: self.membership(),
+            entries: Vec::new(),
+            installed_snapshot,
+            apply_snapshot_fence: ApplySnapshotFence {
+                applied_index: node.applied_index,
+                commit_index: node.commit_index,
+                installed_snapshot_index: snapshot_index,
+                first_retained_log_index: if snapshot_index > 0 {
+                    snapshot_index + 1
+                } else {
+                    node.log
+                        .first()
+                        .map(|entry| entry.log_id.index)
+                        .unwrap_or_default()
+                },
+            },
+            checksum: String::new(),
+        }
+    }
+
+    pub fn restore_wal_record(&mut self, record: WalRecord) -> Result<(), RaftError> {
         if record.group_id != self.group_id {
             return Err(RaftError::InvalidRequest(
                 "WAL record group id mismatch".to_string(),
@@ -2646,7 +2721,7 @@ impl RaftCluster {
         node.commit_index = record.apply_snapshot_fence.commit_index;
         node.applied_index = record.apply_snapshot_fence.applied_index;
         node.safety_applied_index = record.apply_snapshot_fence.applied_index;
-        if node.replica_role == RustRaftReplicaRole::Witness {
+        if node.replica_role == ReplicaRole::Witness {
             let restored_witness_index = node
                 .hard_state
                 .committed
@@ -2678,18 +2753,18 @@ impl RaftCluster {
 
     pub fn append_entries_to(
         &mut self,
-        target: RustRaftNodeId,
-        request: RustRaftAppendEntriesRequest,
-    ) -> Result<RustRaftAppendEntriesResponse, RaftError> {
+        target: NodeId,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, RaftError> {
         self.append_entries_with_membership_change_indexes_to(target, request, &[])
     }
 
     pub fn append_entries_with_membership_change_indexes_to(
         &mut self,
-        target: RustRaftNodeId,
-        request: RustRaftAppendEntriesRequest,
-        membership_change_indexes: &[RustRaftLogIndex],
-    ) -> Result<RustRaftAppendEntriesResponse, RaftError> {
+        target: NodeId,
+        request: AppendEntriesRequest,
+        membership_change_indexes: &[LogIndex],
+    ) -> Result<AppendEntriesResponse, RaftError> {
         if request.group_id != self.group_id {
             return Err(RaftError::InvalidRequest(
                 "append entries group id mismatch".to_string(),
@@ -2711,14 +2786,14 @@ impl RaftCluster {
                 .get(&target)
                 .ok_or(RaftError::NodeNotFound(target))?;
             let require_snapshot = node.rejected_apply_index;
-            return Ok(RustRaftAppendEntriesResponse {
+            return Ok(AppendEntriesResponse {
                 term: node.hard_state.current_term.max(self.current_term),
                 success: false,
                 match_index: node.match_index(),
                 rejection_hint: Some(node.match_index().saturating_add(1)),
                 rejected_index: Some(request_prev_index),
                 require_snapshot,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             });
@@ -2729,14 +2804,14 @@ impl RaftCluster {
                 .get(&target)
                 .ok_or(RaftError::NodeNotFound(target))?;
             let require_snapshot = node.rejected_apply_index;
-            return Ok(RustRaftAppendEntriesResponse {
+            return Ok(AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
                 match_index: node.match_index(),
                 rejection_hint: Some(node.match_index().saturating_add(1)),
                 rejected_index: Some(request_prev_index),
                 require_snapshot,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             });
@@ -2764,11 +2839,11 @@ impl RaftCluster {
             self.invalidate_follower_lease();
             for peer in self.nodes.values_mut() {
                 peer.raft_role = if peer.id == request.leader_id {
-                    RustRaftRole::Leader
-                } else if peer.replica_role == RustRaftReplicaRole::Learner {
-                    RustRaftRole::Learner
+                    StateRole::Leader
+                } else if peer.replica_role == ReplicaRole::Learner {
+                    StateRole::Learner
                 } else {
-                    RustRaftRole::Follower
+                    StateRole::Follower
                 };
             }
         }
@@ -2784,24 +2859,24 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(target))?;
         if request.term < node.hard_state.current_term {
             let require_snapshot = node.rejected_apply_index;
-            return Ok(RustRaftAppendEntriesResponse {
+            return Ok(AppendEntriesResponse {
                 term: node.hard_state.current_term,
                 success: false,
                 match_index: node.match_index(),
                 rejection_hint: Some(node.match_index().saturating_add(1)),
                 rejected_index: Some(request_prev_index),
                 require_snapshot,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             });
         }
         if request.term > node.hard_state.current_term {
             node.hard_state.current_term = request.term;
-            node.raft_role = if node.replica_role == RustRaftReplicaRole::Learner {
-                RustRaftRole::Learner
+            node.raft_role = if node.replica_role == ReplicaRole::Learner {
+                StateRole::Learner
             } else {
-                RustRaftRole::Follower
+                StateRole::Follower
             };
         }
         if self
@@ -2811,14 +2886,14 @@ impl RaftCluster {
             .unwrap_or(false)
         {
             let require_snapshot = node.rejected_apply_index;
-            return Ok(RustRaftAppendEntriesResponse {
+            return Ok(AppendEntriesResponse {
                 term: node.hard_state.current_term,
                 success: true,
                 match_index: node.commit_index,
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot,
-                snapshot_state: RustRaftSnapshotState::Receiving,
+                snapshot_state: SnapshotState::Receiving,
                 lease_confirmation_epoch,
                 lease_duration_ms,
             });
@@ -2829,28 +2904,28 @@ impl RaftCluster {
             let term = node.hard_state.current_term;
             let require_snapshot = node.rejected_apply_index;
             self.refresh_cluster_indexes();
-            return Ok(RustRaftAppendEntriesResponse {
+            return Ok(AppendEntriesResponse {
                 term,
                 success: true,
                 match_index,
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch,
                 lease_duration_ms,
             });
         }
         if request_prev_index < node.commit_index {
             let require_snapshot = node.rejected_apply_index;
-            return Ok(RustRaftAppendEntriesResponse {
+            return Ok(AppendEntriesResponse {
                 term: node.hard_state.current_term,
                 success: true,
                 match_index: node.commit_index,
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch,
                 lease_duration_ms,
             });
@@ -2868,14 +2943,14 @@ impl RaftCluster {
                             membership_change_indexes,
                         );
                     }
-                    return Ok(RustRaftAppendEntriesResponse {
+                    return Ok(AppendEntriesResponse {
                         term,
                         success: false,
                         match_index,
                         rejection_hint: Some(match_index.saturating_add(1)),
                         rejected_index: Some(prev.index.saturating_add(1)),
                         require_snapshot,
-                        snapshot_state: RustRaftSnapshotState::None,
+                        snapshot_state: SnapshotState::None,
                         lease_confirmation_epoch,
                         lease_duration_ms,
                     });
@@ -2885,14 +2960,14 @@ impl RaftCluster {
                     Some(_) => {
                         let rejection_hint = node.conflict_next_index(prev.index);
                         let require_snapshot = node.rejected_apply_index;
-                        return Ok(RustRaftAppendEntriesResponse {
+                        return Ok(AppendEntriesResponse {
                             term: node.hard_state.current_term,
                             success: false,
                             match_index,
                             rejection_hint: Some(rejection_hint),
                             rejected_index: Some(prev.index.saturating_add(1)),
                             require_snapshot,
-                            snapshot_state: RustRaftSnapshotState::None,
+                            snapshot_state: SnapshotState::None,
                             lease_confirmation_epoch,
                             lease_duration_ms,
                         });
@@ -2907,14 +2982,14 @@ impl RaftCluster {
                             .rejected_apply_index
                             .or((snapshot_index > 0 && prev.index < snapshot_index)
                                 .then_some(snapshot_index));
-                        return Ok(RustRaftAppendEntriesResponse {
+                        return Ok(AppendEntriesResponse {
                             term: node.hard_state.current_term,
                             success: false,
                             match_index,
                             rejection_hint: Some(match_index.saturating_add(1)),
                             rejected_index: Some(prev.index.saturating_add(1)),
                             require_snapshot,
-                            snapshot_state: RustRaftSnapshotState::None,
+                            snapshot_state: SnapshotState::None,
                             lease_confirmation_epoch,
                             lease_duration_ms,
                         });
@@ -2927,14 +3002,14 @@ impl RaftCluster {
             if entry.log_id.index != expected_index {
                 let match_index = node.match_index();
                 let require_snapshot = node.rejected_apply_index;
-                return Ok(RustRaftAppendEntriesResponse {
+                return Ok(AppendEntriesResponse {
                     term: node.hard_state.current_term,
                     success: false,
                     match_index,
                     rejection_hint: Some(match_index.saturating_add(1)),
                     rejected_index: Some(entry.log_id.index),
                     require_snapshot,
-                    snapshot_state: RustRaftSnapshotState::None,
+                    snapshot_state: SnapshotState::None,
                     lease_confirmation_epoch,
                     lease_duration_ms,
                 });
@@ -2942,10 +3017,10 @@ impl RaftCluster {
         }
 
         node.hard_state.current_term = request.term;
-        node.raft_role = if node.replica_role == RustRaftReplicaRole::Learner {
-            RustRaftRole::Learner
+        node.raft_role = if node.replica_role == ReplicaRole::Learner {
+            StateRole::Learner
         } else {
-            RustRaftRole::Follower
+            StateRole::Follower
         };
         let mut pending_membership_change_index = self.pending_membership_change_index;
         let mut last_index_before_current_term = self.last_index_before_current_term;
@@ -2977,7 +3052,7 @@ impl RaftCluster {
                         if appended_entries_count == 0 {
                             let match_index = node.match_index();
                             let require_snapshot = node.rejected_apply_index;
-                            return Ok(RustRaftAppendEntriesResponse {
+                            return Ok(AppendEntriesResponse {
                                 term: node.hard_state.current_term,
                                 success: false,
                                 match_index,
@@ -2990,7 +3065,7 @@ impl RaftCluster {
                                 ),
                                 rejected_index: Some(entry.log_id.index),
                                 require_snapshot,
-                                snapshot_state: RustRaftSnapshotState::None,
+                                snapshot_state: SnapshotState::None,
                                 lease_confirmation_epoch,
                                 lease_duration_ms,
                             });
@@ -3005,7 +3080,7 @@ impl RaftCluster {
                 if cap_busy_data_append_batch {
                     break;
                 }
-            } else if node.replica_role == RustRaftReplicaRole::Witness {
+            } else if node.replica_role == ReplicaRole::Witness {
                 node.append_witness_entry(entry, is_membership_change);
                 appended_entries_count = appended_entries_count.saturating_add(1);
             }
@@ -3029,14 +3104,14 @@ impl RaftCluster {
         }
         self.refresh_cluster_indexes();
         self.drain_reordered_appends(target)?;
-        Ok(RustRaftAppendEntriesResponse {
+        Ok(AppendEntriesResponse {
             term,
             success: true,
             match_index,
             rejection_hint: None,
             rejected_index: None,
             require_snapshot,
-            snapshot_state: RustRaftSnapshotState::None,
+            snapshot_state: SnapshotState::None,
             lease_confirmation_epoch,
             lease_duration_ms,
         })
@@ -3044,23 +3119,23 @@ impl RaftCluster {
 
     fn cache_reordered_append(
         &mut self,
-        target: RustRaftNodeId,
-        request: RustRaftAppendEntriesRequest,
-        membership_change_indexes: &[RustRaftLogIndex],
+        target: NodeId,
+        request: AppendEntriesRequest,
+        membership_change_indexes: &[LogIndex],
     ) {
         let Some(prev_log_id) = request.prev_log_id.as_ref() else {
             return;
         };
         self.reorder_queues.entry(target).or_default().insert(
             prev_log_id.index,
-            RustRaftReorderedAppend {
+            ReorderedAppend {
                 request,
                 membership_change_indexes: membership_change_indexes.to_vec(),
             },
         );
     }
 
-    fn drain_reordered_appends(&mut self, target: RustRaftNodeId) -> Result<(), RaftError> {
+    fn drain_reordered_appends(&mut self, target: NodeId) -> Result<(), RaftError> {
         loop {
             let match_index = self
                 .nodes
@@ -3102,8 +3177,8 @@ impl RaftCluster {
 
     pub fn read_index(
         &self,
-        request: RustRaftReadIndexRequest,
-    ) -> Result<RustRaftReadIndexResponse, RaftError> {
+        request: ReadIndexRequest,
+    ) -> Result<ReadIndexResponse, RaftError> {
         if request.group_id != self.group_id {
             return Err(RaftError::InvalidRequest(
                 "read index group id mismatch".to_string(),
@@ -3114,7 +3189,7 @@ impl RaftCluster {
             .get(&request.requester_id)
             .ok_or(RaftError::NodeNotFound(request.requester_id))?;
         if !node.healthy {
-            return Ok(RustRaftReadIndexResponse {
+            return Ok(ReadIndexResponse {
                 safe: false,
                 read_index: node.commit_index,
                 lease_read: false,
@@ -3122,7 +3197,7 @@ impl RaftCluster {
             });
         }
         if self.leader_id != Some(request.requester_id) {
-            return Ok(RustRaftReadIndexResponse {
+            return Ok(ReadIndexResponse {
                 safe: false,
                 read_index: node.commit_index,
                 lease_read: false,
@@ -3133,7 +3208,7 @@ impl RaftCluster {
             && self.config.enable_lease_read
             && self.leader_lease_valid;
         if !self.has_live_quorum() && !lease_read {
-            return Ok(RustRaftReadIndexResponse {
+            return Ok(ReadIndexResponse {
                 safe: false,
                 read_index: node.commit_index,
                 lease_read: false,
@@ -3141,7 +3216,7 @@ impl RaftCluster {
             });
         }
         if request.min_commit_index > node.safety_applied_index {
-            return Ok(RustRaftReadIndexResponse {
+            return Ok(ReadIndexResponse {
                 safe: false,
                 read_index: node.commit_index,
                 lease_read: false,
@@ -3152,14 +3227,14 @@ impl RaftCluster {
             .commit_index
             .max(self.last_index_before_current_term.saturating_add(1));
         if read_index > node.safety_applied_index {
-            return Ok(RustRaftReadIndexResponse {
+            return Ok(ReadIndexResponse {
                 safe: false,
                 read_index,
                 lease_read: false,
                 reason: "applied_index_behind_read_index".to_string(),
             });
         }
-        Ok(RustRaftReadIndexResponse {
+        Ok(ReadIndexResponse {
             safe: true,
             read_index,
             lease_read,
@@ -3173,9 +3248,9 @@ impl RaftCluster {
 
     pub fn read_path_report(
         &self,
-        request: RustRaftReadIndexRequest,
-        max_stale_index_lag: RustRaftLogIndex,
-    ) -> Result<RustRaftReadPathReport, RaftError> {
+        request: ReadIndexRequest,
+        max_stale_index_lag: LogIndex,
+    ) -> Result<ReadPathReport, RaftError> {
         if request.group_id != self.group_id {
             return Err(RaftError::InvalidRequest(
                 "read path group id mismatch".to_string(),
@@ -3213,7 +3288,7 @@ impl RaftCluster {
         let read_index = if self.leader_id == Some(request.requester_id) {
             self.read_index(request)?
         } else {
-            RustRaftReadIndexResponse {
+            ReadIndexResponse {
                 safe: node.healthy && quorum.reached && applied_index_fence.passed,
                 read_index: node.commit_index,
                 lease_read: false,
@@ -3246,7 +3321,7 @@ impl RaftCluster {
         } else {
             "read_index_quorum"
         };
-        Ok(RustRaftReadPathReport {
+        Ok(ReadPathReport {
             safe,
             read_index: read_index.read_index,
             lease_read: read_index.lease_read && safe,
@@ -3261,10 +3336,10 @@ impl RaftCluster {
 
     pub fn lease_read_eligible(
         &self,
-        node_id: RustRaftNodeId,
-        min_commit_index: RustRaftLogIndex,
+        node_id: NodeId,
+        min_commit_index: LogIndex,
     ) -> Result<bool, RaftError> {
-        let response = self.read_index(RustRaftReadIndexRequest {
+        let response = self.read_index(ReadIndexRequest {
             group_id: self.group_id,
             requester_id: node_id,
             min_commit_index,
@@ -3273,7 +3348,7 @@ impl RaftCluster {
         Ok(response.safe && response.lease_read)
     }
 
-    pub fn read_quorum_report(&self) -> RustRaftReadQuorumReport {
+    pub fn read_quorum_report(&self) -> ReadQuorumReport {
         let membership = self.membership();
         let live_voters = membership
             .voters
@@ -3307,7 +3382,7 @@ impl RaftCluster {
             .copied()
             .collect::<Vec<_>>();
         let required = membership.quorum_size_with_witness_policy(self.ignore_witness) as u64;
-        RustRaftReadQuorumReport {
+        ReadQuorumReport {
             required,
             live_voters,
             live_witnesses,
@@ -3318,15 +3393,15 @@ impl RaftCluster {
 
     pub fn begin_leader_transfer(
         &mut self,
-        target: RustRaftNodeId,
-    ) -> Result<Option<RaftLeaderTransferState>, RaftError> {
+        target: NodeId,
+    ) -> Result<Option<LeaderTransferState>, RaftError> {
         let Some(leader_id) = self.leader_id else {
             return Err(RaftError::NoLeader);
         };
         let Some(leader) = self.nodes.get(&leader_id) else {
             return Err(RaftError::NoLeader);
         };
-        if leader.raft_role != RustRaftRole::Leader || !leader.healthy {
+        if leader.raft_role != StateRole::Leader || !leader.healthy {
             return Err(RaftError::NoLeader);
         }
         let current_transferee_id = self
@@ -3362,7 +3437,7 @@ impl RaftCluster {
         if self.leader_transfer.is_some() {
             self.aborted_leader_transfers = aborted_transfers;
         }
-        self.leader_transfer = Some(RaftLeaderTransferState {
+        self.leader_transfer = Some(LeaderTransferState {
             transferee_id: target,
             elapsed_ticks: 0,
             timeout_ticks: self.leader_transfer_timeout_ticks,
@@ -3379,7 +3454,7 @@ impl RaftCluster {
         Ok(self.leader_transfer.clone())
     }
 
-    pub fn transfer_leader(&mut self, target: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn transfer_leader(&mut self, target: NodeId) -> Result<(), RaftError> {
         if self.begin_leader_transfer(target)?.is_none() {
             return Ok(());
         }
@@ -3409,7 +3484,7 @@ impl RaftCluster {
         Ok(true)
     }
 
-    fn leader_transfer_target_caught_up(&self, target: RustRaftNodeId) -> Result<bool, RaftError> {
+    fn leader_transfer_target_caught_up(&self, target: NodeId) -> Result<bool, RaftError> {
         let target_node = self
             .nodes
             .get(&target)
@@ -3417,7 +3492,7 @@ impl RaftCluster {
         Ok(target_node.healthy && target_node.match_index() >= self.last_log_index)
     }
 
-    pub fn closest_follower(&self) -> Option<RustRaftNodeId> {
+    pub fn closest_follower(&self) -> Option<NodeId> {
         let leader_id = self.leader_id?;
         let max_match_index = self
             .nodes
@@ -3425,7 +3500,7 @@ impl RaftCluster {
             .filter(|node| {
                 node.id != leader_id && node.healthy && node.replica_role.can_be_leader()
             })
-            .map(RaftNode::match_index)
+            .map(Node::match_index)
             .max()?;
         let mut candidates = self
             .nodes
@@ -3448,8 +3523,8 @@ impl RaftCluster {
 
     pub fn step_down(
         &mut self,
-        transferee: Option<RustRaftNodeId>,
-    ) -> Result<Option<RustRaftNodeId>, RaftError> {
+        transferee: Option<NodeId>,
+    ) -> Result<Option<NodeId>, RaftError> {
         let target = transferee
             .or_else(|| self.closest_follower())
             .ok_or_else(|| {
@@ -3473,7 +3548,7 @@ impl RaftCluster {
             return Ok(false);
         };
         if leader.replica_role.can_be_leader() {
-            leader.raft_role = RustRaftRole::Follower;
+            leader.raft_role = StateRole::Follower;
             leader.auto_promote = false;
         }
         self.leader_id = None;
@@ -3508,36 +3583,36 @@ impl RaftCluster {
         }
     }
 
-    pub fn leader_transfer_state(&self) -> Option<RaftLeaderTransferState> {
+    pub fn leader_transfer_state(&self) -> Option<LeaderTransferState> {
         self.leader_transfer.clone()
     }
 
-    pub fn membership(&self) -> RaftMembership {
-        RaftMembership {
+    pub fn membership(&self) -> Membership {
+        Membership {
             group_id: self.group_id,
             voters: self
                 .nodes
                 .values()
-                .filter(|node| node.replica_role == RustRaftReplicaRole::Voter)
+                .filter(|node| node.replica_role == ReplicaRole::Voter)
                 .map(|node| node.id)
                 .collect(),
             learners: self
                 .nodes
                 .values()
-                .filter(|node| node.replica_role == RustRaftReplicaRole::Learner)
+                .filter(|node| node.replica_role == ReplicaRole::Learner)
                 .map(|node| node.id)
                 .collect(),
             witnesses: self
                 .nodes
                 .values()
-                .filter(|node| node.replica_role == RustRaftReplicaRole::Witness)
+                .filter(|node| node.replica_role == ReplicaRole::Witness)
                 .map(|node| node.id)
                 .collect(),
             epoch: self.current_term,
         }
     }
 
-    pub fn add_peer(&mut self, peer: RustRaftPeer) -> Result<(), RaftError> {
+    pub fn add_peer(&mut self, peer: Peer) -> Result<(), RaftError> {
         if self.nodes.contains_key(&peer.node_id) {
             return Err(RaftError::InvalidRequest(format!(
                 "duplicate raft node id {}",
@@ -3550,14 +3625,14 @@ impl RaftCluster {
         self.clear_reorder_queue_for(peer_id);
         self.nodes.insert(
             peer_id,
-            RaftNode::new(peer_id, peer.role, peer.auto_promote),
+            Node::new(peer_id, peer.role, peer.auto_promote),
         );
         self.peer_pipelines.insert(
             peer_id,
-            RaftReplicationPipeline::new(
+            ReplicationPipeline::new(
                 peer_id,
                 self.last_log_index + 1,
-                RustRaftPipelineLimits::default(),
+                PipelineLimits::default(),
             ),
         );
         self.reset_leader_lease_epoch();
@@ -3568,18 +3643,18 @@ impl RaftCluster {
         Ok(())
     }
 
-    pub fn add_learner(&mut self, mut peer: RustRaftPeer) -> Result<(), RaftError> {
-        peer.role = RustRaftReplicaRole::Learner;
+    pub fn add_learner(&mut self, mut peer: Peer) -> Result<(), RaftError> {
+        peer.role = ReplicaRole::Learner;
         self.add_peer(peer)
     }
 
-    pub fn promote_peer(&mut self, node_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn promote_peer(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         let commit_index = self.commit_index;
         let node = self
             .nodes
             .get_mut(&node_id)
             .ok_or(RaftError::NodeNotFound(node_id))?;
-        if node.replica_role != RustRaftReplicaRole::Learner {
+        if node.replica_role != ReplicaRole::Learner {
             return Err(RaftError::InvalidRequest(format!(
                 "node {} is not a learner",
                 node_id
@@ -3591,20 +3666,20 @@ impl RaftCluster {
                 node_id, commit_index
             )));
         }
-        node.replica_role = RustRaftReplicaRole::Voter;
-        node.raft_role = RustRaftRole::Follower;
+        node.replica_role = ReplicaRole::Voter;
+        node.raft_role = StateRole::Follower;
         node.auto_promote = false;
-        node.auto_promote_state = RaftLearnerAutoPromoteState::Promoted;
+        node.auto_promote_state = LearnerAutoPromoteState::Promoted;
         self.reset_leader_lease_epoch();
         Ok(())
     }
 
-    pub fn add_witness(&mut self, mut peer: RustRaftPeer) -> Result<(), RaftError> {
-        peer.role = RustRaftReplicaRole::Witness;
+    pub fn add_witness(&mut self, mut peer: Peer) -> Result<(), RaftError> {
+        peer.role = ReplicaRole::Witness;
         self.add_peer(peer)
     }
 
-    pub fn remove_peer(&mut self, node_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn remove_peer(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         let removing_leader = self.leader_id == Some(node_id);
         let transfer_target = removing_leader.then(|| self.closest_follower()).flatten();
         if !self.nodes.contains_key(&node_id) {
@@ -3640,9 +3715,9 @@ impl RaftCluster {
 
     fn reset_membership_from_snapshot(
         &mut self,
-        target: RustRaftNodeId,
-        snapshot_membership: &[RustRaftNodeId],
-        snapshot_members: &[RustRaftPeer],
+        target: NodeId,
+        snapshot_membership: &[NodeId],
+        snapshot_members: &[Peer],
     ) {
         let mut retained: BTreeSet<_> = snapshot_membership.iter().copied().collect();
         retained.extend(snapshot_members.iter().map(|peer| peer.node_id));
@@ -3682,17 +3757,17 @@ impl RaftCluster {
                 .and_modify(|node| {
                     node.replica_role = peer.role;
                     node.auto_promote =
-                        peer.role == RustRaftReplicaRole::Learner && peer.auto_promote;
-                    if node.replica_role == RustRaftReplicaRole::Learner {
-                        node.raft_role = RustRaftRole::Learner;
+                        peer.role == ReplicaRole::Learner && peer.auto_promote;
+                    if node.replica_role == ReplicaRole::Learner {
+                        node.raft_role = StateRole::Learner;
                     }
                 })
-                .or_insert_with(|| RaftNode::new(peer.node_id, peer.role, peer.auto_promote));
+                .or_insert_with(|| Node::new(peer.node_id, peer.role, peer.auto_promote));
         }
         for node_id in retained {
             self.nodes
                 .entry(node_id)
-                .or_insert_with(|| RaftNode::new(node_id, RustRaftReplicaRole::Voter, false));
+                .or_insert_with(|| Node::new(node_id, ReplicaRole::Voter, false));
         }
 
         self.reset_leader_lease_epoch();
@@ -3701,11 +3776,11 @@ impl RaftCluster {
         if let Some(leader_id) = self.leader_id {
             for node in self.nodes.values_mut() {
                 node.raft_role = if node.id == leader_id {
-                    RustRaftRole::Leader
-                } else if node.replica_role == RustRaftReplicaRole::Learner {
-                    RustRaftRole::Learner
+                    StateRole::Leader
+                } else if node.replica_role == ReplicaRole::Learner {
+                    StateRole::Learner
                 } else {
-                    RustRaftRole::Follower
+                    StateRole::Follower
                 };
             }
         }
@@ -3713,72 +3788,72 @@ impl RaftCluster {
 
     pub fn apply_committed_membership_operation(
         &mut self,
-        operation: RaftMembershipOperation,
+        operation: MembershipOperation,
     ) -> Result<bool, RaftError> {
         match operation {
-            RaftMembershipOperation::AddNode(peer) => self.apply_committed_add(peer),
-            RaftMembershipOperation::AddVoter(mut peer) => {
-                peer.role = RustRaftReplicaRole::Voter;
+            MembershipOperation::AddNode(peer) => self.apply_committed_add(peer),
+            MembershipOperation::AddVoter(mut peer) => {
+                peer.role = ReplicaRole::Voter;
                 self.apply_committed_add(peer)
             }
-            RaftMembershipOperation::AddLearner(mut peer) => {
-                peer.role = RustRaftReplicaRole::Learner;
+            MembershipOperation::AddLearner(mut peer) => {
+                peer.role = ReplicaRole::Learner;
                 self.apply_committed_add(peer)
             }
-            RaftMembershipOperation::AddWitness(mut peer) => {
-                peer.role = RustRaftReplicaRole::Witness;
+            MembershipOperation::AddWitness(mut peer) => {
+                peer.role = ReplicaRole::Witness;
                 self.apply_committed_add(peer)
             }
-            RaftMembershipOperation::Promote(node_id) => {
+            MembershipOperation::Promote(node_id) => {
                 let node = self
                     .nodes
                     .get_mut(&node_id)
                     .ok_or(RaftError::NodeNotFound(node_id))?;
-                if node.replica_role == RustRaftReplicaRole::Voter {
+                if node.replica_role == ReplicaRole::Voter {
                     return Ok(false);
                 }
-                if node.replica_role != RustRaftReplicaRole::Learner {
+                if node.replica_role != ReplicaRole::Learner {
                     return Err(RaftError::InvalidRequest(format!(
                         "node {} is not a learner",
                         node_id
                     )));
                 }
-                node.replica_role = RustRaftReplicaRole::Voter;
-                node.raft_role = RustRaftRole::Follower;
+                node.replica_role = ReplicaRole::Voter;
+                node.raft_role = StateRole::Follower;
                 node.auto_promote = false;
-                node.auto_promote_state = RaftLearnerAutoPromoteState::Promoted;
+                node.auto_promote_state = LearnerAutoPromoteState::Promoted;
                 self.reset_leader_lease_epoch();
                 self.refresh_replication_pipelines();
                 Ok(true)
             }
-            RaftMembershipOperation::Remove(node_id) => {
+            MembershipOperation::Remove(node_id) => {
                 if !self.nodes.contains_key(&node_id) {
                     return Ok(false);
                 }
                 self.remove_peer(node_id)?;
                 Ok(true)
             }
-            RaftMembershipOperation::TransferLeader(node_id) => {
+            MembershipOperation::TransferLeader(node_id) => {
                 self.transfer_leader(node_id)?;
                 Ok(true)
             }
         }
     }
 
-    fn apply_committed_add(&mut self, peer: RustRaftPeer) -> Result<bool, RaftError> {
+    fn apply_committed_add(&mut self, peer: Peer) -> Result<bool, RaftError> {
         match self.nodes.get_mut(&peer.node_id) {
             None => {
                 self.add_peer(peer)?;
                 Ok(true)
             }
             Some(existing)
-                if existing.replica_role == RustRaftReplicaRole::Learner
-                    && peer.role == RustRaftReplicaRole::Voter =>
+                if existing.replica_role == ReplicaRole::Learner
+                    && peer.role == ReplicaRole::Voter =>
             {
-                existing.replica_role = RustRaftReplicaRole::Voter;
-                existing.raft_role = RustRaftRole::Follower;
+                existing.replica_role = ReplicaRole::Voter;
+                existing.raft_role = StateRole::Follower;
                 existing.auto_promote = false;
-                existing.auto_promote_state = RaftLearnerAutoPromoteState::Promoted;
+                existing.auto_promote_state = LearnerAutoPromoteState::Promoted;
                 self.reset_leader_lease_epoch();
                 self.refresh_replication_pipelines();
                 Ok(true)
@@ -3789,8 +3864,8 @@ impl RaftCluster {
 
     pub fn catchup_report(
         &self,
-        learner_id: RustRaftNodeId,
-    ) -> Result<RaftLearnerCatchUpReport, RaftError> {
+        learner_id: NodeId,
+    ) -> Result<LearnerCatchUpReport, RaftError> {
         let node = self
             .nodes
             .get(&learner_id)
@@ -3802,13 +3877,13 @@ impl RaftCluster {
 
     pub fn learner_catch_up_loop(
         &mut self,
-        learner_id: RustRaftNodeId,
-    ) -> Result<RaftLearnerCatchUpLoopReport, RaftError> {
+        learner_id: NodeId,
+    ) -> Result<LearnerCatchUpLoopReport, RaftError> {
         let learner = self
             .nodes
             .get(&learner_id)
             .ok_or(RaftError::NodeNotFound(learner_id))?;
-        if learner.replica_role != RustRaftReplicaRole::Learner {
+        if learner.replica_role != ReplicaRole::Learner {
             return Err(RaftError::InvalidRequest(format!(
                 "node {} is not a learner",
                 learner_id
@@ -3819,8 +3894,8 @@ impl RaftCluster {
 
     pub fn catch_up_peer(
         &mut self,
-        peer_id: RustRaftNodeId,
-    ) -> Result<RaftLearnerCatchUpLoopReport, RaftError> {
+        peer_id: NodeId,
+    ) -> Result<LearnerCatchUpLoopReport, RaftError> {
         self.catch_up_peer_with_reason(peer_id, "peer")
     }
 
@@ -3858,9 +3933,9 @@ impl RaftCluster {
             let peer_match_index = self
                 .nodes
                 .get(&peer_id)
-                .map(RaftNode::match_index)
+                .map(Node::match_index)
                 .unwrap_or_default();
-            let request = RustRaftAppendEntriesRequest {
+            let request = AppendEntriesRequest {
                 group_id: self.group_id,
                 term: self.current_term,
                 leader_id,
@@ -3878,9 +3953,9 @@ impl RaftCluster {
 
     fn catch_up_peer_with_reason(
         &mut self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         reason_prefix: &str,
-    ) -> Result<RaftLearnerCatchUpLoopReport, RaftError> {
+    ) -> Result<LearnerCatchUpLoopReport, RaftError> {
         let leader_id = self.leader_id.ok_or(RaftError::NoLeader)?;
         let leader_snapshot = self
             .nodes
@@ -3910,7 +3985,7 @@ impl RaftCluster {
             .nodes
             .get(&leader_id)
             .ok_or(RaftError::NodeNotFound(leader_id))?;
-        let missing_tail: Vec<RustRaftLogEntry> = leader
+        let missing_tail: Vec<LogEntry> = leader
             .log_position_at_or_after(current_match.saturating_add(1))
             .map(|position| leader.log[position..].to_vec())
             .unwrap_or_default();
@@ -3920,7 +3995,7 @@ impl RaftCluster {
             .get_mut(&peer_id)
             .ok_or(RaftError::NodeNotFound(peer_id))?;
         for entry in missing_tail {
-            if peer.replica_role == RustRaftReplicaRole::Witness {
+            if peer.replica_role == ReplicaRole::Witness {
                 peer.append_witness_entry(entry, false);
             } else {
                 peer.append_entry(entry);
@@ -3938,14 +4013,14 @@ impl RaftCluster {
                 pipeline.receive_snapshot_chunk(0, true).ok();
                 pipeline.mark_snapshot_rejoin_after_compacted_log();
             }
-            let response = RustRaftAppendEntriesResponse {
+            let response = AppendEntriesResponse {
                 term: self.current_term,
                 success: true,
                 match_index: learner_match_index_after,
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             };
@@ -3960,7 +4035,7 @@ impl RaftCluster {
             self.promote_caught_up_auto_learner(peer_id)?;
         }
 
-        Ok(RaftLearnerCatchUpLoopReport {
+        Ok(LearnerCatchUpLoopReport {
             learner_id: peer_id,
             leader_commit_index,
             learner_match_index_before,
@@ -3981,13 +4056,13 @@ impl RaftCluster {
 
     fn promote_caught_up_auto_learner(
         &mut self,
-        learner_id: RustRaftNodeId,
+        learner_id: NodeId,
     ) -> Result<bool, RaftError> {
         let should_promote = self
             .nodes
             .get(&learner_id)
             .map(|learner| {
-                learner.replica_role == RustRaftReplicaRole::Learner
+                learner.replica_role == ReplicaRole::Learner
                     && learner.auto_promote
                     && learner.match_index() > 0
                     && learner.match_index() >= self.commit_index
@@ -3997,7 +4072,7 @@ impl RaftCluster {
             return Ok(false);
         }
         if let Some(learner) = self.nodes.get_mut(&learner_id) {
-            learner.auto_promote_state = RaftLearnerAutoPromoteState::Promoting;
+            learner.auto_promote_state = LearnerAutoPromoteState::Promoting;
         }
         self.promote_peer(learner_id)?;
         Ok(true)
@@ -4005,27 +4080,27 @@ impl RaftCluster {
 
     pub fn auto_promote_learner(
         &mut self,
-        learner_id: RustRaftNodeId,
-    ) -> Result<RaftLearnerAutoPromoteReport, RaftError> {
+        learner_id: NodeId,
+    ) -> Result<LearnerAutoPromoteReport, RaftError> {
         let (auto_promote, state_before, learner_match_index) = {
             let learner = self
                 .nodes
                 .get(&learner_id)
                 .ok_or(RaftError::NodeNotFound(learner_id))?;
-            if learner.replica_role == RustRaftReplicaRole::Voter
-                && learner.auto_promote_state == RaftLearnerAutoPromoteState::Promoted
+            if learner.replica_role == ReplicaRole::Voter
+                && learner.auto_promote_state == LearnerAutoPromoteState::Promoted
             {
-                return Ok(RaftLearnerAutoPromoteReport {
+                return Ok(LearnerAutoPromoteReport {
                     learner_id,
                     auto_promote: true,
-                    state_before: RaftLearnerAutoPromoteState::Promoted,
-                    state_after: RaftLearnerAutoPromoteState::Promoted,
+                    state_before: LearnerAutoPromoteState::Promoted,
+                    state_after: LearnerAutoPromoteState::Promoted,
                     catchup: None,
                     promoted: true,
                     reason: "learner_promoted".to_string(),
                 });
             }
-            if learner.replica_role != RustRaftReplicaRole::Learner {
+            if learner.replica_role != ReplicaRole::Learner {
                 return Err(RaftError::InvalidRequest(format!(
                     "node {} is not a learner",
                     learner_id
@@ -4039,7 +4114,7 @@ impl RaftCluster {
         };
 
         if !auto_promote {
-            return Ok(RaftLearnerAutoPromoteReport {
+            return Ok(LearnerAutoPromoteReport {
                 learner_id,
                 auto_promote,
                 state_before,
@@ -4050,8 +4125,8 @@ impl RaftCluster {
             });
         }
 
-        if state_before == RaftLearnerAutoPromoteState::Stop && learner_match_index == 0 {
-            return Ok(RaftLearnerAutoPromoteReport {
+        if state_before == LearnerAutoPromoteState::Stop && learner_match_index == 0 {
+            return Ok(LearnerAutoPromoteReport {
                 learner_id,
                 auto_promote,
                 state_before,
@@ -4062,10 +4137,10 @@ impl RaftCluster {
             });
         }
 
-        let catchup_state = if state_before == RaftLearnerAutoPromoteState::Promoting {
-            RaftLearnerAutoPromoteState::Promoting
+        let catchup_state = if state_before == LearnerAutoPromoteState::Promoting {
+            LearnerAutoPromoteState::Promoting
         } else {
-            RaftLearnerAutoPromoteState::Check
+            LearnerAutoPromoteState::Check
         };
         if let Some(learner) = self.nodes.get_mut(&learner_id) {
             learner.auto_promote_state = catchup_state;
@@ -4079,10 +4154,10 @@ impl RaftCluster {
             learner.auto_promote = auto_promote;
         }
         let catchup = catchup?;
-        if state_before == RaftLearnerAutoPromoteState::Stop
+        if state_before == LearnerAutoPromoteState::Stop
             && learner_match_index < self.last_log_index
         {
-            return Ok(RaftLearnerAutoPromoteReport {
+            return Ok(LearnerAutoPromoteReport {
                 learner_id,
                 auto_promote,
                 state_before,
@@ -4093,7 +4168,7 @@ impl RaftCluster {
             });
         }
         if !catchup.caught_up {
-            return Ok(RaftLearnerAutoPromoteReport {
+            return Ok(LearnerAutoPromoteReport {
                 learner_id,
                 auto_promote,
                 state_before,
@@ -4105,7 +4180,7 @@ impl RaftCluster {
         }
 
         if self.membership_change_fence_active() {
-            return Ok(RaftLearnerAutoPromoteReport {
+            return Ok(LearnerAutoPromoteReport {
                 learner_id,
                 auto_promote,
                 state_before,
@@ -4119,14 +4194,14 @@ impl RaftCluster {
         if self
             .nodes
             .get(&learner_id)
-            .map(|node| node.replica_role == RustRaftReplicaRole::Voter)
+            .map(|node| node.replica_role == ReplicaRole::Voter)
             .unwrap_or(false)
         {
-            return Ok(RaftLearnerAutoPromoteReport {
+            return Ok(LearnerAutoPromoteReport {
                 learner_id,
                 auto_promote,
                 state_before,
-                state_after: RaftLearnerAutoPromoteState::Promoted,
+                state_after: LearnerAutoPromoteState::Promoted,
                 catchup: Some(catchup),
                 promoted: true,
                 reason: "learner_promoted".to_string(),
@@ -4134,23 +4209,23 @@ impl RaftCluster {
         }
 
         if let Some(learner) = self.nodes.get_mut(&learner_id) {
-            learner.auto_promote_state = RaftLearnerAutoPromoteState::Promoting;
+            learner.auto_promote_state = LearnerAutoPromoteState::Promoting;
         }
         self.promote_peer(learner_id)?;
-        Ok(RaftLearnerAutoPromoteReport {
+        Ok(LearnerAutoPromoteReport {
             learner_id,
             auto_promote,
             state_before,
-            state_after: RaftLearnerAutoPromoteState::Promoted,
+            state_after: LearnerAutoPromoteState::Promoted,
             catchup: Some(catchup),
             promoted: true,
             reason: "learner_promoted".to_string(),
         })
     }
 
-    pub fn witness_quorum_report<I>(&mut self, acknowledgements: I) -> RaftWitnessQuorumReport
+    pub fn witness_quorum_report<I>(&mut self, acknowledgements: I) -> WitnessQuorumReport
     where
-        I: IntoIterator<Item = RustRaftNodeId>,
+        I: IntoIterator<Item = NodeId>,
     {
         let membership = self.membership();
         let acknowledgements: Vec<_> = acknowledgements.into_iter().collect();
@@ -4172,7 +4247,7 @@ impl RaftCluster {
                 pipeline.record_witness_quorum(acknowledged, required);
             }
         }
-        RaftWitnessQuorumReport {
+        WitnessQuorumReport {
             required,
             acknowledged,
             reached,
@@ -4183,9 +4258,9 @@ impl RaftCluster {
 
     pub fn install_snapshot_to(
         &mut self,
-        target: RustRaftNodeId,
+        target: NodeId,
         snapshot: RaftSnapshot,
-        fence: RustRaftApplySnapshotFence,
+        fence: ApplySnapshotFence,
     ) -> Result<(), RaftError> {
         if snapshot.group_id != self.group_id {
             return Err(RaftError::InvalidRequest(
@@ -4253,10 +4328,10 @@ impl RaftCluster {
 
     pub fn install_snapshot_with_tail_to(
         &mut self,
-        target: RustRaftNodeId,
+        target: NodeId,
         snapshot: RaftSnapshot,
-        fence: RustRaftApplySnapshotFence,
-        tail_entries: Vec<RustRaftLogEntry>,
+        fence: ApplySnapshotFence,
+        tail_entries: Vec<LogEntry>,
     ) -> Result<(), RaftError> {
         let snapshot_index = snapshot.meta.last_log_id.index;
         if let Some(first_tail) = tail_entries.first() {
@@ -4291,14 +4366,14 @@ impl RaftCluster {
         }
         node.advance_commit(self.commit_index.max(node.match_index()));
         if let Some(pipeline) = self.peer_pipelines.get_mut(&target) {
-            let response = RustRaftAppendEntriesResponse {
+            let response = AppendEntriesResponse {
                 term: self.current_term,
                 success: true,
                 match_index: node.match_index(),
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             };
@@ -4309,7 +4384,7 @@ impl RaftCluster {
         Ok(())
     }
 
-    pub fn compact_logs_through(&mut self, log_index: RustRaftLogIndex) -> u64 {
+    pub fn compact_logs_through(&mut self, log_index: LogIndex) -> u64 {
         let leader_id = self.leader_id;
         let leader_compaction_limit = self
             .leader_id
@@ -4334,11 +4409,11 @@ impl RaftCluster {
 
     pub fn compact_logs_with_storage_fence(
         &mut self,
-        log_index: RustRaftLogIndex,
-        fence: RustRaftStorageApplyFence,
-    ) -> Result<RaftWalCompactionReport, RaftError> {
+        log_index: LogIndex,
+        fence: StorageApplyFence,
+    ) -> Result<WalCompactionReport, RaftError> {
         if let Err(error) = matrixraft_validate_storage_apply_fence(&fence) {
-            return Ok(RaftWalCompactionReport {
+            return Ok(WalCompactionReport {
                 requested_log_index: log_index,
                 released_segments: 0,
                 retained_range: self.log_retained_range(),
@@ -4347,7 +4422,7 @@ impl RaftCluster {
             });
         }
         if fence.durable_applied_index < log_index || fence.storage_flushed_index < log_index {
-            return Ok(RaftWalCompactionReport {
+            return Ok(WalCompactionReport {
                 requested_log_index: log_index,
                 released_segments: 0,
                 retained_range: self.log_retained_range(),
@@ -4356,7 +4431,7 @@ impl RaftCluster {
             });
         }
         let removed_entries = self.compact_logs_through(log_index);
-        Ok(RaftWalCompactionReport {
+        Ok(WalCompactionReport {
             requested_log_index: log_index,
             released_segments: removed_entries,
             retained_range: self.log_retained_range(),
@@ -4365,7 +4440,7 @@ impl RaftCluster {
         })
     }
 
-    fn log_retained_range(&self) -> RaftLogRetainedRange {
+    fn log_retained_range(&self) -> LogRetainedRange {
         // Each node's log is index-ordered, so its bounds are its ends.
         let first_log_index = self
             .nodes
@@ -4380,7 +4455,7 @@ impl RaftCluster {
             .max()
             .unwrap_or(self.last_log_index);
         let record_count = self.nodes.values().map(|node| node.log.len() as u64).sum();
-        RaftLogRetainedRange {
+        LogRetainedRange {
             first_log_index,
             last_log_index,
             first_segment_id: 0,
@@ -4433,7 +4508,7 @@ impl RaftCluster {
 
     pub fn checkpoint_snapshot(
         &self,
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         snapshot_id: impl Into<String>,
     ) -> Result<RaftSnapshot, RaftError> {
         let node = self
@@ -4443,9 +4518,9 @@ impl RaftCluster {
         let snapshot_index = node.commit_index.max(node.match_index());
         Ok(RaftSnapshot {
             group_id: self.group_id,
-            meta: RustRaftSnapshotMeta {
+            meta: SnapshotMetadata {
                 snapshot_id: snapshot_id.into(),
-                last_log_id: RustRaftLogId {
+                last_log_id: LogId {
                     term: node.hard_state.current_term,
                     index: snapshot_index,
                 },
@@ -4460,7 +4535,7 @@ impl RaftCluster {
 
     pub fn install_snapshot_chunk_to(
         &mut self,
-        target: RustRaftNodeId,
+        target: NodeId,
         request: InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse, RaftError> {
         if request.group_id != self.group_id {
@@ -4513,7 +4588,7 @@ impl RaftCluster {
             Some(installer) if request.chunk.offset == 0 && installer.next_offset != 0 => {
                 self.snapshot_installers.insert(
                     target,
-                    RaftSnapshotInstallState::new(request.chunk.meta.clone()),
+                    SnapshotInstallState::new(request.chunk.meta.clone()),
                 );
                 self.snapshot_installers
                     .get_mut(&target)
@@ -4529,7 +4604,7 @@ impl RaftCluster {
                 }
                 self.snapshot_installers.insert(
                     target,
-                    RaftSnapshotInstallState::new(request.chunk.meta.clone()),
+                    SnapshotInstallState::new(request.chunk.meta.clone()),
                 );
                 self.snapshot_installers
                     .get_mut(&target)
@@ -4553,7 +4628,7 @@ impl RaftCluster {
             .expect("completed snapshot installer");
         let snapshot = install.finish(self.group_id)?;
         let snapshot_index = snapshot.meta.last_log_id.index;
-        let fence = RustRaftApplySnapshotFence {
+        let fence = ApplySnapshotFence {
             applied_index: snapshot_index,
             commit_index: snapshot_index,
             installed_snapshot_index: snapshot_index,
@@ -4579,8 +4654,8 @@ impl RaftCluster {
 
     pub fn install_snapshot_lifecycle_request_to(
         &mut self,
-        target: RustRaftNodeId,
-        lifecycle: &mut RaftSnapshotLifecycle,
+        target: NodeId,
+        lifecycle: &mut SnapshotLifecycle,
         request: InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse, RaftError> {
         if request.group_id != self.group_id {
@@ -4622,7 +4697,7 @@ impl RaftCluster {
                 self.install_snapshot_to(
                     target,
                     snapshot,
-                    RustRaftApplySnapshotFence {
+                    ApplySnapshotFence {
                         applied_index: snapshot_index,
                         commit_index: snapshot_index,
                         installed_snapshot_index: snapshot_index,
@@ -4649,7 +4724,7 @@ impl RaftCluster {
 
     fn stale_snapshot_chunk_response(
         &mut self,
-        target: RustRaftNodeId,
+        target: NodeId,
         request: &InstallSnapshotRequest,
         next_offset: u64,
     ) -> Result<Option<InstallSnapshotResponse>, RaftError> {
@@ -4678,16 +4753,16 @@ impl RaftCluster {
 
     fn install_or_queue_completed_snapshot(
         &mut self,
-        target: RustRaftNodeId,
+        target: NodeId,
         snapshot: RaftSnapshot,
-        fence: RustRaftApplySnapshotFence,
+        fence: ApplySnapshotFence,
     ) -> Result<bool, RaftError> {
         match self.install_snapshot_to(target, snapshot.clone(), fence.clone()) {
             Ok(()) => Ok(true),
             Err(error) if Self::snapshot_install_waits_for_apply(&error) => {
                 self.pending_snapshots.insert(
                     target,
-                    RustRaftPendingSnapshotInstall { snapshot, fence },
+                    PendingSnapshotInstall { snapshot, fence },
                 );
                 Ok(false)
             }
@@ -4697,7 +4772,7 @@ impl RaftCluster {
 
     fn try_install_pending_snapshot_to(
         &mut self,
-        target: RustRaftNodeId,
+        target: NodeId,
     ) -> Result<bool, RaftError> {
         let Some(pending) = self.pending_snapshots.get(&target).cloned() else {
             return Ok(false);
@@ -4721,7 +4796,7 @@ impl RaftCluster {
 
     fn reject_snapshot_before_observe(
         &self,
-        target: RustRaftNodeId,
+        target: NodeId,
         request: &InstallSnapshotRequest,
         next_offset: u64,
     ) -> Result<Option<InstallSnapshotResponse>, RaftError> {
@@ -4791,21 +4866,21 @@ impl RaftCluster {
         for peer in self.nodes.values_mut() {
             peer.hard_state.current_term = peer.hard_state.current_term.max(request.term);
             peer.raft_role = if peer.id == request.leader_id {
-                RustRaftRole::Leader
-            } else if peer.replica_role == RustRaftReplicaRole::Learner {
-                RustRaftRole::Learner
+                StateRole::Leader
+            } else if peer.replica_role == ReplicaRole::Learner {
+                StateRole::Learner
             } else {
-                RustRaftRole::Follower
+                StateRole::Follower
             };
         }
     }
 
-    pub fn status(&self, node_id: RustRaftNodeId) -> Result<RustRaftStatusSnapshot, RaftError> {
+    pub fn status(&self, node_id: NodeId) -> Result<StatusSnapshot, RaftError> {
         let node = self
             .nodes
             .get(&node_id)
             .ok_or(RaftError::NodeNotFound(node_id))?;
-        Ok(RustRaftStatusSnapshot {
+        Ok(StatusSnapshot {
             group_id: self.group_id,
             node_id,
             role: node.raft_role,
@@ -4823,11 +4898,11 @@ impl RaftCluster {
                 .nodes
                 .values()
                 .filter(|peer| peer.id != node_id)
-                .map(|peer| RustRaftPeerStatus {
+                .map(|peer| PeerStatus {
                     node_id: peer.id,
                     matched: peer.match_index(),
                     next_index: peer.match_index() + 1,
-                    learner: peer.replica_role == RustRaftReplicaRole::Learner,
+                    learner: peer.replica_role == ReplicaRole::Learner,
                     healthy: peer.healthy,
                     lag: node.match_index().saturating_sub(peer.match_index()),
                 })
@@ -4835,7 +4910,7 @@ impl RaftCluster {
         })
     }
 
-    pub fn cluster_status_report(&self) -> Result<RaftClusterStatusReport, RaftError> {
+    pub fn cluster_status_report(&self) -> Result<ClusterStatusReport, RaftError> {
         let nodes = self
             .node_ids()
             .into_iter()
@@ -4849,7 +4924,7 @@ impl RaftCluster {
         ))
     }
 
-    pub fn snapshot_trigger_in_progress(&self) -> Option<&RustRaftSnapshotTriggerState> {
+    pub fn snapshot_trigger_in_progress(&self) -> Option<&SnapshotTriggerState> {
         self.snapshot_trigger.as_ref()
     }
 
@@ -4857,8 +4932,8 @@ impl RaftCluster {
         self.duplicate_snapshot_trigger_requests
     }
 
-    pub fn snapshot_trigger_status(&self) -> RustRaftSnapshotTriggerStatus {
-        RustRaftSnapshotTriggerStatus {
+    pub fn snapshot_trigger_status(&self) -> SnapshotTriggerStatus {
+        SnapshotTriggerStatus {
             in_progress: self.snapshot_trigger.is_some(),
             snapshot_id: self
                 .snapshot_trigger
@@ -4900,21 +4975,21 @@ impl RaftCluster {
         }
     }
 
-    pub fn trigger_snapshot(&mut self) -> Result<RustRaftSnapshotMeta, RaftError> {
+    pub fn trigger_snapshot(&mut self) -> Result<SnapshotMetadata, RaftError> {
         if let Some(trigger) = &self.snapshot_trigger {
             self.duplicate_snapshot_trigger_requests += 1;
             return Ok(trigger.meta.clone());
         }
-        let meta = RustRaftSnapshotMeta {
+        let meta = SnapshotMetadata {
             snapshot_id: format!("{}-{}", self.group_id, self.commit_index),
-            last_log_id: RustRaftLogId {
+            last_log_id: LogId {
                 term: self.current_term,
                 index: self.commit_index,
             },
             membership: self.node_ids(),
             members: self.snapshot_members(),
         };
-        self.snapshot_trigger = Some(RustRaftSnapshotTriggerState {
+        self.snapshot_trigger = Some(SnapshotTriggerState {
             meta: meta.clone(),
             elapsed_ticks: 0,
             timeout_ticks: self.leader_transfer_timeout_ticks,
@@ -4958,7 +5033,7 @@ impl RaftCluster {
 
     fn publish_ready_snapshot_to_waiting_peers(
         &mut self,
-        meta: RustRaftSnapshotMeta,
+        meta: SnapshotMetadata,
     ) -> Result<(), RaftError> {
         let Some(leader_id) = self.leader_id else {
             return Ok(());
@@ -5001,15 +5076,15 @@ impl RaftCluster {
 
     pub fn peer_pipeline_status(
         &self,
-        peer_id: RustRaftNodeId,
-    ) -> Result<RaftPeerPipelineState, RaftError> {
+        peer_id: NodeId,
+    ) -> Result<PeerProgress, RaftError> {
         self.peer_pipelines
             .get(&peer_id)
-            .map(RaftReplicationPipeline::status)
+            .map(ReplicationPipeline::status)
             .ok_or(RaftError::NodeNotFound(peer_id))
     }
 
-    pub fn peer_pipeline_statuses(&self) -> Vec<RaftPeerPipelineState> {
+    pub fn peer_pipeline_statuses(&self) -> Vec<PeerProgress> {
         self.peer_pipelines
             .iter()
             .filter(|(peer_id, _)| Some(**peer_id) != self.leader_id)
@@ -5019,8 +5094,8 @@ impl RaftCluster {
 
     pub fn receive_out_of_order_append_for(
         &mut self,
-        peer_id: RustRaftNodeId,
-        entry: RustRaftLogEntry,
+        peer_id: NodeId,
+        entry: LogEntry,
     ) -> Result<(), RaftError> {
         self.peer_pipelines
             .get_mut(&peer_id)
@@ -5028,7 +5103,7 @@ impl RaftCluster {
             .receive_out_of_order(&entry)
     }
 
-    pub fn expire_peer_reorder_queue(&mut self, peer_id: RustRaftNodeId) -> Result<u64, RaftError> {
+    pub fn expire_peer_reorder_queue(&mut self, peer_id: NodeId) -> Result<u64, RaftError> {
         Ok(self
             .peer_pipelines
             .get_mut(&peer_id)
@@ -5036,7 +5111,7 @@ impl RaftCluster {
             .expire_reorder_queue())
     }
 
-    pub fn record_network_error_for(&mut self, peer_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn record_network_error_for(&mut self, peer_id: NodeId) -> Result<(), RaftError> {
         let should_probe = self
             .peer_pipelines
             .get_mut(&peer_id)
@@ -5056,7 +5131,7 @@ impl RaftCluster {
 
     pub fn record_replication_task_result_for(
         &mut self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         success: bool,
     ) -> Result<bool, RaftError> {
         self.nodes
@@ -5096,9 +5171,9 @@ impl RaftCluster {
 
     pub fn begin_snapshot_send_to(
         &mut self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<(), RaftError> {
         self.peer_pipelines
@@ -5109,7 +5184,7 @@ impl RaftCluster {
 
     pub fn record_snapshot_chunk_sent_to(
         &mut self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         bytes: u64,
     ) -> Result<(), RaftError> {
         self.peer_pipelines
@@ -5120,7 +5195,7 @@ impl RaftCluster {
 
     pub fn acknowledge_snapshot_chunk_to(
         &mut self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     ) -> Result<(), RaftError> {
         self.peer_pipelines
             .get_mut(&peer_id)
@@ -5130,9 +5205,9 @@ impl RaftCluster {
 
     pub fn handle_snapshot_finish_from(
         &mut self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         accepted: bool,
-        committed_index: RustRaftLogIndex,
+        committed_index: LogIndex,
     ) -> Result<(), RaftError> {
         let pipeline = self
             .peer_pipelines
@@ -5160,7 +5235,7 @@ impl RaftCluster {
 
     pub fn update_snapshot_progress_from(
         &mut self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         remote_receiving: bool,
         elapsed_since_last_receiving_ms: u64,
         send_timeout_ms: u64,
@@ -5176,7 +5251,7 @@ impl RaftCluster {
             ))
     }
 
-    pub fn retry_snapshot_chunk_to(&mut self, peer_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn retry_snapshot_chunk_to(&mut self, peer_id: NodeId) -> Result<(), RaftError> {
         self.peer_pipelines
             .get_mut(&peer_id)
             .ok_or(RaftError::NodeNotFound(peer_id))?
@@ -5185,9 +5260,9 @@ impl RaftCluster {
 
     pub fn begin_snapshot_install_from(
         &mut self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<(), RaftError> {
         self.peer_pipelines
@@ -5198,7 +5273,7 @@ impl RaftCluster {
 
     pub fn receive_snapshot_chunk_from(
         &mut self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         bytes: u64,
         done: bool,
     ) -> Result<(), RaftError> {
@@ -5208,7 +5283,7 @@ impl RaftCluster {
             .receive_snapshot_chunk(bytes, done)
     }
 
-    pub fn cancel_snapshot_send_to(&mut self, peer_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn cancel_snapshot_send_to(&mut self, peer_id: NodeId) -> Result<(), RaftError> {
         self.peer_pipelines
             .get_mut(&peer_id)
             .ok_or(RaftError::NodeNotFound(peer_id))?
@@ -5218,7 +5293,7 @@ impl RaftCluster {
 
     pub fn rollback_snapshot_install_from(
         &mut self,
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     ) -> Result<(), RaftError> {
         self.peer_pipelines
             .get_mut(&peer_id)
@@ -5227,14 +5302,14 @@ impl RaftCluster {
         Ok(())
     }
 
-    pub fn node_ids(&self) -> Vec<RustRaftNodeId> {
+    pub fn node_ids(&self) -> Vec<NodeId> {
         self.nodes.keys().copied().collect()
     }
 
-    fn snapshot_members(&self) -> Vec<RustRaftPeer> {
+    fn snapshot_members(&self) -> Vec<Peer> {
         self.nodes
             .values()
-            .map(|node| RustRaftPeer {
+            .map(|node| Peer {
                 node_id: node.id,
                 raft_addr: String::new(),
                 snapshot_addr: String::new(),
@@ -5250,11 +5325,11 @@ impl RaftCluster {
             .values()
             .filter(|node| {
                 node.replica_role.participates_in_quorum()
-                    && !(self.ignore_witness && node.replica_role == RustRaftReplicaRole::Witness)
-                    && (node.replica_role != RustRaftReplicaRole::Witness
+                    && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness)
+                    && (node.replica_role != ReplicaRole::Witness
                         || self.count_witness_in_commit_quorum)
             })
-            .map(RaftNode::match_index)
+            .map(Node::match_index)
             .collect();
         let quorum_size = self.commit_quorum_size();
         if candidate_indexes.len() < quorum_size {
@@ -5298,7 +5373,7 @@ impl RaftCluster {
         self.last_log_index = self
             .nodes
             .values()
-            .map(RaftNode::match_index)
+            .map(Node::match_index)
             .max()
             .unwrap_or_default();
     }
@@ -5308,10 +5383,10 @@ impl RaftCluster {
             .nodes
             .values()
             .filter(|node| {
-                node.replica_role == RustRaftReplicaRole::Voter
+                node.replica_role == ReplicaRole::Voter
                     || (!self.ignore_witness
                         && self.count_witness_in_commit_quorum
-                        && node.replica_role == RustRaftReplicaRole::Witness)
+                        && node.replica_role == ReplicaRole::Witness)
             })
             .count();
         voters / 2 + 1
@@ -5324,7 +5399,7 @@ impl RaftCluster {
             .filter(|node| {
                 node.healthy
                     && node.replica_role.participates_in_quorum()
-                    && !(self.ignore_witness && node.replica_role == RustRaftReplicaRole::Witness)
+                    && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness)
             })
             .count();
         live_voters
@@ -5333,20 +5408,20 @@ impl RaftCluster {
                 .quorum_size_with_witness_policy(self.ignore_witness)
     }
 
-    fn reset_replication_pipelines_for_leader(&mut self, leader_id: RustRaftNodeId) {
+    fn reset_replication_pipelines_for_leader(&mut self, leader_id: NodeId) {
         let next_index = self.last_log_index + 1;
         for node_id in self.nodes.keys().copied().collect::<Vec<_>>() {
             let pipeline = self.peer_pipelines.entry(node_id).or_insert_with(|| {
-                RaftReplicationPipeline::new(node_id, next_index, RustRaftPipelineLimits::default())
+                ReplicationPipeline::new(node_id, next_index, PipelineLimits::default())
             });
             let is_leader = node_id == leader_id;
             pipeline.reset_for_leader_transition(
                 if is_leader { self.last_log_index } else { 0 },
                 next_index,
                 if is_leader {
-                    RustRaftPeerProgressState::Replicate
+                    ProgressState::Replicate
                 } else {
-                    RustRaftPeerProgressState::Probe
+                    ProgressState::Probe
                 },
             );
         }
@@ -5355,23 +5430,23 @@ impl RaftCluster {
     fn refresh_replication_pipelines(&mut self) {
         for (node_id, node) in &self.nodes {
             self.peer_pipelines.entry(*node_id).or_insert_with(|| {
-                RaftReplicationPipeline::new(
+                ReplicationPipeline::new(
                     *node_id,
                     node.match_index() + 1,
-                    RustRaftPipelineLimits::default(),
+                    PipelineLimits::default(),
                 )
             });
         }
         if let Some(leader_id) = self.leader_id {
             if let Some(pipeline) = self.peer_pipelines.get_mut(&leader_id) {
-                let response = RustRaftAppendEntriesResponse {
+                let response = AppendEntriesResponse {
                     term: self.current_term,
                     success: true,
                     match_index: self.last_log_index,
                     rejection_hint: None,
                     rejected_index: None,
                     require_snapshot: None,
-                    snapshot_state: RustRaftSnapshotState::None,
+                    snapshot_state: SnapshotState::None,
                     lease_confirmation_epoch: 0,
                     lease_duration_ms: 0,
                 };
@@ -5381,51 +5456,51 @@ impl RaftCluster {
     }
 }
 
-impl RustRaftConsensus for RaftCluster {
-    fn start(&mut self) -> Result<(), RustRaftError> {
+impl Consensus for RaftCluster {
+    fn start(&mut self) -> Result<(), RaftError> {
         RaftCluster::start(self)
     }
 
-    fn stop(&mut self) -> Result<(), RustRaftError> {
+    fn stop(&mut self) -> Result<(), RaftError> {
         RaftCluster::stop(self)
     }
 
-    fn status(&self) -> Result<RustRaftStatusSnapshot, RustRaftError> {
+    fn status(&self) -> Result<StatusSnapshot, RaftError> {
         let node_id = self.leader_id.ok_or(RaftError::NoLeader)?;
         RaftCluster::status(self, node_id)
     }
 
-    fn is_busy(&self) -> Result<bool, RustRaftError> {
+    fn is_busy(&self) -> Result<bool, RaftError> {
         Ok(RaftCluster::is_busy(self))
     }
 
-    fn step(&mut self, message: RustRaftMessage) -> Result<RustRaftStepResult, RustRaftError> {
+    fn step(&mut self, message: Message) -> Result<StepResult, RaftError> {
         RaftCluster::step(self, message)
     }
 
     fn step_batch(
         &mut self,
-        messages: Vec<RustRaftMessage>,
-    ) -> Result<Vec<RustRaftStepResult>, RustRaftError> {
+        messages: Vec<Message>,
+    ) -> Result<Vec<StepResult>, RaftError> {
         RaftCluster::step_batch(self, messages)
     }
 
     fn propose(
         &mut self,
-        payload: RustRaftPayload,
-        options: RustRaftProposeOptions,
-    ) -> Result<RustRaftLogId, RustRaftError> {
+        payload: Payload,
+        options: ProposeOptions,
+    ) -> Result<LogId, RaftError> {
         RaftCluster::propose_with_options(self, payload, options)
     }
 
     fn read_index(
         &self,
-        min_commit_index: RustRaftLogIndex,
-    ) -> Result<RustRaftReadIndexResponse, RustRaftError> {
+        min_commit_index: LogIndex,
+    ) -> Result<ReadIndexResponse, RaftError> {
         let requester_id = self.leader_id.ok_or(RaftError::NoLeader)?;
         RaftCluster::read_index(
             self,
-            RustRaftReadIndexRequest {
+            ReadIndexRequest {
                 group_id: self.group_id,
                 requester_id,
                 min_commit_index,
@@ -5434,35 +5509,35 @@ impl RustRaftConsensus for RaftCluster {
         )
     }
 
-    fn add_peer(&mut self, peer: RustRaftPeer) -> Result<(), RustRaftError> {
+    fn add_peer(&mut self, peer: Peer) -> Result<(), RaftError> {
         RaftCluster::add_peer(self, peer)
     }
 
-    fn add_learner(&mut self, peer: RustRaftPeer) -> Result<(), RustRaftError> {
+    fn add_learner(&mut self, peer: Peer) -> Result<(), RaftError> {
         RaftCluster::add_learner(self, peer)
     }
 
-    fn promote_peer(&mut self, node_id: RustRaftNodeId) -> Result<(), RustRaftError> {
+    fn promote_peer(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         RaftCluster::promote_peer(self, node_id)
     }
 
-    fn add_witness(&mut self, peer: RustRaftPeer) -> Result<(), RustRaftError> {
+    fn add_witness(&mut self, peer: Peer) -> Result<(), RaftError> {
         RaftCluster::add_witness(self, peer)
     }
 
-    fn remove_peer(&mut self, node_id: RustRaftNodeId) -> Result<(), RustRaftError> {
+    fn remove_peer(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         RaftCluster::remove_peer(self, node_id)
     }
 
-    fn transfer_leader(&mut self, target: RustRaftNodeId) -> Result<(), RustRaftError> {
+    fn transfer_leader(&mut self, target: NodeId) -> Result<(), RaftError> {
         RaftCluster::transfer_leader(self, target)
     }
 
-    fn resign_leader(&mut self, reason: &str) -> Result<bool, RustRaftError> {
+    fn resign_leader(&mut self, reason: &str) -> Result<bool, RaftError> {
         RaftCluster::resign_leader(self, reason)
     }
 
-    fn campaign(&mut self, forced: bool) -> Result<(), RustRaftError> {
+    fn campaign(&mut self, forced: bool) -> Result<(), RaftError> {
         let candidate_id = self.leader_id.unwrap_or_else(|| {
             self.nodes
                 .values()
@@ -5473,15 +5548,15 @@ impl RustRaftConsensus for RaftCluster {
         RaftCluster::campaign(self, candidate_id, forced)
     }
 
-    fn release_memory(&mut self) -> Result<bool, RustRaftError> {
+    fn release_memory(&mut self) -> Result<bool, RaftError> {
         RaftCluster::release_memory(self)
     }
 
-    fn trigger_snapshot(&mut self) -> Result<RustRaftSnapshotMeta, RustRaftError> {
+    fn trigger_snapshot(&mut self) -> Result<SnapshotMetadata, RaftError> {
         RaftCluster::trigger_snapshot(self)
     }
 
-    fn complete_snapshot_trigger(&mut self, snapshot_id: &str) -> Result<(), RustRaftError> {
+    fn complete_snapshot_trigger(&mut self, snapshot_id: &str) -> Result<(), RaftError> {
         RaftCluster::complete_snapshot_trigger(self, snapshot_id)
     }
 }

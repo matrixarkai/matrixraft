@@ -13,13 +13,13 @@ pub const MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS: u64 = i64::MAX as u64;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftMailPriority {
+pub enum MailPriority {
     Urgent,
     Normal,
     Slowly,
 }
 
-impl RustRaftMailPriority {
+impl MailPriority {
     fn index(self) -> usize {
         match self {
             Self::Urgent => 0,
@@ -30,28 +30,28 @@ impl RustRaftMailPriority {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftMailBoxFetchPolicy {
+pub struct MailBoxFetchPolicy {
     pub limit: usize,
     pub timeout_ms: u64,
-    pub include_until: RustRaftMailPriority,
+    pub include_until: MailPriority,
 }
 
-impl Default for RustRaftMailBoxFetchPolicy {
+impl Default for MailBoxFetchPolicy {
     fn default() -> Self {
         Self {
             limit: 1,
             timeout_ms: MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS,
-            include_until: RustRaftMailPriority::Urgent,
+            include_until: MailPriority::Urgent,
         }
     }
 }
 
 #[derive(Debug)]
-struct RustRaftMailBoxInner<Mail> {
+struct MailBoxInner<Mail> {
     channels: [VecDeque<Mail>; 3],
 }
 
-impl<Mail> RustRaftMailBoxInner<Mail> {
+impl<Mail> MailBoxInner<Mail> {
     fn new() -> Self {
         Self {
             channels: std::array::from_fn(|_| VecDeque::new()),
@@ -64,24 +64,24 @@ impl<Mail> RustRaftMailBoxInner<Mail> {
 }
 
 #[derive(Debug)]
-pub struct RustRaftMailBox<Mail> {
+pub struct MailBox<Mail> {
     high_watermark: usize,
-    inner: Mutex<RustRaftMailBoxInner<Mail>>,
+    inner: Mutex<MailBoxInner<Mail>>,
     readable: Condvar,
     writable: Condvar,
 }
 
-impl<Mail> RustRaftMailBox<Mail> {
+impl<Mail> MailBox<Mail> {
     pub fn new(high_watermark: usize) -> Self {
         Self {
             high_watermark: high_watermark.max(1),
-            inner: Mutex::new(RustRaftMailBoxInner::new()),
+            inner: Mutex::new(MailBoxInner::new()),
             readable: Condvar::new(),
             writable: Condvar::new(),
         }
     }
 
-    pub fn try_send(&self, priority: RustRaftMailPriority, mail: Mail) -> bool {
+    pub fn try_send(&self, priority: MailPriority, mail: Mail) -> bool {
         let mut inner = self.inner.lock().expect("mailbox mutex poisoned");
         let channel = &mut inner.channels[priority.index()];
         if channel.len() >= self.high_watermark {
@@ -93,7 +93,7 @@ impl<Mail> RustRaftMailBox<Mail> {
         true
     }
 
-    pub fn wait_and_send(&self, priority: RustRaftMailPriority, mail: Mail) {
+    pub fn wait_and_send(&self, priority: MailPriority, mail: Mail) {
         let mut inner = self.inner.lock().expect("mailbox mutex poisoned");
         while inner.channels[priority.index()].len() >= self.high_watermark {
             inner = self.writable.wait(inner).expect("mailbox mutex poisoned");
@@ -103,13 +103,13 @@ impl<Mail> RustRaftMailBox<Mail> {
         self.readable.notify_one();
     }
 
-    pub fn send(&self, priority: RustRaftMailPriority, mail: Mail) {
+    pub fn send(&self, priority: MailPriority, mail: Mail) {
         let mut inner = self.inner.lock().expect("mailbox mutex poisoned");
         inner.channels[priority.index()].push_back(mail);
         self.readable.notify_one();
     }
 
-    pub fn fetch(&self, policy: RustRaftMailBoxFetchPolicy) -> Vec<Mail> {
+    pub fn fetch(&self, policy: MailBoxFetchPolicy) -> Vec<Mail> {
         let mut inner = self.inner.lock().expect("mailbox mutex poisoned");
         if !inner.has_new_mail() && policy.timeout_ms == MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS {
             while !inner.has_new_mail() {
@@ -166,7 +166,7 @@ impl<Mail> RustRaftMailBox<Mail> {
         self.writable.notify_all();
     }
 
-    pub fn len(&self, priority: RustRaftMailPriority) -> usize {
+    pub fn len(&self, priority: MailPriority) -> usize {
         self.inner.lock().expect("mailbox mutex poisoned").channels[priority.index()].len()
     }
 

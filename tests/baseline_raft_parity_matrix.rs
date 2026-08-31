@@ -3,11 +3,11 @@
 
 use matrixraft::{
     matrixraft_baseline_raft_parity_matrix, matrixraft_baseline_raft_reference_policy,
-    matrixraft_parity_report, RustRaftBaselineRaftParityStatus, RustRaftReadinessSnapshot,
+    matrixraft_parity_report, BaselineRaftParityStatus, ReadinessSnapshot,
 };
 
-fn ready_snapshot() -> RustRaftReadinessSnapshot {
-    RustRaftReadinessSnapshot {
+fn ready_snapshot() -> ReadinessSnapshot {
+    ReadinessSnapshot {
         matrixraft_leader_write_authority_present: true,
         matrixraft_operator_observability_present: true,
         matrixraft_rpc_transport_contract_present: true,
@@ -81,7 +81,7 @@ fn baseline_raft_parity_report_tracks_gaps_and_intentional_differences() {
         .expect("leader transfer parity item");
     assert_eq!(
         leader_transfer.status,
-        RustRaftBaselineRaftParityStatus::IntentionalDifference
+        BaselineRaftParityStatus::IntentionalDifference
     );
     assert!(leader_transfer.note.contains("consuming runtime"));
 }
@@ -99,7 +99,7 @@ fn ready_baseline_raft_matrix_has_only_declared_runtime_split_difference() {
         report
             .baseline_raft_parity_matrix
             .iter()
-            .filter(|item| item.status == RustRaftBaselineRaftParityStatus::Satisfied)
+            .filter(|item| item.status == BaselineRaftParityStatus::Satisfied)
             .count()
             >= 12
     );

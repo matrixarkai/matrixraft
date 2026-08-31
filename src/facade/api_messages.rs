@@ -5,28 +5,28 @@
 // Split from src/lib.rs to keep the crate facade small and focused.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftNodeOptions {
-    pub group_id: RustRaftGroupId,
-    pub node_id: RustRaftNodeId,
+pub struct NodeOptions {
+    pub group_id: GroupId,
+    pub node_id: NodeId,
     pub raft_addr: String,
     pub snapshot_addr: String,
     pub wal_dir: String,
     pub snapshot_dir: String,
-    pub role: RustRaftReplicaRole,
-    pub config: RustRaftConfig,
+    pub role: ReplicaRole,
+    pub config: Config,
     #[serde(default)]
-    pub peers: Vec<RustRaftPeer>,
+    pub peers: Vec<Peer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftProposeOptions {
-    pub expected_term: Option<RustRaftTerm>,
+pub struct ProposeOptions {
+    pub expected_term: Option<Term>,
     pub is_command: bool,
     #[serde(default)]
     pub is_membership_change: bool,
 }
 
-impl Default for RustRaftProposeOptions {
+impl Default for ProposeOptions {
     fn default() -> Self {
         Self {
             expected_term: None,
@@ -37,38 +37,38 @@ impl Default for RustRaftProposeOptions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftApplyRequest {
-    pub group_id: RustRaftGroupId,
-    pub log_id: RustRaftLogId,
-    pub payload: RustRaftPayload,
+pub struct ApplyRequest {
+    pub group_id: GroupId,
+    pub log_id: LogId,
+    pub payload: Payload,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftApplyResponse {
-    pub applied_index: RustRaftLogIndex,
-    pub response: RustRaftPayload,
+pub struct ApplyResponse {
+    pub applied_index: LogIndex,
+    pub response: Payload,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftGenericApplyRequest<G = RustRaftGroupId, P = RustRaftPayload> {
+pub struct GenericApplyRequest<G = GroupId, P = Payload> {
     pub group_id: G,
-    pub log_id: RustRaftLogId,
+    pub log_id: LogId,
     pub payload: P,
 }
 
-pub type RaftApplyRequest<G = RustRaftGroupId, P = EntryPayload> =
-    RustRaftGenericApplyRequest<G, P>;
+pub type RaftApplyRequest<G = GroupId, P = EntryPayload> =
+    GenericApplyRequest<G, P>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftGenericApplyResponse<P = RustRaftPayload> {
-    pub applied_index: RustRaftLogIndex,
+pub struct GenericApplyResponse<P = Payload> {
+    pub applied_index: LogIndex,
     pub response: P,
 }
 
-pub type RaftApplyResponse<P = EntryPayload> = RustRaftGenericApplyResponse<P>;
+pub type RaftApplyResponse<P = EntryPayload> = GenericApplyResponse<P>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftBaselineRaftParitySurface {
+pub struct BaselineRaftParitySurface {
     pub node_lifecycle: Vec<String>,
     pub transport_api: Vec<String>,
     pub write_api: Vec<String>,
@@ -79,66 +79,62 @@ pub struct RustRaftBaselineRaftParitySurface {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftPeerStatus {
-    pub node_id: RustRaftNodeId,
-    pub matched: RustRaftLogIndex,
-    pub next_index: RustRaftLogIndex,
+pub struct PeerStatus {
+    pub node_id: NodeId,
+    pub matched: LogIndex,
+    pub next_index: LogIndex,
     pub learner: bool,
     pub healthy: bool,
-    pub lag: RustRaftLogIndex,
+    pub lag: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftStatusSnapshot {
-    pub group_id: RustRaftGroupId,
-    pub node_id: RustRaftNodeId,
-    pub role: RustRaftRole,
-    pub term: RustRaftTerm,
-    pub leader_id: Option<RustRaftNodeId>,
-    pub commit_index: RustRaftLogIndex,
-    pub applied_index: RustRaftLogIndex,
-    pub last_log_index: RustRaftLogIndex,
-    pub last_snapshot_index: RustRaftLogIndex,
-    pub peers: Vec<RustRaftPeerStatus>,
+pub struct StatusSnapshot {
+    pub group_id: GroupId,
+    pub node_id: NodeId,
+    pub role: StateRole,
+    pub term: Term,
+    pub leader_id: Option<NodeId>,
+    pub commit_index: LogIndex,
+    pub applied_index: LogIndex,
+    pub last_log_index: LogIndex,
+    pub last_snapshot_index: LogIndex,
+    pub peers: Vec<PeerStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftAppendEntriesRequest {
-    pub group_id: RustRaftGroupId,
-    pub term: RustRaftTerm,
-    pub leader_id: RustRaftNodeId,
-    pub prev_log_id: Option<RustRaftLogId>,
-    pub entries: Vec<RustRaftLogEntry>,
-    pub leader_commit: RustRaftLogIndex,
+pub struct AppendEntriesRequest {
+    pub group_id: GroupId,
+    pub term: Term,
+    pub leader_id: NodeId,
+    pub prev_log_id: Option<LogId>,
+    pub entries: Vec<LogEntry>,
+    pub leader_commit: LogIndex,
     #[serde(default)]
     pub lease_epoch: u64,
 }
 
-pub type AppendEntriesRequest = RustRaftAppendEntriesRequest;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftAppendEntriesResponse {
-    pub term: RustRaftTerm,
+pub struct AppendEntriesResponse {
+    pub term: Term,
     pub success: bool,
-    pub match_index: RustRaftLogIndex,
-    pub rejection_hint: Option<RustRaftLogIndex>,
+    pub match_index: LogIndex,
+    pub rejection_hint: Option<LogIndex>,
     #[serde(default)]
-    pub rejected_index: Option<RustRaftLogIndex>,
+    pub rejected_index: Option<LogIndex>,
     #[serde(default)]
-    pub require_snapshot: Option<RustRaftLogIndex>,
+    pub require_snapshot: Option<LogIndex>,
     #[serde(default)]
-    pub snapshot_state: RustRaftSnapshotState,
+    pub snapshot_state: SnapshotState,
     #[serde(default)]
     pub lease_confirmation_epoch: u64,
     #[serde(default)]
     pub lease_duration_ms: u64,
 }
 
-pub type AppendEntriesResponse = RustRaftAppendEntriesResponse;
-
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftSnapshotState {
+pub enum SnapshotState {
     #[default]
     None,
     Creating,
@@ -146,8 +142,6 @@ pub enum RustRaftSnapshotState {
     Received,
     NotReady,
 }
-
-pub type SnapshotState = RustRaftSnapshotState;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -158,17 +152,17 @@ pub enum MatrixRaftConfState {
     Witness,
 }
 
-impl From<RustRaftReplicaRole> for MatrixRaftConfState {
-    fn from(role: RustRaftReplicaRole) -> Self {
+impl From<ReplicaRole> for MatrixRaftConfState {
+    fn from(role: ReplicaRole) -> Self {
         match role {
-            RustRaftReplicaRole::Voter => Self::Voter,
-            RustRaftReplicaRole::Learner => Self::Learner,
-            RustRaftReplicaRole::Witness => Self::Witness,
+            ReplicaRole::Voter => Self::Voter,
+            ReplicaRole::Learner => Self::Learner,
+            ReplicaRole::Witness => Self::Witness,
         }
     }
 }
 
-impl From<MatrixRaftConfState> for RustRaftReplicaRole {
+impl From<MatrixRaftConfState> for ReplicaRole {
     fn from(state: MatrixRaftConfState) -> Self {
         match state {
             MatrixRaftConfState::Voter => Self::Voter,
@@ -180,7 +174,7 @@ impl From<MatrixRaftConfState> for RustRaftReplicaRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMemberId {
-    pub id: RustRaftNodeId,
+    pub id: NodeId,
     pub raft_addr: String,
     pub snapshot_addr: String,
     pub is_from_options: bool,
@@ -191,8 +185,8 @@ pub struct MatrixRaftMemberId {
 }
 
 impl MatrixRaftMemberId {
-    pub fn to_peer(&self) -> RustRaftPeer {
-        RustRaftPeer {
+    pub fn to_peer(&self) -> Peer {
+        Peer {
             node_id: self.id,
             raft_addr: self.raft_addr.clone(),
             snapshot_addr: self.snapshot_addr.clone(),
@@ -202,8 +196,8 @@ impl MatrixRaftMemberId {
     }
 }
 
-impl From<&RustRaftPeer> for MatrixRaftMemberId {
-    fn from(peer: &RustRaftPeer) -> Self {
+impl From<&Peer> for MatrixRaftMemberId {
+    fn from(peer: &Peer) -> Self {
         Self {
             id: peer.node_id,
             raft_addr: peer.raft_addr.clone(),
@@ -218,9 +212,9 @@ impl From<&RustRaftPeer> for MatrixRaftMemberId {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotDesc {
     #[serde(default)]
-    pub snapshot_id: Option<RustRaftSnapshotId>,
-    pub index: RustRaftLogIndex,
-    pub term: RustRaftTerm,
+    pub snapshot_id: Option<SnapshotId>,
+    pub index: LogIndex,
+    pub term: Term,
     #[serde(default)]
     pub members: Vec<MatrixRaftMemberId>,
     #[serde(default)]
@@ -240,7 +234,7 @@ fn default_matrixraft_snapshot_version() -> i32 {
 }
 
 impl MatrixRaftSnapshotDesc {
-    pub fn from_snapshot_meta(meta: &RustRaftSnapshotMeta) -> Self {
+    pub fn from_snapshot_meta(meta: &SnapshotMetadata) -> Self {
         Self {
             snapshot_id: Some(meta.snapshot_id.clone()),
             index: meta.last_log_id.index,
@@ -254,15 +248,15 @@ impl MatrixRaftSnapshotDesc {
         }
     }
 
-    pub fn to_snapshot_meta(&self, snapshot_id: impl Into<String>) -> RustRaftSnapshotMeta {
+    pub fn to_snapshot_meta(&self, snapshot_id: impl Into<String>) -> SnapshotMetadata {
         let members: Vec<_> = self
             .members
             .iter()
             .map(MatrixRaftMemberId::to_peer)
             .collect();
-        RustRaftSnapshotMeta {
+        SnapshotMetadata {
             snapshot_id: snapshot_id.into(),
-            last_log_id: RustRaftLogId {
+            last_log_id: LogId {
                 term: self.term,
                 index: self.index,
             },
@@ -274,18 +268,18 @@ impl MatrixRaftSnapshotDesc {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftInitialState {
-    pub index: RustRaftLogIndex,
-    pub term: RustRaftTerm,
+    pub index: LogIndex,
+    pub term: Term,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftHardState {
-    pub current_term: RustRaftTerm,
-    pub voted_for: Option<RustRaftNodeId>,
+    pub current_term: Term,
+    pub voted_for: Option<NodeId>,
 }
 
-impl From<&RustRaftHardState> for MatrixRaftHardState {
-    fn from(state: &RustRaftHardState) -> Self {
+impl From<&HardState> for MatrixRaftHardState {
+    fn from(state: &HardState) -> Self {
         Self {
             current_term: state.current_term,
             voted_for: state.voted_for,
@@ -300,9 +294,9 @@ pub struct MatrixRaftMembers {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftMetadata {
-    pub current_term: RustRaftTerm,
-    pub voted_for: Option<RustRaftNodeId>,
-    pub committed_index: RustRaftLogIndex,
+    pub current_term: Term,
+    pub voted_for: Option<NodeId>,
+    pub committed_index: LogIndex,
     #[serde(default)]
     pub local_id: Option<MatrixRaftMemberId>,
     #[serde(default)]
@@ -323,9 +317,9 @@ fn default_matrixraft_metadata_version() -> i32 {
 
 impl MatrixRaftMetadata {
     pub fn from_hard_state_and_membership(
-        hard_state: &RustRaftHardState,
-        membership: &RaftMembership,
-        peers: &[RustRaftPeer],
+        hard_state: &HardState,
+        membership: &Membership,
+        peers: &[Peer],
     ) -> Self {
         let committed_index = hard_state
             .committed
@@ -441,37 +435,37 @@ pub struct MatrixRaftAdminCommand {
     #[serde(default)]
     pub request_id: Option<u64>,
     #[serde(default)]
-    pub node_id: Option<RustRaftNodeId>,
+    pub node_id: Option<NodeId>,
     #[serde(default)]
-    pub transferee_id: Option<RustRaftNodeId>,
+    pub transferee_id: Option<NodeId>,
     #[serde(default)]
     pub forced_campaign: bool,
     #[serde(default)]
     pub status: Option<MatrixRaftAdminStatus>,
     #[serde(default)]
-    pub snapshot_state: Option<RustRaftSnapshotState>,
+    pub snapshot_state: Option<SnapshotState>,
     #[serde(default)]
-    pub snapshot_id: Option<RustRaftSnapshotId>,
+    pub snapshot_id: Option<SnapshotId>,
     #[serde(default)]
-    pub applied_index: Option<RustRaftLogIndex>,
+    pub applied_index: Option<LogIndex>,
     #[serde(default)]
-    pub log_index: Option<RustRaftLogIndex>,
+    pub log_index: Option<LogIndex>,
     #[serde(default)]
-    pub first_index: Option<RustRaftLogIndex>,
+    pub first_index: Option<LogIndex>,
     #[serde(default)]
-    pub last_index: Option<RustRaftLogIndex>,
+    pub last_index: Option<LogIndex>,
     #[serde(default)]
     pub prohibits_election: Option<bool>,
     #[serde(default)]
     pub apply_task_rejected: bool,
     #[serde(default)]
-    pub stabled_config_change_index: Option<RustRaftLogIndex>,
+    pub stabled_config_change_index: Option<LogIndex>,
     #[serde(default)]
     pub ignore_witness: Option<bool>,
     #[serde(default)]
-    pub snapshot_peer_id: Option<RustRaftNodeId>,
+    pub snapshot_peer_id: Option<NodeId>,
     #[serde(default)]
-    pub snapshot_index: Option<RustRaftLogIndex>,
+    pub snapshot_index: Option<LogIndex>,
     #[serde(default)]
     pub snapshot_total_chunks: Option<u64>,
     #[serde(default)]
@@ -479,9 +473,9 @@ pub struct MatrixRaftAdminCommand {
     #[serde(default)]
     pub snapshot_done: bool,
     #[serde(default)]
-    pub storage_fence: Option<RustRaftStorageApplyFence>,
+    pub storage_fence: Option<StorageApplyFence>,
     #[serde(default)]
-    pub acknowledgements: Vec<RustRaftNodeId>,
+    pub acknowledgements: Vec<NodeId>,
     #[serde(default)]
     pub lease_valid: Option<bool>,
     #[serde(default)]
@@ -534,14 +528,14 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn campaign(candidate_id: RustRaftNodeId, forced: bool) -> Self {
+    pub fn campaign(candidate_id: NodeId, forced: bool) -> Self {
         Self {
             node_id: Some(candidate_id),
             ..Self::election(forced)
         }
     }
 
-    pub fn transfer_leader(transferee_id: RustRaftNodeId) -> Self {
+    pub fn transfer_leader(transferee_id: NodeId) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::TransferLeader,
             transferee_id: Some(transferee_id),
@@ -564,7 +558,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn step_down(transferee_id: Option<RustRaftNodeId>) -> Self {
+    pub fn step_down(transferee_id: Option<NodeId>) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::StepDown,
             transferee_id,
@@ -572,7 +566,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn partition_peer(peer_id: RustRaftNodeId) -> Self {
+    pub fn partition_peer(peer_id: NodeId) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::PartitionPeer,
             snapshot_peer_id: Some(peer_id),
@@ -580,7 +574,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn heal_peer(peer_id: RustRaftNodeId) -> Self {
+    pub fn heal_peer(peer_id: NodeId) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::HealPeer,
             snapshot_peer_id: Some(peer_id),
@@ -588,7 +582,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn set_node_healthy(node_id: RustRaftNodeId, healthy: bool) -> Self {
+    pub fn set_node_healthy(node_id: NodeId, healthy: bool) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::SetNodeHealthy,
             node_id: Some(node_id),
@@ -597,7 +591,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn fire_fatal_event(node_id: RustRaftNodeId, reason: impl Into<String>) -> Self {
+    pub fn fire_fatal_event(node_id: NodeId, reason: impl Into<String>) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::FireFatalEvent,
             node_id: Some(node_id),
@@ -606,7 +600,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn receive_out_of_order_append(peer_id: RustRaftNodeId, entry: MatrixRaftEntry) -> Self {
+    pub fn receive_out_of_order_append(peer_id: NodeId, entry: MatrixRaftEntry) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::ReceiveOutOfOrderAppend,
             node_id: Some(peer_id),
@@ -615,7 +609,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn expire_peer_reorder_queue(peer_id: RustRaftNodeId) -> Self {
+    pub fn expire_peer_reorder_queue(peer_id: NodeId) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::ExpirePeerReorderQueue,
             node_id: Some(peer_id),
@@ -673,7 +667,7 @@ impl MatrixRaftAdminCommand {
     }
 
     pub fn receive_leader_lease_confirmation(
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         confirmation_epoch: u64,
         duration_ms: Option<u64>,
     ) -> Self {
@@ -718,9 +712,9 @@ impl MatrixRaftAdminCommand {
     }
 
     pub fn begin_snapshot_send(
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Self {
         Self {
@@ -733,7 +727,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn record_snapshot_chunk_sent(peer_id: RustRaftNodeId, bytes: u64) -> Self {
+    pub fn record_snapshot_chunk_sent(peer_id: NodeId, bytes: u64) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::RecordSnapshotChunkSent,
             snapshot_peer_id: Some(peer_id),
@@ -742,7 +736,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn acknowledge_snapshot_chunk(peer_id: RustRaftNodeId) -> Self {
+    pub fn acknowledge_snapshot_chunk(peer_id: NodeId) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::AcknowledgeSnapshotChunk,
             snapshot_peer_id: Some(peer_id),
@@ -750,7 +744,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn retry_snapshot_chunk(peer_id: RustRaftNodeId) -> Self {
+    pub fn retry_snapshot_chunk(peer_id: NodeId) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::RetrySnapshotChunk,
             snapshot_peer_id: Some(peer_id),
@@ -758,7 +752,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn cancel_snapshot_send(peer_id: RustRaftNodeId) -> Self {
+    pub fn cancel_snapshot_send(peer_id: NodeId) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::CancelSnapshotSend,
             snapshot_peer_id: Some(peer_id),
@@ -767,9 +761,9 @@ impl MatrixRaftAdminCommand {
     }
 
     pub fn begin_snapshot_install(
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         snapshot_id: impl Into<String>,
-        snapshot_index: RustRaftLogIndex,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Self {
         Self {
@@ -782,7 +776,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn receive_snapshot_chunk(peer_id: RustRaftNodeId, bytes: u64, done: bool) -> Self {
+    pub fn receive_snapshot_chunk(peer_id: NodeId, bytes: u64, done: bool) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::ReceiveSnapshotChunk,
             snapshot_peer_id: Some(peer_id),
@@ -792,7 +786,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn rollback_snapshot_install(peer_id: RustRaftNodeId) -> Self {
+    pub fn rollback_snapshot_install(peer_id: NodeId) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::RollbackSnapshotInstall,
             snapshot_peer_id: Some(peer_id),
@@ -801,9 +795,9 @@ impl MatrixRaftAdminCommand {
     }
 
     pub fn synced(
-        first_index: Option<RustRaftLogIndex>,
-        last_index: Option<RustRaftLogIndex>,
-        stabled_config_change_index: RustRaftLogIndex,
+        first_index: Option<LogIndex>,
+        last_index: Option<LogIndex>,
+        stabled_config_change_index: LogIndex,
     ) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::Synced,
@@ -815,8 +809,8 @@ impl MatrixRaftAdminCommand {
     }
 
     pub fn applied(
-        node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        node_id: NodeId,
+        applied_index: LogIndex,
         rejected: bool,
     ) -> Self {
         Self {
@@ -829,8 +823,8 @@ impl MatrixRaftAdminCommand {
     }
 
     pub fn apply_task_inflight(
-        node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        node_id: NodeId,
+        applied_index: LogIndex,
     ) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::ApplyTaskInflight,
@@ -840,7 +834,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn replicated(peer_id: RustRaftNodeId, success: bool) -> Self {
+    pub fn replicated(peer_id: NodeId, success: bool) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::Replicated,
             node_id: Some(peer_id),
@@ -849,7 +843,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn compact_logs_through(log_index: RustRaftLogIndex) -> Self {
+    pub fn compact_logs_through(log_index: LogIndex) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::CompactLogsThrough,
             log_index: Some(log_index),
@@ -858,8 +852,8 @@ impl MatrixRaftAdminCommand {
     }
 
     pub fn compact_logs_with_storage_fence(
-        log_index: RustRaftLogIndex,
-        fence: RustRaftStorageApplyFence,
+        log_index: LogIndex,
+        fence: StorageApplyFence,
     ) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::CompactLogsWithStorageFence,
@@ -870,7 +864,7 @@ impl MatrixRaftAdminCommand {
     }
 
     pub fn checkpoint_snapshot(
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         snapshot_id: impl Into<String>,
     ) -> Self {
         Self {
@@ -881,7 +875,7 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn witness_quorum(acknowledgements: impl IntoIterator<Item = RustRaftNodeId>) -> Self {
+    pub fn witness_quorum(acknowledgements: impl IntoIterator<Item = NodeId>) -> Self {
         Self {
             command_type: MatrixRaftAdminCommandType::WitnessQuorum,
             acknowledgements: acknowledgements.into_iter().collect(),
@@ -896,13 +890,13 @@ impl MatrixRaftAdminCommand {
         }
     }
 
-    pub fn require_node_id(&self, purpose: &str) -> Result<RustRaftNodeId, RaftError> {
+    pub fn require_node_id(&self, purpose: &str) -> Result<NodeId, RaftError> {
         self.node_id.ok_or_else(|| {
             RaftError::InvalidRequest(format!("{purpose} admin command missing node id"))
         })
     }
 
-    pub fn require_log_index(&self, purpose: &str) -> Result<RustRaftLogIndex, RaftError> {
+    pub fn require_log_index(&self, purpose: &str) -> Result<LogIndex, RaftError> {
         self.log_index.ok_or_else(|| {
             RaftError::InvalidRequest(format!("{purpose} admin command missing log index"))
         })
@@ -920,19 +914,19 @@ impl MatrixRaftAdminCommand {
         })
     }
 
-    pub fn require_snapshot_peer_id(&self) -> Result<RustRaftNodeId, RaftError> {
+    pub fn require_snapshot_peer_id(&self) -> Result<NodeId, RaftError> {
         self.snapshot_peer_id.ok_or_else(|| {
             RaftError::InvalidRequest("snapshot admin command missing peer id".to_string())
         })
     }
 
-    pub fn require_snapshot_id(&self) -> Result<RustRaftSnapshotId, RaftError> {
+    pub fn require_snapshot_id(&self) -> Result<SnapshotId, RaftError> {
         self.snapshot_id.clone().ok_or_else(|| {
             RaftError::InvalidRequest("snapshot admin command missing snapshot id".to_string())
         })
     }
 
-    pub fn require_snapshot_index(&self) -> Result<RustRaftLogIndex, RaftError> {
+    pub fn require_snapshot_index(&self) -> Result<LogIndex, RaftError> {
         self.snapshot_index.ok_or_else(|| {
             RaftError::InvalidRequest("snapshot admin command missing snapshot index".to_string())
         })
@@ -979,7 +973,7 @@ pub struct MatrixRaftConfigChange {
     #[serde(default)]
     pub request_id: Option<u64>,
     pub change_type: MatrixRaftConfigChangeType,
-    pub member_id: RustRaftNodeId,
+    pub member_id: NodeId,
     pub raft_addr: String,
     pub snapshot_addr: String,
     #[serde(default)]
@@ -994,7 +988,7 @@ pub struct MatrixRaftConfigChange {
 pub struct MatrixRaftPropose {
     #[serde(default)]
     pub request_id: Option<u64>,
-    pub data: RustRaftPayload,
+    pub data: Payload,
     #[serde(default)]
     pub context: Vec<u8>,
     #[serde(default)]
@@ -1012,8 +1006,8 @@ pub enum MatrixRaftEntryType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftEntry {
     pub entry_type: MatrixRaftEntryType,
-    pub term: RustRaftTerm,
-    pub index: RustRaftLogIndex,
+    pub term: Term,
+    pub index: LogIndex,
     #[serde(default)]
     pub propose: Option<MatrixRaftPropose>,
     #[serde(default)]
@@ -1026,8 +1020,8 @@ pub struct MatrixRaftEntry {
     pub bytes_size: u64,
 }
 
-impl From<&RustRaftLogEntry> for MatrixRaftEntry {
-    fn from(entry: &RustRaftLogEntry) -> Self {
+impl From<&LogEntry> for MatrixRaftEntry {
+    fn from(entry: &LogEntry) -> Self {
         let bytes_size = entry.payload.len() as u64;
         Self {
             entry_type: if entry.is_command {
@@ -1052,9 +1046,9 @@ impl From<&RustRaftLogEntry> for MatrixRaftEntry {
 }
 
 impl MatrixRaftEntry {
-    pub fn to_log_entry(&self) -> RustRaftLogEntry {
-        RustRaftLogEntry {
-            log_id: RustRaftLogId {
+    pub fn to_log_entry(&self) -> LogEntry {
+        LogEntry {
+            log_id: LogId {
                 term: self.term,
                 index: self.index,
             },
@@ -1075,8 +1069,8 @@ impl MatrixRaftEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftAppendEntriesRequest {
-    pub prev_term: RustRaftTerm,
-    pub prev_index: RustRaftLogIndex,
+    pub prev_term: Term,
+    pub prev_index: LogIndex,
     #[serde(default)]
     pub entries: Vec<MatrixRaftEntry>,
 }
@@ -1103,11 +1097,11 @@ impl From<&AppendEntriesRequest> for MatrixRaftAppendEntriesRequest {
 pub struct MatrixRaftAppendEntriesResponse {
     pub received: bool,
     #[serde(default)]
-    pub matched_index: Option<RustRaftLogIndex>,
+    pub matched_index: Option<LogIndex>,
     #[serde(default)]
-    pub rejected_hint: Option<RustRaftLogIndex>,
+    pub rejected_hint: Option<LogIndex>,
     #[serde(default)]
-    pub rejected_index: Option<RustRaftLogIndex>,
+    pub rejected_index: Option<LogIndex>,
 }
 
 impl From<&AppendEntriesResponse> for MatrixRaftAppendEntriesResponse {
@@ -1136,12 +1130,12 @@ pub enum MatrixRaftOldSnapshotFinishState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftOldSnapshotFinish {
     pub finish_state: MatrixRaftOldSnapshotFinishState,
-    pub snapshot_index: RustRaftLogIndex,
+    pub snapshot_index: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftRequireSnapshot {
-    pub required_index: RustRaftLogIndex,
+    pub required_index: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1166,17 +1160,17 @@ pub struct MatrixRaftLeaseResponse {
 pub struct MatrixRaftMessage {
     pub message_type: MatrixRaftMessageType,
     #[serde(default)]
-    pub from: Option<RustRaftNodeId>,
+    pub from: Option<NodeId>,
     #[serde(default)]
     pub raft_addr: Option<String>,
     #[serde(default)]
     pub snapshot_addr: Option<String>,
     #[serde(default)]
-    pub to: Option<RustRaftNodeId>,
+    pub to: Option<NodeId>,
     #[serde(default)]
-    pub term: Option<RustRaftTerm>,
+    pub term: Option<Term>,
     #[serde(default)]
-    pub committed_index: Option<RustRaftLogIndex>,
+    pub committed_index: Option<LogIndex>,
     #[serde(default)]
     pub vote_request: Option<VoteRequest>,
     #[serde(default)]
@@ -1184,7 +1178,7 @@ pub struct MatrixRaftMessage {
     #[serde(default)]
     pub config_change: Option<MatrixRaftConfigChange>,
     #[serde(default)]
-    pub membership_operation: Option<RaftMembershipOperation>,
+    pub membership_operation: Option<MembershipOperation>,
     #[serde(default)]
     pub propose: Option<MatrixRaftPropose>,
     #[serde(default)]
@@ -1206,7 +1200,7 @@ pub struct MatrixRaftMessage {
     #[serde(default)]
     pub timestamp: Option<u64>,
     #[serde(default)]
-    pub snapshot_state: Option<RustRaftSnapshotState>,
+    pub snapshot_state: Option<SnapshotState>,
     #[serde(default)]
     pub snapshot: Option<MatrixRaftSnapshotDesc>,
     #[serde(default)]
@@ -1229,8 +1223,8 @@ pub struct MatrixRaftMessage {
 
 impl MatrixRaftMessage {
     pub fn admin(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         command: MatrixRaftAdminCommand,
     ) -> Self {
         Self {
@@ -1269,8 +1263,8 @@ impl MatrixRaftMessage {
     }
 
     pub fn vote(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         request: VoteRequest,
         pre_vote: bool,
     ) -> Self {
@@ -1314,8 +1308,8 @@ impl MatrixRaftMessage {
     }
 
     pub fn vote_response(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         response: VoteResponse,
         pre_vote: bool,
     ) -> Self {
@@ -1358,7 +1352,7 @@ impl MatrixRaftMessage {
         }
     }
 
-    pub fn pre_vote(from: RustRaftNodeId, to: RustRaftNodeId) -> Self {
+    pub fn pre_vote(from: NodeId, to: NodeId) -> Self {
         Self {
             message_type: MatrixRaftMessageType::PreVote,
             from: Some(from),
@@ -1394,7 +1388,7 @@ impl MatrixRaftMessage {
         }
     }
 
-    pub fn timeout_now(from: RustRaftNodeId, to: RustRaftNodeId) -> Self {
+    pub fn timeout_now(from: NodeId, to: NodeId) -> Self {
         Self {
             message_type: MatrixRaftMessageType::TimeoutNow,
             from: Some(from),
@@ -1431,8 +1425,8 @@ impl MatrixRaftMessage {
     }
 
     pub fn append_entries(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
     ) -> Self {
         Self {
@@ -1475,8 +1469,8 @@ impl MatrixRaftMessage {
     }
 
     pub fn append_entries_lease_request(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         request: &AppendEntriesRequest,
         lease_request: MatrixRaftLeaseRequest,
     ) -> Self {
@@ -1486,8 +1480,8 @@ impl MatrixRaftMessage {
     }
 
     pub fn append_entries_response(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
     ) -> Self {
         Self {
@@ -1533,8 +1527,8 @@ impl MatrixRaftMessage {
     }
 
     pub fn append_entries_lease_response(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         response: &AppendEntriesResponse,
         lease_response: MatrixRaftLeaseResponse,
     ) -> Self {
@@ -1544,8 +1538,8 @@ impl MatrixRaftMessage {
     }
 
     pub fn install_snapshot_response(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         response: InstallSnapshotResponse,
     ) -> Self {
         Self {
@@ -1584,8 +1578,8 @@ impl MatrixRaftMessage {
     }
 
     pub fn install_snapshot(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         request: InstallSnapshotRequest,
     ) -> Self {
         Self {
@@ -1624,8 +1618,8 @@ impl MatrixRaftMessage {
     }
 
     pub fn snapshot_progress(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         progress: MatrixRaftSnapshotProgress,
     ) -> Self {
         Self {
@@ -1663,7 +1657,7 @@ impl MatrixRaftMessage {
         }
     }
 
-    pub fn read_index(from: RustRaftNodeId, to: RustRaftNodeId, request: ReadIndexRequest) -> Self {
+    pub fn read_index(from: NodeId, to: NodeId, request: ReadIndexRequest) -> Self {
         Self {
             message_type: MatrixRaftMessageType::ReadIndexRequest,
             from: Some(from),
@@ -1699,7 +1693,7 @@ impl MatrixRaftMessage {
         }
     }
 
-    pub fn catch_up_peer(from: RustRaftNodeId, peer_id: RustRaftNodeId) -> Self {
+    pub fn catch_up_peer(from: NodeId, peer_id: NodeId) -> Self {
         Self {
             message_type: MatrixRaftMessageType::CatchUpPeer,
             from: Some(from),
@@ -1735,7 +1729,7 @@ impl MatrixRaftMessage {
         }
     }
 
-    pub fn promote_peer(from: RustRaftNodeId, peer_id: RustRaftNodeId) -> Self {
+    pub fn promote_peer(from: NodeId, peer_id: NodeId) -> Self {
         Self {
             message_type: MatrixRaftMessageType::PromotePeer,
             from: Some(from),
@@ -1771,7 +1765,7 @@ impl MatrixRaftMessage {
         }
     }
 
-    pub fn auto_promote_learner(from: RustRaftNodeId, learner_id: RustRaftNodeId) -> Self {
+    pub fn auto_promote_learner(from: NodeId, learner_id: NodeId) -> Self {
         Self {
             message_type: MatrixRaftMessageType::AutoPromoteLearner,
             from: Some(from),
@@ -1807,7 +1801,7 @@ impl MatrixRaftMessage {
         }
     }
 
-    pub fn network_error(from: RustRaftNodeId, peer_id: RustRaftNodeId) -> Self {
+    pub fn network_error(from: NodeId, peer_id: NodeId) -> Self {
         Self {
             message_type: MatrixRaftMessageType::NetworkError,
             from: Some(from),
@@ -1843,7 +1837,7 @@ impl MatrixRaftMessage {
         }
     }
 
-    pub fn propose(from: RustRaftNodeId, to: RustRaftNodeId, propose: MatrixRaftPropose) -> Self {
+    pub fn propose(from: NodeId, to: NodeId, propose: MatrixRaftPropose) -> Self {
         let bytes_size = propose.data.len() as u64;
         Self {
             message_type: MatrixRaftMessageType::Propose,
@@ -1881,9 +1875,9 @@ impl MatrixRaftMessage {
     }
 
     pub fn membership_operation(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
-        operation: RaftMembershipOperation,
+        from: NodeId,
+        to: NodeId,
+        operation: MembershipOperation,
     ) -> Self {
         Self {
             message_type: MatrixRaftMessageType::MembershipOperation,
@@ -1921,8 +1915,8 @@ impl MatrixRaftMessage {
     }
 
     pub fn config_change(
-        from: RustRaftNodeId,
-        to: RustRaftNodeId,
+        from: NodeId,
+        to: NodeId,
         config_change: MatrixRaftConfigChange,
     ) -> Self {
         Self {
@@ -1990,160 +1984,156 @@ impl MatrixRaftMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftVoteRequest {
-    pub group_id: RustRaftGroupId,
-    pub term: RustRaftTerm,
-    pub candidate_id: RustRaftNodeId,
-    pub last_log_id: Option<RustRaftLogId>,
+pub struct VoteRequest {
+    pub group_id: GroupId,
+    pub term: Term,
+    pub candidate_id: NodeId,
+    pub last_log_id: Option<LogId>,
     pub pre_vote: bool,
     #[serde(default)]
     pub force: bool,
 }
 
-pub type VoteRequest = RustRaftVoteRequest;
-pub type PreVoteRequest = RustRaftVoteRequest;
+pub type PreVoteRequest = VoteRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftVoteResponse {
-    pub term: RustRaftTerm,
+pub struct VoteResponse {
+    pub term: Term,
     pub vote_granted: bool,
     pub reason: String,
 }
 
-pub type VoteResponse = RustRaftVoteResponse;
-pub type PreVoteResponse = RustRaftVoteResponse;
+pub type PreVoteResponse = VoteResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftTimeoutNowResponse {
-    pub node_id: RustRaftNodeId,
-    pub from: RustRaftNodeId,
+pub struct TimeoutNowResponse {
+    pub node_id: NodeId,
+    pub from: NodeId,
     pub campaigned: bool,
-    pub term: RustRaftTerm,
-    pub leader_id: Option<RustRaftNodeId>,
+    pub term: Term,
+    pub leader_id: Option<NodeId>,
     pub reason: String,
 }
 
-pub type TimeoutNowResponse = RustRaftTimeoutNowResponse;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
-pub enum RustRaftAdminCommand {
+pub enum AdminCommand {
     Campaign {
-        candidate_id: RustRaftNodeId,
+        candidate_id: NodeId,
         forced: bool,
     },
     TransferLeader {
-        target: RustRaftNodeId,
+        target: NodeId,
     },
     CompleteLeaderTransfer,
     AbortLeaderTransfer {
         reason: String,
     },
     FireFatalEvent {
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         reason: String,
     },
     StepDown {
-        transferee: Option<RustRaftNodeId>,
+        transferee: Option<NodeId>,
     },
     Resign {
         reason: String,
     },
     TriggerSnapshot,
     SnapshotReady {
-        snapshot_id: RustRaftSnapshotId,
+        snapshot_id: SnapshotId,
         success: bool,
     },
     SnapshotApplied {
-        snapshot_id: RustRaftSnapshotId,
+        snapshot_id: SnapshotId,
     },
     BeginSnapshotSend {
-        peer_id: RustRaftNodeId,
-        snapshot_id: RustRaftSnapshotId,
-        snapshot_index: RustRaftLogIndex,
+        peer_id: NodeId,
+        snapshot_id: SnapshotId,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     },
     RecordSnapshotChunkSent {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         bytes: u64,
     },
     AcknowledgeSnapshotChunk {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     },
     RetrySnapshotChunk {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     },
     CancelSnapshotSend {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     },
     BeginSnapshotInstall {
-        peer_id: RustRaftNodeId,
-        snapshot_id: RustRaftSnapshotId,
-        snapshot_index: RustRaftLogIndex,
+        peer_id: NodeId,
+        snapshot_id: SnapshotId,
+        snapshot_index: LogIndex,
         total_chunks: u64,
     },
     ReceiveSnapshotChunk {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         bytes: u64,
         done: bool,
     },
     RollbackSnapshotInstall {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     },
     ApplyResult {
-        node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        node_id: NodeId,
+        applied_index: LogIndex,
         rejected: bool,
     },
     ApplyTaskInflight {
-        node_id: RustRaftNodeId,
-        applied_index: RustRaftLogIndex,
+        node_id: NodeId,
+        applied_index: LogIndex,
     },
     StabledResult {
-        first_index: Option<RustRaftLogIndex>,
-        last_index: Option<RustRaftLogIndex>,
-        stabled_membership_change_index: RustRaftLogIndex,
+        first_index: Option<LogIndex>,
+        last_index: Option<LogIndex>,
+        stabled_membership_change_index: LogIndex,
     },
     Replicated {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         success: bool,
     },
     CompactLogsThrough {
-        log_index: RustRaftLogIndex,
+        log_index: LogIndex,
     },
     CompactLogsWithStorageFence {
-        log_index: RustRaftLogIndex,
-        fence: RustRaftStorageApplyFence,
+        log_index: LogIndex,
+        fence: StorageApplyFence,
     },
     CheckpointSnapshot {
-        target: RustRaftNodeId,
-        snapshot_id: RustRaftSnapshotId,
+        target: NodeId,
+        snapshot_id: SnapshotId,
     },
     WitnessQuorum {
-        acknowledgements: Vec<RustRaftNodeId>,
+        acknowledgements: Vec<NodeId>,
     },
     PartitionPeer {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     },
     HealPeer {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     },
     ReceiveOutOfOrderAppend {
-        peer_id: RustRaftNodeId,
-        entry: RustRaftLogEntry,
+        peer_id: NodeId,
+        entry: LogEntry,
     },
     ExpirePeerReorderQueue {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     },
     SetNodeHealthy {
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         healthy: bool,
     },
     SetLeaderLeaseValid {
         valid: bool,
     },
     ReceiveLeaderLeaseConfirmation {
-        node_id: RustRaftNodeId,
+        node_id: NodeId,
         confirmation_epoch: u64,
         duration_ms: Option<u64>,
     },
@@ -2165,68 +2155,66 @@ pub enum RustRaftAdminCommand {
     ReleaseMemory,
 }
 
-pub type RaftAdminCommand = RustRaftAdminCommand;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
-pub enum RustRaftMessage {
+pub enum Message {
     Admin {
-        command: RustRaftAdminCommand,
+        command: AdminCommand,
     },
     Propose {
-        payload: RustRaftPayload,
-        options: RustRaftProposeOptions,
+        payload: Payload,
+        options: ProposeOptions,
     },
     Membership {
-        operation: RaftMembershipOperation,
+        operation: MembershipOperation,
     },
     AutoPromoteLearner {
-        learner_id: RustRaftNodeId,
+        learner_id: NodeId,
     },
     CatchUpPeer {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     },
     PreVote {
-        candidate_id: RustRaftNodeId,
+        candidate_id: NodeId,
     },
     AppendEntries {
-        target: RustRaftNodeId,
+        target: NodeId,
         request: AppendEntriesRequest,
     },
     AppendEntriesResponse {
-        local_node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        local_node_id: NodeId,
+        peer_id: NodeId,
         response: AppendEntriesResponse,
     },
     Vote {
-        target: RustRaftNodeId,
+        target: NodeId,
         request: VoteRequest,
     },
     VoteResponse {
-        local_node_id: RustRaftNodeId,
-        peer_id: Option<RustRaftNodeId>,
+        local_node_id: NodeId,
+        peer_id: Option<NodeId>,
         response: VoteResponse,
         pre_vote: bool,
     },
     InstallSnapshot {
-        target: RustRaftNodeId,
+        target: NodeId,
         request: InstallSnapshotRequest,
     },
     InstallSnapshotResponse {
-        local_node_id: RustRaftNodeId,
-        peer_id: RustRaftNodeId,
+        local_node_id: NodeId,
+        peer_id: NodeId,
         response: InstallSnapshotResponse,
     },
     NetworkError {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
     },
     SnapshotFinish {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         accepted: bool,
-        committed_index: RustRaftLogIndex,
+        committed_index: LogIndex,
     },
     SnapshotProgress {
-        peer_id: RustRaftNodeId,
+        peer_id: NodeId,
         remote_receiving: bool,
         elapsed_since_last_receiving_ms: u64,
         send_timeout_ms: u64,
@@ -2235,46 +2223,42 @@ pub enum RustRaftMessage {
         request: ReadIndexRequest,
     },
     TimeoutNow {
-        from: RustRaftNodeId,
-        target: RustRaftNodeId,
+        from: NodeId,
+        target: NodeId,
     },
 }
-
-pub type RaftMessage = RustRaftMessage;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 // Value-type step-result contract: boxing the largest variant would change the
 // public enum's shape for every consumer, so the size trade-off is accepted here.
 #[allow(clippy::large_enum_variant)]
-pub enum RustRaftStepResult {
+pub enum StepResult {
     Handled,
-    Proposed(RustRaftLogId),
-    Membership(RaftMembershipExecutionReport),
-    AutoPromoteLearner(RaftLearnerAutoPromoteReport),
-    CatchUpPeer(RaftLearnerCatchUpLoopReport),
+    Proposed(LogId),
+    Membership(MembershipExecutionReport),
+    AutoPromoteLearner(LearnerAutoPromoteReport),
+    CatchUpPeer(LearnerCatchUpLoopReport),
     PreVote(VoteResponse),
-    SnapshotTriggered(RustRaftSnapshotMeta),
+    SnapshotTriggered(SnapshotMetadata),
     ReleasedMemory(bool),
     CompactedLogs(u64),
-    FencedCompaction(RaftWalCompactionReport),
+    FencedCompaction(WalCompactionReport),
     CheckpointedSnapshot(RaftSnapshot),
     LeaderTransferCompleted(bool),
     LeaderTransferAborted(bool),
-    FatalEvent(Option<RustRaftNodeId>),
+    FatalEvent(Option<NodeId>),
     LeaderResigned(bool),
     LeaderLeaseConfirmed(bool),
     LeaderLeaseExpired(bool),
     FollowerLeaseReceived(bool),
     FollowerLeaseExpired(bool),
-    StepDown(Option<RustRaftNodeId>),
-    WitnessQuorum(RaftWitnessQuorumReport),
+    StepDown(Option<NodeId>),
+    WitnessQuorum(WitnessQuorumReport),
     AppendEntries(AppendEntriesResponse),
     Vote(VoteResponse),
     InstallSnapshot(InstallSnapshotResponse),
     ReadIndex(ReadIndexResponse),
     TimeoutNow(TimeoutNowResponse),
 }
-
-pub type RaftStepResult = RustRaftStepResult;
 

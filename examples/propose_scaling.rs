@@ -8,10 +8,10 @@
 
 use std::time::Instant;
 
-use matrixraft::{RaftCluster, RaftConfig, RustRaftPeer, RustRaftReplicaRole};
+use matrixraft::{Config, Peer, RaftCluster, ReplicaRole};
 
-fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 9_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 10_000 + node_id),
@@ -23,11 +23,11 @@ fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
 fn run(entries: usize, payload_bytes: usize) -> f64 {
     let mut cluster = RaftCluster::new(
         7,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("valid cluster");

@@ -8,19 +8,19 @@
 mod log_addressing_tests {
     use super::*;
 
-    fn entry(term: RustRaftTerm, index: RustRaftLogIndex, bytes: usize) -> RustRaftLogEntry {
-        RustRaftLogEntry {
-            log_id: RustRaftLogId { term, index },
+    fn entry(term: Term, index: LogIndex, bytes: usize) -> LogEntry {
+        LogEntry {
+            log_id: LogId { term, index },
             payload: vec![b'x'; bytes],
             is_command: false,
         }
     }
 
-    fn summed_payload_bytes(node: &RaftNode) -> u64 {
+    fn summed_payload_bytes(node: &Node) -> u64 {
         node.log.iter().map(|entry| entry.payload.len() as u64).sum()
     }
 
-    fn assert_byte_count_matches_log(node: &RaftNode, stage: &str) {
+    fn assert_byte_count_matches_log(node: &Node, stage: &str) {
         assert_eq!(
             node.retained_log_bytes(),
             summed_payload_bytes(node),
@@ -28,8 +28,8 @@ mod log_addressing_tests {
         );
     }
 
-    fn voter() -> RaftNode {
-        RaftNode::new(1, RustRaftReplicaRole::Voter, false)
+    fn voter() -> Node {
+        Node::new(1, ReplicaRole::Voter, false)
     }
 
     #[test]
@@ -122,8 +122,8 @@ mod log_addressing_tests {
 mod tests {
     use super::*;
 
-    fn ready_snapshot() -> RustRaftReadinessSnapshot {
-        RustRaftReadinessSnapshot {
+    fn ready_snapshot() -> ReadinessSnapshot {
+        ReadinessSnapshot {
             matrixraft_leader_write_authority_present: true,
             matrixraft_operator_observability_present: true,
             matrixraft_rpc_transport_contract_present: true,
@@ -139,8 +139,8 @@ mod tests {
         }
     }
 
-    fn ready_operational_semantics() -> RustRaftProcessOperationalSemanticsEvidence {
-        RustRaftProcessOperationalSemanticsEvidence {
+    fn ready_operational_semantics() -> ProcessOperationalSemanticsEvidence {
+        ProcessOperationalSemanticsEvidence {
             api_presence_only_rejected: true,
             process_path_validated: true,
             read_index_validated: true,
@@ -172,9 +172,9 @@ mod tests {
         }
     }
 
-    fn ready_process_nodes() -> Vec<RustRaftProcessNodeEvidence> {
+    fn ready_process_nodes() -> Vec<ProcessNodeEvidence> {
         vec![
-            RustRaftProcessNodeEvidence {
+            ProcessNodeEvidence {
                 node_id: 1,
                 addr: "127.0.0.1:19001".to_string(),
                 wal_dir: "/tmp/rustraft/node1/wal".to_string(),
@@ -185,7 +185,7 @@ mod tests {
                 restarted: true,
                 log_store_validated: true,
             },
-            RustRaftProcessNodeEvidence {
+            ProcessNodeEvidence {
                 node_id: 2,
                 addr: "127.0.0.1:19002".to_string(),
                 wal_dir: "/tmp/rustraft/node2/wal".to_string(),
@@ -199,8 +199,8 @@ mod tests {
         ]
     }
 
-    fn ready_data_node_rollout() -> RustRaftDataNodeProcessRolloutReport {
-        RustRaftDataNodeProcessRolloutReport {
+    fn ready_data_node_rollout() -> DataNodeProcessRolloutReport {
+        DataNodeProcessRolloutReport {
             shard_id: 7,
             voters: vec![1, 2, 3],
             learners: vec![4],
@@ -241,8 +241,8 @@ mod tests {
         }
     }
 
-    fn ready_meta_rollout() -> RustRaftMetaProcessRolloutReport {
-        RustRaftMetaProcessRolloutReport {
+    fn ready_meta_rollout() -> MetaProcessRolloutReport {
+        MetaProcessRolloutReport {
             voters: vec![1, 2, 3],
             learners: vec![4],
             nodes: ready_process_nodes(),
@@ -284,11 +284,11 @@ mod tests {
     }
 
     fn membership_transition(
-        scope: RustRaftMembershipScope,
-        transition: RustRaftMembershipTransitionKind,
-    ) -> RustRaftMembershipTransitionEvidence {
+        scope: MembershipScope,
+        transition: MembershipTransitionKind,
+    ) -> MembershipTransitionEvidence {
         match transition {
-            RustRaftMembershipTransitionKind::Failover => RustRaftMembershipTransitionEvidence {
+            MembershipTransitionKind::Failover => MembershipTransitionEvidence {
                 scope,
                 transition,
                 before_voters: vec![1, 2, 3],
@@ -316,10 +316,10 @@ mod tests {
                 write_validated_after: true,
                 snapshot_floor_preserved: true,
                 secondary_replication_visible: true,
-                scheduler_generation_advanced: matches!(scope, RustRaftMembershipScope::Metaserver),
+                scheduler_generation_advanced: matches!(scope, MembershipScope::Metaserver),
                 blockers: Vec::new(),
             },
-            RustRaftMembershipTransitionKind::ScaleUp => RustRaftMembershipTransitionEvidence {
+            MembershipTransitionKind::ScaleUp => MembershipTransitionEvidence {
                 scope,
                 transition,
                 before_voters: vec![1, 2, 3],
@@ -347,10 +347,10 @@ mod tests {
                 write_validated_after: true,
                 snapshot_floor_preserved: true,
                 secondary_replication_visible: true,
-                scheduler_generation_advanced: matches!(scope, RustRaftMembershipScope::Metaserver),
+                scheduler_generation_advanced: matches!(scope, MembershipScope::Metaserver),
                 blockers: Vec::new(),
             },
-            RustRaftMembershipTransitionKind::ScaleDown => RustRaftMembershipTransitionEvidence {
+            MembershipTransitionKind::ScaleDown => MembershipTransitionEvidence {
                 scope,
                 transition,
                 before_voters: vec![1, 2, 3, 4],
@@ -378,23 +378,23 @@ mod tests {
                 write_validated_after: true,
                 snapshot_floor_preserved: true,
                 secondary_replication_visible: true,
-                scheduler_generation_advanced: matches!(scope, RustRaftMembershipScope::Metaserver),
+                scheduler_generation_advanced: matches!(scope, MembershipScope::Metaserver),
                 blockers: Vec::new(),
             },
         }
     }
 
-    fn ready_membership_transitions() -> Vec<RustRaftMembershipTransitionEvidence> {
+    fn ready_membership_transitions() -> Vec<MembershipTransitionEvidence> {
         [
-            RustRaftMembershipScope::Metaserver,
-            RustRaftMembershipScope::DataNode,
+            MembershipScope::Metaserver,
+            MembershipScope::DataNode,
         ]
         .into_iter()
         .flat_map(|scope| {
             [
-                RustRaftMembershipTransitionKind::Failover,
-                RustRaftMembershipTransitionKind::ScaleUp,
-                RustRaftMembershipTransitionKind::ScaleDown,
+                MembershipTransitionKind::Failover,
+                MembershipTransitionKind::ScaleUp,
+                MembershipTransitionKind::ScaleDown,
             ]
             .into_iter()
             .map(move |transition| membership_transition(scope, transition))
@@ -402,23 +402,23 @@ mod tests {
         .collect()
     }
 
-    fn ready_admin_status_surface() -> RustRaftAdminStatusSurfaceEvidence {
-        let limits = RustRaftPipelineLimits::production_default();
-        let mut peer_2 = RustRaftPeerPipelineStatus::new(2, 105, limits);
+    fn ready_admin_status_surface() -> AdminStatusSurfaceEvidence {
+        let limits = PipelineLimits::production_default();
+        let mut peer_2 = PeerProgress::new(2, 105, limits);
         peer_2.match_index = 104;
         peer_2.append_requests = 8;
         peer_2.append_accepted = 8;
         peer_2.append_queue_max_depth = 4;
         peer_2.apply_queue_max_depth = 3;
 
-        let mut peer_3 = RustRaftPeerPipelineStatus::new(3, 105, limits);
+        let mut peer_3 = PeerProgress::new(3, 105, limits);
         peer_3.match_index = 104;
         peer_3.append_requests = 7;
         peer_3.append_accepted = 7;
         peer_3.inflight_entries = 1;
         peer_3.inflight_bytes = 128;
 
-        matrixraft_admin_status_surface_evidence(&RustRaftAdminStatusSurfaceInput {
+        matrixraft_admin_status_surface_evidence(&AdminStatusSurfaceInput {
             commit_index: 104,
             max_observed_node_commit_index: 104,
             quorum_size: 2,
@@ -429,10 +429,10 @@ mod tests {
         })
     }
 
-    fn ready_fault_harness() -> fault::RustRaftFaultHarnessReadinessReport {
+    fn ready_fault_harness() -> fault::FaultHarnessReadinessReport {
         let evidence = fault::matrixraft_baseline_raft_fault_scenarios()
             .into_iter()
-            .map(|requirement| fault::RustRaftFaultScenarioEvidence {
+            .map(|requirement| fault::FaultScenarioEvidence {
                 scenario: requirement.scenario,
                 process_path_observed: true,
                 spawned_process_count: 3,
@@ -452,10 +452,10 @@ mod tests {
         fault::matrixraft_fault_harness_readiness_report(&evidence)
     }
 
-    fn ready_production_input() -> RustRaftProductionReadinessInput {
-        RustRaftProductionReadinessInput {
+    fn ready_production_input() -> ProductionReadinessInput {
+        ProductionReadinessInput {
             readiness: ready_snapshot(),
-            peer_pipeline: Some(RustRaftPipelineEvidence {
+            peer_pipeline: Some(PipelineEvidence {
                 per_peer_pipeline_state_present: true,
                 append_backpressure_enforced: true,
                 apply_backpressure_enforced: true,
@@ -470,7 +470,7 @@ mod tests {
                 stale_term_rejection_present: true,
                 reorder_queue_enabled: true,
             }),
-            snapshot_lifecycle: Some(RustRaftSnapshotLifecycleEvidence {
+            snapshot_lifecycle: Some(SnapshotLifecycleEvidence {
                 sender_lifecycle_present: true,
                 downloader_lifecycle_present: true,
                 retry_backpressure_present: true,
@@ -486,7 +486,7 @@ mod tests {
                 membership_change_present: true,
                 rejoin_after_compacted_log_present: true,
             }),
-            wal_lifecycle: Some(RustRaftWalLifecycleEvidence {
+            wal_lifecycle: Some(WalLifecycleEvidence {
                 segment_lifecycle_present: true,
                 retained_range_present: true,
                 sequence_range_present: true,
@@ -500,7 +500,7 @@ mod tests {
             data_node_rollout: Some(ready_data_node_rollout()),
             metaserver_rollout: Some(ready_meta_rollout()),
             membership_transitions: ready_membership_transitions(),
-            baseline_raft_benchmark: Some(RustRaftBaselineRaftBenchmarkEvidence {
+            baseline_raft_benchmark: Some(BaselineRaftBenchmarkEvidence {
                 real_baseline_raft: true,
                 matrixraft_runtime: true,
                 baseline_raft_reference: true,
@@ -521,45 +521,45 @@ mod tests {
     }
 
     fn ready_benchmark_sample(
-        workload: crate::benchmark::RustRaftBenchmarkWorkload,
-        engine: crate::benchmark::RustRaftBenchmarkEngine,
-        engine_source: crate::benchmark::RustRaftBenchmarkEngineSource,
+        workload: crate::benchmark::BenchmarkWorkload,
+        engine: crate::benchmark::BenchmarkEngine,
+        engine_source: crate::benchmark::BenchmarkEngineSource,
         p50_latency_micros: u64,
         p99_latency_micros: u64,
         throughput_ops_per_sec: f64,
-    ) -> crate::benchmark::RustRaftBenchmarkSample {
+    ) -> crate::benchmark::BenchmarkSample {
         let operation_count = match workload {
-            crate::benchmark::RustRaftBenchmarkWorkload::BatchedWrites
-            | crate::benchmark::RustRaftBenchmarkWorkload::ReplicationBatching => 128 * 16,
+            crate::benchmark::BenchmarkWorkload::BatchedWrites
+            | crate::benchmark::BenchmarkWorkload::ReplicationBatching => 128 * 16,
             _ => 128,
         };
         let operations_per_timed_iteration = match workload {
-            crate::benchmark::RustRaftBenchmarkWorkload::BatchedWrites
-            | crate::benchmark::RustRaftBenchmarkWorkload::ReplicationBatching => 16,
+            crate::benchmark::BenchmarkWorkload::BatchedWrites
+            | crate::benchmark::BenchmarkWorkload::ReplicationBatching => 16,
             _ => 1,
         };
         let total_duration_micros =
             ((operation_count as f64 / throughput_ops_per_sec) * 1_000_000.0).round() as u64;
-        crate::benchmark::RustRaftBenchmarkSample {
+        crate::benchmark::BenchmarkSample {
             workload,
             engine,
             engine_source,
             benchmark_run_id: "ready-benchmark-run".to_string(),
             implementation: match engine {
-                crate::benchmark::RustRaftBenchmarkEngine::BaselineRaft => {
-                    crate::benchmark::RustRaftBenchmarkImplementation::BaselineRaft
+                crate::benchmark::BenchmarkEngine::BaselineRaft => {
+                    crate::benchmark::BenchmarkImplementation::BaselineRaft
                 }
-                crate::benchmark::RustRaftBenchmarkEngine::RustRaft => {
-                    crate::benchmark::RustRaftBenchmarkImplementation::RustRaftRust
+                crate::benchmark::BenchmarkEngine::RustRaft => {
+                    crate::benchmark::BenchmarkImplementation::RustRaftRust
                 }
             },
             binary_path: Some(ready_benchmark_binary_path(engine)),
             git_revision: Some(
                 match engine {
-                    crate::benchmark::RustRaftBenchmarkEngine::BaselineRaft => {
+                    crate::benchmark::BenchmarkEngine::BaselineRaft => {
                         "1111111111111111111111111111111111111111"
                     }
-                    crate::benchmark::RustRaftBenchmarkEngine::RustRaft => {
+                    crate::benchmark::BenchmarkEngine::RustRaft => {
                         "2222222222222222222222222222222222222222"
                     }
                 }
@@ -567,11 +567,11 @@ mod tests {
             ),
             build_profile: "release".to_string(),
             harness_kind: match engine {
-                crate::benchmark::RustRaftBenchmarkEngine::BaselineRaft => {
-                    crate::benchmark::RustRaftBenchmarkHarnessKind::FullBaselineRaftHarness
+                crate::benchmark::BenchmarkEngine::BaselineRaft => {
+                    crate::benchmark::BenchmarkHarnessKind::FullBaselineRaftHarness
                 }
-                crate::benchmark::RustRaftBenchmarkEngine::RustRaft => {
-                    crate::benchmark::RustRaftBenchmarkHarnessKind::RustRaftRuntime
+                crate::benchmark::BenchmarkEngine::RustRaft => {
+                    crate::benchmark::BenchmarkHarnessKind::RustRaftRuntime
                 }
             },
             node_count: crate::benchmark::MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT,
@@ -591,13 +591,13 @@ mod tests {
     }
 
     fn ready_benchmark_binary_path(
-        engine: crate::benchmark::RustRaftBenchmarkEngine,
+        engine: crate::benchmark::BenchmarkEngine,
     ) -> String {
         let name = match engine {
-            crate::benchmark::RustRaftBenchmarkEngine::BaselineRaft => {
+            crate::benchmark::BenchmarkEngine::BaselineRaft => {
                 "baseline_raft_kvbench"
             }
-            crate::benchmark::RustRaftBenchmarkEngine::RustRaft => "rustraft-kvbench",
+            crate::benchmark::BenchmarkEngine::RustRaft => "rustraft-kvbench",
         };
         let dir = std::env::temp_dir().join(format!(
             "rustraft-ready-benchmark-bins-{}",
@@ -623,27 +623,27 @@ mod tests {
         path.display().to_string()
     }
 
-    fn ready_benchmark_report() -> crate::benchmark::RustRaftBenchmarkReport {
+    fn ready_benchmark_report() -> crate::benchmark::BenchmarkReport {
         let comparisons = crate::benchmark::matrixraft_baseline_raft_benchmark_workloads()
             .into_iter()
             .map(|workload| {
                 let baseline_raft = ready_benchmark_sample(
                     workload,
-                    crate::benchmark::RustRaftBenchmarkEngine::BaselineRaft,
-                    crate::benchmark::RustRaftBenchmarkEngineSource::RealBaselineRaft,
+                    crate::benchmark::BenchmarkEngine::BaselineRaft,
+                    crate::benchmark::BenchmarkEngineSource::RealBaselineRaft,
                     100,
                     200,
                     1_000.0,
                 );
                 let rustraft = ready_benchmark_sample(
                     workload,
-                    crate::benchmark::RustRaftBenchmarkEngine::RustRaft,
-                    crate::benchmark::RustRaftBenchmarkEngineSource::RustRaftRuntime,
+                    crate::benchmark::BenchmarkEngine::RustRaft,
+                    crate::benchmark::BenchmarkEngineSource::RustRaftRuntime,
                     110,
                     220,
                     900.0,
                 );
-                crate::benchmark::RustRaftBenchmarkComparison {
+                crate::benchmark::BenchmarkComparison {
                     workload,
                     baseline_raft,
                     rustraft,
@@ -655,7 +655,7 @@ mod tests {
                 }
             })
             .collect();
-        crate::benchmark::RustRaftBenchmarkReport {
+        crate::benchmark::BenchmarkReport {
             schema: crate::benchmark::MATRIXRAFT_BENCHMARK_REPORT_SCHEMA.to_string(),
             generated_at_unix_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -666,7 +666,7 @@ mod tests {
                 "os=linux;arch=x86_64;target=x86_64-unknown-linux-gnu;debug_assertions=false"
                     .to_string(),
             node_count: crate::benchmark::MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT,
-            options: crate::benchmark::RustRaftBenchmarkOptions::default(),
+            options: crate::benchmark::BenchmarkOptions::default(),
             pass_tolerance_percent: crate::benchmark::MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT,
             correctness_required: true,
             required_workloads: crate::benchmark::matrixraft_baseline_raft_benchmark_required_workloads(),
@@ -698,7 +698,7 @@ mod tests {
         snapshot.raft_storage_apply_fence_present = false;
         let report = matrixraft_parity_report(&snapshot);
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert_eq!(report.missing, vec!["storage_apply_fence".to_string()]);
     }
 
@@ -708,11 +708,11 @@ mod tests {
         assert!(report.ready, "{report:#?}");
         assert_eq!(
             report.production_status,
-            RustRaftProductionStatus::ProductionReady
+            ProductionStatus::ProductionReady
         );
         assert!(report.missing.is_empty());
         assert!(report.production_blockers.is_empty());
-        assert_eq!(report.public_api.storage_trait, "RustRaftStorage");
+        assert_eq!(report.public_api.storage_trait, "Storage");
     }
 
     #[test]
@@ -755,7 +755,7 @@ mod tests {
         .unwrap();
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .production_blockers
             .contains(&"benchmark:report_environment_fingerprint_missing".to_string()));
@@ -778,7 +778,7 @@ mod tests {
         .unwrap();
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .production_blockers
             .contains(&"benchmark:report_environment_debug_assertions_enabled".to_string()));
@@ -818,7 +818,7 @@ mod tests {
         .unwrap();
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker == "benchmark:report_required_workload_count_mismatch:declared_0_required_9"
         }));
@@ -856,7 +856,7 @@ mod tests {
         .unwrap();
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker
                 == "benchmark:report_schema_mismatch:rustraft.baseline_raft_benchmark_report.v0:rustraft.baseline_raft_benchmark_report.v1"
@@ -878,7 +878,7 @@ mod tests {
         .unwrap();
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker
                 == "benchmark:report_rustraft_run_id_mismatch:single_key_writes:different-run:ready-benchmark-run"
@@ -893,10 +893,10 @@ mod tests {
         benchmark.comparisons[0].baseline_raft.node_count = 1;
         benchmark.comparisons[0].baseline_raft.payload_size_bytes = 512;
         benchmark.comparisons[0].baseline_raft.implementation =
-            crate::benchmark::RustRaftBenchmarkImplementation::Model;
+            crate::benchmark::BenchmarkImplementation::Model;
         benchmark.comparisons[0].rustraft.batch_size = 1;
         benchmark.comparisons[0].rustraft.implementation =
-            crate::benchmark::RustRaftBenchmarkImplementation::Unknown;
+            crate::benchmark::BenchmarkImplementation::Unknown;
         benchmark.comparisons[0].rustraft.operation_count = 1;
         let summary =
             crate::benchmark::matrixraft_baseline_raft_benchmark_failure_summary(&benchmark);
@@ -907,7 +907,7 @@ mod tests {
         .unwrap();
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.missing.contains(&"benchmark:blockers".to_string()));
         assert!(report
             .missing
@@ -950,7 +950,7 @@ mod tests {
         .unwrap();
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker.starts_with(
                 "single_key_writes:benchmark:comparison_p99_ratio_mismatch:1.100000:2.000000",
@@ -977,7 +977,7 @@ mod tests {
         .unwrap();
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker
                 == "single_key_writes:benchmark:baseline_raft_sample_latency_order_invalid:300:200"
@@ -999,7 +999,7 @@ mod tests {
         .unwrap();
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker == "single_key_writes:benchmark:build_profile_mismatch:release:debug"
         }));
@@ -1040,7 +1040,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker == "benchmark:summary_p99_regression:single_key_writes:2.000000:1.100000"
         }));
@@ -1059,7 +1059,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker
                 == "benchmark:summary_rustraft_latency_order_invalid:single_key_writes:110:100"
@@ -1083,7 +1083,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker == "benchmark:summary_worst_p99_ratio_mismatch:1.000000:1.100000"
         }));
@@ -1102,7 +1102,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker == "benchmark:iterations_per_workload_below_production_min:2:128"
         }));
@@ -1121,7 +1121,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .production_blockers
             .contains(&"benchmark:summary_environment_fingerprint_missing".to_string()));
@@ -1142,7 +1142,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .production_blockers
             .contains(&"benchmark:summary_environment_debug_assertions_enabled".to_string()));
@@ -1161,7 +1161,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker
                 == "benchmark:summary_schema_mismatch:rustraft.baseline_raft_benchmark_summary.v0:rustraft.baseline_raft_benchmark_summary.v1"
@@ -1181,7 +1181,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker
                 == "benchmark:summary_rustraft_run_id_mismatch:single_key_writes:different-run:ready-benchmark-run"
@@ -1201,7 +1201,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker == "benchmark:summary_rustraft_node_count_mismatch:single_key_writes:3:5"
         }));
@@ -1220,7 +1220,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker == "benchmark:summary_build_profile_mismatch:single_key_writes:release:debug"
         }));
@@ -1234,13 +1234,13 @@ mod tests {
         let mut summary =
             crate::benchmark::matrixraft_baseline_raft_benchmark_failure_summary(&benchmark);
         summary.workloads[0].baseline_raft_harness_kind =
-            crate::benchmark::RustRaftBenchmarkHarnessKind::NativeKvbenchPartial;
+            crate::benchmark::BenchmarkHarnessKind::NativeKvbenchPartial;
         let input = matrixraft_production_readiness_input_with_benchmark_summary(input, &summary);
 
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.missing.contains(&"benchmark:blockers".to_string()));
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker
@@ -1257,13 +1257,13 @@ mod tests {
             .unwrap()
             .workloads
             .retain(|workload| {
-                workload != crate::benchmark::RustRaftBenchmarkWorkload::WalFsync.id()
+                workload != crate::benchmark::BenchmarkWorkload::WalFsync.id()
             });
 
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .missing
             .contains(&"benchmark:workload:wal_fsync".to_string()));
@@ -1285,7 +1285,7 @@ mod tests {
             .unwrap()
             .workloads
             .push(
-                crate::benchmark::RustRaftBenchmarkWorkload::SingleKeyWrites
+                crate::benchmark::BenchmarkWorkload::SingleKeyWrites
                     .id()
                     .to_string(),
             );
@@ -1293,7 +1293,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .missing
             .contains(&"benchmark:workload_duplicate:single_key_writes".to_string()));
@@ -1322,7 +1322,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .missing
             .contains(&"benchmark:workload_unknown:ad_hoc_latency_probe".to_string()));
@@ -1351,7 +1351,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.missing.contains(&"benchmark:blockers".to_string()));
         assert!(report
             .production_blockers
@@ -1417,7 +1417,7 @@ mod tests {
 
     #[test]
     fn production_readiness_gate_fails_closed_without_runtime_evidence() {
-        let report = matrixraft_production_readiness_report(&RustRaftProductionReadinessInput {
+        let report = matrixraft_production_readiness_report(&ProductionReadinessInput {
             readiness: ready_snapshot(),
             peer_pipeline: None,
             snapshot_lifecycle: None,
@@ -1430,7 +1430,7 @@ mod tests {
             baseline_raft_benchmark: None,
         });
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .missing
             .contains(&"pipeline:evidence_present".to_string()));
@@ -1465,7 +1465,7 @@ mod tests {
     #[test]
     fn production_readiness_gate_rejects_model_only_benchmark_evidence() {
         let mut input = ready_production_input();
-        input.baseline_raft_benchmark = Some(RustRaftBaselineRaftBenchmarkEvidence {
+        input.baseline_raft_benchmark = Some(BaselineRaftBenchmarkEvidence {
             real_baseline_raft: false,
             matrixraft_runtime: false,
             baseline_raft_reference: false,
@@ -1513,7 +1513,7 @@ mod tests {
         let correctness_blocker =
             "read_index_reads:benchmark:baseline_raft_native_kvbench_zero_operations".to_string();
         let performance_blocker = "batched_writes:benchmark:p99_regression".to_string();
-        input.baseline_raft_benchmark = Some(RustRaftBaselineRaftBenchmarkEvidence {
+        input.baseline_raft_benchmark = Some(BaselineRaftBenchmarkEvidence {
             real_baseline_raft: true,
             matrixraft_runtime: true,
             baseline_raft_reference: true,
@@ -1577,7 +1577,7 @@ mod tests {
     fn production_readiness_gate_rejects_incomplete_admin_status_surface() {
         let mut input = ready_production_input();
         input.admin_status_surface = Some(matrixraft_admin_status_surface_evidence(
-            &RustRaftAdminStatusSurfaceInput {
+            &AdminStatusSurfaceInput {
                 commit_index: 104,
                 max_observed_node_commit_index: 106,
                 quorum_size: 2,
@@ -1591,7 +1591,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .production_blockers
             .contains(&"status:admin_surface_complete".to_string()));
@@ -1614,7 +1614,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .production_blockers
             .contains(&"fault:harness_ready".to_string()));
@@ -1632,7 +1632,7 @@ mod tests {
     #[test]
     fn production_readiness_gate_reports_specific_wal_blocker() {
         let mut input = ready_production_input();
-        input.wal_lifecycle = Some(RustRaftWalLifecycleEvidence {
+        input.wal_lifecycle = Some(WalLifecycleEvidence {
             segment_lifecycle_present: true,
             retained_range_present: true,
             sequence_range_present: true,
@@ -1661,7 +1661,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .missing
             .contains(&"wal:compaction_after_slow_fsync".to_string()));
@@ -1679,7 +1679,7 @@ mod tests {
         let report = matrixraft_production_readiness_report(&input);
 
         assert!(!report.ready);
-        assert_eq!(report.production_status, RustRaftProductionStatus::Blocked);
+        assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report
             .missing
             .contains(&"pipeline:packet_loss_reorder_same_peer_recovered".to_string()));
@@ -1687,17 +1687,17 @@ mod tests {
 
     #[test]
     fn safety_helpers_accept_healthy_state() {
-        let status = RustRaftStatusSnapshot {
+        let status = StatusSnapshot {
             group_id: 1,
             node_id: 1,
-            role: RustRaftRole::Leader,
+            role: StateRole::Leader,
             term: 2,
             leader_id: Some(1),
             commit_index: 10,
             applied_index: 10,
             last_log_index: 10,
             last_snapshot_index: 4,
-            peers: vec![RustRaftPeerStatus {
+            peers: vec![PeerStatus {
                 node_id: 2,
                 matched: 10,
                 next_index: 11,
@@ -1709,7 +1709,7 @@ mod tests {
         assert!(
             matrixraft_read_safety_decision(
                 &status,
-                &RustRaftReadIndexRequest {
+                &ReadIndexRequest {
                     group_id: 1,
                     requester_id: 1,
                     min_commit_index: 10,
@@ -1725,27 +1725,27 @@ mod tests {
     fn leader_only_commits_current_term_entry_by_quorum_counting() {
         let mut cluster = RaftCluster::new(
             1,
-            RaftConfig::default(),
+            Config::default(),
             vec![
-                RustRaftPeer {
+                Peer {
                     node_id: 1,
                     raft_addr: "127.0.0.1:19001".to_string(),
                     snapshot_addr: "127.0.0.1:20001".to_string(),
-                    role: RustRaftReplicaRole::Voter,
+                    role: ReplicaRole::Voter,
                     auto_promote: false,
                 },
-                RustRaftPeer {
+                Peer {
                     node_id: 2,
                     raft_addr: "127.0.0.1:19002".to_string(),
                     snapshot_addr: "127.0.0.1:20002".to_string(),
-                    role: RustRaftReplicaRole::Voter,
+                    role: ReplicaRole::Voter,
                     auto_promote: false,
                 },
-                RustRaftPeer {
+                Peer {
                     node_id: 3,
                     raft_addr: "127.0.0.1:19003".to_string(),
                     snapshot_addr: "127.0.0.1:20003".to_string(),
-                    role: RustRaftReplicaRole::Voter,
+                    role: ReplicaRole::Voter,
                     auto_promote: false,
                 },
             ],
@@ -1756,12 +1756,12 @@ mod tests {
         for node in cluster.nodes.values_mut() {
             node.hard_state.current_term = 2;
             node.raft_role = if node.id == 1 {
-                RustRaftRole::Leader
+                StateRole::Leader
             } else {
-                RustRaftRole::Follower
+                StateRole::Follower
             };
-            node.append_entry(RustRaftLogEntry {
-                log_id: RustRaftLogId { term: 1, index: 1 },
+            node.append_entry(LogEntry {
+                log_id: LogId { term: 1, index: 1 },
                 payload: b"committed-before-election".to_vec(),
                 is_command: true,
             });
@@ -1774,8 +1774,8 @@ mod tests {
                 .nodes
                 .get_mut(&node_id)
                 .expect("node")
-                .append_entry(RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 2 },
+                .append_entry(LogEntry {
+                    log_id: LogId { term: 1, index: 2 },
                     payload: b"previous-term-entry".to_vec(),
                     is_command: true,
                 });
@@ -1788,8 +1788,8 @@ mod tests {
                 .nodes
                 .get_mut(&node_id)
                 .expect("node")
-                .append_entry(RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 2, index: 3 },
+                .append_entry(LogEntry {
+                    log_id: LogId { term: 2, index: 3 },
                     payload: b"current-term-entry".to_vec(),
                     is_command: true,
                 });
@@ -1798,14 +1798,14 @@ mod tests {
         assert_eq!(cluster.commit_index, 3);
         assert_eq!(
             cluster.nodes.get(&1).expect("leader").hard_state.committed,
-            Some(RustRaftLogId { term: 2, index: 3 })
+            Some(LogId { term: 2, index: 3 })
         );
     }
 
     #[test]
     fn runtime_read_safety_rejects_stale_leader_lease() {
-        let decision = matrixraft_read_safety_runtime_decision(RustRaftReadSafetyRuntimeInput {
-            operation: RustRaftReadSafetyOperation::LeaseRead,
+        let decision = matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
+            operation: ReadSafetyOperation::LeaseRead,
             node_id: 1,
             leader_id: 1,
             node_alive: true,
@@ -1823,8 +1823,8 @@ mod tests {
 
     #[test]
     fn runtime_read_safety_rejects_lagging_follower() {
-        let decision = matrixraft_read_safety_runtime_decision(RustRaftReadSafetyRuntimeInput {
-            operation: RustRaftReadSafetyOperation::ReadIndex,
+        let decision = matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
+            operation: ReadSafetyOperation::ReadIndex,
             node_id: 2,
             leader_id: 1,
             node_alive: true,
@@ -1842,8 +1842,8 @@ mod tests {
 
     #[test]
     fn runtime_read_safety_allows_bounded_stale_within_lag_budget() {
-        let decision = matrixraft_read_safety_runtime_decision(RustRaftReadSafetyRuntimeInput {
-            operation: RustRaftReadSafetyOperation::BoundedStaleRead,
+        let decision = matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
+            operation: ReadSafetyOperation::BoundedStaleRead,
             node_id: 2,
             leader_id: 1,
             node_alive: true,
@@ -1860,8 +1860,8 @@ mod tests {
 
     #[test]
     fn runtime_read_safety_rejects_minority_writes() {
-        let decision = matrixraft_read_safety_runtime_decision(RustRaftReadSafetyRuntimeInput {
-            operation: RustRaftReadSafetyOperation::Write,
+        let decision = matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
+            operation: ReadSafetyOperation::Write,
             node_id: 1,
             leader_id: 1,
             node_alive: true,
@@ -1898,8 +1898,8 @@ mod tests {
         let transitions = ready_membership_transitions()
             .into_iter()
             .filter(|item| {
-                !(item.scope == RustRaftMembershipScope::DataNode
-                    && item.transition == RustRaftMembershipTransitionKind::ScaleDown)
+                !(item.scope == MembershipScope::DataNode
+                    && item.transition == MembershipTransitionKind::ScaleDown)
             })
             .collect::<Vec<_>>();
         let report = matrixraft_membership_readiness_report(&transitions);
@@ -1912,8 +1912,8 @@ mod tests {
     #[test]
     fn membership_readiness_rejects_unsafe_scale_up_without_joint_consensus() {
         let mut transition = membership_transition(
-            RustRaftMembershipScope::Metaserver,
-            RustRaftMembershipTransitionKind::ScaleUp,
+            MembershipScope::Metaserver,
+            MembershipTransitionKind::ScaleUp,
         );
         transition.joint_consensus_used = false;
         let missing = matrixraft_membership_transition_missing(&transition);
@@ -1923,8 +1923,8 @@ mod tests {
     #[test]
     fn membership_readiness_rejects_joint_consensus_without_old_and_new_quorum_ack() {
         let mut transition = membership_transition(
-            RustRaftMembershipScope::DataNode,
-            RustRaftMembershipTransitionKind::ScaleDown,
+            MembershipScope::DataNode,
+            MembershipTransitionKind::ScaleDown,
         );
         transition.joint_acknowledged_voters = vec![1, 2];
         transition.joint_old_majority_acked = false;

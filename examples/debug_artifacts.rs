@@ -13,9 +13,8 @@ use matrixraft::{
     matrixraft_observability_provisioning_validation_prometheus,
     matrixraft_operator_runbook_prometheus, matrixraft_operator_triage_prometheus,
     matrixraft_runtime_admin_report, matrixraft_validate_debug_snapshot,
-    matrixraft_validate_observability_provisioning, RaftCluster, RaftPeerPipelineState,
-    RustRaftDebugBundleValidationReport, RustRaftPeer, RustRaftPeerProgressState,
-    RustRaftReadinessSnapshot, RustRaftReplicaRole,
+    matrixraft_validate_observability_provisioning, DebugBundleValidationReport, Peer,
+    PeerProgress, ProgressState, RaftCluster, ReadinessSnapshot, ReplicaRole,
 };
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,18 +29,18 @@ fn now_unix_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn peer(node_id: u64) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 6_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 7_000 + node_id),
-        role: RustRaftReplicaRole::Voter,
+        role: ReplicaRole::Voter,
         auto_promote: false,
     }
 }
 
-fn readiness() -> RustRaftReadinessSnapshot {
-    RustRaftReadinessSnapshot {
+fn readiness() -> ReadinessSnapshot {
+    ReadinessSnapshot {
         matrixraft_leader_write_authority_present: true,
         matrixraft_operator_observability_present: true,
         matrixraft_rpc_transport_contract_present: true,
@@ -57,10 +56,10 @@ fn readiness() -> RustRaftReadinessSnapshot {
     }
 }
 
-fn pipeline_peer(peer_id: u64, match_index: u64, next_index: u64) -> RaftPeerPipelineState {
-    RaftPeerPipelineState {
+fn pipeline_peer(peer_id: u64, match_index: u64, next_index: u64) -> PeerProgress {
+    PeerProgress {
         peer_id,
-        progress_state: RustRaftPeerProgressState::Probe,
+        progress_state: ProgressState::Probe,
         paused: false,
         old_paused: false,
         match_index,
@@ -141,7 +140,7 @@ fn main() {
         readiness,
         capability_evidence,
     );
-    let status_surface = matrixraft::RustRaftAdminStatusSurfaceInput {
+    let status_surface = matrixraft::AdminStatusSurfaceInput {
         commit_index: 10,
         max_observed_node_commit_index: 10,
         quorum_size: 2,
@@ -304,7 +303,7 @@ fn main() {
     } else {
         "warning"
     };
-    let support_envelope_report = RustRaftDebugBundleValidationReport {
+    let support_envelope_report = DebugBundleValidationReport {
         ready: support_envelope_issues.is_empty(),
         issue_count: support_envelope_issues.len(),
         issues: support_envelope_issues

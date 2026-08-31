@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftConfig {
+pub struct Config {
     pub election_timeout_ms: u64,
     pub heartbeat_interval_ms: u64,
     pub leader_lease_ms: u64,
@@ -33,7 +33,7 @@ fn default_max_log_buffer_bytes() -> u64 {
     64 * 1024 * 1024
 }
 
-impl Default for RustRaftConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
             election_timeout_ms: 1_000,
@@ -52,49 +52,47 @@ impl Default for RustRaftConfig {
     }
 }
 
-impl RustRaftConfig {
-    pub fn validate(&self) -> Result<(), RaftConfigError> {
+impl Config {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         if self.election_timeout_ms == 0 {
-            return Err(RaftConfigError::ZeroElectionTimeout);
+            return Err(ConfigError::ZeroElectionTimeout);
         }
         if self.heartbeat_interval_ms == 0 {
-            return Err(RaftConfigError::ZeroHeartbeatInterval);
+            return Err(ConfigError::ZeroHeartbeatInterval);
         }
         if self.leader_lease_ms == 0 {
-            return Err(RaftConfigError::ZeroLeaderLease);
+            return Err(ConfigError::ZeroLeaderLease);
         }
         if self.heartbeat_interval_ms >= self.election_timeout_ms {
-            return Err(RaftConfigError::HeartbeatNotLessThanElection {
+            return Err(ConfigError::HeartbeatNotLessThanElection {
                 heartbeat_interval_ms: self.heartbeat_interval_ms,
                 election_timeout_ms: self.election_timeout_ms,
             });
         }
         if self.leader_lease_ms >= self.election_timeout_ms {
-            return Err(RaftConfigError::LeaseNotLessThanElection {
+            return Err(ConfigError::LeaseNotLessThanElection {
                 leader_lease_ms: self.leader_lease_ms,
                 election_timeout_ms: self.election_timeout_ms,
             });
         }
         if self.max_payload_bytes == 0 {
-            return Err(RaftConfigError::ZeroMaxPayloadBytes);
+            return Err(ConfigError::ZeroMaxPayloadBytes);
         }
         if self.max_log_buffer_bytes == 0 {
-            return Err(RaftConfigError::ZeroMaxLogBufferBytes);
+            return Err(ConfigError::ZeroMaxLogBufferBytes);
         }
         if self.snapshot_threshold_entries == 0 {
-            return Err(RaftConfigError::ZeroSnapshotThreshold);
+            return Err(ConfigError::ZeroSnapshotThreshold);
         }
         if self.max_segment_bytes == 0 {
-            return Err(RaftConfigError::ZeroMaxSegmentBytes);
+            return Err(ConfigError::ZeroMaxSegmentBytes);
         }
         Ok(())
     }
 }
 
-pub type RaftConfig = RustRaftConfig;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Error)]
-pub enum RaftConfigError {
+pub enum ConfigError {
     #[error("election_timeout_ms must be greater than zero")]
     ZeroElectionTimeout,
     #[error("heartbeat_interval_ms must be greater than zero")]

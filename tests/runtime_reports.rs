@@ -9,26 +9,25 @@ use matrixraft::{
     matrixraft_diagnostic_log_prometheus, matrixraft_operator_runbook_prometheus,
     matrixraft_optimization_report, matrixraft_optimization_report_prometheus,
     matrixraft_runtime_admin_report, matrixraft_runtime_local_status_report,
-    matrixraft_validate_debug_snapshot, matrixraft_validate_debug_snapshot_json, RaftCluster,
-    RaftHealthStatus, RaftPeerPipelineState, RustRaftAdminStatusSurfaceInput,
-    RustRaftDiagnosticLogEntry, RustRaftDiagnosticSeverity, RustRaftOperatorRunbookStep,
-    RustRaftOptimizationHint, RustRaftOptimizationHintSeverity, RustRaftPeer,
-    RustRaftPeerProgressState, RustRaftReplicaRole, RustRaftRole, RustRaftStatusSnapshot,
+    matrixraft_validate_debug_snapshot, matrixraft_validate_debug_snapshot_json,
+    AdminStatusSurfaceInput, DiagnosticLogEntry, DiagnosticSeverity, HealthStatus,
+    OperatorRunbookStep, OptimizationHint, OptimizationHintSeverity, Peer, PeerProgress,
+    ProgressState, RaftCluster, ReplicaRole, StateRole, StatusSnapshot,
 };
 use serde_json::Value;
 
-fn peer(node_id: u64) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 6_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 7_000 + node_id),
-        role: RustRaftReplicaRole::Voter,
+        role: ReplicaRole::Voter,
         auto_promote: false,
     }
 }
 
-fn ready_snapshot() -> matrixraft::RustRaftReadinessSnapshot {
-    matrixraft::RustRaftReadinessSnapshot {
+fn ready_snapshot() -> matrixraft::ReadinessSnapshot {
+    matrixraft::ReadinessSnapshot {
         matrixraft_leader_write_authority_present: true,
         matrixraft_operator_observability_present: true,
         matrixraft_rpc_transport_contract_present: true,
@@ -44,10 +43,10 @@ fn ready_snapshot() -> matrixraft::RustRaftReadinessSnapshot {
     }
 }
 
-fn pipeline_peer(peer_id: u64, match_index: u64, next_index: u64) -> RaftPeerPipelineState {
-    RaftPeerPipelineState {
+fn pipeline_peer(peer_id: u64, match_index: u64, next_index: u64) -> PeerProgress {
+    PeerProgress {
         peer_id,
-        progress_state: RustRaftPeerProgressState::Probe,
+        progress_state: ProgressState::Probe,
         paused: false,
         old_paused: false,
         match_index,
@@ -115,10 +114,10 @@ fn pipeline_peer(peer_id: u64, match_index: u64, next_index: u64) -> RaftPeerPip
 
 #[test]
 fn local_status_report_tracks_replication_apply_and_pipeline_health() {
-    let status = RustRaftStatusSnapshot {
+    let status = StatusSnapshot {
         group_id: 5,
         node_id: 1,
-        role: RustRaftRole::Leader,
+        role: StateRole::Leader,
         term: 3,
         leader_id: Some(1),
         commit_index: 10,
@@ -127,9 +126,9 @@ fn local_status_report_tracks_replication_apply_and_pipeline_health() {
         last_snapshot_index: 4,
         peers: Vec::new(),
     };
-    let pipeline = vec![RaftPeerPipelineState {
+    let pipeline = vec![PeerProgress {
         peer_id: 2,
-        progress_state: RustRaftPeerProgressState::Replicate,
+        progress_state: ProgressState::Replicate,
         paused: false,
         old_paused: false,
         match_index: 8,
@@ -195,15 +194,15 @@ fn local_status_report_tracks_replication_apply_and_pipeline_health() {
     }];
 
     let report = matrixraft_runtime_local_status_report(status, pipeline, ready_snapshot());
-    assert_eq!(report.replication_health.status, RaftHealthStatus::Degraded);
-    assert_eq!(report.apply_health.status, RaftHealthStatus::Degraded);
+    assert_eq!(report.replication_health.status, HealthStatus::Degraded);
+    assert_eq!(report.apply_health.status, HealthStatus::Degraded);
     assert!(report.blockers.contains(&"replication_lagging".to_string()));
     assert!(report.blockers.contains(&"apply_lagging".to_string()));
 }
 
 #[test]
 fn admin_status_surface_evidence_accepts_quorum_progress_with_lagging_peer() {
-    let input = RustRaftAdminStatusSurfaceInput {
+    let input = AdminStatusSurfaceInput {
         commit_index: 10,
         max_observed_node_commit_index: 10,
         quorum_size: 2,
@@ -226,7 +225,7 @@ fn admin_status_surface_evidence_accepts_quorum_progress_with_lagging_peer() {
 
 #[test]
 fn admin_status_surface_evidence_fails_closed_on_missing_wal_or_quorum() {
-    let input = RustRaftAdminStatusSurfaceInput {
+    let input = AdminStatusSurfaceInput {
         commit_index: 10,
         max_observed_node_commit_index: 11,
         quorum_size: 2,
@@ -260,7 +259,7 @@ fn optimization_report_surfaces_pipeline_wal_and_commit_pressure() {
     apply_saturated.apply_inflight_tasks = apply_saturated.apply_inflight_limit;
     apply_saturated.inflight_bytes = apply_saturated.inflight_bytes_limit;
 
-    let report = matrixraft_optimization_report(&RustRaftAdminStatusSurfaceInput {
+    let report = matrixraft_optimization_report(&AdminStatusSurfaceInput {
         commit_index: 10,
         max_observed_node_commit_index: 11,
         quorum_size: 2,
@@ -275,7 +274,7 @@ fn optimization_report_surfaces_pipeline_wal_and_commit_pressure() {
     assert!(report.warning_count >= 4);
     assert!(report.hints.iter().any(|hint| {
         hint.id == "cluster_commit_index_inconsistent"
-            && hint.severity == RustRaftOptimizationHintSeverity::Critical
+            && hint.severity == OptimizationHintSeverity::Critical
     }));
     assert!(report
         .hints
@@ -301,7 +300,7 @@ fn optimization_report_surfaces_pipeline_wal_and_commit_pressure() {
 
 #[test]
 fn optimization_report_is_ready_for_clean_admin_status_surface() {
-    let report = matrixraft_optimization_report(&RustRaftAdminStatusSurfaceInput {
+    let report = matrixraft_optimization_report(&AdminStatusSurfaceInput {
         commit_index: 10,
         max_observed_node_commit_index: 10,
         quorum_size: 2,
@@ -325,7 +324,7 @@ fn cluster_status_report_is_derived_from_runtime_cluster() {
 
     let report = cluster.cluster_status_report().expect("cluster status");
     assert_eq!(report.group_id, 5);
-    assert_eq!(report.health, RaftHealthStatus::Healthy);
+    assert_eq!(report.health, HealthStatus::Healthy);
     assert!(report.ready);
     assert_eq!(report.nodes.len(), 3);
 }
@@ -345,8 +344,8 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     );
 
     assert!(report.ready);
-    assert_eq!(report.health, RaftHealthStatus::Healthy);
-    assert_eq!(report.public_api.transport_trait, "RaftTransport");
+    assert_eq!(report.health, HealthStatus::Healthy);
+    assert_eq!(report.public_api.transport_trait, "Transport");
     assert!(report
         .capability_evidence
         .iter()
@@ -360,7 +359,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let entries = matrixraft_admin_diagnostic_log_entries(&report);
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].target, "rustraft.admin");
-    assert_eq!(entries[0].severity, RustRaftDiagnosticSeverity::Info);
+    assert_eq!(entries[0].severity, DiagnosticSeverity::Info);
     assert!(entries[0]
         .fields
         .contains(&("health".to_string(), "Healthy".to_string())));
@@ -380,7 +379,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     assert_eq!(parsed[0]["target"], "rustraft.admin");
     assert_eq!(parsed[0]["severity"], "info");
 
-    let status_surface = RustRaftAdminStatusSurfaceInput {
+    let status_surface = AdminStatusSurfaceInput {
         commit_index: 10,
         max_observed_node_commit_index: 10,
         quorum_size: 2,
@@ -595,9 +594,9 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let mut escaped_diagnostic_snapshot = snapshot.clone();
     escaped_diagnostic_snapshot
         .diagnostics
-        .push(RustRaftDiagnosticLogEntry {
+        .push(DiagnosticLogEntry {
             target: "rustraft.target\"with\\escape".to_string(),
-            severity: RustRaftDiagnosticSeverity::Warn,
+            severity: DiagnosticSeverity::Warn,
             message: "diagnostic\"message\\escaped".to_string(),
             fields: vec![(
                 "detail".to_string(),
@@ -649,9 +648,9 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     stale_optimization_ready_snapshot
         .optimization
         .hints
-        .push(RustRaftOptimizationHint {
+        .push(OptimizationHint {
             id: "critical_ready_mismatch".to_string(),
-            severity: RustRaftOptimizationHintSeverity::Critical,
+            severity: OptimizationHintSeverity::Critical,
             component: "optimization".to_string(),
             recommendation: "clear critical hints before ready".to_string(),
             observed_value: 1,
@@ -694,9 +693,9 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     missing_prometheus_hint_snapshot
         .optimization
         .hints
-        .push(RustRaftOptimizationHint {
+        .push(OptimizationHint {
             id: "stale_missing_hint_metric".to_string(),
-            severity: RustRaftOptimizationHintSeverity::Warning,
+            severity: OptimizationHintSeverity::Warning,
             component: "observability".to_string(),
             recommendation: "refresh Prometheus hint metrics".to_string(),
             observed_value: 1,
@@ -717,9 +716,9 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     escaped_hint_snapshot
         .optimization
         .hints
-        .push(RustRaftOptimizationHint {
+        .push(OptimizationHint {
             id: "hint\"with\\escape".to_string(),
-            severity: RustRaftOptimizationHintSeverity::Warning,
+            severity: OptimizationHintSeverity::Warning,
             component: "observability".to_string(),
             recommendation: "keep escaped labels valid".to_string(),
             observed_value: 1,
@@ -817,7 +816,7 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
     let mut escaped_runbook_snapshot = snapshot.clone();
     escaped_runbook_snapshot
         .runbook_steps
-        .push(RustRaftOperatorRunbookStep {
+        .push(OperatorRunbookStep {
             id: "step\"with\\escape".to_string(),
             severity: "warning\\level".to_string(),
             target: "runbook\"target\\escaped".to_string(),

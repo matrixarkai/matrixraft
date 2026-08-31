@@ -4,49 +4,38 @@
 //! Transport traits and RPC envelopes for append, vote, snapshot, and read-index paths.
 
 pub use crate::{
-    AppendEntriesRequest, AppendEntriesResponse, AuthenticatedRaftRpc, AuthenticatedRaftTransport,
-    ClusterRaftTransport, InMemoryRaftTransport, InstallSnapshotRequest, InstallSnapshotResponse,
-    PreVoteRequest, PreVoteResponse, RaftAuthPolicy, ReadIndexRequest, ReadIndexResponse,
-    RustRaftAppendEntriesRequest, RustRaftAppendEntriesResponse, RustRaftHeartbeatAddressResolver,
-    RustRaftHeartbeatMergeMessage, RustRaftHeartbeatMergeStats, RustRaftHeartbeatMerger,
-    RustRaftInstallSnapshotRequest, RustRaftInstallSnapshotResponse, RustRaftMergedHeartbeatBatch,
-    RustRaftReadIndexRequest, RustRaftReadIndexResponse, RustRaftSnapshotChunk,
-    RustRaftTransportValidationReport, RustRaftVoteRequest, RustRaftVoteResponse,
-    StaticRaftAuthToken, TcpRaftRpcResult, TcpRaftTransport, TcpRaftTransportRequest,
-    TcpRaftTransportResponse, TcpRaftTransportServer, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, AuthPolicy, AuthenticatedRaftRpc,
+    AuthenticatedRaftTransport, ClusterRaftTransport, HeartbeatAddressResolver,
+    HeartbeatMergeMessage, HeartbeatMergeStats, HeartbeatMerger, InMemoryRaftTransport,
+    InstallSnapshotRequest, InstallSnapshotResponse, MergedHeartbeatBatch, PreVoteRequest,
+    PreVoteResponse, ReadIndexRequest, ReadIndexResponse, SnapshotChunk, StaticRaftAuthToken,
+    TcpRaftRpcResult, TcpRaftTransport, TcpRaftTransportRequest, TcpRaftTransportResponse,
+    TcpRaftTransportServer, TransportValidationReport, VoteRequest, VoteResponse,
 };
 
-use crate::{RaftError, RustRaftError, RustRaftLogId};
+use crate::{LogId, RaftError};
 
 /// Network transport API for Raft append, vote, snapshot, and read-index RPCs.
-pub trait RustRaftTransport {
+pub trait Transport {
     fn append_entries(
         &self,
         target: u64,
-        request: RustRaftAppendEntriesRequest,
-    ) -> Result<RustRaftAppendEntriesResponse, RustRaftError>;
-    fn vote(
-        &self,
-        target: u64,
-        request: RustRaftVoteRequest,
-    ) -> Result<RustRaftVoteResponse, RustRaftError>;
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, RaftError>;
+    fn vote(&self, target: u64, request: VoteRequest) -> Result<VoteResponse, RaftError>;
     fn install_snapshot(
         &self,
         target: u64,
-        request: RustRaftInstallSnapshotRequest,
-    ) -> Result<RustRaftInstallSnapshotResponse, RustRaftError>;
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse, RaftError>;
     fn read_index(
         &self,
         target: u64,
-        request: RustRaftReadIndexRequest,
-    ) -> Result<RustRaftReadIndexResponse, RustRaftError>;
+        request: ReadIndexRequest,
+    ) -> Result<ReadIndexResponse, RaftError>;
 }
 
-pub trait RaftTransport: RustRaftTransport {}
-
-impl<T> RaftTransport for T where T: RustRaftTransport + ?Sized {}
-
-impl RustRaftTransportValidationReport {
+impl TransportValidationReport {
     fn new(rpc: impl Into<String>, blockers: Vec<String>) -> Self {
         Self {
             rpc: rpc.into(),
@@ -62,7 +51,7 @@ fn validate_positive_id(blockers: &mut Vec<String>, field: &str, value: u64) {
     }
 }
 
-fn validate_log_id(blockers: &mut Vec<String>, field: &str, log_id: &RustRaftLogId) {
+fn validate_log_id(blockers: &mut Vec<String>, field: &str, log_id: &LogId) {
     if log_id.index == 0 {
         blockers.push(format!("{field}.index must be greater than zero"));
     }
@@ -75,7 +64,7 @@ fn validate_non_empty_reason(blockers: &mut Vec<String>, field: &str, reason: &s
 }
 
 pub(crate) fn require_transport_validation(
-    report: RustRaftTransportValidationReport,
+    report: TransportValidationReport,
 ) -> Result<(), RaftError> {
     if report.valid {
         Ok(())
@@ -90,7 +79,7 @@ pub(crate) fn require_transport_validation(
 
 pub fn matrixraft_validate_append_entries_request(
     request: &AppendEntriesRequest,
-) -> RustRaftTransportValidationReport {
+) -> TransportValidationReport {
     let mut blockers = Vec::new();
     validate_positive_id(&mut blockers, "group_id", request.group_id);
     validate_positive_id(&mut blockers, "leader_id", request.leader_id);
@@ -111,12 +100,12 @@ pub fn matrixraft_validate_append_entries_request(
         }
         expected_index = entry.log_id.index + 1;
     }
-    RustRaftTransportValidationReport::new("append_entries_request", blockers)
+    TransportValidationReport::new("append_entries_request", blockers)
 }
 
 pub fn matrixraft_validate_append_entries_response(
     response: &AppendEntriesResponse,
-) -> RustRaftTransportValidationReport {
+) -> TransportValidationReport {
     let mut blockers = Vec::new();
     if response.success && (response.rejection_hint.is_some() || response.rejected_index.is_some())
     {
@@ -125,32 +114,28 @@ pub fn matrixraft_validate_append_entries_response(
                 .to_string(),
         );
     }
-    RustRaftTransportValidationReport::new("append_entries_response", blockers)
+    TransportValidationReport::new("append_entries_response", blockers)
 }
 
-pub fn matrixraft_validate_vote_request(
-    request: &VoteRequest,
-) -> RustRaftTransportValidationReport {
+pub fn matrixraft_validate_vote_request(request: &VoteRequest) -> TransportValidationReport {
     let mut blockers = Vec::new();
     validate_positive_id(&mut blockers, "group_id", request.group_id);
     validate_positive_id(&mut blockers, "candidate_id", request.candidate_id);
     if let Some(last_log_id) = &request.last_log_id {
         validate_log_id(&mut blockers, "last_log_id", last_log_id);
     }
-    RustRaftTransportValidationReport::new("vote_request", blockers)
+    TransportValidationReport::new("vote_request", blockers)
 }
 
-pub fn matrixraft_validate_vote_response(
-    response: &VoteResponse,
-) -> RustRaftTransportValidationReport {
+pub fn matrixraft_validate_vote_response(response: &VoteResponse) -> TransportValidationReport {
     let mut blockers = Vec::new();
     validate_non_empty_reason(&mut blockers, "vote_response", &response.reason);
-    RustRaftTransportValidationReport::new("vote_response", blockers)
+    TransportValidationReport::new("vote_response", blockers)
 }
 
 pub fn matrixraft_validate_install_snapshot_request(
     request: &InstallSnapshotRequest,
-) -> RustRaftTransportValidationReport {
+) -> TransportValidationReport {
     let mut blockers = Vec::new();
     validate_positive_id(&mut blockers, "group_id", request.group_id);
     validate_positive_id(&mut blockers, "leader_id", request.leader_id);
@@ -165,40 +150,40 @@ pub fn matrixraft_validate_install_snapshot_request(
     if request.chunk.meta.membership.is_empty() {
         blockers.push("chunk.meta.membership must not be empty".to_string());
     }
-    RustRaftTransportValidationReport::new("install_snapshot_request", blockers)
+    TransportValidationReport::new("install_snapshot_request", blockers)
 }
 
 pub fn matrixraft_validate_install_snapshot_response(
     response: &InstallSnapshotResponse,
-) -> RustRaftTransportValidationReport {
+) -> TransportValidationReport {
     let mut blockers = Vec::new();
     validate_non_empty_reason(&mut blockers, "install_snapshot_response", &response.reason);
-    RustRaftTransportValidationReport::new("install_snapshot_response", blockers)
+    TransportValidationReport::new("install_snapshot_response", blockers)
 }
 
 pub fn matrixraft_validate_read_index_request(
     request: &ReadIndexRequest,
-) -> RustRaftTransportValidationReport {
+) -> TransportValidationReport {
     let mut blockers = Vec::new();
     validate_positive_id(&mut blockers, "group_id", request.group_id);
     validate_positive_id(&mut blockers, "requester_id", request.requester_id);
-    RustRaftTransportValidationReport::new("read_index_request", blockers)
+    TransportValidationReport::new("read_index_request", blockers)
 }
 
 pub fn matrixraft_validate_read_index_response(
     response: &ReadIndexResponse,
-) -> RustRaftTransportValidationReport {
+) -> TransportValidationReport {
     let mut blockers = Vec::new();
     validate_non_empty_reason(&mut blockers, "read_index_response", &response.reason);
     if !response.safe && response.lease_read {
         blockers.push("unsafe read-index response must not grant lease_read".to_string());
     }
-    RustRaftTransportValidationReport::new("read_index_response", blockers)
+    TransportValidationReport::new("read_index_response", blockers)
 }
 
 pub fn matrixraft_validate_tcp_transport_request(
     request: &TcpRaftTransportRequest,
-) -> RustRaftTransportValidationReport {
+) -> TransportValidationReport {
     let mut report = match request {
         TcpRaftTransportRequest::AppendEntries { request, .. } => {
             matrixraft_validate_append_entries_request(request)
@@ -228,7 +213,7 @@ pub fn matrixraft_validate_tcp_transport_request(
                         .map(|blocker| format!("batch request {index}: {blocker}")),
                 );
             }
-            return RustRaftTransportValidationReport::new("tcp_batch_request", blockers);
+            return TransportValidationReport::new("tcp_batch_request", blockers);
         }
     };
     let target = match request {

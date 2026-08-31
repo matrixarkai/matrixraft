@@ -5,7 +5,7 @@ use matrixraft::{
     matrixraft_flexible_apply_with_store, MatrixRaftBatchId, MatrixRaftCheckpoint,
     MatrixRaftConfigurationApplied, MatrixRaftFsm, MatrixRaftFsmEntry, MatrixRaftFsmEntryKind,
     MatrixRaftFsmIterator, MatrixRaftFsmRuntimeBinding, MatrixRaftNodeId, MatrixRaftStatus,
-    MatrixRaftStoreFsm, RaftError, RaftMembership, RustRaftRole,
+    MatrixRaftStoreFsm, Membership, RaftError, StateRole,
 };
 
 #[derive(Debug, Default)]
@@ -129,7 +129,7 @@ fn node(peer_id: u64) -> MatrixRaftNodeId {
     }
 }
 
-fn status(role: RustRaftRole, term: u64, leader_id: Option<u64>) -> MatrixRaftStatus {
+fn status(role: StateRole, term: u64, leader_id: Option<u64>) -> MatrixRaftStatus {
     MatrixRaftStatus {
         node_id: 1,
         group_id: 44,
@@ -140,7 +140,7 @@ fn status(role: RustRaftRole, term: u64, leader_id: Option<u64>) -> MatrixRaftSt
         commit_index: 0,
         applied_index: 0,
         last_log_index: 0,
-        membership: RaftMembership {
+        membership: Membership {
             group_id: 44,
             voters: vec![1, 2, 3],
             learners: Vec::new(),
@@ -224,7 +224,7 @@ fn matrixraft_fsm_runtime_binding_invokes_hooks_from_status_and_membership_chang
     let mut binding = MatrixRaftFsmRuntimeBinding::new(CompatFsm::default());
     let first = binding
         .observe_status(
-            &status(RustRaftRole::Follower, 3, Some(11)),
+            &status(StateRole::Follower, 3, Some(11)),
             vec![node(1), node(2), node(3)],
         )
         .expect("first follower status");
@@ -234,7 +234,7 @@ fn matrixraft_fsm_runtime_binding_invokes_hooks_from_status_and_membership_chang
 
     let same = binding
         .observe_status(
-            &status(RustRaftRole::Follower, 3, Some(11)),
+            &status(StateRole::Follower, 3, Some(11)),
             vec![node(1), node(2), node(3)],
         )
         .expect("same follower status");
@@ -244,7 +244,7 @@ fn matrixraft_fsm_runtime_binding_invokes_hooks_from_status_and_membership_chang
 
     let leader = binding
         .observe_status(
-            &status(RustRaftRole::Leader, 4, Some(1)),
+            &status(StateRole::Leader, 4, Some(1)),
             vec![node(1), node(2), node(3)],
         )
         .expect("leader status");
@@ -253,7 +253,7 @@ fn matrixraft_fsm_runtime_binding_invokes_hooks_from_status_and_membership_chang
 
     let follower_with_new_config = binding
         .observe_status(
-            &status(RustRaftRole::Follower, 5, Some(22)),
+            &status(StateRole::Follower, 5, Some(22)),
             vec![node(1), node(2), node(4)],
         )
         .expect("follower with new config");

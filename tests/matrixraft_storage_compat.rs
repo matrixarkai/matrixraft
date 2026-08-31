@@ -6,7 +6,7 @@ use matrixraft::{
     MatrixRaftHardState, MatrixRaftInitialState, MatrixRaftLogRange, MatrixRaftLogSegmentEventKind,
     MatrixRaftLogStorage, MatrixRaftLogStorageOptions, MatrixRaftLogStoragePrepareOptions,
     MatrixRaftLogStorageWriteTask, MatrixRaftMemberId, MatrixRaftMemoryGroupStorage,
-    MatrixRaftPropose, RustRaftPeer, RustRaftReplicaRole,
+    MatrixRaftPropose, Peer, ReplicaRole,
 };
 
 fn member(node_id: u64) -> MatrixRaftMemberId {
@@ -20,12 +20,12 @@ fn member(node_id: u64) -> MatrixRaftMemberId {
     }
 }
 
-fn peer(node_id: u64) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 50_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 51_000 + node_id),
-        role: RustRaftReplicaRole::Voter,
+        role: ReplicaRole::Voter,
         auto_promote: false,
     }
 }
@@ -62,7 +62,7 @@ fn matrixraft_storage_contract_covers_group_prepare_open_log_write_and_truncate(
                 peer_id: 1,
                 max_segment_bytes: 64 * 1024 * 1024,
                 initial_state: MatrixRaftInitialState { index: 0, term: 0 },
-                role: RustRaftReplicaRole::Voter,
+                role: ReplicaRole::Voter,
                 local_id: local_id.clone(),
                 members: members.clone(),
             },
@@ -75,7 +75,7 @@ fn matrixraft_storage_contract_covers_group_prepare_open_log_write_and_truncate(
                 peer_id: 2,
                 max_segment_bytes: 64 * 1024 * 1024,
                 initial_state: MatrixRaftInitialState { index: 0, term: 0 },
-                role: RustRaftReplicaRole::Voter,
+                role: ReplicaRole::Voter,
                 local_id: member(2),
                 members: members.clone(),
             },
@@ -176,7 +176,7 @@ fn matrixraft_storage_compaction_report_covers_released_and_trimmed_segments() {
                 peer_id: 1,
                 max_segment_bytes: 4,
                 initial_state: MatrixRaftInitialState { index: 0, term: 0 },
-                role: RustRaftReplicaRole::Voter,
+                role: ReplicaRole::Voter,
                 local_id: local_id.clone(),
                 members: vec![member(1), member(2)],
             },
@@ -247,7 +247,7 @@ fn matrixraft_storage_contract_exposes_segment_switch_release_and_truncate_event
                 peer_id: 1,
                 max_segment_bytes: 4,
                 initial_state: MatrixRaftInitialState { index: 0, term: 0 },
-                role: RustRaftReplicaRole::Voter,
+                role: ReplicaRole::Voter,
                 local_id: local_id.clone(),
                 members,
             },

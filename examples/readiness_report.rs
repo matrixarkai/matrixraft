@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
-use matrixraft::{matrixraft_parity_report, RustRaftProductionStatus, RustRaftReadinessSnapshot};
+use matrixraft::{matrixraft_parity_report, ProductionStatus, ReadinessSnapshot};
 
 fn main() {
-    let readiness = RustRaftReadinessSnapshot {
+    let readiness = ReadinessSnapshot {
         matrixraft_leader_write_authority_present: true,
         matrixraft_operator_observability_present: true,
         matrixraft_rpc_transport_contract_present: true,
@@ -20,9 +20,6 @@ fn main() {
     };
 
     let report = matrixraft_parity_report(&readiness);
-    assert_eq!(
-        report.production_status,
-        RustRaftProductionStatus::ProductionReady
-    );
+    assert_eq!(report.production_status, ProductionStatus::ProductionReady);
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
 }

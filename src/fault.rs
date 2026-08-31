@@ -9,7 +9,7 @@ pub const MATRIXRAFT_FAULT_MIN_INJECTED_FAULT_COUNT: u64 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftFaultScenario {
+pub enum FaultScenario {
     PacketLossMajority,
     PartitionHeal,
     SlowWalFsync,
@@ -19,7 +19,7 @@ pub enum RustRaftFaultScenario {
     RollingRestartJointConsensus,
 }
 
-impl RustRaftFaultScenario {
+impl FaultScenario {
     pub fn id(self) -> &'static str {
         match self {
             Self::PacketLossMajority => "packet_loss_majority",
@@ -34,16 +34,16 @@ impl RustRaftFaultScenario {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftFaultScenarioRequirement {
-    pub scenario: RustRaftFaultScenario,
+pub struct FaultScenarioRequirement {
+    pub scenario: FaultScenario,
     pub required_for_production: bool,
     pub baseline_raft_reference: String,
     pub acceptance: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftFaultScenarioEvidence {
-    pub scenario: RustRaftFaultScenario,
+pub struct FaultScenarioEvidence {
+    pub scenario: FaultScenario,
     pub process_path_observed: bool,
     #[serde(default)]
     pub spawned_process_count: u64,
@@ -67,24 +67,24 @@ pub struct RustRaftFaultScenarioEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftFaultScenarioResult {
-    pub scenario: RustRaftFaultScenario,
+pub struct FaultScenarioResult {
+    pub scenario: FaultScenario,
     pub ready: bool,
     pub missing: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftFaultHarnessReadinessReport {
+pub struct FaultHarnessReadinessReport {
     pub ready: bool,
-    pub required_scenarios: Vec<RustRaftFaultScenarioRequirement>,
-    pub results: Vec<RustRaftFaultScenarioResult>,
+    pub required_scenarios: Vec<FaultScenarioRequirement>,
+    pub results: Vec<FaultScenarioResult>,
     pub missing: Vec<String>,
 }
 
-pub fn matrixraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRequirement> {
+pub fn matrixraft_baseline_raft_fault_scenarios() -> Vec<FaultScenarioRequirement> {
     vec![
-        RustRaftFaultScenarioRequirement {
-            scenario: RustRaftFaultScenario::PacketLossMajority,
+        FaultScenarioRequirement {
+            scenario: FaultScenario::PacketLossMajority,
             required_for_production: true,
             baseline_raft_reference: "majority continues while the minority rejects stale reads/writes".to_string(),
             acceptance: vec![
@@ -93,8 +93,8 @@ pub fn matrixraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRe
                 "minority_stale_read_rejected".to_string(),
             ],
         },
-        RustRaftFaultScenarioRequirement {
-            scenario: RustRaftFaultScenario::PartitionHeal,
+        FaultScenarioRequirement {
+            scenario: FaultScenario::PartitionHeal,
             required_for_production: true,
             baseline_raft_reference: "partitioned peer heals, reconciles divergent tail, catches up, and only then becomes read eligible".to_string(),
             acceptance: vec![
@@ -105,8 +105,8 @@ pub fn matrixraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRe
                 "read_eligible_after_heal_catchup".to_string(),
             ],
         },
-        RustRaftFaultScenarioRequirement {
-            scenario: RustRaftFaultScenario::SlowWalFsync,
+        FaultScenarioRequirement {
+            scenario: FaultScenario::SlowWalFsync,
             required_for_production: true,
             baseline_raft_reference: "slow WAL fsync activates backpressure without losing committed writes".to_string(),
             acceptance: vec![
@@ -115,8 +115,8 @@ pub fn matrixraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRe
                 "committed_write_survived_restart".to_string(),
             ],
         },
-        RustRaftFaultScenarioRequirement {
-            scenario: RustRaftFaultScenario::SnapshotDuringMembershipChange,
+        FaultScenarioRequirement {
+            scenario: FaultScenario::SnapshotDuringMembershipChange,
             required_for_production: true,
             baseline_raft_reference: "snapshot floor and membership generation remain consistent across restart".to_string(),
             acceptance: vec![
@@ -124,8 +124,8 @@ pub fn matrixraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRe
                 "restart_replay_preserves_joint_state".to_string(),
             ],
         },
-        RustRaftFaultScenarioRequirement {
-            scenario: RustRaftFaultScenario::LeaderTransferUnderLoad,
+        FaultScenarioRequirement {
+            scenario: FaultScenario::LeaderTransferUnderLoad,
             required_for_production: true,
             baseline_raft_reference: "leader transfer under active writes commits each accepted write exactly once".to_string(),
             acceptance: vec![
@@ -134,8 +134,8 @@ pub fn matrixraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRe
                 "final_leader_has_committed_entries".to_string(),
             ],
         },
-        RustRaftFaultScenarioRequirement {
-            scenario: RustRaftFaultScenario::FollowerRejoinCompactedLogs,
+        FaultScenarioRequirement {
+            scenario: FaultScenario::FollowerRejoinCompactedLogs,
             required_for_production: true,
             baseline_raft_reference: "rejoining follower installs snapshot, replays retained tail, and becomes read-eligible only after catch-up".to_string(),
             acceptance: vec![
@@ -145,8 +145,8 @@ pub fn matrixraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRe
                 "read_eligible_after_catchup".to_string(),
             ],
         },
-        RustRaftFaultScenarioRequirement {
-            scenario: RustRaftFaultScenario::RollingRestartJointConsensus,
+        FaultScenarioRequirement {
+            scenario: FaultScenario::RollingRestartJointConsensus,
             required_for_production: true,
             baseline_raft_reference: "pending joint consensus survives rolling restarts and completes or rolls back safely".to_string(),
             acceptance: vec![
@@ -158,8 +158,8 @@ pub fn matrixraft_baseline_raft_fault_scenarios() -> Vec<RustRaftFaultScenarioRe
 }
 
 pub fn matrixraft_fault_harness_readiness_report(
-    evidence: &[RustRaftFaultScenarioEvidence],
-) -> RustRaftFaultHarnessReadinessReport {
+    evidence: &[FaultScenarioEvidence],
+) -> FaultHarnessReadinessReport {
     let required_scenarios = matrixraft_baseline_raft_fault_scenarios();
     let results = required_scenarios
         .iter()
@@ -168,7 +168,7 @@ pub fn matrixraft_fault_harness_readiness_report(
                 .iter()
                 .find(|item| item.scenario == requirement.scenario);
             let missing = matrixraft_fault_scenario_missing(requirement, scenario_evidence);
-            RustRaftFaultScenarioResult {
+            FaultScenarioResult {
                 scenario: requirement.scenario,
                 ready: missing.is_empty(),
                 missing,
@@ -184,7 +184,7 @@ pub fn matrixraft_fault_harness_readiness_report(
                 .map(move |field| format!("{}:{field}", result.scenario.id()))
         })
         .collect::<Vec<_>>();
-    RustRaftFaultHarnessReadinessReport {
+    FaultHarnessReadinessReport {
         ready: missing.is_empty(),
         required_scenarios,
         results,
@@ -193,8 +193,8 @@ pub fn matrixraft_fault_harness_readiness_report(
 }
 
 fn matrixraft_fault_scenario_missing(
-    requirement: &RustRaftFaultScenarioRequirement,
-    evidence: Option<&RustRaftFaultScenarioEvidence>,
+    requirement: &FaultScenarioRequirement,
+    evidence: Option<&FaultScenarioEvidence>,
 ) -> Vec<String> {
     let Some(evidence) = evidence else {
         return vec!["evidence_missing".to_string()];
@@ -264,7 +264,7 @@ fn matrixraft_fault_scenario_missing(
     {
         missing.push(
             match requirement.scenario {
-                RustRaftFaultScenario::LeaderTransferUnderLoad => "exact_once_report_path",
+                FaultScenario::LeaderTransferUnderLoad => "exact_once_report_path",
                 _ => "process_fault_report_path",
             }
             .to_string(),

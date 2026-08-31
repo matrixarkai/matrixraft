@@ -3,16 +3,16 @@
 
 use matrixraft::fault::{
     matrixraft_baseline_raft_fault_scenarios, matrixraft_fault_harness_readiness_report,
-    RustRaftFaultScenario, RustRaftFaultScenarioEvidence,
+    FaultScenario, FaultScenarioEvidence,
 };
 
-fn passing_evidence(scenario: RustRaftFaultScenario) -> RustRaftFaultScenarioEvidence {
+fn passing_evidence(scenario: FaultScenario) -> FaultScenarioEvidence {
     let observed_acceptance = matrixraft_baseline_raft_fault_scenarios()
         .into_iter()
         .find(|requirement| requirement.scenario == scenario)
         .expect("scenario requirement")
         .acceptance;
-    RustRaftFaultScenarioEvidence {
+    FaultScenarioEvidence {
         scenario,
         process_path_observed: true,
         spawned_process_count: 3,
@@ -71,8 +71,8 @@ fn fault_harness_readiness_fails_closed_on_missing_process_evidence() {
 
 #[test]
 fn fault_harness_readiness_requires_independent_stores_safety_recovery_and_metrics() {
-    let report = matrixraft_fault_harness_readiness_report(&[RustRaftFaultScenarioEvidence {
-        scenario: RustRaftFaultScenario::PacketLossMajority,
+    let report = matrixraft_fault_harness_readiness_report(&[FaultScenarioEvidence {
+        scenario: FaultScenario::PacketLossMajority,
         process_path_observed: true,
         spawned_process_count: 3,
         observed_process_ids: vec![10_001, 10_002, 10_003],
@@ -102,7 +102,7 @@ fn fault_harness_readiness_requires_independent_stores_safety_recovery_and_metri
 
 #[test]
 fn fault_harness_readiness_requires_nontrivial_workload_and_fault_injection() {
-    let mut evidence = passing_evidence(RustRaftFaultScenario::PacketLossMajority);
+    let mut evidence = passing_evidence(FaultScenario::PacketLossMajority);
     evidence.scenario_runtime_ms = 0;
     evidence.client_operation_count = 0;
     evidence.injected_fault_count = 0;
@@ -123,7 +123,7 @@ fn fault_harness_readiness_requires_nontrivial_workload_and_fault_injection() {
 
 #[test]
 fn fault_harness_readiness_requires_distinct_real_process_evidence() {
-    let mut evidence = passing_evidence(RustRaftFaultScenario::SlowWalFsync);
+    let mut evidence = passing_evidence(FaultScenario::SlowWalFsync);
     evidence.spawned_process_count = 1;
     evidence.observed_process_ids = vec![10_001, 10_001, 10_001];
     evidence.report_path = None;
@@ -144,7 +144,7 @@ fn fault_harness_readiness_requires_distinct_real_process_evidence() {
 
 #[test]
 fn fault_harness_readiness_requires_exact_baseline_raft_acceptance_markers() {
-    let mut evidence = passing_evidence(RustRaftFaultScenario::PartitionHeal);
+    let mut evidence = passing_evidence(FaultScenario::PartitionHeal);
     evidence
         .observed_acceptance
         .retain(|item| item != "read_eligible_after_heal_catchup");
@@ -172,7 +172,7 @@ fn fault_harness_readiness_accepts_complete_baseline_raft_style_evidence() {
 
 #[test]
 fn leader_transfer_under_load_requires_exact_once_report_path() {
-    let mut evidence = passing_evidence(RustRaftFaultScenario::LeaderTransferUnderLoad);
+    let mut evidence = passing_evidence(FaultScenario::LeaderTransferUnderLoad);
     evidence.report_path = None;
 
     let report = matrixraft_fault_harness_readiness_report(&[evidence]);

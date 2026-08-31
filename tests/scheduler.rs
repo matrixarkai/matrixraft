@@ -2,15 +2,13 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    RaftAdminCommand, RustRaftApplyTask, RustRaftFlushTask, RustRaftFlushTaskDesc,
-    RustRaftHardState, RustRaftLogEntry, RustRaftLogId, RustRaftMailBoxFetchPolicy,
-    RustRaftMailPriority, RustRaftMessage, RustRaftReadTask, RustRaftScheduler,
-    RustRaftSchedulerTask,
+    AdminCommand, ApplyTask, FlushTask, FlushTaskDesc, HardState, LogEntry, LogId,
+    MailBoxFetchPolicy, MailPriority, Message, ReadTask, Scheduler, SchedulerTask,
 };
 
-fn entry(index: u64) -> RustRaftLogEntry {
-    RustRaftLogEntry {
-        log_id: RustRaftLogId { term: 1, index },
+fn entry(index: u64) -> LogEntry {
+    LogEntry {
+        log_id: LogId { term: 1, index },
         payload: format!("entry-{index}").into_bytes(),
         is_command: true,
     }
@@ -18,10 +16,10 @@ fn entry(index: u64) -> RustRaftLogEntry {
 
 #[test]
 fn scheduler_fetch_preserves_priority_and_fifo_order_mailbox() {
-    let scheduler = RustRaftScheduler::new(8);
+    let scheduler = Scheduler::new(8);
     scheduler.schedule(
-        RustRaftMailPriority::Slowly,
-        RustRaftSchedulerTask::Read(RustRaftReadTask {
+        MailPriority::Slowly,
+        SchedulerTask::Read(ReadTask {
             target_id: 2,
             from_index: 1,
             to_index: 5,
@@ -29,42 +27,42 @@ fn scheduler_fetch_preserves_priority_and_fifo_order_mailbox() {
         }),
     );
     scheduler.schedule(
-        RustRaftMailPriority::Normal,
-        RustRaftSchedulerTask::Message(RustRaftMessage::Admin {
-            command: RaftAdminCommand::TriggerSnapshot,
+        MailPriority::Normal,
+        SchedulerTask::Message(Message::Admin {
+            command: AdminCommand::TriggerSnapshot,
         }),
     );
     scheduler.schedule(
-        RustRaftMailPriority::Urgent,
-        RustRaftSchedulerTask::Apply(RustRaftApplyTask {
+        MailPriority::Urgent,
+        SchedulerTask::Apply(ApplyTask {
             entries: vec![entry(1)],
             snapshot: None,
         }),
     );
     scheduler.schedule(
-        RustRaftMailPriority::Normal,
-        RustRaftSchedulerTask::Message(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ReleaseMemory,
+        MailPriority::Normal,
+        SchedulerTask::Message(Message::Admin {
+            command: AdminCommand::ReleaseMemory,
         }),
     );
 
-    let fetched = scheduler.fetch(RustRaftMailBoxFetchPolicy {
+    let fetched = scheduler.fetch(MailBoxFetchPolicy {
         limit: 3,
         timeout_ms: 0,
-        include_until: RustRaftMailPriority::Urgent,
+        include_until: MailPriority::Urgent,
     });
     assert_eq!(fetched.len(), 3);
-    assert!(matches!(fetched[0], RustRaftSchedulerTask::Apply(_)));
+    assert!(matches!(fetched[0], SchedulerTask::Apply(_)));
     assert!(matches!(
         fetched[1],
-        RustRaftSchedulerTask::Message(RustRaftMessage::Admin {
-            command: RaftAdminCommand::TriggerSnapshot
+        SchedulerTask::Message(Message::Admin {
+            command: AdminCommand::TriggerSnapshot
         })
     ));
     assert!(matches!(
         fetched[2],
-        RustRaftSchedulerTask::Message(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ReleaseMemory
+        SchedulerTask::Message(Message::Admin {
+            command: AdminCommand::ReleaseMemory
         })
     ));
     assert_eq!(scheduler.queued_tasks(), 1);
@@ -72,26 +70,24 @@ fn scheduler_fetch_preserves_priority_and_fifo_order_mailbox() {
 
 #[test]
 fn scheduler_try_schedule_applies_high_watermark_per_priority() {
-    let scheduler = RustRaftScheduler::new(1);
-    let first = RustRaftSchedulerTask::Apply(RustRaftApplyTask {
+    let scheduler = Scheduler::new(1);
+    let first = SchedulerTask::Apply(ApplyTask {
         entries: vec![entry(1)],
         snapshot: None,
     });
-    let second = RustRaftSchedulerTask::Apply(RustRaftApplyTask {
+    let second = SchedulerTask::Apply(ApplyTask {
         entries: vec![entry(2)],
         snapshot: None,
     });
 
+    assert!(scheduler.try_schedule(MailPriority::Normal, first).is_ok());
     assert!(scheduler
-        .try_schedule(RustRaftMailPriority::Normal, first)
-        .is_ok());
-    assert!(scheduler
-        .try_schedule(RustRaftMailPriority::Normal, second)
+        .try_schedule(MailPriority::Normal, second)
         .is_err());
     assert!(scheduler
         .try_schedule(
-            RustRaftMailPriority::Urgent,
-            RustRaftSchedulerTask::Apply(RustRaftApplyTask {
+            MailPriority::Urgent,
+            SchedulerTask::Apply(ApplyTask {
                 entries: vec![entry(3)],
                 snapshot: None,
             })
@@ -101,7 +97,7 @@ fn scheduler_try_schedule_applies_high_watermark_per_priority() {
 
 #[test]
 fn scheduler_records_apply_results_and_step_down_signals() {
-    let scheduler = RustRaftScheduler::new(4);
+    let scheduler = Scheduler::new(4);
 
     scheduler.send_apply_result(12, false);
     scheduler.send_apply_result(13, true);
@@ -125,8 +121,8 @@ fn scheduler_records_apply_results_and_step_down_signals() {
 
 #[test]
 fn scheduler_validates_flush_task_ranges_and_metadata() {
-    let valid = RustRaftFlushTask {
-        desc: RustRaftFlushTaskDesc {
+    let valid = FlushTask {
+        desc: FlushTaskDesc {
             first_index: Some(1),
             last_index: Some(2),
             unstable_config_change_index: None,
@@ -135,20 +131,20 @@ fn scheduler_validates_flush_task_ranges_and_metadata() {
         committed_index: 2,
         should_flush_meta: true,
         members: vec![1, 2, 3],
-        hard_state: Some(RustRaftHardState {
+        hard_state: Some(HardState {
             current_term: 1,
             voted_for: Some(1),
-            committed: Some(RustRaftLogId { term: 1, index: 2 }),
+            committed: Some(LogId { term: 1, index: 2 }),
         }),
         entries: vec![entry(1), entry(2)],
     };
-    RustRaftScheduler::validate_flush_task(&valid).expect("valid flush task");
+    Scheduler::validate_flush_task(&valid).expect("valid flush task");
 
     let mut missing_meta = valid.clone();
     missing_meta.hard_state = None;
-    assert!(RustRaftScheduler::validate_flush_task(&missing_meta).is_err());
+    assert!(Scheduler::validate_flush_task(&missing_meta).is_err());
 
     let mut bad_range = valid;
     bad_range.desc.last_index = Some(3);
-    assert!(RustRaftScheduler::validate_flush_task(&bad_range).is_err());
+    assert!(Scheduler::validate_flush_task(&bad_range).is_err());
 }

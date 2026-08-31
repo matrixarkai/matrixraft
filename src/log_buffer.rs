@@ -7,35 +7,35 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{RaftError, RustRaftLogEntry, RustRaftLogId, RustRaftLogIndex};
+use crate::{LogEntry, LogId, LogIndex, RaftError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftLogBufferFlush {
-    pub entries: Vec<RustRaftLogEntry>,
-    pub first_index: RustRaftLogIndex,
-    pub last_index: RustRaftLogIndex,
+pub struct LogBufferFlush {
+    pub entries: Vec<LogEntry>,
+    pub first_index: LogIndex,
+    pub last_index: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftLogBufferRelease {
-    pub released_entries: Vec<RustRaftLogEntry>,
-    pub released_until: RustRaftLogIndex,
+pub struct LogBufferRelease {
+    pub released_entries: Vec<LogEntry>,
+    pub released_until: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftLogBuffer {
+pub struct LogBuffer {
     cache_memory_limit: u64,
-    initial_state: RustRaftLogId,
+    initial_state: LogId,
     flushing: bool,
     flushing_offset: usize,
     waiting_offset: usize,
     log_buffer_bytes: u64,
-    entries: VecDeque<RustRaftLogEntry>,
+    entries: VecDeque<LogEntry>,
 }
 
-impl RustRaftLogBuffer {
-    pub fn new(cache_memory_limit: u64, initial_state: RustRaftLogId) -> Self {
-        let dummy = RustRaftLogEntry {
+impl LogBuffer {
+    pub fn new(cache_memory_limit: u64, initial_state: LogId) -> Self {
+        let dummy = LogEntry {
             log_id: initial_state.clone(),
             payload: Vec::new(),
             is_command: false,
@@ -54,7 +54,7 @@ impl RustRaftLogBuffer {
         }
     }
 
-    pub fn append(&mut self, entry: RustRaftLogEntry) -> Result<(), RaftError> {
+    pub fn append(&mut self, entry: LogEntry) -> Result<(), RaftError> {
         let expected = self.last_index().saturating_add(1);
         if entry.log_id.index != expected {
             return Err(RaftError::InvalidRequest(format!(
@@ -67,14 +67,14 @@ impl RustRaftLogBuffer {
         Ok(())
     }
 
-    pub fn append_many(&mut self, entries: Vec<RustRaftLogEntry>) -> Result<(), RaftError> {
+    pub fn append_many(&mut self, entries: Vec<LogEntry>) -> Result<(), RaftError> {
         for entry in entries {
             self.append(entry)?;
         }
         Ok(())
     }
 
-    pub fn flush(&mut self) -> Result<Option<RustRaftLogBufferFlush>, RaftError> {
+    pub fn flush(&mut self) -> Result<Option<LogBufferFlush>, RaftError> {
         if self.flushing || self.entries.len() == self.flushing_offset {
             return Ok(None);
         }
@@ -100,7 +100,7 @@ impl RustRaftLogBuffer {
             .unwrap_or_default();
         self.waiting_offset = self.entries.len();
         self.flushing = true;
-        Ok(Some(RustRaftLogBufferFlush {
+        Ok(Some(LogBufferFlush {
             entries: flushed_entries,
             first_index,
             last_index,
@@ -109,9 +109,9 @@ impl RustRaftLogBuffer {
 
     pub fn apply_append_result(
         &mut self,
-        first_index: RustRaftLogIndex,
-        last_index: RustRaftLogIndex,
-    ) -> Result<RustRaftLogIndex, RaftError> {
+        first_index: LogIndex,
+        last_index: LogIndex,
+    ) -> Result<LogIndex, RaftError> {
         if first_index == 0 || last_index < first_index {
             return Err(RaftError::InvalidRequest(format!(
                 "invalid stabled range: {first_index}..={last_index}"
@@ -152,12 +152,12 @@ impl RustRaftLogBuffer {
         Ok(last_written_index)
     }
 
-    pub fn get_entries(
+    pub fn read_entries(
         &self,
-        from: RustRaftLogIndex,
-        to: RustRaftLogIndex,
+        from: LogIndex,
+        to: LogIndex,
         limit_bytes: usize,
-    ) -> Result<Vec<RustRaftLogEntry>, RaftError> {
+    ) -> Result<Vec<LogEntry>, RaftError> {
         if from > to || from <= self.actual_first_index() || to > self.last_index() {
             return Err(RaftError::InvalidRequest(format!(
                 "log buffer range {from}..={to} is outside retained range {:?}",
@@ -187,7 +187,7 @@ impl RustRaftLogBuffer {
             .collect())
     }
 
-    pub fn truncate_from_index(&mut self, index: RustRaftLogIndex) -> Result<(), RaftError> {
+    pub fn truncate_from_index(&mut self, index: LogIndex) -> Result<(), RaftError> {
         if index <= self.actual_first_index() {
             return Err(RaftError::InvalidRequest(format!(
                 "truncate index {index} must be after first retained index {}",
@@ -209,7 +209,7 @@ impl RustRaftLogBuffer {
         Ok(())
     }
 
-    pub fn reset_initial_state(&mut self, initial_state: RustRaftLogId) -> Result<(), RaftError> {
+    pub fn reset_initial_state(&mut self, initial_state: LogId) -> Result<(), RaftError> {
         if initial_state.index <= self.actual_first_index() {
             return Err(RaftError::InvalidRequest(format!(
                 "reset initial index {} must be after first retained index {}",
@@ -229,9 +229,9 @@ impl RustRaftLogBuffer {
 
     pub fn release_memory(
         &mut self,
-        replicate_index: RustRaftLogIndex,
-        applied_index: RustRaftLogIndex,
-    ) -> Result<Option<RustRaftLogBufferRelease>, RaftError> {
+        replicate_index: LogIndex,
+        applied_index: LogIndex,
+    ) -> Result<Option<LogBufferRelease>, RaftError> {
         if replicate_index > applied_index {
             return Err(RaftError::InvalidRequest(format!(
                 "replicate index {replicate_index} must not exceed applied index {applied_index}"
@@ -244,10 +244,7 @@ impl RustRaftLogBuffer {
         self.drain_until(recommend_index)
     }
 
-    pub fn drain_until(
-        &mut self,
-        index: RustRaftLogIndex,
-    ) -> Result<Option<RustRaftLogBufferRelease>, RaftError> {
+    pub fn drain_until(&mut self, index: LogIndex) -> Result<Option<LogBufferRelease>, RaftError> {
         let first_index = self.actual_first_index();
         if index <= first_index {
             return Ok(None);
@@ -276,13 +273,13 @@ impl RustRaftLogBuffer {
         self.initial_state = sentinel;
         self.flushing_offset = self.flushing_offset.saturating_sub(drain_length);
         self.waiting_offset = self.waiting_offset.saturating_sub(drain_length);
-        Ok(Some(RustRaftLogBufferRelease {
+        Ok(Some(LogBufferRelease {
             released_entries,
             released_until: index,
         }))
     }
 
-    pub fn get_term(&self, index: RustRaftLogIndex) -> Option<u64> {
+    pub fn term_at(&self, index: LogIndex) -> Option<u64> {
         if index < self.actual_first_index() || index > self.last_index() {
             return None;
         }
@@ -291,14 +288,14 @@ impl RustRaftLogBuffer {
             .map(|entry| entry.log_id.term)
     }
 
-    pub fn range(&self) -> (RustRaftLogIndex, RustRaftLogIndex) {
+    pub fn range(&self) -> (LogIndex, LogIndex) {
         (
             self.actual_first_index().saturating_add(1),
             self.last_index().saturating_add(1),
         )
     }
 
-    pub fn last_index(&self) -> RustRaftLogIndex {
+    pub fn last_index(&self) -> LogIndex {
         self.actual_first_index() + self.entries.len() as u64 - 1
     }
 
@@ -310,7 +307,7 @@ impl RustRaftLogBuffer {
             .term
     }
 
-    pub fn last_synced_index(&self) -> RustRaftLogIndex {
+    pub fn last_synced_index(&self) -> LogIndex {
         self.actual_first_index() + self.flushing_offset as u64 - 1
     }
 
@@ -322,7 +319,7 @@ impl RustRaftLogBuffer {
         self.cache_memory_limit <= self.log_buffer_bytes
     }
 
-    pub fn is_releasable(&self, applied_index: RustRaftLogIndex) -> bool {
+    pub fn is_releasable(&self, applied_index: LogIndex) -> bool {
         self.find_releasable_index(applied_index, applied_index)
             .is_some()
     }
@@ -335,15 +332,15 @@ impl RustRaftLogBuffer {
         self.log_buffer_bytes
     }
 
-    pub fn initial_state(&self) -> &RustRaftLogId {
+    pub fn initial_state(&self) -> &LogId {
         &self.initial_state
     }
 
     fn find_releasable_index(
         &self,
-        replicate_index: RustRaftLogIndex,
-        applied_index: RustRaftLogIndex,
-    ) -> Option<RustRaftLogIndex> {
+        replicate_index: LogIndex,
+        applied_index: LogIndex,
+    ) -> Option<LogIndex> {
         let first_index = self.actual_first_index();
         let hint_index = if first_index < applied_index
             && ratio(self.cache_memory_limit) <= self.log_buffer_bytes
@@ -362,7 +359,7 @@ impl RustRaftLogBuffer {
         (drain_length > 0).then_some(first_index + drain_length)
     }
 
-    fn actual_first_index(&self) -> RustRaftLogIndex {
+    fn actual_first_index(&self) -> LogIndex {
         self.initial_state.index
     }
 }
@@ -371,6 +368,6 @@ fn ratio(value: u64) -> u64 {
     value.saturating_mul(9) / 10
 }
 
-fn entry_size(entry: &RustRaftLogEntry) -> u64 {
+fn entry_size(entry: &LogEntry) -> u64 {
     24 + entry.payload.len() as u64
 }

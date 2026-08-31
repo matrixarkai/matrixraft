@@ -2,30 +2,30 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    cluster::{RaftCluster, RustRaftConsensus, RustRaftReadIndexRequest},
-    config::{RaftConfig, RustRaftConfig},
+    cluster::{Consensus, RaftCluster, ReadIndexRequest},
+    config::Config,
     membership::{
-        JointConsensusMembership, RaftMembershipExecutor, RaftMembershipOperation, RustRaftPeer,
-        RustRaftReplicaRole,
+        JointConsensusMembership, MembershipExecutor, MembershipOperation, Peer, ReplicaRole,
     },
     metrics::matrixraft_metric_names,
-    node::{RaftNodeRuntime, RustRaftNodeOptions},
+    node::{NodeOptions, NodeRuntime},
     readiness::{
         matrixraft_open_source_surface, matrixraft_parity_report, matrixraft_public_api_contract,
         matrixraft_standalone_readiness_report, matrixraft_temporalstore_adapter_shape,
-        RustRaftReadinessSnapshot,
+        ReadinessSnapshot,
     },
     snapshot::{
-        PersistentRaftSnapshotStoreOptions, RaftSnapshot, RustRaftApplySnapshotFence,
-        RustRaftSnapshotMeta,
+        ApplySnapshotFence, PersistentRaftSnapshotStoreOptions, RaftSnapshot, SnapshotMetadata,
     },
-    status::{matrixraft_cluster_status_report, RaftHealthStatus},
-    transport::{AppendEntriesRequest, ReadIndexRequest, RustRaftTransport, VoteRequest},
-    wal::{PersistentRaftWalOptions, RaftHardState, RaftWalRecord},
+    status::{matrixraft_cluster_status_report, HealthStatus},
+    // `ReadIndexRequest` is imported above from `cluster`; dropping the
+    // `RustRaft` prefix made the two module paths name the same item.
+    transport::{AppendEntriesRequest, Transport, VoteRequest},
+    wal::{HardState, PersistentRaftWalOptions, WalRecord},
 };
 
-fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 23_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 24_000 + node_id),
@@ -37,11 +37,11 @@ fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
 fn module_cluster() -> RaftCluster {
     RaftCluster::new(
         707,
-        RaftConfig::default(),
+        Config::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("module cluster")
@@ -50,14 +50,13 @@ fn module_cluster() -> RaftCluster {
 #[test]
 fn public_modules_expose_temporalstore_consumption_boundary() {
     let mut cluster = module_cluster();
-    RustRaftConsensus::start(&mut cluster).expect("start through cluster module");
-    let log_id =
-        RustRaftConsensus::propose(&mut cluster, b"module-write".to_vec(), Default::default())
-            .expect("propose through cluster module");
+    Consensus::start(&mut cluster).expect("start through cluster module");
+    let log_id = Consensus::propose(&mut cluster, b"module-write".to_vec(), Default::default())
+        .expect("propose through cluster module");
     assert_eq!(log_id.index, 2);
 
     let read = cluster
-        .read_index(RustRaftReadIndexRequest {
+        .read_index(ReadIndexRequest {
             group_id: 707,
             requester_id: 1,
             min_commit_index: 2,
@@ -73,11 +72,11 @@ fn public_modules_expose_temporalstore_consumption_boundary() {
         .expect("campaign/pre-vote surface");
     cluster.transfer_leader(1).expect("leader transfer surface");
 
-    let mut executor = RaftMembershipExecutor::new();
+    let mut executor = MembershipExecutor::new();
     executor
         .execute(
             &mut cluster,
-            RaftMembershipOperation::AddLearner(peer(4, RustRaftReplicaRole::Voter)),
+            MembershipOperation::AddLearner(peer(4, ReplicaRole::Voter)),
         )
         .expect("add learner through membership module");
     assert!(cluster.membership().learners.contains(&4));
@@ -94,7 +93,7 @@ fn public_modules_expose_temporalstore_consumption_boundary() {
 
     let snapshot = RaftSnapshot {
         group_id: 707,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: "module-contract-catchup".to_string(),
             last_log_id: catchup_log_id.clone(),
             membership: vec![1, 2, 3, 4],
@@ -106,7 +105,7 @@ fn public_modules_expose_temporalstore_consumption_boundary() {
         .install_snapshot_to(
             4,
             snapshot,
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: catchup_log_id.index,
                 commit_index: catchup_log_id.index,
                 installed_snapshot_index: catchup_log_id.index,
@@ -119,9 +118,9 @@ fn public_modules_expose_temporalstore_consumption_boundary() {
         .execute_all(
             &mut cluster,
             vec![
-                RaftMembershipOperation::Promote(4),
-                RaftMembershipOperation::AddWitness(peer(5, RustRaftReplicaRole::Voter)),
-                RaftMembershipOperation::Remove(3),
+                MembershipOperation::Promote(4),
+                MembershipOperation::AddWitness(peer(5, ReplicaRole::Voter)),
+                MembershipOperation::Remove(3),
             ],
         )
         .expect("membership workflow through module boundary");
@@ -136,10 +135,10 @@ fn public_modules_expose_temporalstore_consumption_boundary() {
         cluster.leader_transfer_state(),
         vec![cluster.status(1).expect("node status")],
     );
-    assert_eq!(report.health, RaftHealthStatus::Healthy);
+    assert_eq!(report.health, HealthStatus::Healthy);
     assert_eq!(report.leader_id, Some(1));
 
-    let readiness = RustRaftReadinessSnapshot {
+    let readiness = ReadinessSnapshot {
         matrixraft_leader_write_authority_present: true,
         matrixraft_operator_observability_present: true,
         matrixraft_rpc_transport_contract_present: true,
@@ -163,7 +162,7 @@ fn standalone_readiness_report_covers_non_temporalstore_embedding_status() {
     assert!(report.standalone, "{:?}", report.missing);
     assert_eq!(
         report.production_status,
-        matrixraft::RustRaftProductionStatus::ProductionReady
+        matrixraft::ProductionStatus::ProductionReady
     );
     assert!(report.missing.is_empty());
 
@@ -194,7 +193,7 @@ fn standalone_readiness_report_covers_non_temporalstore_embedding_status() {
     assert!(report
         .evidence
         .iter()
-        .any(|item| item.contains("RaftNodeRuntime")));
+        .any(|item| item.contains("NodeRuntime")));
     assert!(report
         .evidence
         .iter()
@@ -220,16 +219,16 @@ fn standalone_readiness_report_covers_non_temporalstore_embedding_status() {
 
 #[test]
 fn public_modules_export_runtime_storage_wal_snapshot_and_transport_types() {
-    let _node_options = std::mem::size_of::<RustRaftNodeOptions>();
-    let _node_runtime = std::mem::size_of::<RaftNodeRuntime>();
-    let _config = RustRaftConfig::default();
+    let _node_options = std::mem::size_of::<NodeOptions>();
+    let _node_runtime = std::mem::size_of::<NodeRuntime>();
+    let _config = Config::default();
     let _joint = std::mem::size_of::<JointConsensusMembership>();
 
     let wal_options =
         PersistentRaftWalOptions::new(std::env::temp_dir().join("rustraft-module-wal"));
     assert!(wal_options.validate().is_ok());
-    let _hard_state = std::mem::size_of::<RaftHardState>();
-    let _wal_record = std::mem::size_of::<RaftWalRecord>();
+    let _hard_state = std::mem::size_of::<HardState>();
+    let _wal_record = std::mem::size_of::<WalRecord>();
 
     let snapshot_options =
         PersistentRaftSnapshotStoreOptions::new(std::env::temp_dir().join("rustraft-module-snap"));
@@ -238,7 +237,7 @@ fn public_modules_export_runtime_storage_wal_snapshot_and_transport_types() {
     let _append = std::mem::size_of::<AppendEntriesRequest>();
     let _vote = std::mem::size_of::<VoteRequest>();
     let _read_index_alias = std::mem::size_of::<ReadIndexRequest>();
-    let _transport = std::mem::size_of::<&dyn RustRaftTransport>();
+    let _transport = std::mem::size_of::<&dyn Transport>();
 }
 
 #[test]
@@ -265,7 +264,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         .contains(&"examples/open_source_surface.rs".to_string()));
     assert!(api
         .benchmark_interfaces
-        .contains(&"RustRaftBenchmarkRunner".to_string()));
+        .contains(&"BenchmarkRunner".to_string()));
     assert!(api
         .compatibility_reports
         .contains(&"matrixraft_production_readiness_report".to_string()));
@@ -289,7 +288,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         .any(|item| item.contains("TemporalStore command codecs")));
     let adapter_shape = matrixraft_temporalstore_adapter_shape();
     assert_eq!(adapter_shape.node_field, "node");
-    assert!(adapter_shape.node_runtime_type.contains("RaftNodeRuntime"));
+    assert!(adapter_shape.node_runtime_type.contains("NodeRuntime"));
     assert!(adapter_shape
         .temporalstore_owned
         .contains(&"apply semantics".to_string()));

@@ -3,14 +3,13 @@
 
 use matrixraft::{
     matrixraft_validate_snapshot_floor_log_matching, matrixraft_validate_snapshot_install,
-    matrixraft_wal_checksum, matrixraft_wal_checksum_valid, JointConsensusMembership, LocalRaftWal,
-    RaftCluster, RaftHardState, RaftMembership, RaftSnapshot, RaftSnapshotInstallState,
-    RaftWalRecord, RustRaftApplySnapshotFence, RustRaftLogEntry, RustRaftLogId, RustRaftPeer,
-    RustRaftReplicaRole, RustRaftSnapshotChunk, RustRaftSnapshotMeta,
+    matrixraft_wal_checksum, matrixraft_wal_checksum_valid, ApplySnapshotFence, HardState,
+    JointConsensusMembership, LocalRaftWal, LogEntry, LogId, Membership, Peer, RaftCluster,
+    RaftSnapshot, ReplicaRole, SnapshotChunk, SnapshotInstallState, SnapshotMetadata, WalRecord,
 };
 
-fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 8_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 9_000 + node_id),
@@ -19,29 +18,30 @@ fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
     }
 }
 
-fn wal_record(index: u64) -> RaftWalRecord {
-    let mut record = RaftWalRecord {
+fn wal_record(index: u64) -> WalRecord {
+    let mut record = WalRecord {
+        entries_are_delta: false,
         group_id: 9,
         node_id: 1,
-        hard_state: RaftHardState {
+        hard_state: HardState {
             current_term: 2,
             voted_for: Some(1),
-            committed: Some(RustRaftLogId { term: 2, index }),
+            committed: Some(LogId { term: 2, index }),
         },
-        membership: RaftMembership {
+        membership: Membership {
             group_id: 9,
             voters: vec![1, 2, 3],
             learners: Vec::new(),
             witnesses: Vec::new(),
             epoch: 1,
         },
-        entries: vec![RustRaftLogEntry {
-            log_id: RustRaftLogId { term: 2, index },
+        entries: vec![LogEntry {
+            log_id: LogId { term: 2, index },
             payload: vec![index as u8],
             is_command: true,
         }],
         installed_snapshot: None,
-        apply_snapshot_fence: RustRaftApplySnapshotFence {
+        apply_snapshot_fence: ApplySnapshotFence {
             applied_index: index,
             commit_index: index,
             installed_snapshot_index: 0,
@@ -55,7 +55,7 @@ fn wal_record(index: u64) -> RaftWalRecord {
 
 #[test]
 fn membership_helpers_cover_learners_witnesses_joint_quorum_and_catchup() {
-    let mut membership = RaftMembership {
+    let mut membership = Membership {
         group_id: 9,
         voters: vec![1, 2, 3],
         learners: Vec::new(),
@@ -96,9 +96,9 @@ fn cluster_membership_methods_add_promote_remove_and_report_catchup() {
         9,
         Default::default(),
         vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     )
     .expect("cluster");
@@ -106,13 +106,13 @@ fn cluster_membership_methods_add_promote_remove_and_report_catchup() {
     cluster.propose(b"a".to_vec()).expect("write");
 
     cluster
-        .add_learner(peer(4, RustRaftReplicaRole::Voter))
+        .add_learner(peer(4, ReplicaRole::Voter))
         .expect("add learner");
     let report = cluster.catchup_report(4).expect("catchup report");
     assert!(report.promotable);
     cluster.promote_peer(4).expect("promote");
     cluster
-        .add_witness(peer(5, RustRaftReplicaRole::Voter))
+        .add_witness(peer(5, ReplicaRole::Voter))
         .expect("witness");
     cluster.remove_peer(2).expect("remove peer");
 
@@ -127,10 +127,7 @@ fn cluster_catches_up_late_learner_with_snapshot_before_membership_config_entry(
     let mut cluster = RaftCluster::new(
         17,
         Default::default(),
-        vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-        ],
+        vec![peer(1, ReplicaRole::Voter), peer(2, ReplicaRole::Voter)],
     )
     .expect("cluster");
     cluster.start().expect("start");
@@ -143,7 +140,7 @@ fn cluster_catches_up_late_learner_with_snapshot_before_membership_config_entry(
     assert_eq!(cluster.status(1).expect("leader status").commit_index, 3);
 
     cluster
-        .add_learner(peer(3, RustRaftReplicaRole::Learner))
+        .add_learner(peer(3, ReplicaRole::Learner))
         .expect("late learner");
     assert!(
         cluster
@@ -166,9 +163,9 @@ fn cluster_catches_up_late_learner_with_snapshot_before_membership_config_entry(
 
     let snapshot = RaftSnapshot {
         group_id: 17,
-        meta: RustRaftSnapshotMeta {
+        meta: SnapshotMetadata {
             snapshot_id: "temporalstore-catchup-through-four".to_string(),
-            last_log_id: RustRaftLogId { term: 1, index: 4 },
+            last_log_id: LogId { term: 1, index: 4 },
             membership: vec![1, 2, 3],
             members: Vec::new(),
         },
@@ -178,7 +175,7 @@ fn cluster_catches_up_late_learner_with_snapshot_before_membership_config_entry(
         .install_snapshot_with_tail_to(
             3,
             snapshot,
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 4,
                 commit_index: 4,
                 installed_snapshot_index: 4,
@@ -196,7 +193,7 @@ fn cluster_catches_up_late_learner_with_snapshot_before_membership_config_entry(
     assert_eq!(membership_entry.index, 5);
 
     let read = cluster
-        .read_index(matrixraft::RustRaftReadIndexRequest {
+        .read_index(matrixraft::ReadIndexRequest {
             group_id: 17,
             requester_id: 1,
             min_commit_index: 5,
@@ -236,15 +233,15 @@ fn local_raft_wal_segments_recovers_and_truncates_corrupt_tail() {
 
 #[test]
 fn chunked_snapshot_install_validates_offsets_and_snapshot_fence() {
-    let meta = RustRaftSnapshotMeta {
+    let meta = SnapshotMetadata {
         snapshot_id: "snapshot-10".to_string(),
-        last_log_id: RustRaftLogId { term: 4, index: 10 },
+        last_log_id: LogId { term: 4, index: 10 },
         membership: vec![1, 2, 3],
         members: Vec::new(),
     };
-    let mut install = RaftSnapshotInstallState::new(meta.clone());
+    let mut install = SnapshotInstallState::new(meta.clone());
     install
-        .install_chunk(RustRaftSnapshotChunk {
+        .install_chunk(SnapshotChunk {
             meta: meta.clone(),
             offset: 0,
             data: b"hello ".to_vec(),
@@ -252,7 +249,7 @@ fn chunked_snapshot_install_validates_offsets_and_snapshot_fence() {
         })
         .expect("first chunk");
     install
-        .install_chunk(RustRaftSnapshotChunk {
+        .install_chunk(SnapshotChunk {
             meta: meta.clone(),
             offset: 6,
             data: b"snapshot".to_vec(),
@@ -262,23 +259,19 @@ fn chunked_snapshot_install_validates_offsets_and_snapshot_fence() {
 
     let snapshot = install.finish(9).expect("finish snapshot");
     assert_eq!(snapshot.payload, b"hello snapshot");
-    let fence = RustRaftApplySnapshotFence {
+    let fence = ApplySnapshotFence {
         applied_index: 10,
         commit_index: 10,
         installed_snapshot_index: 10,
         first_retained_log_index: 11,
     };
     matrixraft_validate_snapshot_install(&snapshot, &fence).expect("valid install");
-    matrixraft_validate_snapshot_floor_log_matching(
-        &meta,
-        11,
-        Some(&RustRaftLogId { term: 4, index: 10 }),
-    )
-    .expect("floor matches");
+    matrixraft_validate_snapshot_floor_log_matching(&meta, 11, Some(&LogId { term: 4, index: 10 }))
+        .expect("floor matches");
     assert!(matrixraft_validate_snapshot_floor_log_matching(
         &meta,
         11,
-        Some(&RustRaftLogId { term: 3, index: 10 }),
+        Some(&LogId { term: 3, index: 10 }),
     )
     .is_err());
 }

@@ -2,30 +2,28 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, RaftAdminCommand,
-    RaftMembershipOperation, RaftNodeRuntime, RaftNodeRuntimeState, RaftSnapshot, ReadIndexRequest,
-    RustRaftApplySnapshotFence, RustRaftConfig, RustRaftLogId, RustRaftMessage,
-    RustRaftNodeOptions, RustRaftPeer, RustRaftProposeOptions, RustRaftReplicaRole,
-    RustRaftRequestTimer, RustRaftSnapshotChunk, RustRaftSnapshotMeta, RustRaftSnapshotState,
-    RustRaftStepResult, RustRaftStorageApplyFence, RustRaftTickBackpressure, VoteRequest,
-    MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS,
+    AdminCommand, AppendEntriesRequest, AppendEntriesResponse, ApplySnapshotFence, Config,
+    InstallSnapshotRequest, LogId, MembershipOperation, Message, NodeOptions, NodeRuntime,
+    NodeRuntimeState, Peer, ProposeOptions, RaftSnapshot, ReadIndexRequest, ReplicaRole,
+    RequestTimer, SnapshotChunk, SnapshotMetadata, SnapshotState, StepResult, StorageApplyFence,
+    TickBackpressure, VoteRequest, MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS,
 };
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-fn peer(node_id: u64) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 12_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 13_000 + node_id),
-        role: RustRaftReplicaRole::Voter,
+        role: ReplicaRole::Voter,
         auto_promote: false,
     }
 }
 
-fn auto_promote_peer(node_id: u64) -> RustRaftPeer {
-    RustRaftPeer {
+fn auto_promote_peer(node_id: u64) -> Peer {
+    Peer {
         auto_promote: true,
         ..peer(node_id)
     }
@@ -42,25 +40,25 @@ fn temp_runtime_dir(name: &str) -> PathBuf {
     ))
 }
 
-fn node_options() -> RustRaftNodeOptions {
+fn node_options() -> NodeOptions {
     node_options_in(temp_runtime_dir("default"))
 }
 
-fn node_options_in(base_dir: PathBuf) -> RustRaftNodeOptions {
-    RustRaftNodeOptions {
+fn node_options_in(base_dir: PathBuf) -> NodeOptions {
+    NodeOptions {
         group_id: 77,
         node_id: 1,
         raft_addr: "127.0.0.1:12001".to_string(),
         snapshot_addr: "127.0.0.1:13001".to_string(),
         wal_dir: base_dir.join("wal").to_string_lossy().into_owned(),
         snapshot_dir: base_dir.join("snapshot").to_string_lossy().into_owned(),
-        role: RustRaftReplicaRole::Voter,
-        config: RustRaftConfig::default(),
+        role: ReplicaRole::Voter,
+        config: Config::default(),
         peers: vec![peer(1), peer(2), peer(3)],
     }
 }
 
-fn timer_node_options() -> RustRaftNodeOptions {
+fn timer_node_options() -> NodeOptions {
     let mut options = node_options_in(temp_runtime_dir("timer"));
     options.config.heartbeat_interval_ms = 10;
     options.config.election_timeout_ms = 50;
@@ -70,11 +68,11 @@ fn timer_node_options() -> RustRaftNodeOptions {
 
 #[test]
 fn node_runtime_lifecycle_drives_background_cluster() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
-    assert_eq!(runtime.state(), RaftNodeRuntimeState::Created);
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
+    assert_eq!(runtime.state(), NodeRuntimeState::Created);
 
     runtime.start().expect("start runtime");
-    assert_eq!(runtime.state(), RaftNodeRuntimeState::Running);
+    assert_eq!(runtime.state(), NodeRuntimeState::Running);
     let status = runtime.status().expect("status");
     assert!(status.worker_running);
     assert_eq!(status.node_id, 1);
@@ -94,39 +92,39 @@ fn node_runtime_lifecycle_drives_background_cluster() {
     assert!(read.lease_read);
 
     let stale_lease = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::SetLeaderLeaseValid { valid: false },
+        .step(Message::Admin {
+            command: AdminCommand::SetLeaderLeaseValid { valid: false },
         })
         .expect("stale leader lease through runtime step");
-    assert_eq!(stale_lease, RustRaftStepResult::Handled);
+    assert_eq!(stale_lease, StepResult::Handled);
     let read = runtime.read_index(2).expect("read index without lease");
     assert!(read.safe);
     assert!(!read.lease_read);
     assert_eq!(read.reason, "read_index");
 
     runtime.stop().expect("stop runtime");
-    assert_eq!(runtime.state(), RaftNodeRuntimeState::Stopped);
+    assert_eq!(runtime.state(), NodeRuntimeState::Stopped);
     assert!(runtime.propose(b"stopped".to_vec()).is_err());
 
     runtime.restart().expect("restart runtime");
-    assert_eq!(runtime.state(), RaftNodeRuntimeState::Running);
+    assert_eq!(runtime.state(), NodeRuntimeState::Running);
     assert_eq!(runtime.restart_count(), 1);
     assert_eq!(runtime.propose(b"after restart".to_vec()).unwrap().index, 3);
 
     runtime.shutdown().expect("shutdown runtime");
-    assert_eq!(runtime.state(), RaftNodeRuntimeState::Shutdown);
+    assert_eq!(runtime.state(), NodeRuntimeState::Shutdown);
     assert!(runtime.read_index(1).is_err());
 }
 
 #[test]
 fn node_runtime_rejects_stale_expected_term_proposals_like_baseline_raft() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     let stale = runtime
         .propose_with_options(
             b"stale-term".to_vec(),
-            RustRaftProposeOptions {
+            ProposeOptions {
                 expected_term: Some(0),
                 is_command: true,
                 ..Default::default()
@@ -140,43 +138,43 @@ fn node_runtime_rejects_stale_expected_term_proposals_like_baseline_raft() {
     let accepted = runtime
         .propose_with_options(
             b"current-term".to_vec(),
-            RustRaftProposeOptions {
+            ProposeOptions {
                 expected_term: Some(1),
                 is_command: true,
                 ..Default::default()
             },
         )
         .expect("current expected term is accepted");
-    assert_eq!(accepted, RustRaftLogId { term: 1, index: 2 });
+    assert_eq!(accepted, LogId { term: 1, index: 2 });
     runtime.shutdown().expect("shutdown runtime");
 }
 
 #[test]
 fn node_runtime_read_index_rejects_without_live_quorum() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.propose(b"write".to_vec()).expect("propose");
     let node_2_down = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::SetNodeHealthy {
+        .step(Message::Admin {
+            command: AdminCommand::SetNodeHealthy {
                 node_id: 2,
                 healthy: false,
             },
         })
         .expect("mark node 2 down through runtime step");
-    assert_eq!(node_2_down, RustRaftStepResult::Handled);
+    assert_eq!(node_2_down, StepResult::Handled);
     let node_3_down = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::SetNodeHealthy {
+        .step(Message::Admin {
+            command: AdminCommand::SetNodeHealthy {
                 node_id: 3,
                 healthy: false,
             },
         })
         .expect("mark node 3 down through runtime step");
-    assert_eq!(node_3_down, RustRaftStepResult::Handled);
+    assert_eq!(node_3_down, StepResult::Handled);
     runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::SetLeaderLeaseValid { valid: false },
+        .step(Message::Admin {
+            command: AdminCommand::SetLeaderLeaseValid { valid: false },
         })
         .expect("invalidate leader lease");
 
@@ -188,7 +186,7 @@ fn node_runtime_read_index_rejects_without_live_quorum() {
 
 #[test]
 fn node_runtime_handles_read_index_rpc_request() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
         .propose(b"read-index-rpc".to_vec())
@@ -227,19 +225,36 @@ fn node_runtime_handles_read_index_rpc_request() {
 #[test]
 fn node_runtime_expires_and_renews_leader_lease() {
     let mut options = node_options();
-    options.config.heartbeat_interval_ms = 5;
-    options.config.election_timeout_ms = 50;
-    options.config.leader_lease_ms = 10;
-    let mut runtime = RaftNodeRuntime::create(options).expect("create runtime");
+    // Drive the lease instead of racing it.
+    //
+    // The runtime's automatic tick fires only when the command channel has been
+    // idle for a full heartbeat interval, so how many ticks land between two
+    // steps of this test depends on the scheduler. With a 5ms heartbeat and a
+    // 10ms lease, one hiccup was enough to expire the lease again right after
+    // the renewing propose below -- this test failed about twice in twenty runs
+    // under 2x CPU oversubscription.
+    //
+    // A heartbeat interval far longer than the test suppresses the automatic
+    // tick entirely, and `AdminCommand::TickLeaderLease` advances the lease
+    // clock explicitly. Expiry becomes a step the test takes rather than a
+    // wait it hopes is long enough -- which also drops the 25ms sleep.
+    options.config.heartbeat_interval_ms = 10_000;
+    options.config.election_timeout_ms = 20_000;
+    options.config.leader_lease_ms = 5_000;
+    let mut runtime = NodeRuntime::create(options).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.propose(b"lease-start".to_vec()).expect("propose");
     assert!(runtime.read_index(1).expect("initial lease").lease_read);
 
-    std::thread::sleep(std::time::Duration::from_millis(25));
+    runtime
+        .step(Message::Admin {
+            command: AdminCommand::TickLeaderLease { elapsed_ms: 6_000 },
+        })
+        .expect("expire the leader lease explicitly");
 
     let expired = runtime.status().expect("status");
     assert!(!expired.timer_status.leader_lease_valid);
-    assert!(expired.timer_status.leader_lease_elapsed_ms >= 10);
+    assert!(expired.timer_status.leader_lease_elapsed_ms >= 5_000);
     let read = runtime.read_index(1).expect("read after lease expiry");
     assert!(read.safe);
     assert!(!read.lease_read);
@@ -249,6 +264,8 @@ fn node_runtime_expires_and_renews_leader_lease() {
         .expect("renew lease");
     let renewed = runtime.status().expect("renewed status");
     assert!(renewed.timer_status.leader_lease_valid);
+    // Exact zero is safe again now that no automatic tick can land between the
+    // renewing propose and this read.
     assert_eq!(renewed.timer_status.leader_lease_elapsed_ms, 0);
     assert!(runtime.read_index(2).expect("renewed lease").lease_read);
 }
@@ -259,7 +276,7 @@ fn node_runtime_steps_down_leader_after_lost_quorum() {
     options.config.heartbeat_interval_ms = 5;
     options.config.election_timeout_ms = 50;
     options.config.leader_lease_ms = 10;
-    let mut runtime = RaftNodeRuntime::create(options).expect("create runtime");
+    let mut runtime = NodeRuntime::create(options).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
         .propose(b"before-quorum-loss".to_vec())
@@ -302,7 +319,7 @@ fn node_runtime_election_timeout_campaigns_after_stale_leader() {
     options.config.heartbeat_interval_ms = 5;
     options.config.election_timeout_ms = 20;
     options.config.leader_lease_ms = 5;
-    let mut runtime = RaftNodeRuntime::create(options).expect("create runtime");
+    let mut runtime = NodeRuntime::create(options).expect("create runtime");
     runtime.start().expect("start runtime");
 
     std::thread::sleep(Duration::from_millis(35));
@@ -329,7 +346,7 @@ fn node_runtime_election_timeout_campaigns_after_stale_leader() {
 
 #[test]
 fn node_runtime_transfers_leader_on_fatal_event() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
         .propose(b"before-leader-fatal".to_vec())
@@ -357,7 +374,7 @@ fn node_runtime_transfers_leader_on_fatal_event() {
 
 #[test]
 fn node_runtime_supports_transfer_and_campaign_lifecycle_commands() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     runtime.transfer_leader(2).expect("transfer leader");
@@ -377,7 +394,7 @@ fn node_runtime_supports_transfer_and_campaign_lifecycle_commands() {
 
 #[test]
 fn node_runtime_runs_heartbeat_election_timer_loop_and_peer_state_machine() {
-    let mut runtime = RaftNodeRuntime::create(timer_node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(timer_node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     let mut status = runtime.status().expect("status");
@@ -402,13 +419,13 @@ fn node_runtime_runs_heartbeat_election_timer_loop_and_peer_state_machine() {
 
 #[test]
 fn node_runtime_executes_prevote_and_reports_blockers_from_runtime_tasks() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     let vote = runtime
-        .step(RustRaftMessage::PreVote { candidate_id: 1 })
+        .step(Message::PreVote { candidate_id: 1 })
         .expect("pre-vote through runtime step");
-    let RustRaftStepResult::PreVote(vote) = vote else {
+    let StepResult::PreVote(vote) = vote else {
         panic!("unexpected pre-vote step response: {vote:?}");
     };
     assert!(vote.vote_granted);
@@ -434,15 +451,15 @@ fn node_runtime_executes_prevote_and_reports_blockers_from_runtime_tasks() {
 
 #[test]
 fn node_runtime_can_prohibit_election_until_forced_campaign() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     let prohibit = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ProhibitsElection { prohibits: true },
+        .step(Message::Admin {
+            command: AdminCommand::ProhibitsElection { prohibits: true },
         })
         .expect("prohibit election through runtime step");
-    assert_eq!(prohibit, RustRaftStepResult::Handled);
+    assert_eq!(prohibit, StepResult::Handled);
     let vote = runtime.pre_vote().expect("pre-vote");
     assert!(!vote.vote_granted);
     assert_eq!(vote.reason, "election_prohibited");
@@ -453,14 +470,14 @@ fn node_runtime_can_prohibit_election_until_forced_campaign() {
 
 #[test]
 fn node_runtime_handles_timeout_now_like_baseline_raft() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     let prohibit = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ProhibitsElection { prohibits: true },
+        .step(Message::Admin {
+            command: AdminCommand::ProhibitsElection { prohibits: true },
         })
         .expect("prohibit normal elections through runtime step");
-    assert_eq!(prohibit, RustRaftStepResult::Handled);
+    assert_eq!(prohibit, StepResult::Handled);
 
     let follower_timeout = runtime.timeout_now(1, 2).expect("timeout-now follower");
     assert!(follower_timeout.campaigned);
@@ -476,9 +493,9 @@ fn node_runtime_handles_timeout_now_like_baseline_raft() {
     );
 
     let mut learner = peer(4);
-    learner.role = RustRaftReplicaRole::Learner;
+    learner.role = ReplicaRole::Learner;
     runtime
-        .execute_membership_operation(RaftMembershipOperation::AddLearner(learner))
+        .execute_membership_operation(MembershipOperation::AddLearner(learner))
         .expect("add learner");
     let learner_timeout = runtime.timeout_now(2, 4).expect("timeout-now learner");
     assert!(!learner_timeout.campaigned);
@@ -486,9 +503,9 @@ fn node_runtime_handles_timeout_now_like_baseline_raft() {
     assert_eq!(learner_timeout.term, 0);
 
     let mut witness = peer(5);
-    witness.role = RustRaftReplicaRole::Witness;
+    witness.role = ReplicaRole::Witness;
     runtime
-        .execute_membership_operation(RaftMembershipOperation::AddWitness(witness))
+        .execute_membership_operation(MembershipOperation::AddWitness(witness))
         .expect("add witness");
     let witness_timeout = runtime.timeout_now(2, 5).expect("timeout-now witness");
     assert!(!witness_timeout.campaigned);
@@ -507,15 +524,15 @@ fn node_runtime_handles_timeout_now_like_baseline_raft() {
 
 #[test]
 fn node_runtime_step_down_transfers_to_selected_follower() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     let transferee = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::StepDown { transferee: None },
+        .step(Message::Admin {
+            command: AdminCommand::StepDown { transferee: None },
         })
         .expect("step down through runtime step");
-    let RustRaftStepResult::StepDown(transferee) = transferee else {
+    let StepResult::StepDown(transferee) = transferee else {
         panic!("unexpected step-down response: {transferee:?}");
     };
     assert_eq!(transferee, Some(2));
@@ -529,7 +546,7 @@ fn node_runtime_step_down_transfers_to_selected_follower() {
 
 #[test]
 fn node_runtime_resigns_leader_without_transfer_target() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.set_node_healthy(2, false).expect("stop follower 2");
     runtime.set_node_healthy(3, false).expect("stop follower 3");
@@ -540,31 +557,31 @@ fn node_runtime_resigns_leader_without_transfer_target() {
         .to_string()
         .contains("no healthy follower"));
     let resigned = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::Resign {
+        .step(Message::Admin {
+            command: AdminCommand::Resign {
                 reason: "operator_resign".to_string(),
             },
         })
         .expect("resign leader through runtime step");
-    assert_eq!(resigned, RustRaftStepResult::LeaderResigned(true));
+    assert_eq!(resigned, StepResult::LeaderResigned(true));
     let status = runtime.status().expect("status after resign");
     assert_eq!(
         status.cluster_status.expect("cluster status").leader_id,
         None
     );
     let second_resign = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::Resign {
+        .step(Message::Admin {
+            command: AdminCommand::Resign {
                 reason: "already_resigned".to_string(),
             },
         })
         .expect("second resign is ignored");
-    assert_eq!(second_resign, RustRaftStepResult::LeaderResigned(false));
+    assert_eq!(second_resign, StepResult::LeaderResigned(false));
 }
 
 #[test]
 fn node_runtime_rejects_propose_after_local_node_steps_down() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     assert_eq!(
         runtime.propose(b"before-transfer".to_vec()).unwrap().index,
@@ -582,7 +599,7 @@ fn node_runtime_rejects_propose_after_local_node_steps_down() {
 
 #[test]
 fn node_runtime_rejects_read_index_after_local_node_steps_down() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.propose(b"before-transfer".to_vec()).unwrap();
     assert!(runtime.read_index(1).expect("leader read-index").safe);
@@ -598,7 +615,7 @@ fn node_runtime_rejects_read_index_after_local_node_steps_down() {
 
 #[test]
 fn node_runtime_allows_explicit_bounded_stale_read_after_step_down() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.propose(b"before-transfer".to_vec()).unwrap();
 
@@ -622,37 +639,37 @@ fn node_runtime_allows_explicit_bounded_stale_read_after_step_down() {
 
 #[test]
 fn node_runtime_executes_membership_operations() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     let learner = runtime
-        .step(RustRaftMessage::Membership {
-            operation: RaftMembershipOperation::AddLearner(peer(4)),
+        .step(Message::Membership {
+            operation: MembershipOperation::AddLearner(peer(4)),
         })
         .expect("add learner through runtime step");
-    let RustRaftStepResult::Membership(learner) = learner else {
+    let StepResult::Membership(learner) = learner else {
         panic!("unexpected learner membership step response: {learner:?}");
     };
     assert!(learner.success);
     assert!(learner.after.learners.contains(&4));
 
     let witness = runtime
-        .step(RustRaftMessage::Membership {
-            operation: RaftMembershipOperation::AddWitness(peer(5)),
+        .step(Message::Membership {
+            operation: MembershipOperation::AddWitness(peer(5)),
         })
         .expect("add witness through runtime step");
-    let RustRaftStepResult::Membership(witness) = witness else {
+    let StepResult::Membership(witness) = witness else {
         panic!("unexpected witness membership step response: {witness:?}");
     };
     assert!(witness.success);
     assert!(witness.after.witnesses.contains(&5));
 
     let removed = runtime
-        .step(RustRaftMessage::Membership {
-            operation: RaftMembershipOperation::Remove(3),
+        .step(Message::Membership {
+            operation: MembershipOperation::Remove(3),
         })
         .expect("remove peer through runtime step");
-    let RustRaftStepResult::Membership(removed) = removed else {
+    let StepResult::Membership(removed) = removed else {
         panic!("unexpected remove membership step response: {removed:?}");
     };
     assert!(removed.success);
@@ -662,42 +679,42 @@ fn node_runtime_executes_membership_operations() {
     assert!(status
         .peer_runtime
         .iter()
-        .any(|peer| peer.node_id == 4 && peer.replica_role == RustRaftReplicaRole::Learner));
+        .any(|peer| peer.node_id == 4 && peer.replica_role == ReplicaRole::Learner));
     assert!(status
         .peer_runtime
         .iter()
-        .any(|peer| peer.node_id == 5 && peer.replica_role == RustRaftReplicaRole::Witness));
+        .any(|peer| peer.node_id == 5 && peer.replica_role == ReplicaRole::Witness));
     assert!(!status.peer_runtime.iter().any(|peer| peer.node_id == 3));
 }
 
 #[test]
 fn node_runtime_rolls_back_membership_workflow() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
         .propose(b"membership-workflow".to_vec())
         .expect("write");
     runtime
-        .execute_membership_operation(RaftMembershipOperation::AddLearner(peer(4)))
+        .execute_membership_operation(MembershipOperation::AddLearner(peer(4)))
         .expect("add learner");
     runtime.catch_up_peer(4).expect("catch up learner");
     runtime
-        .execute_membership_operation(RaftMembershipOperation::Promote(4))
+        .execute_membership_operation(MembershipOperation::Promote(4))
         .expect("promote peer");
 
     let status_before = runtime.status().expect("status before rollback");
     let mut voters_before = status_before
         .peer_runtime
         .iter()
-        .filter(|node| node.replica_role == RustRaftReplicaRole::Voter)
+        .filter(|node| node.replica_role == ReplicaRole::Voter)
         .map(|node| node.node_id)
         .collect::<Vec<_>>();
     voters_before.sort_unstable();
 
     runtime
         .execute_membership_workflow_with_rollback(vec![
-            RaftMembershipOperation::AddWitness(peer(5)),
-            RaftMembershipOperation::Remove(99),
+            MembershipOperation::AddWitness(peer(5)),
+            MembershipOperation::Remove(99),
         ])
         .expect_err("workflow should roll back");
     let reports = runtime
@@ -717,7 +734,7 @@ fn node_runtime_rolls_back_membership_workflow() {
     let mut voters_after = status_after
         .peer_runtime
         .iter()
-        .filter(|node| node.replica_role == RustRaftReplicaRole::Voter)
+        .filter(|node| node.replica_role == ReplicaRole::Voter)
         .map(|node| node.node_id)
         .collect::<Vec<_>>();
     voters_after.sort_unstable();
@@ -731,20 +748,20 @@ fn node_runtime_rolls_back_membership_workflow() {
 
 #[test]
 fn node_runtime_reports_witness_quorum_policy() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
-        .execute_membership_operation(RaftMembershipOperation::AddWitness(peer(5)))
+        .execute_membership_operation(MembershipOperation::AddWitness(peer(5)))
         .expect("add witness");
 
     let quorum = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::WitnessQuorum {
+        .step(Message::Admin {
+            command: AdminCommand::WitnessQuorum {
                 acknowledgements: vec![1, 2, 5],
             },
         })
         .expect("witness quorum through runtime step");
-    let RustRaftStepResult::WitnessQuorum(quorum) = quorum else {
+    let StepResult::WitnessQuorum(quorum) = quorum else {
         panic!("unexpected witness quorum response: {quorum:?}");
     };
     assert_eq!(quorum.required, 3);
@@ -758,11 +775,11 @@ fn node_runtime_reports_witness_quorum_policy() {
     assert!(witness.witness_quorum_reached);
 
     let ignore_witness = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::IgnoreWitness { ignore: true },
+        .step(Message::Admin {
+            command: AdminCommand::IgnoreWitness { ignore: true },
         })
         .expect("ignore witness through runtime step");
-    assert_eq!(ignore_witness, RustRaftStepResult::Handled);
+    assert_eq!(ignore_witness, StepResult::Handled);
     let voter_quorum = runtime
         .witness_quorum_report([1, 2])
         .expect("voter quorum with witness ignored");
@@ -773,10 +790,10 @@ fn node_runtime_reports_witness_quorum_policy() {
 
 #[test]
 fn node_runtime_installs_snapshot_with_apply_fence() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
-        .execute_membership_operation(RaftMembershipOperation::AddLearner(peer(4)))
+        .execute_membership_operation(MembershipOperation::AddLearner(peer(4)))
         .expect("add learner");
     runtime.propose(b"before-snapshot".to_vec()).expect("write");
 
@@ -785,15 +802,15 @@ fn node_runtime_installs_snapshot_with_apply_fence() {
             4,
             RaftSnapshot {
                 group_id: 77,
-                meta: RustRaftSnapshotMeta {
+                meta: SnapshotMetadata {
                     snapshot_id: "runtime-install-2".to_string(),
-                    last_log_id: RustRaftLogId { term: 1, index: 3 },
+                    last_log_id: LogId { term: 1, index: 3 },
                     membership: vec![1, 2, 3, 4],
                     members: Vec::new(),
                 },
                 payload: b"snapshot-payload".to_vec(),
             },
-            RustRaftApplySnapshotFence {
+            ApplySnapshotFence {
                 applied_index: 3,
                 commit_index: 3,
                 installed_snapshot_index: 3,
@@ -817,16 +834,16 @@ fn node_runtime_installs_snapshot_with_apply_fence() {
 
 #[test]
 fn node_runtime_installs_snapshot_chunk_through_runtime() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
-        .execute_membership_operation(RaftMembershipOperation::AddLearner(peer(4)))
+        .execute_membership_operation(MembershipOperation::AddLearner(peer(4)))
         .expect("add learner");
     runtime.propose(b"before-chunk".to_vec()).expect("write");
 
-    let meta = RustRaftSnapshotMeta {
+    let meta = SnapshotMetadata {
         snapshot_id: "runtime-chunk-3".to_string(),
-        last_log_id: RustRaftLogId { term: 1, index: 3 },
+        last_log_id: LogId { term: 1, index: 3 },
         membership: vec![1, 2, 3, 4],
         members: Vec::new(),
     };
@@ -837,7 +854,7 @@ fn node_runtime_installs_snapshot_chunk_through_runtime() {
                 group_id: 77,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
+                chunk: SnapshotChunk {
                     meta: meta.clone(),
                     offset: 0,
                     data: b"partial".to_vec(),
@@ -857,7 +874,7 @@ fn node_runtime_installs_snapshot_chunk_through_runtime() {
                 group_id: 77,
                 term: 1,
                 leader_id: 1,
-                chunk: RustRaftSnapshotChunk {
+                chunk: SnapshotChunk {
                     meta,
                     offset: 0,
                     data: b"snapshot-payload".to_vec(),
@@ -884,17 +901,17 @@ fn node_runtime_installs_snapshot_chunk_through_runtime() {
 
 #[test]
 fn node_runtime_catches_up_added_learner() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.propose(b"before-learner".to_vec()).expect("write");
     runtime
-        .execute_membership_operation(RaftMembershipOperation::AddLearner(peer(4)))
+        .execute_membership_operation(MembershipOperation::AddLearner(peer(4)))
         .expect("add learner");
 
     let report = runtime
-        .step(RustRaftMessage::CatchUpPeer { peer_id: 4 })
+        .step(Message::CatchUpPeer { peer_id: 4 })
         .expect("catch up learner through runtime step");
-    let RustRaftStepResult::CatchUpPeer(report) = report else {
+    let StepResult::CatchUpPeer(report) = report else {
         panic!("unexpected catch-up step response: {report:?}");
     };
     assert!(report.caught_up);
@@ -914,19 +931,19 @@ fn node_runtime_catches_up_added_learner() {
 
 #[test]
 fn node_runtime_auto_promotes_caught_up_learner() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
         .propose(b"before-auto-promote".to_vec())
         .expect("write");
     runtime
-        .execute_membership_operation(RaftMembershipOperation::AddLearner(auto_promote_peer(4)))
+        .execute_membership_operation(MembershipOperation::AddLearner(auto_promote_peer(4)))
         .expect("add auto-promote learner");
 
     let report = runtime
-        .step(RustRaftMessage::AutoPromoteLearner { learner_id: 4 })
+        .step(Message::AutoPromoteLearner { learner_id: 4 })
         .expect("auto promote through runtime step");
-    let RustRaftStepResult::AutoPromoteLearner(report) = report else {
+    let StepResult::AutoPromoteLearner(report) = report else {
         panic!("unexpected auto-promote step response: {report:?}");
     };
     assert!(report.auto_promote);
@@ -937,12 +954,12 @@ fn node_runtime_auto_promotes_caught_up_learner() {
     assert!(status
         .peer_runtime
         .iter()
-        .any(|peer| peer.node_id == 4 && peer.replica_role == RustRaftReplicaRole::Voter));
+        .any(|peer| peer.node_id == 4 && peer.replica_role == ReplicaRole::Voter));
 }
 
 #[test]
 fn node_runtime_reports_peer_pipeline_status() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.propose(b"pipeline-lag".to_vec()).expect("write");
 
@@ -952,9 +969,9 @@ fn node_runtime_reports_peer_pipeline_status() {
     assert!(pipeline.append_requests > 0);
     assert!(pipeline.append_accepted > 0);
     let network_error = runtime
-        .step(RustRaftMessage::NetworkError { peer_id: 2 })
+        .step(Message::NetworkError { peer_id: 2 })
         .expect("record peer network error through runtime step");
-    assert_eq!(network_error, RustRaftStepResult::Handled);
+    assert_eq!(network_error, StepResult::Handled);
     let recovered = runtime
         .peer_pipeline_status(2)
         .expect("recovered pipeline status");
@@ -963,14 +980,14 @@ fn node_runtime_reports_peer_pipeline_status() {
 
 #[test]
 fn node_runtime_reports_all_peer_pipeline_statuses() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.propose(b"pipeline-all".to_vec()).expect("write");
     runtime
-        .execute_membership_operation(RaftMembershipOperation::AddLearner(peer(4)))
+        .execute_membership_operation(MembershipOperation::AddLearner(peer(4)))
         .expect("add learner");
     runtime
-        .execute_membership_operation(RaftMembershipOperation::AddWitness(peer(5)))
+        .execute_membership_operation(MembershipOperation::AddWitness(peer(5)))
         .expect("add witness");
 
     let statuses = runtime
@@ -988,19 +1005,19 @@ fn node_runtime_reports_all_peer_pipeline_statuses() {
 
 #[test]
 fn node_runtime_steps_batch_of_raft_messages() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     let single = runtime
-        .step(RustRaftMessage::AppendEntries {
+        .step(Message::AppendEntries {
             target: 3,
             request: AppendEntriesRequest {
                 group_id: 77,
                 term: 1,
                 leader_id: 1,
                 prev_log_id: None,
-                entries: vec![matrixraft::RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 1 },
+                entries: vec![matrixraft::LogEntry {
+                    log_id: LogId { term: 1, index: 1 },
                     payload: b"single-step".to_vec(),
                     is_command: true,
                 }],
@@ -1011,20 +1028,20 @@ fn node_runtime_steps_batch_of_raft_messages() {
         .expect("single step through runtime");
     assert!(matches!(
         single,
-        RustRaftStepResult::AppendEntries(response) if response.success && response.match_index == 1
+        StepResult::AppendEntries(response) if response.success && response.match_index == 1
     ));
 
     let responses = runtime
         .step_batch(vec![
-            RustRaftMessage::AppendEntries {
+            Message::AppendEntries {
                 target: 2,
                 request: AppendEntriesRequest {
                     group_id: 77,
                     term: 1,
                     leader_id: 1,
                     prev_log_id: None,
-                    entries: vec![matrixraft::RustRaftLogEntry {
-                        log_id: RustRaftLogId { term: 1, index: 1 },
+                    entries: vec![matrixraft::LogEntry {
+                        log_id: LogId { term: 1, index: 1 },
                         payload: b"replicated".to_vec(),
                         is_command: true,
                     }],
@@ -1032,13 +1049,13 @@ fn node_runtime_steps_batch_of_raft_messages() {
                     lease_epoch: 0,
                 },
             },
-            RustRaftMessage::Vote {
+            Message::Vote {
                 target: 2,
                 request: VoteRequest {
                     group_id: 77,
                     term: 2,
                     candidate_id: 3,
-                    last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                    last_log_id: Some(LogId { term: 1, index: 1 }),
                     pre_vote: true,
                     force: true,
                 },
@@ -1048,17 +1065,17 @@ fn node_runtime_steps_batch_of_raft_messages() {
     assert_eq!(responses.len(), 2);
     assert!(matches!(
         &responses[0],
-        RustRaftStepResult::AppendEntries(response) if response.success && response.match_index == 1
+        StepResult::AppendEntries(response) if response.success && response.match_index == 1
     ));
     assert!(matches!(
         &responses[1],
-        RustRaftStepResult::Vote(response) if response.vote_granted
+        StepResult::Vote(response) if response.vote_granted
     ));
 
     let proposed = runtime
-        .step(RustRaftMessage::Propose {
+        .step(Message::Propose {
             payload: b"step-membership-1".to_vec(),
-            options: RustRaftProposeOptions {
+            options: ProposeOptions {
                 is_membership_change: true,
                 ..Default::default()
             },
@@ -1066,13 +1083,13 @@ fn node_runtime_steps_batch_of_raft_messages() {
         .expect("step proposal through runtime");
     assert!(matches!(
         proposed,
-        RustRaftStepResult::Proposed(RustRaftLogId { index: 2, .. })
+        StepResult::Proposed(LogId { index: 2, .. })
     ));
 
     let downgraded = runtime
-        .step(RustRaftMessage::Propose {
+        .step(Message::Propose {
             payload: b"step-membership-2".to_vec(),
-            options: RustRaftProposeOptions {
+            options: ProposeOptions {
                 is_membership_change: true,
                 ..Default::default()
             },
@@ -1080,22 +1097,22 @@ fn node_runtime_steps_batch_of_raft_messages() {
         .expect("step second membership proposal through runtime");
     assert!(matches!(
         downgraded,
-        RustRaftStepResult::Proposed(RustRaftLogId { index: 3, .. })
+        StepResult::Proposed(LogId { index: 3, .. })
     ));
 
     let apply_result = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ApplyResult {
+        .step(Message::Admin {
+            command: AdminCommand::ApplyResult {
                 node_id: 2,
                 applied_index: 3,
                 rejected: false,
             },
         })
         .expect("step apply-result admin command");
-    assert_eq!(apply_result, RustRaftStepResult::Handled);
+    assert_eq!(apply_result, StepResult::Handled);
 
     let handled = runtime
-        .step(RustRaftMessage::AppendEntriesResponse {
+        .step(Message::AppendEntriesResponse {
             local_node_id: 1,
             peer_id: 2,
             response: AppendEntriesResponse {
@@ -1105,30 +1122,30 @@ fn node_runtime_steps_batch_of_raft_messages() {
                 rejection_hint: None,
                 rejected_index: None,
                 require_snapshot: None,
-                snapshot_state: RustRaftSnapshotState::None,
+                snapshot_state: SnapshotState::None,
                 lease_confirmation_epoch: 0,
                 lease_duration_ms: 0,
             },
         })
         .expect("step append response through runtime");
-    assert_eq!(handled, RustRaftStepResult::Handled);
+    assert_eq!(handled, StepResult::Handled);
 
     let network_error = runtime
-        .step(RustRaftMessage::NetworkError { peer_id: 2 })
+        .step(Message::NetworkError { peer_id: 2 })
         .expect("step network-error message through runtime");
-    assert_eq!(network_error, RustRaftStepResult::Handled);
+    assert_eq!(network_error, StepResult::Handled);
 
     runtime
         .begin_snapshot_send_to(2, "step-snapshot-finish", 3, 1)
         .expect("begin snapshot send");
     let snapshot_finish = runtime
-        .step(RustRaftMessage::SnapshotFinish {
+        .step(Message::SnapshotFinish {
             peer_id: 2,
             accepted: true,
             committed_index: 3,
         })
         .expect("step snapshot-finish message through runtime");
-    assert_eq!(snapshot_finish, RustRaftStepResult::Handled);
+    assert_eq!(snapshot_finish, StepResult::Handled);
 
     let follower = runtime
         .status()
@@ -1144,11 +1161,11 @@ fn node_runtime_steps_batch_of_raft_messages() {
     assert_eq!(follower.applied_index, 3);
 
     let transferred = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::TransferLeader { target: 2 },
+        .step(Message::Admin {
+            command: AdminCommand::TransferLeader { target: 2 },
         })
         .expect("step transfer-leader admin command");
-    assert_eq!(transferred, RustRaftStepResult::Handled);
+    assert_eq!(transferred, StepResult::Handled);
     assert_eq!(
         runtime
             .status()
@@ -1160,25 +1177,25 @@ fn node_runtime_steps_batch_of_raft_messages() {
     );
 
     let snapshot = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::TriggerSnapshot,
+        .step(Message::Admin {
+            command: AdminCommand::TriggerSnapshot,
         })
         .expect("step trigger-snapshot admin command");
     let snapshot_id = match snapshot {
-        RustRaftStepResult::SnapshotTriggered(meta) => meta.snapshot_id,
+        StepResult::SnapshotTriggered(meta) => meta.snapshot_id,
         other => panic!("unexpected snapshot admin response: {other:?}"),
     };
     let snapshot_applied = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::SnapshotApplied { snapshot_id },
+        .step(Message::Admin {
+            command: AdminCommand::SnapshotApplied { snapshot_id },
         })
         .expect("step snapshot-applied admin command");
-    assert_eq!(snapshot_applied, RustRaftStepResult::Handled);
+    assert_eq!(snapshot_applied, StepResult::Handled);
 }
 
 #[test]
 fn node_runtime_handles_vote_rpc() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     let pre_vote = runtime
@@ -1188,7 +1205,7 @@ fn node_runtime_handles_vote_rpc() {
                 group_id: 77,
                 term: 2,
                 candidate_id: 2,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                last_log_id: Some(LogId { term: 1, index: 1 }),
                 pre_vote: true,
                 force: false,
             },
@@ -1204,7 +1221,7 @@ fn node_runtime_handles_vote_rpc() {
                 group_id: 77,
                 term: 2,
                 candidate_id: 2,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                last_log_id: Some(LogId { term: 1, index: 1 }),
                 pre_vote: false,
                 force: false,
             },
@@ -1220,7 +1237,7 @@ fn node_runtime_handles_vote_rpc() {
                 group_id: 77,
                 term: 2,
                 candidate_id: 3,
-                last_log_id: Some(RustRaftLogId { term: 1, index: 1 }),
+                last_log_id: Some(LogId { term: 1, index: 1 }),
                 pre_vote: false,
                 force: false,
             },
@@ -1232,32 +1249,32 @@ fn node_runtime_handles_vote_rpc() {
 
 #[test]
 fn node_runtime_tracks_and_expires_reorder_queue() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     let queued_append = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ReceiveOutOfOrderAppend {
+        .step(Message::Admin {
+            command: AdminCommand::ReceiveOutOfOrderAppend {
                 peer_id: 2,
-                entry: matrixraft::RustRaftLogEntry {
-                    log_id: RustRaftLogId { term: 1, index: 3 },
+                entry: matrixraft::LogEntry {
+                    log_id: LogId { term: 1, index: 3 },
                     payload: b"future".to_vec(),
                     is_command: true,
                 },
             },
         })
         .expect("queue out-of-order append through runtime step");
-    assert_eq!(queued_append, RustRaftStepResult::Handled);
+    assert_eq!(queued_append, StepResult::Handled);
 
     let queued = runtime.peer_pipeline_status(2).expect("pipeline status");
     assert_eq!(queued.reorder_queue_depth, 1);
 
     let dropped = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ExpirePeerReorderQueue { peer_id: 2 },
+        .step(Message::Admin {
+            command: AdminCommand::ExpirePeerReorderQueue { peer_id: 2 },
         })
         .expect("expire reorder queue through runtime step");
-    assert_eq!(dropped, RustRaftStepResult::CompactedLogs(1));
+    assert_eq!(dropped, StepResult::CompactedLogs(1));
 
     let expired = runtime.peer_pipeline_status(2).expect("expired status");
     assert_eq!(expired.reorder_queue_depth, 0);
@@ -1267,7 +1284,7 @@ fn node_runtime_tracks_and_expires_reorder_queue() {
 
 #[test]
 fn tick_backpressure_caps_pending_ticks() {
-    let mut ticks = RustRaftTickBackpressure::new(2);
+    let mut ticks = TickBackpressure::new(2);
 
     let first = ticks.admit_tick();
     assert!(first.accepted);
@@ -1298,7 +1315,7 @@ fn tick_backpressure_caps_pending_ticks() {
 
 #[test]
 fn tick_backpressure_handles_empty_completion_and_reset() {
-    let mut ticks = RustRaftTickBackpressure::new(0);
+    let mut ticks = TickBackpressure::new(0);
     assert_eq!(ticks.max_pending_ticks, 1);
     assert!(!ticks.complete_tick());
 
@@ -1314,7 +1331,7 @@ fn tick_backpressure_handles_empty_completion_and_reset() {
 
 #[test]
 fn request_timer_watch_cancel_and_notify() {
-    let mut timer = RustRaftRequestTimer::new();
+    let mut timer = RequestTimer::new();
     assert_eq!(
         timer.next_timeout_ms(100),
         MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS
@@ -1345,7 +1362,7 @@ fn request_timer_watch_cancel_and_notify() {
 
 #[test]
 fn request_timer_lapses_with_limit_and_removes_node_tasks() {
-    let mut timer = RustRaftRequestTimer::new();
+    let mut timer = RequestTimer::new();
     timer.watch(1, 1, 90, 80);
     timer.watch(1, 2, 95, 80);
     timer.watch(2, 3, 120, 100);
@@ -1373,7 +1390,7 @@ fn request_timer_lapses_with_limit_and_removes_node_tasks() {
 
 #[test]
 fn request_timer_replaces_existing_handler_timeout_index() {
-    let mut timer = RustRaftRequestTimer::new();
+    let mut timer = RequestTimer::new();
     assert!(timer.watch(1, 1, 100, 90).is_none());
 
     let replaced = timer.watch(1, 1, 150, 95).expect("replace task");
@@ -1393,12 +1410,12 @@ fn request_timer_replaces_existing_handler_timeout_index() {
 
 #[test]
 fn node_runtime_tracks_snapshot_transfer_progress() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
 
     let begin_send = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::BeginSnapshotSend {
+        .step(Message::Admin {
+            command: AdminCommand::BeginSnapshotSend {
                 peer_id: 2,
                 snapshot_id: "runtime-send-5".to_string(),
                 snapshot_index: 5,
@@ -1406,45 +1423,45 @@ fn node_runtime_tracks_snapshot_transfer_progress() {
             },
         })
         .expect("begin snapshot send through runtime step");
-    assert_eq!(begin_send, RustRaftStepResult::Handled);
+    assert_eq!(begin_send, StepResult::Handled);
     let sent_chunk = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::RecordSnapshotChunkSent {
+        .step(Message::Admin {
+            command: AdminCommand::RecordSnapshotChunkSent {
                 peer_id: 2,
                 bytes: 128,
             },
         })
         .expect("record sent chunk through runtime step");
-    assert_eq!(sent_chunk, RustRaftStepResult::Handled);
+    assert_eq!(sent_chunk, StepResult::Handled);
     let retry = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::RetrySnapshotChunk { peer_id: 2 },
+        .step(Message::Admin {
+            command: AdminCommand::RetrySnapshotChunk { peer_id: 2 },
         })
         .expect("retry snapshot chunk through runtime step");
-    assert_eq!(retry, RustRaftStepResult::Handled);
+    assert_eq!(retry, StepResult::Handled);
     let retrying = runtime.peer_pipeline_status(2).expect("retry status");
     assert_eq!(retrying.snapshot_chunk_retry_count, 1);
     assert_eq!(retrying.snapshot_install_progress_per_mille, 0);
     let ack = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::AcknowledgeSnapshotChunk { peer_id: 2 },
+        .step(Message::Admin {
+            command: AdminCommand::AcknowledgeSnapshotChunk { peer_id: 2 },
         })
         .expect("ack first chunk through runtime step");
-    assert_eq!(ack, RustRaftStepResult::Handled);
+    assert_eq!(ack, StepResult::Handled);
 
     let sending = runtime.peer_pipeline_status(2).expect("sender status");
     assert!(sending.snapshot_sending);
     assert_eq!(sending.snapshot_install_progress_per_mille, 500);
 
     let progress = runtime
-        .step(RustRaftMessage::SnapshotProgress {
+        .step(Message::SnapshotProgress {
             peer_id: 2,
             remote_receiving: true,
             elapsed_since_last_receiving_ms: 500,
             send_timeout_ms: 100,
         })
         .expect("step snapshot progress");
-    assert_eq!(progress, RustRaftStepResult::Handled);
+    assert_eq!(progress, StepResult::Handled);
     assert!(
         runtime
             .peer_pipeline_status(2)
@@ -1453,14 +1470,14 @@ fn node_runtime_tracks_snapshot_transfer_progress() {
     );
 
     let timed_out = runtime
-        .step(RustRaftMessage::SnapshotProgress {
+        .step(Message::SnapshotProgress {
             peer_id: 2,
             remote_receiving: false,
             elapsed_since_last_receiving_ms: 101,
             send_timeout_ms: 100,
         })
         .expect("step snapshot timeout progress");
-    assert_eq!(timed_out, RustRaftStepResult::Handled);
+    assert_eq!(timed_out, StepResult::Handled);
     assert!(
         !runtime
             .peer_pipeline_status(2)
@@ -1481,8 +1498,8 @@ fn node_runtime_tracks_snapshot_transfer_progress() {
     assert_eq!(sent.snapshot_install_progress_per_mille, 1000);
 
     let begin_install = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::BeginSnapshotInstall {
+        .step(Message::Admin {
+            command: AdminCommand::BeginSnapshotInstall {
                 peer_id: 3,
                 snapshot_id: "runtime-recv-7".to_string(),
                 snapshot_index: 7,
@@ -1490,39 +1507,39 @@ fn node_runtime_tracks_snapshot_transfer_progress() {
             },
         })
         .expect("begin snapshot receive through runtime step");
-    assert_eq!(begin_install, RustRaftStepResult::Handled);
+    assert_eq!(begin_install, StepResult::Handled);
     let first_chunk = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ReceiveSnapshotChunk {
+        .step(Message::Admin {
+            command: AdminCommand::ReceiveSnapshotChunk {
                 peer_id: 3,
                 bytes: 64,
                 done: false,
             },
         })
         .expect("receive first chunk through runtime step");
-    assert_eq!(first_chunk, RustRaftStepResult::Handled);
+    assert_eq!(first_chunk, StepResult::Handled);
     let receiving = runtime.peer_pipeline_status(3).expect("receiver status");
     assert!(receiving.snapshot_installing);
     assert_eq!(receiving.snapshot_install_progress_per_mille, 500);
 
     let final_chunk = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ReceiveSnapshotChunk {
+        .step(Message::Admin {
+            command: AdminCommand::ReceiveSnapshotChunk {
                 peer_id: 3,
                 bytes: 64,
                 done: true,
             },
         })
         .expect("receive final chunk through runtime step");
-    assert_eq!(final_chunk, RustRaftStepResult::Handled);
+    assert_eq!(final_chunk, StepResult::Handled);
     let received = runtime.peer_pipeline_status(3).expect("received status");
     assert!(!received.snapshot_installing);
     assert_eq!(received.snapshot_installed_index, 7);
     assert_eq!(received.snapshot_install_progress_per_mille, 1000);
 
     runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::BeginSnapshotInstall {
+        .step(Message::Admin {
+            command: AdminCommand::BeginSnapshotInstall {
                 peer_id: 3,
                 snapshot_id: "runtime-rollback-9".to_string(),
                 snapshot_index: 9,
@@ -1531,8 +1548,8 @@ fn node_runtime_tracks_snapshot_transfer_progress() {
         })
         .expect("begin rollback snapshot receive through runtime step");
     runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ReceiveSnapshotChunk {
+        .step(Message::Admin {
+            command: AdminCommand::ReceiveSnapshotChunk {
                 peer_id: 3,
                 bytes: 32,
                 done: false,
@@ -1540,11 +1557,11 @@ fn node_runtime_tracks_snapshot_transfer_progress() {
         })
         .expect("receive rollback chunk through runtime step");
     let rollback = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::RollbackSnapshotInstall { peer_id: 3 },
+        .step(Message::Admin {
+            command: AdminCommand::RollbackSnapshotInstall { peer_id: 3 },
         })
         .expect("rollback snapshot install through runtime step");
-    assert_eq!(rollback, RustRaftStepResult::Handled);
+    assert_eq!(rollback, StepResult::Handled);
     let rolled_back = runtime.peer_pipeline_status(3).expect("rollback status");
     assert!(!rolled_back.snapshot_installing);
     assert_eq!(rolled_back.snapshot_install_rolled_back, 1);
@@ -1552,7 +1569,7 @@ fn node_runtime_tracks_snapshot_transfer_progress() {
 
 #[test]
 fn node_runtime_compacts_logs_through_runtime() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
         .propose(b"compact-one".to_vec())
@@ -1562,11 +1579,11 @@ fn node_runtime_compacts_logs_through_runtime() {
         .expect("second write");
 
     let released = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::ReleaseMemory,
+        .step(Message::Admin {
+            command: AdminCommand::ReleaseMemory,
         })
         .expect("release memory through runtime step");
-    assert_eq!(released, RustRaftStepResult::ReleasedMemory(true));
+    assert_eq!(released, StepResult::ReleasedMemory(true));
 
     let read = runtime.read_index(3).expect("read after compaction");
     assert!(read.safe);
@@ -1592,7 +1609,7 @@ fn node_runtime_compacts_wal_with_storage_fence() {
     let mut options = node_options_in(base_dir.clone());
     options.config.max_segment_bytes = 1;
     options.config.min_keep_segment_num = 1;
-    let mut runtime = RaftNodeRuntime::create(options).expect("create runtime");
+    let mut runtime = NodeRuntime::create(options).expect("create runtime");
     runtime.start().expect("start runtime");
     for index in 1..=5 {
         assert_eq!(
@@ -1612,10 +1629,10 @@ fn node_runtime_compacts_wal_with_storage_fence() {
     );
 
     let blocked = match runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::CompactLogsWithStorageFence {
+        .step(Message::Admin {
+            command: AdminCommand::CompactLogsWithStorageFence {
                 log_index: 4,
-                fence: RustRaftStorageApplyFence {
+                fence: StorageApplyFence {
                     group_id: 77,
                     node_id: 1,
                     committed_index: 6,
@@ -1629,7 +1646,7 @@ fn node_runtime_compacts_wal_with_storage_fence() {
         })
         .expect("blocked compaction step")
     {
-        RustRaftStepResult::FencedCompaction(report) => report,
+        StepResult::FencedCompaction(report) => report,
         other => panic!("unexpected compaction step result: {other:?}"),
     };
     assert!(!blocked.fence_valid);
@@ -1637,10 +1654,10 @@ fn node_runtime_compacts_wal_with_storage_fence() {
     assert!(blocked.blocker.expect("blocker").contains("behind"));
 
     let released = match runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::CompactLogsWithStorageFence {
+        .step(Message::Admin {
+            command: AdminCommand::CompactLogsWithStorageFence {
                 log_index: 4,
-                fence: RustRaftStorageApplyFence {
+                fence: StorageApplyFence {
                     group_id: 77,
                     node_id: 1,
                     committed_index: 6,
@@ -1654,7 +1671,7 @@ fn node_runtime_compacts_wal_with_storage_fence() {
         })
         .expect("safe compaction step")
     {
-        RustRaftStepResult::FencedCompaction(report) => report,
+        StepResult::FencedCompaction(report) => report,
         other => panic!("unexpected compaction step result: {other:?}"),
     };
     assert!(released.fence_valid);
@@ -1676,22 +1693,22 @@ fn node_runtime_compacts_wal_with_storage_fence() {
 
 #[test]
 fn node_runtime_checkpoints_snapshot_through_runtime() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
         .propose(b"checkpoint-me".to_vec())
         .expect("write before checkpoint");
 
     let snapshot = match runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::CheckpointSnapshot {
+        .step(Message::Admin {
+            command: AdminCommand::CheckpointSnapshot {
                 target: 1,
                 snapshot_id: "runtime-checkpoint-1".to_string(),
             },
         })
         .expect("checkpoint snapshot through runtime step")
     {
-        RustRaftStepResult::CheckpointedSnapshot(snapshot) => snapshot,
+        StepResult::CheckpointedSnapshot(snapshot) => snapshot,
         other => panic!("unexpected checkpoint step result: {other:?}"),
     };
 
@@ -1710,7 +1727,7 @@ fn node_runtime_times_out_lagging_leader_transfer() {
     options.config.heartbeat_interval_ms = 5;
     options.config.election_timeout_ms = 10;
     options.config.leader_lease_ms = 5;
-    let mut runtime = RaftNodeRuntime::create(options).expect("create runtime");
+    let mut runtime = NodeRuntime::create(options).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
         .set_node_healthy(2, false)
@@ -1745,7 +1762,7 @@ fn node_runtime_times_out_lagging_leader_transfer() {
 
 #[test]
 fn node_runtime_completes_and_aborts_leader_transfer_lifecycle() {
-    let mut completing = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut completing = NodeRuntime::create(node_options()).expect("create runtime");
     completing.start().expect("start runtime");
     completing
         .set_node_healthy(2, false)
@@ -1767,14 +1784,11 @@ fn node_runtime_completes_and_aborts_leader_transfer_lifecycle() {
 
     completing.catch_up_peer(2).expect("catch up transferee");
     let complete_transfer = completing
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::CompleteLeaderTransfer,
+        .step(Message::Admin {
+            command: AdminCommand::CompleteLeaderTransfer,
         })
         .expect("complete leader transfer through runtime step");
-    assert_eq!(
-        complete_transfer,
-        RustRaftStepResult::LeaderTransferCompleted(true)
-    );
+    assert_eq!(complete_transfer, StepResult::LeaderTransferCompleted(true));
     assert!(completing
         .leader_transfer_state()
         .expect("query completed leader transfer")
@@ -1789,16 +1803,13 @@ fn node_runtime_completes_and_aborts_leader_transfer_lifecycle() {
         Some(2)
     );
     let no_transfer_left = completing
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::CompleteLeaderTransfer,
+        .step(Message::Admin {
+            command: AdminCommand::CompleteLeaderTransfer,
         })
         .expect("no transfer left to complete through runtime step");
-    assert_eq!(
-        no_transfer_left,
-        RustRaftStepResult::LeaderTransferCompleted(false)
-    );
+    assert_eq!(no_transfer_left, StepResult::LeaderTransferCompleted(false));
 
-    let mut aborting = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut aborting = NodeRuntime::create(node_options()).expect("create runtime");
     aborting.start().expect("start runtime");
     aborting
         .set_node_healthy(2, false)
@@ -1809,16 +1820,13 @@ fn node_runtime_completes_and_aborts_leader_transfer_lifecycle() {
         .expect("restore transferee health");
     aborting.transfer_leader(2).expect("begin transfer");
     let abort_transfer = aborting
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::AbortLeaderTransfer {
+        .step(Message::Admin {
+            command: AdminCommand::AbortLeaderTransfer {
                 reason: "operator_abort".to_string(),
             },
         })
         .expect("abort transfer through runtime step");
-    assert_eq!(
-        abort_transfer,
-        RustRaftStepResult::LeaderTransferAborted(true)
-    );
+    assert_eq!(abort_transfer, StepResult::LeaderTransferAborted(true));
     assert!(aborting
         .leader_transfer_state()
         .expect("query aborted transfer")
@@ -1833,18 +1841,15 @@ fn node_runtime_completes_and_aborts_leader_transfer_lifecycle() {
         Some(1)
     );
     let no_transfer_left = aborting
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::AbortLeaderTransfer {
+        .step(Message::Admin {
+            command: AdminCommand::AbortLeaderTransfer {
                 reason: "operator_abort".to_string(),
             },
         })
         .expect("no transfer left to abort through runtime step");
-    assert_eq!(
-        no_transfer_left,
-        RustRaftStepResult::LeaderTransferAborted(false)
-    );
+    assert_eq!(no_transfer_left, StepResult::LeaderTransferAborted(false));
 
-    let mut removing = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut removing = NodeRuntime::create(node_options()).expect("create runtime");
     removing.start().expect("start runtime");
     removing
         .set_node_healthy(2, false)
@@ -1861,7 +1866,7 @@ fn node_runtime_completes_and_aborts_leader_transfer_lifecycle() {
         .expect("query removing transfer")
         .is_some());
     removing
-        .execute_membership_operation(RaftMembershipOperation::Remove(2))
+        .execute_membership_operation(MembershipOperation::Remove(2))
         .expect("remove transferee");
     assert!(removing
         .leader_transfer_state()
@@ -1875,7 +1880,7 @@ fn node_runtime_catches_up_recovered_follower_on_heartbeat() {
     options.config.heartbeat_interval_ms = 5;
     options.config.election_timeout_ms = 20;
     options.config.leader_lease_ms = 5;
-    let mut runtime = RaftNodeRuntime::create(options).expect("create runtime");
+    let mut runtime = NodeRuntime::create(options).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime
         .set_node_healthy(2, false)
@@ -1903,14 +1908,14 @@ fn node_runtime_catches_up_recovered_follower_on_heartbeat() {
 
 #[test]
 fn node_runtime_partitions_and_heals_peer_with_catchup_report() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     let partition = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::PartitionPeer { peer_id: 2 },
+        .step(Message::Admin {
+            command: AdminCommand::PartitionPeer { peer_id: 2 },
         })
         .expect("partition peer through runtime step");
-    assert_eq!(partition, RustRaftStepResult::Handled);
+    assert_eq!(partition, StepResult::Handled);
     runtime
         .propose(b"partitioned-write".to_vec())
         .expect("propose");
@@ -1925,11 +1930,11 @@ fn node_runtime_partitions_and_heals_peer_with_catchup_report() {
     assert!(peer.lag > 0);
 
     let catchup = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::HealPeer { peer_id: 2 },
+        .step(Message::Admin {
+            command: AdminCommand::HealPeer { peer_id: 2 },
         })
         .expect("heal peer through runtime step");
-    let RustRaftStepResult::CatchUpPeer(catchup) = catchup else {
+    let StepResult::CatchUpPeer(catchup) = catchup else {
         panic!("unexpected heal peer step response: {catchup:?}");
     };
     assert_eq!(catchup.learner_id, 2);
@@ -1956,7 +1961,7 @@ fn node_runtime_partitions_and_heals_peer_with_catchup_report() {
 
 #[test]
 fn node_runtime_triggers_snapshot_metadata() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.propose(b"snapshot-me".to_vec()).expect("propose");
 
@@ -1988,14 +1993,14 @@ fn node_runtime_triggers_snapshot_metadata() {
     );
 
     let ready = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::SnapshotReady {
+        .step(Message::Admin {
+            command: AdminCommand::SnapshotReady {
                 snapshot_id: snapshot.snapshot_id.clone(),
                 success: false,
             },
         })
         .expect("step snapshot-ready admin command");
-    assert_eq!(ready, RustRaftStepResult::Handled);
+    assert_eq!(ready, StepResult::Handled);
     assert!(
         !runtime
             .status()
@@ -2007,14 +2012,14 @@ fn node_runtime_triggers_snapshot_metadata() {
         .trigger_snapshot()
         .expect("trigger again after completion");
     let stale_ready = runtime
-        .step(RustRaftMessage::Admin {
-            command: RaftAdminCommand::SnapshotReady {
+        .step(Message::Admin {
+            command: AdminCommand::SnapshotReady {
                 snapshot_id: "stale-ready-callback".to_string(),
                 success: true,
             },
         })
         .expect("stale snapshot-ready callback is ignored");
-    assert_eq!(stale_ready, RustRaftStepResult::Handled);
+    assert_eq!(stale_ready, StepResult::Handled);
     assert!(
         runtime
             .status()
@@ -2030,14 +2035,35 @@ fn node_runtime_reports_stale_snapshot_trigger_timeout() {
     options.config.heartbeat_interval_ms = 5;
     options.config.election_timeout_ms = 10;
     options.config.leader_lease_ms = 5;
-    let mut runtime = RaftNodeRuntime::create(options).expect("create runtime");
+    let mut runtime = NodeRuntime::create(options).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.propose(b"slow-snapshot".to_vec()).expect("propose");
     runtime.trigger_snapshot().expect("trigger snapshot");
 
-    std::thread::sleep(std::time::Duration::from_millis(25));
-
-    let status = runtime.status().expect("status");
+    // Wait for the timeout rather than sleeping a fixed 25ms and assuming it
+    // happened. The tick that advances the snapshot-trigger clock fires only
+    // from the timeout arm of the runtime's command loop, so it needs the
+    // command channel to sit idle for a whole heartbeat interval -- and under
+    // load the runtime thread may not be scheduled for far longer than 25ms.
+    // This failed about once in forty whole-binary runs under 2x CPU
+    // oversubscription.
+    //
+    // Note the sleep inside the loop is load-bearing: polling `status()` back
+    // to back would keep the channel busy and starve the very tick being
+    // waited on.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        let status = runtime.status().expect("status");
+        if status.snapshot_trigger_status.timed_out {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "snapshot trigger never timed out: {:?}",
+            status.snapshot_trigger_status
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
     assert!(status.snapshot_trigger_status.in_progress);
     assert!(status.snapshot_trigger_status.elapsed_ticks >= 2);
     assert!(status.snapshot_trigger_status.timed_out);
@@ -2050,11 +2076,11 @@ fn node_runtime_reports_stale_snapshot_trigger_timeout() {
 
 #[test]
 fn node_runtime_shutdown_is_idempotent() {
-    let mut runtime = RaftNodeRuntime::create(node_options()).expect("create runtime");
+    let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.shutdown().expect("shutdown runtime");
     runtime.shutdown().expect("second shutdown is ok");
-    assert_eq!(runtime.state(), RaftNodeRuntimeState::Shutdown);
+    assert_eq!(runtime.state(), NodeRuntimeState::Shutdown);
 }
 
 #[test]
@@ -2062,7 +2088,7 @@ fn node_runtime_recovers_committed_index_from_persistent_wal() {
     let base_dir = temp_runtime_dir("wal-recovery");
     let options = node_options_in(base_dir.clone());
     {
-        let mut runtime = RaftNodeRuntime::create(options.clone()).expect("create runtime");
+        let mut runtime = NodeRuntime::create(options.clone()).expect("create runtime");
         runtime.start().expect("start runtime");
         assert_eq!(runtime.propose(b"one".to_vec()).expect("first").index, 2);
         assert_eq!(runtime.propose(b"two".to_vec()).expect("second").index, 3);
@@ -2083,7 +2109,7 @@ fn node_runtime_recovers_committed_index_from_persistent_wal() {
         runtime.shutdown().expect("shutdown");
     }
 
-    let mut recovered = RaftNodeRuntime::create(options).expect("recreate runtime");
+    let mut recovered = NodeRuntime::create(options).expect("recreate runtime");
     recovered.start().expect("start recovered runtime");
     let recovery = recovered
         .wal_recovery_report()

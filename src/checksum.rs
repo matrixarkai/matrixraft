@@ -10,13 +10,13 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftChecksumType {
+pub enum ChecksumType {
     Invalid,
     Crc32,
     Murmur32,
 }
 
-impl RustRaftChecksumType {
+impl ChecksumType {
     pub fn from_name(name: &str) -> Self {
         match name {
             "crc32" | "crc32c" => Self::Crc32,
@@ -35,8 +35,8 @@ impl RustRaftChecksumType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftChecksumResult {
-    pub checksum_type: RustRaftChecksumType,
+pub struct ChecksumResult {
+    pub checksum_type: ChecksumType,
     pub checksum_name: String,
     pub value: u32,
     pub bytes: u64,
@@ -44,8 +44,8 @@ pub struct RustRaftChecksumResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftChecksumContext {
-    checksum_type: RustRaftChecksumType,
+pub struct ChecksumContext {
+    checksum_type: ChecksumType,
     finished: bool,
     value: u32,
     length: u64,
@@ -54,8 +54,8 @@ pub struct RustRaftChecksumContext {
     chunks: u64,
 }
 
-impl RustRaftChecksumContext {
-    pub fn new(checksum_type: RustRaftChecksumType) -> Self {
+impl ChecksumContext {
+    pub fn new(checksum_type: ChecksumType) -> Self {
         Self {
             checksum_type,
             finished: false,
@@ -68,35 +68,35 @@ impl RustRaftChecksumContext {
     }
 
     pub fn from_name(name: &str) -> Self {
-        Self::new(RustRaftChecksumType::from_name(name))
+        Self::new(ChecksumType::from_name(name))
     }
 
     pub fn extend(&mut self, data: &[u8]) -> Result<(), String> {
         if self.finished {
             return Err("checksum already finished".to_string());
         }
-        if self.checksum_type == RustRaftChecksumType::Invalid {
+        if self.checksum_type == ChecksumType::Invalid {
             return Err("checksum type is invalid".to_string());
         }
         if data.is_empty() {
             return Ok(());
         }
         match self.checksum_type {
-            RustRaftChecksumType::Crc32 => {
+            ChecksumType::Crc32 => {
                 self.value = crc32c_extend(self.value, data);
             }
-            RustRaftChecksumType::Murmur32 => {
+            ChecksumType::Murmur32 => {
                 self.extend_murmur32(data);
             }
-            RustRaftChecksumType::Invalid => unreachable!(),
+            ChecksumType::Invalid => unreachable!(),
         }
         self.length = self.length.saturating_add(data.len() as u64);
         self.chunks = self.chunks.saturating_add(1);
         Ok(())
     }
 
-    pub fn finalize(&mut self) -> RustRaftChecksumResult {
-        if !self.finished && self.checksum_type == RustRaftChecksumType::Murmur32 {
+    pub fn finalize(&mut self) -> ChecksumResult {
+        if !self.finished && self.checksum_type == ChecksumType::Murmur32 {
             self.value = murmur3_x86_32_finalize(
                 self.value,
                 &self.tail,
@@ -105,7 +105,7 @@ impl RustRaftChecksumContext {
             self.tail.clear();
         }
         self.finished = true;
-        RustRaftChecksumResult {
+        ChecksumResult {
             checksum_type: self.checksum_type,
             checksum_name: self.checksum_type.name().to_string(),
             value: self.value,
@@ -114,7 +114,7 @@ impl RustRaftChecksumContext {
         }
     }
 
-    pub fn checksum_type(&self) -> RustRaftChecksumType {
+    pub fn checksum_type(&self) -> ChecksumType {
         self.checksum_type
     }
 
@@ -139,27 +139,27 @@ impl RustRaftChecksumContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftFileChecksumResult {
-    pub checksum: RustRaftChecksumResult,
+pub struct FileChecksumResult {
+    pub checksum: ChecksumResult,
     pub files: Vec<PathBuf>,
     pub block_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftFileChecksumContext {
+pub struct FileChecksumContext {
     path: PathBuf,
-    checksum_type: RustRaftChecksumType,
+    checksum_type: ChecksumType,
     block_size: usize,
 }
 
-impl RustRaftFileChecksumContext {
+impl FileChecksumContext {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self::with_type(path, RustRaftChecksumType::Crc32, 10_485_764)
+        Self::with_type(path, ChecksumType::Crc32, 10_485_764)
     }
 
     pub fn with_type(
         path: impl Into<PathBuf>,
-        checksum_type: RustRaftChecksumType,
+        checksum_type: ChecksumType,
         block_size: usize,
     ) -> Self {
         Self {
@@ -169,9 +169,9 @@ impl RustRaftFileChecksumContext {
         }
     }
 
-    pub fn start(&self) -> io::Result<RustRaftFileChecksumResult> {
+    pub fn start(&self) -> io::Result<FileChecksumResult> {
         let files = matrixraft_checksum_file_list(&self.path)?;
-        let mut context = RustRaftChecksumContext::new(self.checksum_type);
+        let mut context = ChecksumContext::new(self.checksum_type);
         let mut buffer = vec![0; self.block_size];
         for file in &files {
             let mut input = fs::File::open(file)?;
@@ -185,7 +185,7 @@ impl RustRaftFileChecksumContext {
                     .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
             }
         }
-        Ok(RustRaftFileChecksumResult {
+        Ok(FileChecksumResult {
             checksum: context.finalize(),
             files,
             block_size: self.block_size,

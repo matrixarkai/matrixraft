@@ -2,9 +2,9 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    MatrixRaftAsyncOperation, MatrixRaftAsyncResult, MatrixRaftCallbackScheduler,
-    MatrixRaftConfState, MatrixRaftNode, MatrixRaftNodeId, MatrixRaftProposeOptions, RaftConfig,
-    RaftNodeRuntimeState, RustRaftNodeOptions, RustRaftPeer, RustRaftReplicaRole,
+    Config, MatrixRaftAsyncOperation, MatrixRaftAsyncResult, MatrixRaftCallbackScheduler,
+    MatrixRaftConfState, MatrixRaftNode, MatrixRaftNodeId, MatrixRaftProposeOptions, NodeOptions,
+    NodeRuntimeState, Peer, ReplicaRole,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -21,8 +21,8 @@ fn temp_dir(name: &str) -> PathBuf {
     ))
 }
 
-fn peer(node_id: u64, role: RustRaftReplicaRole) -> RustRaftPeer {
-    RustRaftPeer {
+fn peer(node_id: u64, role: ReplicaRole) -> Peer {
+    Peer {
         node_id,
         raft_addr: format!("127.0.0.1:{}", 52_000 + node_id),
         snapshot_addr: format!("127.0.0.1:{}", 53_000 + node_id),
@@ -102,24 +102,24 @@ fn matrixraft_callback_scheduler_exposes_scheduled_timeout_and_cancellation_shap
 fn matrixraft_callback_facade_invokes_step_down_and_resign_admin_callbacks() {
     let wal_dir = temp_dir("admin-wal");
     let snapshot_dir = temp_dir("admin-snapshot");
-    let options = RustRaftNodeOptions {
+    let options = NodeOptions {
         group_id: 902,
         node_id: 1,
         raft_addr: "127.0.0.1:52001".to_string(),
         snapshot_addr: "127.0.0.1:53001".to_string(),
         wal_dir: wal_dir.display().to_string(),
         snapshot_dir: snapshot_dir.display().to_string(),
-        role: RustRaftReplicaRole::Voter,
-        config: RaftConfig {
+        role: ReplicaRole::Voter,
+        config: Config {
             heartbeat_interval_ms: 5,
             election_timeout_ms: 20,
             leader_lease_ms: 10,
             ..Default::default()
         },
         peers: vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     };
 
@@ -172,24 +172,30 @@ fn matrixraft_callback_facade_invokes_step_down_and_resign_admin_callbacks() {
 fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operations() {
     let wal_dir = temp_dir("wal");
     let snapshot_dir = temp_dir("snapshot");
-    let options = RustRaftNodeOptions {
+    let options = NodeOptions {
         group_id: 901,
         node_id: 1,
         raft_addr: "127.0.0.1:52001".to_string(),
         snapshot_addr: "127.0.0.1:53001".to_string(),
         wal_dir: wal_dir.display().to_string(),
         snapshot_dir: snapshot_dir.display().to_string(),
-        role: RustRaftReplicaRole::Voter,
-        config: RaftConfig {
-            heartbeat_interval_ms: 5,
-            election_timeout_ms: 20,
-            leader_lease_ms: 10,
+        role: ReplicaRole::Voter,
+        // A 20ms election timeout meant that when the runtime thread was
+        // starved, the node churned through elections between the operations
+        // below and an operation could come back not-ok -- `assert!(returned.ok)`
+        // failed about 13 runs in 60 under 2x CPU load. Intervals longer than
+        // the test suppress the automatic tick, so leadership stays put. This
+        // test is about callback delivery, not about election timing.
+        config: Config {
+            heartbeat_interval_ms: 10_000,
+            election_timeout_ms: 20_000,
+            leader_lease_ms: 5_000,
             ..Default::default()
         },
         peers: vec![
-            peer(1, RustRaftReplicaRole::Voter),
-            peer(2, RustRaftReplicaRole::Voter),
-            peer(3, RustRaftReplicaRole::Voter),
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
         ],
     };
 
@@ -197,7 +203,7 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     node.start(1).expect("start");
     assert_eq!(
         node.get_local_status().expect("status").state,
-        RaftNodeRuntimeState::Running
+        NodeRuntimeState::Running
     );
 
     let mut propose_callback = None;

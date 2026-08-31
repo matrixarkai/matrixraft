@@ -8,55 +8,46 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    RustRaftAppendEntriesRequest, RustRaftAppendSafetyDecision, RustRaftAppliedIndexFenceReport,
-    RustRaftBoundedStaleReadReport, RustRaftLeaseReadEligibilityReport, RustRaftLogIndex,
-    RustRaftNodeId, RustRaftReadIndexRequest, RustRaftReadSafetyDecision,
-    RustRaftReadSafetyEvidenceArtifact, RustRaftReadSafetyEvidenceValidationReport,
-    RustRaftReadSafetyOperation, RustRaftReadSafetyRuntimeDecision, RustRaftReadSafetyRuntimeInput,
-    RustRaftRole, RustRaftStatusSnapshot,
+    AppendEntriesRequest, AppendSafetyDecision, AppliedIndexFenceReport, BoundedStaleReadReport,
+    LeaseReadEligibilityReport, LogIndex, NodeId, ReadIndexRequest, ReadSafetyDecision,
+    ReadSafetyEvidenceArtifact, ReadSafetyEvidenceValidationReport, ReadSafetyOperation,
+    ReadSafetyRuntimeDecision, ReadSafetyRuntimeInput, StateRole, StatusSnapshot,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftPendingReadIndex {
-    pub request: RustRaftReadIndexRequest,
-    pub read_index: RustRaftLogIndex,
+pub struct PendingReadIndex {
+    pub request: ReadIndexRequest,
+    pub read_index: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftPendingReadIndexResult {
-    pub request: RustRaftReadIndexRequest,
-    pub read_index: RustRaftLogIndex,
-    pub applied_index: RustRaftLogIndex,
+pub struct PendingReadIndexResult {
+    pub request: ReadIndexRequest,
+    pub read_index: LogIndex,
+    pub applied_index: LogIndex,
     pub ready: bool,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftPendingReadIndexQueue {
-    pending: VecDeque<RustRaftPendingReadIndex>,
+pub struct PendingReadIndexQueue {
+    pending: VecDeque<PendingReadIndex>,
 }
 
-impl RustRaftPendingReadIndexQueue {
+impl PendingReadIndexQueue {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn push(
-        &mut self,
-        request: RustRaftReadIndexRequest,
-        read_index: RustRaftLogIndex,
-    ) -> usize {
-        self.pending.push_back(RustRaftPendingReadIndex {
+    pub fn push(&mut self, request: ReadIndexRequest, read_index: LogIndex) -> usize {
+        self.pending.push_back(PendingReadIndex {
             request,
             read_index,
         });
         self.pending.len()
     }
 
-    pub fn notify_applied(
-        &mut self,
-        applied_index: RustRaftLogIndex,
-    ) -> Vec<RustRaftPendingReadIndexResult> {
+    pub fn notify_applied(&mut self, applied_index: LogIndex) -> Vec<PendingReadIndexResult> {
         let mut ready = Vec::new();
         while self
             .pending
@@ -65,7 +56,7 @@ impl RustRaftPendingReadIndexQueue {
             .unwrap_or(false)
         {
             let pending = self.pending.pop_front().expect("front is ready");
-            ready.push(RustRaftPendingReadIndexResult {
+            ready.push(PendingReadIndexResult {
                 request: pending.request,
                 read_index: pending.read_index,
                 applied_index,
@@ -78,13 +69,13 @@ impl RustRaftPendingReadIndexQueue {
 
     pub fn release_all(
         &mut self,
-        applied_index: RustRaftLogIndex,
+        applied_index: LogIndex,
         reason: impl Into<String>,
-    ) -> Vec<RustRaftPendingReadIndexResult> {
+    ) -> Vec<PendingReadIndexResult> {
         let reason = reason.into();
         self.pending
             .drain(..)
-            .map(|pending| RustRaftPendingReadIndexResult {
+            .map(|pending| PendingReadIndexResult {
                 request: pending.request,
                 read_index: pending.read_index,
                 applied_index,
@@ -103,8 +94,8 @@ impl RustRaftPendingReadIndexQueue {
     }
 }
 
-impl RustRaftPendingReadIndex {
-    pub fn fence_index(&self) -> RustRaftLogIndex {
+impl PendingReadIndex {
+    pub fn fence_index(&self) -> LogIndex {
         self.read_index.max(self.request.min_commit_index)
     }
 }
@@ -112,11 +103,11 @@ impl RustRaftPendingReadIndex {
 pub fn matrixraft_append_safety_decision(
     first_retained_log_index: u64,
     snapshot_index: u64,
-    request: &RustRaftAppendEntriesRequest,
-) -> RustRaftAppendSafetyDecision {
+    request: &AppendEntriesRequest,
+) -> AppendSafetyDecision {
     let prev_index = request.prev_log_id.as_ref().map(|id| id.index).unwrap_or(0);
     if prev_index > 0 && prev_index < first_retained_log_index && prev_index <= snapshot_index {
-        return RustRaftAppendSafetyDecision {
+        return AppendSafetyDecision {
             accepted: false,
             rejected_compacted_entry: true,
             reason: "prev_log_compacted".to_string(),
@@ -127,13 +118,13 @@ pub fn matrixraft_append_safety_decision(
         .iter()
         .any(|entry| entry.log_id.index < first_retained_log_index)
     {
-        return RustRaftAppendSafetyDecision {
+        return AppendSafetyDecision {
             accepted: false,
             rejected_compacted_entry: true,
             reason: "entry_compacted".to_string(),
         };
     }
-    RustRaftAppendSafetyDecision {
+    AppendSafetyDecision {
         accepted: true,
         rejected_compacted_entry: false,
         reason: "accepted".to_string(),
@@ -141,19 +132,19 @@ pub fn matrixraft_append_safety_decision(
 }
 
 pub fn matrixraft_read_safety_decision(
-    status: &RustRaftStatusSnapshot,
-    request: &RustRaftReadIndexRequest,
-) -> RustRaftReadSafetyDecision {
+    status: &StatusSnapshot,
+    request: &ReadIndexRequest,
+) -> ReadSafetyDecision {
     if status.group_id != request.group_id {
-        return RustRaftReadSafetyDecision {
+        return ReadSafetyDecision {
             safe: false,
             read_index: status.commit_index,
             lease_read: false,
             reason: "group_mismatch".to_string(),
         };
     }
-    if !matches!(status.role, RustRaftRole::Leader) {
-        return RustRaftReadSafetyDecision {
+    if !matches!(status.role, StateRole::Leader) {
+        return ReadSafetyDecision {
             safe: false,
             read_index: status.commit_index,
             lease_read: false,
@@ -161,14 +152,14 @@ pub fn matrixraft_read_safety_decision(
         };
     }
     if status.applied_index < request.min_commit_index {
-        return RustRaftReadSafetyDecision {
+        return ReadSafetyDecision {
             safe: false,
             read_index: status.commit_index,
             lease_read: false,
             reason: "apply_lag".to_string(),
         };
     }
-    RustRaftReadSafetyDecision {
+    ReadSafetyDecision {
         safe: true,
         read_index: status.commit_index,
         lease_read: request.allow_lease_read,
@@ -177,12 +168,12 @@ pub fn matrixraft_read_safety_decision(
 }
 
 pub fn matrixraft_applied_index_fence_report(
-    min_commit_index: RustRaftLogIndex,
-    commit_index: RustRaftLogIndex,
-    applied_index: RustRaftLogIndex,
-) -> RustRaftAppliedIndexFenceReport {
+    min_commit_index: LogIndex,
+    commit_index: LogIndex,
+    applied_index: LogIndex,
+) -> AppliedIndexFenceReport {
     let passed = applied_index >= min_commit_index && applied_index <= commit_index;
-    RustRaftAppliedIndexFenceReport {
+    AppliedIndexFenceReport {
         min_commit_index,
         commit_index,
         applied_index,
@@ -198,16 +189,16 @@ pub fn matrixraft_applied_index_fence_report(
 }
 
 pub fn matrixraft_lease_read_eligibility_report(
-    node_id: RustRaftNodeId,
-    leader_id: Option<RustRaftNodeId>,
+    node_id: NodeId,
+    leader_id: Option<NodeId>,
     config_enabled: bool,
     leader_lease_valid: bool,
     applied_index_fence_passed: bool,
-) -> RustRaftLeaseReadEligibilityReport {
+) -> LeaseReadEligibilityReport {
     let requester_is_leader = leader_id == Some(node_id);
     let eligible =
         config_enabled && requester_is_leader && leader_lease_valid && applied_index_fence_passed;
-    RustRaftLeaseReadEligibilityReport {
+    LeaseReadEligibilityReport {
         node_id,
         leader_id,
         config_enabled,
@@ -230,15 +221,15 @@ pub fn matrixraft_lease_read_eligibility_report(
 }
 
 pub fn matrixraft_bounded_stale_read_report(
-    node_id: RustRaftNodeId,
-    leader_id: RustRaftNodeId,
-    node_commit_index: RustRaftLogIndex,
-    leader_commit_index: RustRaftLogIndex,
-    max_stale_index_lag: RustRaftLogIndex,
-) -> RustRaftBoundedStaleReadReport {
+    node_id: NodeId,
+    leader_id: NodeId,
+    node_commit_index: LogIndex,
+    leader_commit_index: LogIndex,
+    max_stale_index_lag: LogIndex,
+) -> BoundedStaleReadReport {
     let lag = leader_commit_index.saturating_sub(node_commit_index);
     let allowed = lag <= max_stale_index_lag;
-    RustRaftBoundedStaleReadReport {
+    BoundedStaleReadReport {
         node_id,
         leader_id,
         node_commit_index,
@@ -255,14 +246,14 @@ pub fn matrixraft_bounded_stale_read_report(
 }
 
 pub fn matrixraft_read_safety_runtime_decision(
-    input: RustRaftReadSafetyRuntimeInput,
-) -> RustRaftReadSafetyRuntimeDecision {
+    input: ReadSafetyRuntimeInput,
+) -> ReadSafetyRuntimeDecision {
     let is_follower = input.node_id != input.leader_id;
-    if matches!(input.operation, RustRaftReadSafetyOperation::Write) {
+    if matches!(input.operation, ReadSafetyOperation::Write) {
         let stale_follower_write_rejected = is_follower;
         let minority_partition_write_rejected = !input.has_majority;
         let allowed = !stale_follower_write_rejected && !minority_partition_write_rejected;
-        return RustRaftReadSafetyRuntimeDecision {
+        return ReadSafetyRuntimeDecision {
             allowed,
             read_index: input.leader_commit_index,
             reason: if allowed {
@@ -282,7 +273,7 @@ pub fn matrixraft_read_safety_runtime_decision(
     }
 
     if !input.node_alive || !input.role_can_serve_data {
-        return RustRaftReadSafetyRuntimeDecision {
+        return ReadSafetyRuntimeDecision {
             allowed: false,
             read_index: input.node_commit_index,
             reason: "node_unavailable".to_string(),
@@ -295,10 +286,8 @@ pub fn matrixraft_read_safety_runtime_decision(
         };
     }
 
-    if matches!(input.operation, RustRaftReadSafetyOperation::LeaseRead)
-        && !input.leader_lease_valid
-    {
-        return RustRaftReadSafetyRuntimeDecision {
+    if matches!(input.operation, ReadSafetyOperation::LeaseRead) && !input.leader_lease_valid {
+        return ReadSafetyRuntimeDecision {
             allowed: false,
             read_index: input.node_commit_index,
             reason: "stale_leader_lease".to_string(),
@@ -313,10 +302,10 @@ pub fn matrixraft_read_safety_runtime_decision(
 
     if matches!(
         input.operation,
-        RustRaftReadSafetyOperation::ReadIndex | RustRaftReadSafetyOperation::LeaseRead
+        ReadSafetyOperation::ReadIndex | ReadSafetyOperation::LeaseRead
     ) && !input.has_majority
     {
-        return RustRaftReadSafetyRuntimeDecision {
+        return ReadSafetyRuntimeDecision {
             allowed: false,
             read_index: input.node_commit_index,
             reason: "minority_partition".to_string(),
@@ -332,16 +321,13 @@ pub fn matrixraft_read_safety_runtime_decision(
     let lag = input
         .leader_commit_index
         .saturating_sub(input.node_commit_index);
-    let max_lag = if matches!(
-        input.operation,
-        RustRaftReadSafetyOperation::BoundedStaleRead
-    ) {
+    let max_lag = if matches!(input.operation, ReadSafetyOperation::BoundedStaleRead) {
         input.max_stale_index_lag
     } else {
         0
     };
     if lag > max_lag {
-        return RustRaftReadSafetyRuntimeDecision {
+        return ReadSafetyRuntimeDecision {
             allowed: false,
             read_index: input.node_commit_index,
             reason: "replica_lagging".to_string(),
@@ -354,7 +340,7 @@ pub fn matrixraft_read_safety_runtime_decision(
         };
     }
 
-    RustRaftReadSafetyRuntimeDecision {
+    ReadSafetyRuntimeDecision {
         allowed: true,
         read_index: input.node_commit_index,
         reason: "safe".to_string(),
@@ -368,54 +354,48 @@ pub fn matrixraft_read_safety_runtime_decision(
     }
 }
 
-pub fn matrixraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceArtifact {
-    RustRaftReadSafetyEvidenceArtifact {
+pub fn matrixraft_read_safety_evidence_artifact() -> ReadSafetyEvidenceArtifact {
+    ReadSafetyEvidenceArtifact {
         schema: "rustraft.read_safety_evidence.v1".to_string(),
-        stale_leader_lease: matrixraft_read_safety_runtime_decision(
-            RustRaftReadSafetyRuntimeInput {
-                operation: RustRaftReadSafetyOperation::LeaseRead,
-                node_id: 1,
-                leader_id: 1,
-                node_alive: true,
-                role_can_serve_data: true,
-                leader_lease_valid: false,
-                has_majority: true,
-                node_commit_index: 10,
-                leader_commit_index: 10,
-                max_stale_index_lag: 0,
-            },
-        ),
-        lagging_follower_read: matrixraft_read_safety_runtime_decision(
-            RustRaftReadSafetyRuntimeInput {
-                operation: RustRaftReadSafetyOperation::ReadIndex,
-                node_id: 2,
-                leader_id: 1,
-                node_alive: true,
-                role_can_serve_data: true,
-                leader_lease_valid: true,
-                has_majority: true,
-                node_commit_index: 7,
-                leader_commit_index: 10,
-                max_stale_index_lag: 0,
-            },
-        ),
-        stale_follower_write: matrixraft_read_safety_runtime_decision(
-            RustRaftReadSafetyRuntimeInput {
-                operation: RustRaftReadSafetyOperation::Write,
-                node_id: 2,
-                leader_id: 1,
-                node_alive: true,
-                role_can_serve_data: true,
-                leader_lease_valid: true,
-                has_majority: true,
-                node_commit_index: 10,
-                leader_commit_index: 10,
-                max_stale_index_lag: 0,
-            },
-        ),
+        stale_leader_lease: matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
+            operation: ReadSafetyOperation::LeaseRead,
+            node_id: 1,
+            leader_id: 1,
+            node_alive: true,
+            role_can_serve_data: true,
+            leader_lease_valid: false,
+            has_majority: true,
+            node_commit_index: 10,
+            leader_commit_index: 10,
+            max_stale_index_lag: 0,
+        }),
+        lagging_follower_read: matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
+            operation: ReadSafetyOperation::ReadIndex,
+            node_id: 2,
+            leader_id: 1,
+            node_alive: true,
+            role_can_serve_data: true,
+            leader_lease_valid: true,
+            has_majority: true,
+            node_commit_index: 7,
+            leader_commit_index: 10,
+            max_stale_index_lag: 0,
+        }),
+        stale_follower_write: matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
+            operation: ReadSafetyOperation::Write,
+            node_id: 2,
+            leader_id: 1,
+            node_alive: true,
+            role_can_serve_data: true,
+            leader_lease_valid: true,
+            has_majority: true,
+            node_commit_index: 10,
+            leader_commit_index: 10,
+            max_stale_index_lag: 0,
+        }),
         bounded_stale_read_accept: matrixraft_read_safety_runtime_decision(
-            RustRaftReadSafetyRuntimeInput {
-                operation: RustRaftReadSafetyOperation::BoundedStaleRead,
+            ReadSafetyRuntimeInput {
+                operation: ReadSafetyOperation::BoundedStaleRead,
                 node_id: 2,
                 leader_id: 1,
                 node_alive: true,
@@ -428,8 +408,8 @@ pub fn matrixraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceA
             },
         ),
         bounded_stale_read_reject: matrixraft_read_safety_runtime_decision(
-            RustRaftReadSafetyRuntimeInput {
-                operation: RustRaftReadSafetyOperation::BoundedStaleRead,
+            ReadSafetyRuntimeInput {
+                operation: ReadSafetyOperation::BoundedStaleRead,
                 node_id: 2,
                 leader_id: 1,
                 node_alive: true,
@@ -441,54 +421,48 @@ pub fn matrixraft_read_safety_evidence_artifact() -> RustRaftReadSafetyEvidenceA
                 max_stale_index_lag: 1,
             },
         ),
-        minority_partition_read: matrixraft_read_safety_runtime_decision(
-            RustRaftReadSafetyRuntimeInput {
-                operation: RustRaftReadSafetyOperation::ReadIndex,
-                node_id: 1,
-                leader_id: 1,
-                node_alive: true,
-                role_can_serve_data: true,
-                leader_lease_valid: true,
-                has_majority: false,
-                node_commit_index: 10,
-                leader_commit_index: 10,
-                max_stale_index_lag: 0,
-            },
-        ),
-        minority_partition_write: matrixraft_read_safety_runtime_decision(
-            RustRaftReadSafetyRuntimeInput {
-                operation: RustRaftReadSafetyOperation::Write,
-                node_id: 1,
-                leader_id: 1,
-                node_alive: true,
-                role_can_serve_data: true,
-                leader_lease_valid: true,
-                has_majority: false,
-                node_commit_index: 10,
-                leader_commit_index: 10,
-                max_stale_index_lag: 0,
-            },
-        ),
-        healed_follower_catchup: matrixraft_read_safety_runtime_decision(
-            RustRaftReadSafetyRuntimeInput {
-                operation: RustRaftReadSafetyOperation::ReadIndex,
-                node_id: 2,
-                leader_id: 1,
-                node_alive: true,
-                role_can_serve_data: true,
-                leader_lease_valid: true,
-                has_majority: true,
-                node_commit_index: 10,
-                leader_commit_index: 10,
-                max_stale_index_lag: 0,
-            },
-        ),
+        minority_partition_read: matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
+            operation: ReadSafetyOperation::ReadIndex,
+            node_id: 1,
+            leader_id: 1,
+            node_alive: true,
+            role_can_serve_data: true,
+            leader_lease_valid: true,
+            has_majority: false,
+            node_commit_index: 10,
+            leader_commit_index: 10,
+            max_stale_index_lag: 0,
+        }),
+        minority_partition_write: matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
+            operation: ReadSafetyOperation::Write,
+            node_id: 1,
+            leader_id: 1,
+            node_alive: true,
+            role_can_serve_data: true,
+            leader_lease_valid: true,
+            has_majority: false,
+            node_commit_index: 10,
+            leader_commit_index: 10,
+            max_stale_index_lag: 0,
+        }),
+        healed_follower_catchup: matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
+            operation: ReadSafetyOperation::ReadIndex,
+            node_id: 2,
+            leader_id: 1,
+            node_alive: true,
+            role_can_serve_data: true,
+            leader_lease_valid: true,
+            has_majority: true,
+            node_commit_index: 10,
+            leader_commit_index: 10,
+            max_stale_index_lag: 0,
+        }),
     }
 }
 
 pub fn matrixraft_validate_read_safety_evidence_artifact(
-    artifact: &RustRaftReadSafetyEvidenceArtifact,
-) -> RustRaftReadSafetyEvidenceValidationReport {
+    artifact: &ReadSafetyEvidenceArtifact,
+) -> ReadSafetyEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.read_safety_evidence.v1";
     let stale_leader_lease_rejected = !artifact.stale_leader_lease.allowed
         && artifact.stale_leader_lease.stale_leader_lease_rejected
@@ -553,7 +527,7 @@ pub fn matrixraft_validate_read_safety_evidence_artifact(
             missing.push(requirement.to_string());
         }
     }
-    RustRaftReadSafetyEvidenceValidationReport {
+    ReadSafetyEvidenceValidationReport {
         valid: missing.is_empty(),
         schema_valid,
         stale_leader_lease_rejected,

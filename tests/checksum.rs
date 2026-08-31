@@ -2,8 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    matrixraft_checksum_file_list, matrixraft_crc32c, matrixraft_murmur32, RustRaftChecksumContext,
-    RustRaftChecksumType, RustRaftFileChecksumContext,
+    matrixraft_checksum_file_list, matrixraft_crc32c, matrixraft_murmur32, ChecksumContext,
+    ChecksumType, FileChecksumContext,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -25,7 +25,7 @@ fn checksum_context_matches_known_crc32c_and_murmur32_vectors() {
     assert_eq!(matrixraft_crc32c(b"123456789"), 0xe306_9283);
     assert_eq!(matrixraft_murmur32(b"hello"), 0x248b_fa47);
 
-    let mut crc = RustRaftChecksumContext::new(RustRaftChecksumType::Crc32);
+    let mut crc = ChecksumContext::new(ChecksumType::Crc32);
     crc.extend(b"123").expect("extend");
     crc.extend(b"456").expect("extend");
     crc.extend(b"789").expect("extend");
@@ -35,7 +35,7 @@ fn checksum_context_matches_known_crc32c_and_murmur32_vectors() {
     assert_eq!(crc_result.chunks, 3);
     assert_eq!(crc_result.checksum_name, "crc32");
 
-    let mut murmur = RustRaftChecksumContext::from_name("murmur32");
+    let mut murmur = ChecksumContext::from_name("murmur32");
     murmur.extend(b"he").expect("extend");
     murmur.extend(b"llo").expect("extend");
     let murmur_result = murmur.finalize();
@@ -46,13 +46,13 @@ fn checksum_context_matches_known_crc32c_and_murmur32_vectors() {
 
 #[test]
 fn checksum_context_rejects_invalid_type_and_extend_after_finalize() {
-    let mut invalid = RustRaftChecksumContext::from_name("unknown");
+    let mut invalid = ChecksumContext::from_name("unknown");
     assert_eq!(
         invalid.extend(b"data").expect_err("invalid type"),
         "checksum type is invalid"
     );
 
-    let mut crc = RustRaftChecksumContext::new(RustRaftChecksumType::Crc32);
+    let mut crc = ChecksumContext::new(ChecksumType::Crc32);
     crc.extend(b"data").expect("extend");
     crc.finalize();
     assert_eq!(
@@ -68,7 +68,7 @@ fn file_checksum_context_reads_file_in_blocks() {
     let file = dir.join("segment.log");
     fs::write(&file, b"abcdefghi").expect("write");
 
-    let result = RustRaftFileChecksumContext::with_type(&file, RustRaftChecksumType::Crc32, 3)
+    let result = FileChecksumContext::with_type(&file, ChecksumType::Crc32, 3)
         .start()
         .expect("checksum file");
 
@@ -99,10 +99,10 @@ fn directory_checksum_uses_recursive_sorted_file_order() {
         vec!["a.log", "b.log", "c.log"]
     );
 
-    let result = RustRaftFileChecksumContext::with_type(&dir, RustRaftChecksumType::Murmur32, 2)
+    let result = FileChecksumContext::with_type(&dir, ChecksumType::Murmur32, 2)
         .start()
         .expect("checksum dir");
-    let mut expected = RustRaftChecksumContext::new(RustRaftChecksumType::Murmur32);
+    let mut expected = ChecksumContext::new(ChecksumType::Murmur32);
     expected.extend(b"a").expect("a");
     expected.extend(b"b").expect("b");
     expected.extend(b"c").expect("c");

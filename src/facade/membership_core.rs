@@ -6,23 +6,23 @@
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftMembershipScope {
+pub enum MembershipScope {
     Metaserver,
     DataNode,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftMembershipTransitionKind {
+pub enum MembershipTransitionKind {
     Failover,
     ScaleUp,
     ScaleDown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftMembershipTransitionEvidence {
-    pub scope: RustRaftMembershipScope,
-    pub transition: RustRaftMembershipTransitionKind,
+pub struct MembershipTransitionEvidence {
+    pub scope: MembershipScope,
+    pub transition: MembershipTransitionKind,
     #[serde(default)]
     pub before_voters: Vec<u64>,
     #[serde(default)]
@@ -67,24 +67,24 @@ pub struct RustRaftMembershipTransitionEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftMembershipTransitionDecision {
-    pub scope: RustRaftMembershipScope,
-    pub transition: RustRaftMembershipTransitionKind,
+pub struct MembershipTransitionDecision {
+    pub scope: MembershipScope,
+    pub transition: MembershipTransitionKind,
     pub ready: bool,
     pub missing: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftMembershipReadinessReport {
+pub struct MembershipReadinessReport {
     pub ready: bool,
     pub satisfied: Vec<String>,
     pub missing: Vec<String>,
-    pub decisions: Vec<RustRaftMembershipTransitionDecision>,
+    pub decisions: Vec<MembershipTransitionDecision>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RustRaftRole {
+pub enum StateRole {
     Leader,
     Follower,
     Candidate,
@@ -92,52 +92,50 @@ pub enum RustRaftRole {
     Learner,
 }
 
-pub type RustRaftNodeId = u64;
-pub type RustRaftGroupId = u64;
-pub type RustRaftTerm = u64;
-pub type RustRaftLogIndex = u64;
-pub type RustRaftSnapshotId = String;
-pub type RustRaftPayload = Vec<u8>;
-pub type EntryPayload = RustRaftPayload;
-pub type RustRaftSnapshotPayload = Vec<u8>;
+pub type NodeId = u64;
+pub type GroupId = u64;
+pub type Term = u64;
+pub type LogIndex = u64;
+pub type SnapshotId = String;
+pub type Payload = Vec<u8>;
+pub type EntryPayload = Payload;
+pub type SnapshotPayload = Vec<u8>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftLogId {
-    pub term: RustRaftTerm,
-    pub index: RustRaftLogIndex,
+pub struct LogId {
+    pub term: Term,
+    pub index: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftGenericLogEntry<P = RustRaftPayload> {
-    pub log_id: RustRaftLogId,
+pub struct GenericLogEntry<P = Payload> {
+    pub log_id: LogId,
     pub payload: P,
     #[serde(default)]
     pub is_command: bool,
 }
 
-pub type RustRaftLogEntry = RustRaftGenericLogEntry<RustRaftPayload>;
-pub type RaftLogEntry<P = EntryPayload> = RustRaftGenericLogEntry<P>;
+pub type LogEntry = GenericLogEntry<Payload>;
+pub type RaftLogEntry<P = EntryPayload> = GenericLogEntry<P>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftHardState {
-    pub current_term: RustRaftTerm,
-    pub voted_for: Option<RustRaftNodeId>,
-    pub committed: Option<RustRaftLogId>,
+pub struct HardState {
+    pub current_term: Term,
+    pub voted_for: Option<NodeId>,
+    pub committed: Option<LogId>,
 }
-
-pub type RaftHardState = RustRaftHardState;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
-pub enum RustRaftReplicaRole {
+pub enum ReplicaRole {
     #[default]
     Voter,
     Learner,
     Witness,
 }
 
-impl RustRaftReplicaRole {
+impl ReplicaRole {
     pub fn participates_in_quorum(self) -> bool {
         matches!(self, Self::Voter | Self::Witness)
     }
@@ -153,41 +151,39 @@ impl RustRaftReplicaRole {
 
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftPeer {
-    pub node_id: RustRaftNodeId,
+pub struct Peer {
+    pub node_id: NodeId,
     pub raft_addr: String,
     pub snapshot_addr: String,
-    pub role: RustRaftReplicaRole,
+    pub role: ReplicaRole,
     #[serde(default)]
     pub auto_promote: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftMembership {
-    pub group_id: RustRaftGroupId,
-    pub voters: Vec<RustRaftNodeId>,
+pub struct Membership {
+    pub group_id: GroupId,
+    pub voters: Vec<NodeId>,
     #[serde(default)]
-    pub learners: Vec<RustRaftNodeId>,
+    pub learners: Vec<NodeId>,
     #[serde(default)]
-    pub witnesses: Vec<RustRaftNodeId>,
+    pub witnesses: Vec<NodeId>,
     #[serde(default)]
     pub epoch: u64,
 }
 
-pub type RaftMembership = RustRaftMembership;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftLearnerCatchUpReport {
-    pub learner_id: RustRaftNodeId,
-    pub learner_match_index: RustRaftLogIndex,
-    pub leader_commit_index: RustRaftLogIndex,
+pub struct LearnerCatchUpReport {
+    pub learner_id: NodeId,
+    pub learner_match_index: LogIndex,
+    pub leader_commit_index: LogIndex,
     pub caught_up: bool,
-    pub lag: RustRaftLogIndex,
+    pub lag: LogIndex,
     pub promotable: bool,
     pub reason: String,
 }
 
-impl RustRaftMembership {
+impl Membership {
     pub fn quorum_size(&self) -> usize {
         self.quorum_size_with_witness_policy(false)
     }
@@ -202,7 +198,7 @@ impl RustRaftMembership {
 
     pub fn quorum_reached<I>(&self, acknowledgements: I) -> bool
     where
-        I: IntoIterator<Item = RustRaftNodeId>,
+        I: IntoIterator<Item = NodeId>,
     {
         self.quorum_reached_with_witness_policy(acknowledgements, false)
     }
@@ -213,7 +209,7 @@ impl RustRaftMembership {
         ignore_witness: bool,
     ) -> bool
     where
-        I: IntoIterator<Item = RustRaftNodeId>,
+        I: IntoIterator<Item = NodeId>,
     {
         let acknowledgements: Vec<_> = acknowledgements.into_iter().collect();
         let votes = self
@@ -230,21 +226,21 @@ impl RustRaftMembership {
         votes >= self.quorum_size_with_witness_policy(ignore_witness)
     }
 
-    pub fn add_learner(&mut self, node_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn add_learner(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         self.ensure_absent(node_id)?;
         self.learners.push(node_id);
         self.epoch += 1;
         Ok(())
     }
 
-    pub fn add_witness(&mut self, node_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn add_witness(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         self.ensure_absent(node_id)?;
         self.witnesses.push(node_id);
         self.epoch += 1;
         Ok(())
     }
 
-    pub fn promote_learner(&mut self, node_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn promote_learner(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         let position = self
             .learners
             .iter()
@@ -258,7 +254,7 @@ impl RustRaftMembership {
         Ok(())
     }
 
-    pub fn remove_peer(&mut self, node_id: RustRaftNodeId) -> Result<(), RaftError> {
+    pub fn remove_peer(&mut self, node_id: NodeId) -> Result<(), RaftError> {
         let removed = remove_node(&mut self.voters, node_id)
             || remove_node(&mut self.learners, node_id)
             || remove_node(&mut self.witnesses, node_id);
@@ -271,14 +267,14 @@ impl RustRaftMembership {
 
     pub fn catchup_report(
         &self,
-        learner_id: RustRaftNodeId,
-        learner_match_index: RustRaftLogIndex,
-        leader_commit_index: RustRaftLogIndex,
-    ) -> RaftLearnerCatchUpReport {
+        learner_id: NodeId,
+        learner_match_index: LogIndex,
+        leader_commit_index: LogIndex,
+    ) -> LearnerCatchUpReport {
         let lag = leader_commit_index.saturating_sub(learner_match_index);
         let is_learner = self.learners.contains(&learner_id);
         let caught_up = is_learner && learner_match_index >= leader_commit_index;
-        RaftLearnerCatchUpReport {
+        LearnerCatchUpReport {
             learner_id,
             learner_match_index,
             leader_commit_index,
@@ -295,7 +291,7 @@ impl RustRaftMembership {
         }
     }
 
-    fn ensure_absent(&self, node_id: RustRaftNodeId) -> Result<(), RaftError> {
+    fn ensure_absent(&self, node_id: NodeId) -> Result<(), RaftError> {
         if self.voters.contains(&node_id)
             || self.learners.contains(&node_id)
             || self.witnesses.contains(&node_id)
@@ -310,24 +306,24 @@ impl RustRaftMembership {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftJointMembership {
-    pub old_voters: Vec<RustRaftNodeId>,
-    pub new_voters: Vec<RustRaftNodeId>,
+pub struct JointMembership {
+    pub old_voters: Vec<NodeId>,
+    pub new_voters: Vec<NodeId>,
 }
 
-pub type JointConsensusMembership = RustRaftJointMembership;
+pub type JointConsensusMembership = JointMembership;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftJointConsensusCommitEvidence {
+pub struct JointConsensusCommitEvidence {
     pub old_quorum_size: usize,
     pub new_quorum_size: usize,
-    pub acknowledged_voters: Vec<RustRaftNodeId>,
+    pub acknowledged_voters: Vec<NodeId>,
     pub old_majority_acked: bool,
     pub new_majority_acked: bool,
     pub joint_quorum_reached: bool,
 }
 
-impl RustRaftJointMembership {
+impl JointMembership {
     pub fn old_quorum_size(&self) -> usize {
         self.old_voters.len() / 2 + 1
     }
@@ -338,14 +334,14 @@ impl RustRaftJointMembership {
 
     pub fn quorum_reached<I>(&self, acknowledgements: I) -> bool
     where
-        I: IntoIterator<Item = RustRaftNodeId>,
+        I: IntoIterator<Item = NodeId>,
     {
         self.commit_evidence(acknowledgements).joint_quorum_reached
     }
 
-    pub fn commit_evidence<I>(&self, acknowledgements: I) -> RustRaftJointConsensusCommitEvidence
+    pub fn commit_evidence<I>(&self, acknowledgements: I) -> JointConsensusCommitEvidence
     where
-        I: IntoIterator<Item = RustRaftNodeId>,
+        I: IntoIterator<Item = NodeId>,
     {
         let acknowledgements: Vec<_> = acknowledgements.into_iter().collect();
         let old_votes = self
@@ -360,7 +356,7 @@ impl RustRaftJointMembership {
             .count();
         let old_majority_acked = old_votes >= self.old_quorum_size();
         let new_majority_acked = new_votes >= self.new_quorum_size();
-        RustRaftJointConsensusCommitEvidence {
+        JointConsensusCommitEvidence {
             old_quorum_size: self.old_quorum_size(),
             new_quorum_size: self.new_quorum_size(),
             acknowledged_voters: acknowledgements,
@@ -371,7 +367,7 @@ impl RustRaftJointMembership {
     }
 }
 
-fn remove_node(nodes: &mut Vec<RustRaftNodeId>, node_id: RustRaftNodeId) -> bool {
+fn remove_node(nodes: &mut Vec<NodeId>, node_id: NodeId) -> bool {
     if let Some(position) = nodes.iter().position(|existing| *existing == node_id) {
         nodes.remove(position);
         true

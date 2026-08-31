@@ -5,16 +5,15 @@ use matrixraft::benchmark::{
     matrixraft_assert_production_baseline_raft_parity,
     matrixraft_baseline_raft_benchmark_failure_summary, matrixraft_find_baseline_raft_harness,
     matrixraft_run_baseline_raft_parity_benchmark,
-    matrixraft_validate_production_baseline_raft_benchmark_options,
-    RustRaftBenchmarkFailureSummary, RustRaftBenchmarkOptions, RustRaftExternalBaselineRaftRunner,
-    RustRaftRuntimeBenchmarkRunner,
+    matrixraft_validate_production_baseline_raft_benchmark_options, BenchmarkFailureSummary,
+    BenchmarkOptions, ExternalBaselineRaftRunner, RuntimeBenchmarkRunner,
 };
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let mut options = RustRaftBenchmarkOptions::default();
+    let mut options = BenchmarkOptions::default();
     if let Ok(node_count) = std::env::var("RUSTRAFT_BENCHMARK_NODE_COUNT") {
         options.node_count = node_count.parse().unwrap_or_else(|error| {
             eprintln!("invalid RUSTRAFT_BENCHMARK_NODE_COUNT={node_count}: {error}");
@@ -71,7 +70,7 @@ fn main() {
         );
         std::process::exit(2);
     };
-    let mut baseline_raft = match RustRaftExternalBaselineRaftRunner::new(
+    let mut baseline_raft = match ExternalBaselineRaftRunner::new(
         baseline_raft_bin,
         baseline_raft_root,
         &build_profile,
@@ -82,7 +81,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let mut rustraft = RustRaftRuntimeBenchmarkRunner::new(build_profile);
+    let mut rustraft = RuntimeBenchmarkRunner::new(build_profile);
     let report =
         matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
     let summary = matrixraft_baseline_raft_benchmark_failure_summary(&report);
@@ -108,7 +107,7 @@ fn main() {
 
 fn write_summary_artifact_atomic(
     summary_out: &Path,
-    summary: &RustRaftBenchmarkFailureSummary,
+    summary: &BenchmarkFailureSummary,
 ) -> std::io::Result<()> {
     if let Some(parent) = summary_out
         .parent()

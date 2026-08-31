@@ -8,9 +8,8 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
 use crate::{
-    EntryPayload, RaftApplyRequest, RaftApplyResponse, RaftError, RaftLogEntry,
-    RustRaftApplyRequest, RustRaftApplyResponse, RustRaftError, RustRaftGroupId, RustRaftLogId,
-    RustRaftLogIndex, RustRaftNodeId, RustRaftRole, RustRaftSnapshotChunk, RustRaftTerm,
+    ApplyRequest, ApplyResponse, EntryPayload, GroupId, LogId, LogIndex, NodeId, RaftApplyRequest,
+    RaftApplyResponse, RaftError, RaftLogEntry, SnapshotChunk, StateRole, Term,
 };
 
 pub fn matrixraft_apply_entry<S, G, P>(
@@ -28,7 +27,7 @@ where
     })
 }
 
-pub trait RaftApply<G = RustRaftGroupId, P = EntryPayload> {
+pub trait RaftApply<G = GroupId, P = EntryPayload> {
     type Response;
 
     fn apply(
@@ -38,7 +37,7 @@ pub trait RaftApply<G = RustRaftGroupId, P = EntryPayload> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftFsmApplyOutcome<R> {
+pub struct FsmApplyOutcome<R> {
     pub response: RaftApplyResponse<R>,
     pub applied: bool,
     pub replayed: bool,
@@ -46,32 +45,32 @@ pub struct RaftFsmApplyOutcome<R> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftFsmReplayReport {
+pub struct FsmReplayReport {
     pub attempted: u64,
     pub applied: u64,
     pub skipped_replay: u64,
-    pub last_applied: RustRaftLogIndex,
+    pub last_applied: LogIndex,
     pub idempotent: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RaftFsmApplyEntryKind {
+pub enum FsmApplyEntryKind {
     Data,
     NoOp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftFsmBatchApplyReport {
+pub struct FsmBatchApplyReport {
     pub attempted: u64,
     pub applied: u64,
     pub skipped_noop: u64,
     pub skipped_replay: u64,
     pub deferred: u64,
-    pub first_log_id: Option<RustRaftLogId>,
-    pub last_log_id: Option<RustRaftLogId>,
-    pub applied_through: RustRaftLogIndex,
-    pub next_index: RustRaftLogIndex,
+    pub first_log_id: Option<LogId>,
+    pub last_log_id: Option<LogId>,
+    pub applied_through: LogIndex,
+    pub next_index: LogIndex,
     pub hit_batch_limit: bool,
 }
 
@@ -83,21 +82,21 @@ pub struct MatrixRaftFlexibleApplyReport {
     pub skipped_noop: u64,
     pub skipped_config_change: u64,
     pub skipped_meta: u64,
-    pub first_log_id: Option<RustRaftLogId>,
-    pub last_log_id: Option<RustRaftLogId>,
-    pub applied_through: RustRaftLogIndex,
-    pub next_index: RustRaftLogIndex,
+    pub first_log_id: Option<LogId>,
+    pub last_log_id: Option<LogId>,
+    pub applied_through: LogIndex,
+    pub next_index: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RaftFsmCheckpoint<G, S> {
+pub struct FsmCheckpoint<G, S> {
     pub group_id: G,
-    pub last_applied: RustRaftLogIndex,
-    pub applied_log_ids: Vec<RustRaftLogId>,
+    pub last_applied: LogIndex,
+    pub applied_log_ids: Vec<LogId>,
     pub snapshot: S,
 }
 
-pub trait RaftStateMachine<G = RustRaftGroupId, P = EntryPayload>: RaftApply<G, P> {
+pub trait RaftStateMachine<G = GroupId, P = EntryPayload>: RaftApply<G, P> {
     type Snapshot;
 
     fn snapshot(&self, group_id: G) -> Result<Self::Snapshot, RaftError>;
@@ -119,43 +118,43 @@ pub enum MatrixRaftFsmEntryKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftFsmEntry {
     pub batch_id: MatrixRaftBatchId,
-    pub log_id: RustRaftLogId,
+    pub log_id: LogId,
     pub data: EntryPayload,
     pub kind: MatrixRaftFsmEntryKind,
 }
 
 impl MatrixRaftFsmEntry {
-    pub fn data(index: RustRaftLogIndex, term: RustRaftTerm, data: EntryPayload) -> Self {
+    pub fn data(index: LogIndex, term: Term, data: EntryPayload) -> Self {
         Self {
             batch_id: MATRIXRAFT_NON_BATCH,
-            log_id: RustRaftLogId { term, index },
+            log_id: LogId { term, index },
             data,
             kind: MatrixRaftFsmEntryKind::Data,
         }
     }
 
-    pub fn noop(index: RustRaftLogIndex, term: RustRaftTerm) -> Self {
+    pub fn noop(index: LogIndex, term: Term) -> Self {
         Self {
             batch_id: MATRIXRAFT_NON_BATCH,
-            log_id: RustRaftLogId { term, index },
+            log_id: LogId { term, index },
             data: Vec::new(),
             kind: MatrixRaftFsmEntryKind::NoOp,
         }
     }
 
-    pub fn config_change(index: RustRaftLogIndex, term: RustRaftTerm, data: EntryPayload) -> Self {
+    pub fn config_change(index: LogIndex, term: Term, data: EntryPayload) -> Self {
         Self {
             batch_id: MATRIXRAFT_NON_BATCH,
-            log_id: RustRaftLogId { term, index },
+            log_id: LogId { term, index },
             data,
             kind: MatrixRaftFsmEntryKind::ConfigChange,
         }
     }
 
-    pub fn meta(index: RustRaftLogIndex, term: RustRaftTerm, data: EntryPayload) -> Self {
+    pub fn meta(index: LogIndex, term: Term, data: EntryPayload) -> Self {
         Self {
             batch_id: MATRIXRAFT_NON_BATCH,
-            log_id: RustRaftLogId { term, index },
+            log_id: LogId { term, index },
             data,
             kind: MatrixRaftFsmEntryKind::Meta,
         }
@@ -187,11 +186,11 @@ impl MatrixRaftFsmIterator {
             .unwrap_or(MATRIXRAFT_NON_BATCH)
     }
 
-    pub fn index(&self) -> Option<RustRaftLogIndex> {
+    pub fn index(&self) -> Option<LogIndex> {
         self.current().map(|entry| entry.log_id.index)
     }
 
-    pub fn term(&self) -> Option<RustRaftTerm> {
+    pub fn term(&self) -> Option<Term> {
         self.current().map(|entry| entry.log_id.term)
     }
 
@@ -203,6 +202,14 @@ impl MatrixRaftFsmIterator {
         self.current().map(|entry| entry.kind)
     }
 
+    /// Advances to the next entry.
+    ///
+    /// This is **not** `Iterator::next`: it returns `()` rather than the entry,
+    /// and reads through [`Self::current`]. The shape mirrors the reference
+    /// implementation's FSM iterator, which is this type's job, so it keeps the
+    /// name -- but an inherent `next` that yields nothing is a trap worth
+    /// naming. Use `while it.valid() { ...; it.next(); }`, not `for` or
+    /// `while let Some(..) = it.next()`.
     pub fn next(&mut self) {
         if self.valid() {
             self.position += 1;
@@ -225,7 +232,7 @@ impl MatrixRaftFsmIterator {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftCheckpoint {
     pub path: String,
-    pub applied_index: RustRaftLogIndex,
+    pub applied_index: LogIndex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -243,7 +250,7 @@ pub trait MatrixRaftFsm {
     fn open(&mut self) -> Result<(), RaftError>;
     fn close(&mut self) -> Result<(), RaftError>;
 
-    fn apply(&mut self, index: RustRaftLogIndex, data: &[u8]) -> Result<(), RaftError> {
+    fn apply(&mut self, index: LogIndex, data: &[u8]) -> Result<(), RaftError> {
         let _ = (index, data);
         Err(RaftError::InvalidRequest(
             "unimplemented MatrixRaftFsm::apply".to_string(),
@@ -262,23 +269,23 @@ pub trait MatrixRaftFsm {
 
     fn on_start_following(
         &mut self,
-        cur_leader_term: RustRaftTerm,
-        cur_leader_id: RustRaftNodeId,
+        cur_leader_term: Term,
+        cur_leader_id: NodeId,
     ) -> Result<(), RaftError>;
 
     fn on_stop_following(
         &mut self,
-        prev_leader_term: RustRaftTerm,
-        prev_leader_id: RustRaftNodeId,
+        prev_leader_term: Term,
+        prev_leader_id: NodeId,
     ) -> Result<(), RaftError>;
 
-    fn on_leader_start(&mut self, term: RustRaftTerm) -> Result<(), RaftError>;
-    fn on_leader_stop(&mut self, term: RustRaftTerm) -> Result<(), RaftError>;
+    fn on_leader_start(&mut self, term: Term) -> Result<(), RaftError>;
+    fn on_leader_stop(&mut self, term: Term) -> Result<(), RaftError>;
     fn checkpoint(&mut self, path: &str) -> Result<MatrixRaftCheckpoint, RaftError>;
     fn on_snapshot_load(&mut self, snapshot_path: &str) -> Result<(), RaftError>;
     fn on_configuration_applied(&mut self, config: MatrixRaftConfigurationApplied);
 
-    fn flushed_index(&self) -> RustRaftLogIndex {
+    fn flushed_index(&self) -> LogIndex {
         0
     }
 }
@@ -350,9 +357,9 @@ pub struct MatrixRaftFsmRuntimeHookReport {
     pub following_started: bool,
     pub following_stopped: bool,
     pub configuration_applied: bool,
-    pub term: RustRaftTerm,
-    pub leader_id: Option<RustRaftNodeId>,
-    pub role: RustRaftRole,
+    pub term: Term,
+    pub leader_id: Option<NodeId>,
+    pub role: StateRole,
 }
 
 #[derive(Debug, Clone)]
@@ -362,9 +369,9 @@ where
 {
     fsm: F,
     opened: bool,
-    role: Option<RustRaftRole>,
-    term: RustRaftTerm,
-    leader_id: Option<RustRaftNodeId>,
+    role: Option<StateRole>,
+    term: Term,
+    leader_id: Option<NodeId>,
     membership: Vec<crate::MatrixRaftNodeId>,
 }
 
@@ -407,7 +414,7 @@ where
 
     pub fn close(&mut self) -> Result<MatrixRaftFsmRuntimeHookReport, RaftError> {
         let mut report = self.report(false, false);
-        if self.role == Some(RustRaftRole::Leader) {
+        if self.role == Some(StateRole::Leader) {
             self.fsm.on_leader_stop(self.term)?;
             report.leader_stopped = true;
         }
@@ -445,7 +452,7 @@ where
         let old_follow = self.following();
         let old_term = self.term;
         let old_leader = self.leader_id;
-        let new_follow = status.role == RustRaftRole::Follower && status.leader_id.is_some();
+        let new_follow = status.role == StateRole::Follower && status.leader_id.is_some();
         if old_follow && (!new_follow || old_leader != status.leader_id || old_term != status.term)
         {
             self.fsm
@@ -453,8 +460,8 @@ where
             report.following_stopped = true;
         }
 
-        let was_leader = self.role == Some(RustRaftRole::Leader);
-        let is_leader = status.role == RustRaftRole::Leader;
+        let was_leader = self.role == Some(StateRole::Leader);
+        let is_leader = status.role == StateRole::Leader;
         if was_leader && !is_leader {
             self.fsm.on_leader_stop(self.term)?;
             report.leader_stopped = true;
@@ -487,7 +494,7 @@ where
     }
 
     fn following(&self) -> bool {
-        self.role == Some(RustRaftRole::Follower) && self.leader_id.is_some()
+        self.role == Some(StateRole::Follower) && self.leader_id.is_some()
     }
 
     fn report(&self, opened: bool, closed: bool) -> MatrixRaftFsmRuntimeHookReport {
@@ -501,25 +508,25 @@ where
             configuration_applied: false,
             term: self.term,
             leader_id: self.leader_id,
-            role: self.role.unwrap_or(RustRaftRole::Follower),
+            role: self.role.unwrap_or(StateRole::Follower),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct RaftFsmAdapter<S, G = RustRaftGroupId, P = EntryPayload>
+pub struct FsmAdapter<S, G = GroupId, P = EntryPayload>
 where
     S: RaftStateMachine<G, P>,
 {
     group_id: G,
     state_machine: S,
-    applied: BTreeMap<RustRaftLogIndex, RustRaftTerm>,
-    responses: BTreeMap<RustRaftLogIndex, RaftApplyResponse<S::Response>>,
-    last_applied: RustRaftLogIndex,
+    applied: BTreeMap<LogIndex, Term>,
+    responses: BTreeMap<LogIndex, RaftApplyResponse<S::Response>>,
+    last_applied: LogIndex,
     _payload: PhantomData<P>,
 }
 
-impl<S, G, P> RaftFsmAdapter<S, G, P>
+impl<S, G, P> FsmAdapter<S, G, P>
 where
     S: RaftStateMachine<G, P>,
     G: Clone,
@@ -540,7 +547,7 @@ where
     pub fn apply_entry(
         &mut self,
         entry: RaftLogEntry<P>,
-    ) -> Result<RaftFsmApplyOutcome<S::Response>, RaftError> {
+    ) -> Result<FsmApplyOutcome<S::Response>, RaftError> {
         if let Some(term) = self.applied.get(&entry.log_id.index) {
             if *term != entry.log_id.term {
                 return Err(RaftError::InvalidRequest(format!(
@@ -558,7 +565,7 @@ where
                         entry.log_id.index
                     ))
                 })?;
-            return Ok(RaftFsmApplyOutcome {
+            return Ok(FsmApplyOutcome {
                 response,
                 applied: false,
                 replayed: true,
@@ -574,7 +581,7 @@ where
         self.last_applied = self.last_applied.max(response.applied_index);
         self.applied.insert(entry.log_id.index, entry.log_id.term);
         self.responses.insert(entry.log_id.index, response.clone());
-        Ok(RaftFsmApplyOutcome {
+        Ok(FsmApplyOutcome {
             response,
             applied: true,
             replayed: false,
@@ -582,11 +589,11 @@ where
         })
     }
 
-    pub fn replay_entries<I>(&mut self, entries: I) -> Result<RaftFsmReplayReport, RaftError>
+    pub fn replay_entries<I>(&mut self, entries: I) -> Result<FsmReplayReport, RaftError>
     where
         I: IntoIterator<Item = RaftLogEntry<P>>,
     {
-        let mut report = RaftFsmReplayReport {
+        let mut report = FsmReplayReport {
             attempted: 0,
             applied: 0,
             skipped_replay: 0,
@@ -611,12 +618,12 @@ where
         &mut self,
         entries: &[RaftLogEntry<P>],
         max_entries: usize,
-    ) -> Result<RaftFsmBatchApplyReport, RaftError>
+    ) -> Result<FsmBatchApplyReport, RaftError>
     where
         S::Response: Default,
     {
         let apply_count = entries.len().min(max_entries.max(1));
-        let mut report = RaftFsmBatchApplyReport {
+        let mut report = FsmBatchApplyReport {
             attempted: 0,
             applied: 0,
             skipped_noop: 0,
@@ -640,7 +647,7 @@ where
         for entry in &entries[..apply_count] {
             report.attempted += 1;
             match matrixraft_fsm_entry_kind(entry) {
-                RaftFsmApplyEntryKind::Data => {
+                FsmApplyEntryKind::Data => {
                     let outcome = self.apply_entry(entry.clone())?;
                     if outcome.applied {
                         report.applied += 1;
@@ -649,7 +656,7 @@ where
                         report.skipped_replay += 1;
                     }
                 }
-                RaftFsmApplyEntryKind::NoOp => {
+                FsmApplyEntryKind::NoOp => {
                     if let Some(term) = self.applied.get(&entry.log_id.index) {
                         if *term != entry.log_id.term {
                             return Err(RaftError::InvalidRequest(format!(
@@ -679,14 +686,14 @@ where
         Ok(report)
     }
 
-    pub fn checkpoint(&self) -> Result<RaftFsmCheckpoint<G, S::Snapshot>, RaftError> {
-        Ok(RaftFsmCheckpoint {
+    pub fn checkpoint(&self) -> Result<FsmCheckpoint<G, S::Snapshot>, RaftError> {
+        Ok(FsmCheckpoint {
             group_id: self.group_id.clone(),
             last_applied: self.last_applied,
             applied_log_ids: self
                 .applied
                 .iter()
-                .map(|(index, term)| RustRaftLogId {
+                .map(|(index, term)| LogId {
                     term: *term,
                     index: *index,
                 })
@@ -697,7 +704,7 @@ where
 
     pub fn install_checkpoint(
         &mut self,
-        checkpoint: RaftFsmCheckpoint<G, S::Snapshot>,
+        checkpoint: FsmCheckpoint<G, S::Snapshot>,
     ) -> Result<(), RaftError> {
         self.state_machine.install_snapshot(checkpoint.snapshot)?;
         self.last_applied = checkpoint.last_applied;
@@ -710,7 +717,7 @@ where
         Ok(())
     }
 
-    pub fn last_applied(&self) -> RustRaftLogIndex {
+    pub fn last_applied(&self) -> LogIndex {
         self.last_applied
     }
 
@@ -727,36 +734,33 @@ where
     }
 }
 
-pub fn matrixraft_fsm_entry_kind<P>(entry: &RaftLogEntry<P>) -> RaftFsmApplyEntryKind {
+pub fn matrixraft_fsm_entry_kind<P>(entry: &RaftLogEntry<P>) -> FsmApplyEntryKind {
     if entry.is_command {
-        RaftFsmApplyEntryKind::Data
+        FsmApplyEntryKind::Data
     } else {
-        RaftFsmApplyEntryKind::NoOp
+        FsmApplyEntryKind::NoOp
     }
 }
 
-pub trait RustRaftStateMachine {
-    fn apply(
-        &mut self,
-        request: RustRaftApplyRequest,
-    ) -> Result<RustRaftApplyResponse, RustRaftError>;
-    fn snapshot(&self) -> Result<RustRaftSnapshotChunk, RustRaftError>;
-    fn install_snapshot(&mut self, chunk: RustRaftSnapshotChunk) -> Result<(), RustRaftError>;
+pub trait StateMachine {
+    fn apply(&mut self, request: ApplyRequest) -> Result<ApplyResponse, RaftError>;
+    fn snapshot(&self) -> Result<SnapshotChunk, RaftError>;
+    fn install_snapshot(&mut self, chunk: SnapshotChunk) -> Result<(), RaftError>;
 }
 
-impl<T> RaftApply<RustRaftGroupId, EntryPayload> for T
+impl<T> RaftApply<GroupId, EntryPayload> for T
 where
-    T: RustRaftStateMachine,
+    T: StateMachine,
 {
     type Response = EntryPayload;
 
     fn apply(
         &mut self,
-        request: RaftApplyRequest<RustRaftGroupId, EntryPayload>,
+        request: RaftApplyRequest<GroupId, EntryPayload>,
     ) -> Result<RaftApplyResponse<Self::Response>, RaftError> {
-        let response = RustRaftStateMachine::apply(
+        let response = StateMachine::apply(
             self,
-            RustRaftApplyRequest {
+            ApplyRequest {
                 group_id: request.group_id,
                 log_id: request.log_id,
                 payload: request.payload,

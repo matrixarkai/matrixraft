@@ -14,24 +14,23 @@ use crate::{
     matrixraft_validate_replication_pipeline_evidence_artifact,
     matrixraft_validate_snapshot_lifecycle_evidence_artifact,
     matrixraft_validate_wal_lifecycle_evidence_artifact,
-    matrixraft_wal_lifecycle_evidence_artifact, RustRaftMembershipSemanticsEvidenceArtifact,
-    RustRaftPeerPipelineStatus, RustRaftPipelineLimits, RustRaftReadSafetyEvidenceArtifact,
-    RustRaftReplicationPipelineEvidenceArtifact, RustRaftSnapshotLifecycleEvidenceArtifact,
-    RustRaftWalLifecycleEvidenceArtifact, RustRaftWalLifecycleStatus,
+    matrixraft_wal_lifecycle_evidence_artifact, MembershipSemanticsEvidenceArtifact, PeerProgress,
+    PipelineLimits, ReadSafetyEvidenceArtifact, ReplicationPipelineEvidenceArtifact,
+    SnapshotLifecycleEvidenceArtifact, WalLifecycleEvidenceArtifact, WalLifecycleStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftBaselineRaftOperationalEvidenceBundle {
+pub struct BaselineRaftOperationalEvidenceBundle {
     pub schema: String,
-    pub read_safety: RustRaftReadSafetyEvidenceArtifact,
-    pub membership: RustRaftMembershipSemanticsEvidenceArtifact,
-    pub replication_pipeline: RustRaftReplicationPipelineEvidenceArtifact,
-    pub snapshot_lifecycle: RustRaftSnapshotLifecycleEvidenceArtifact,
-    pub wal_lifecycle: RustRaftWalLifecycleEvidenceArtifact,
+    pub read_safety: ReadSafetyEvidenceArtifact,
+    pub membership: MembershipSemanticsEvidenceArtifact,
+    pub replication_pipeline: ReplicationPipelineEvidenceArtifact,
+    pub snapshot_lifecycle: SnapshotLifecycleEvidenceArtifact,
+    pub wal_lifecycle: WalLifecycleEvidenceArtifact,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RustRaftBaselineRaftOperationalEvidenceBundleValidationReport {
+pub struct BaselineRaftOperationalEvidenceBundleValidationReport {
     pub valid: bool,
     pub schema_valid: bool,
     pub read_safety_valid: bool,
@@ -44,14 +43,14 @@ pub struct RustRaftBaselineRaftOperationalEvidenceBundleValidationReport {
 }
 
 pub fn matrixraft_baseline_raft_operational_evidence_bundle(
-    pipeline_peers: Vec<RustRaftPeerPipelineStatus>,
-    pipeline_limits: RustRaftPipelineLimits,
-    snapshot_peers: Vec<RustRaftPeerPipelineStatus>,
+    pipeline_peers: Vec<PeerProgress>,
+    pipeline_limits: PipelineLimits,
+    snapshot_peers: Vec<PeerProgress>,
     send_snapshot_timeout_ms: u64,
     snapshot_max_inflights_replicate: u64,
-    wal_status: RustRaftWalLifecycleStatus,
-) -> RustRaftBaselineRaftOperationalEvidenceBundle {
-    RustRaftBaselineRaftOperationalEvidenceBundle {
+    wal_status: WalLifecycleStatus,
+) -> BaselineRaftOperationalEvidenceBundle {
+    BaselineRaftOperationalEvidenceBundle {
         schema: "rustraft.baseline_raft_operational_evidence_bundle.v1".to_string(),
         read_safety: matrixraft_read_safety_evidence_artifact(),
         membership: matrixraft_membership_semantics_evidence_artifact(),
@@ -69,8 +68,8 @@ pub fn matrixraft_baseline_raft_operational_evidence_bundle(
 }
 
 pub fn matrixraft_validate_baseline_raft_operational_evidence_bundle(
-    bundle: &RustRaftBaselineRaftOperationalEvidenceBundle,
-) -> RustRaftBaselineRaftOperationalEvidenceBundleValidationReport {
+    bundle: &BaselineRaftOperationalEvidenceBundle,
+) -> BaselineRaftOperationalEvidenceBundleValidationReport {
     let schema_valid = bundle.schema == "rustraft.baseline_raft_operational_evidence_bundle.v1";
     let read_safety = matrixraft_validate_read_safety_evidence_artifact(&bundle.read_safety);
     let membership = matrixraft_validate_membership_semantics_evidence_artifact(&bundle.membership);
@@ -105,7 +104,7 @@ pub fn matrixraft_validate_baseline_raft_operational_evidence_bundle(
         missing.extend(fields.into_iter().map(|field| format!("{prefix}.{field}")));
     }
 
-    RustRaftBaselineRaftOperationalEvidenceBundleValidationReport {
+    BaselineRaftOperationalEvidenceBundleValidationReport {
         valid: missing.is_empty(),
         schema_valid,
         read_safety_valid: read_safety.valid,
