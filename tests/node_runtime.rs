@@ -2148,3 +2148,90 @@ fn node_runtime_recovers_committed_index_from_persistent_wal() {
 
     let _ = fs::remove_dir_all(base_dir);
 }
+
+/// A durable append is its fsync, so a batch of proposals has to cost one
+/// fsync rather than one each. Asserted by counting, because the count is exact
+/// where elapsed time is not.
+#[test]
+fn a_batch_of_proposals_costs_one_fsync() {
+    let mut runtime = NodeRuntime::create(node_options_in(temp_runtime_dir("batch-fsync")))
+        .expect("create runtime");
+    runtime.start().expect("start");
+    runtime.campaign(true).expect("campaign");
+
+    let before = runtime.wal_lifecycle_status().expect("status").fsync_count;
+
+    let batch: Vec<_> = (0..16)
+        .map(|index| Message::Propose {
+            payload: format!("entry-{index}").into_bytes(),
+            options: Default::default(),
+        })
+        .collect();
+    let results = runtime.step_batch(batch).expect("step batch");
+    assert_eq!(results.len(), 16, "a result per proposal");
+
+    let after = runtime.wal_lifecycle_status().expect("status").fsync_count;
+    assert_eq!(
+        after - before,
+        1,
+        "sixteen proposals in one batch should cost one fsync, not sixteen"
+    );
+
+    // A proposal on its own still persists on its own, so the batch is doing
+    // something the ordinary path does not.
+    let single_before = after;
+    runtime
+        .step(Message::Propose {
+            payload: b"single".to_vec(),
+            options: Default::default(),
+        })
+        .expect("single propose");
+    let single_after = runtime.wal_lifecycle_status().expect("status").fsync_count;
+    assert_eq!(
+        single_after - single_before,
+        1,
+        "one proposal outside a batch still costs its own fsync"
+    );
+    runtime.stop().expect("stop");
+}
+
+/// `propose_batch` is the obvious way to get what `step_batch` makes possible,
+/// without a caller assembling `Message::Propose` values by hand.
+#[test]
+fn propose_batch_persists_once_and_returns_a_log_id_per_payload() {
+    let mut runtime = NodeRuntime::create(node_options_in(temp_runtime_dir("propose-batch")))
+        .expect("create runtime");
+    runtime.start().expect("start");
+    runtime.campaign(true).expect("campaign");
+
+    assert!(
+        runtime
+            .propose_batch(Vec::new())
+            .expect("empty batch")
+            .is_empty(),
+        "an empty batch proposes nothing"
+    );
+
+    let before = runtime.wal_lifecycle_status().expect("status").fsync_count;
+    let payloads: Vec<_> = (0..12)
+        .map(|index| format!("payload-{index}").into_bytes())
+        .collect();
+    let log_ids = runtime.propose_batch(payloads).expect("propose batch");
+    let after = runtime.wal_lifecycle_status().expect("status").fsync_count;
+
+    assert_eq!(log_ids.len(), 12, "a log id per payload");
+    let indexes: Vec<_> = log_ids.iter().map(|log_id| log_id.index).collect();
+    let mut sorted = indexes.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        indexes, sorted,
+        "log ids come back in proposal order, one per payload"
+    );
+    assert_eq!(
+        after - before,
+        1,
+        "twelve proposals in one batch should cost one fsync"
+    );
+    runtime.stop().expect("stop");
+}
