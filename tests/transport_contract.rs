@@ -793,3 +793,110 @@ fn tcp_transport_batches_mixed_rpc_requests() {
 
     server.shutdown().expect("shutdown server");
 }
+
+/// Builds a cluster and a TCP server for it, on an ephemeral loopback port.
+fn tcp_server_for_a_three_node_cluster() -> TcpRaftTransportServer {
+    let cluster = Arc::new(Mutex::new(
+        RaftCluster::new(
+            3,
+            Default::default(),
+            vec![
+                peer(1, ReplicaRole::Voter),
+                peer(2, ReplicaRole::Voter),
+                peer(3, ReplicaRole::Voter),
+            ],
+        )
+        .expect("cluster"),
+    ));
+    cluster.lock().expect("lock").start().expect("start");
+    let handler = Arc::new(ClusterRaftTransport::new(Arc::clone(&cluster)));
+    TcpRaftTransportServer::start("127.0.0.1:0", handler).expect("start tcp server")
+}
+
+/// Always index 1: with `prev_log_id: None` the request has to start the log,
+/// and anything else fails contiguity validation before the transport is even
+/// exercised. Re-sending the same append is fine -- it is idempotent, and what
+/// is under test here is the connection rather than the log.
+fn append_one(transport: &TcpRaftTransport) -> Result<AppendEntriesResponse, RaftError> {
+    transport.append_entries(
+        2,
+        AppendEntriesRequest {
+            group_id: 3,
+            term: 1,
+            leader_id: 1,
+            prev_log_id: None,
+            entries: vec![LogEntry {
+                log_id: LogId { term: 1, index: 1 },
+                payload: b"x".to_vec(),
+                is_command: true,
+            }],
+            leader_commit: 1,
+            lease_epoch: 0,
+        },
+    )
+}
+
+/// Connections are kept open, so a caller can hand back one the peer has since
+/// closed. There is no way to learn that but to use it, so the failure has to
+/// be retried on a fresh connection rather than surfaced.
+#[test]
+fn a_pooled_connection_the_peer_closed_is_retried_on_a_fresh_one() {
+    let mut first = tcp_server_for_a_three_node_cluster();
+    let addr = first.addr().to_string();
+
+    let mut peers = BTreeMap::new();
+    peers.insert(2, addr.clone());
+    let transport = TcpRaftTransport::new(peers);
+
+    append_one(&transport).expect("the first append opens and pools a connection");
+
+    // Take the peer away, then bring it back at the same address. The pooled
+    // connection is now dead, and the caller has no way to know.
+    first.shutdown().expect("shut the first server down");
+    let cluster = Arc::new(Mutex::new(
+        RaftCluster::new(
+            3,
+            Default::default(),
+            vec![
+                peer(1, ReplicaRole::Voter),
+                peer(2, ReplicaRole::Voter),
+                peer(3, ReplicaRole::Voter),
+            ],
+        )
+        .expect("cluster"),
+    ));
+    cluster.lock().expect("lock").start().expect("start");
+    let handler = Arc::new(ClusterRaftTransport::new(Arc::clone(&cluster)));
+    let mut second =
+        TcpRaftTransportServer::start(addr.as_str(), handler).expect("rebind the same address");
+
+    append_one(&transport).expect("a dead pooled connection must not fail the RPC");
+    second.shutdown().expect("shut the second server down");
+}
+
+/// The listener used to serve each connection inline, so one peer's round trip
+/// blocked every other peer's. With connections kept open that would have been
+/// a stall for as long as the connection lived, so this covers the concurrency
+/// the reuse depends on.
+#[test]
+fn concurrent_callers_are_all_served() {
+    let mut server = tcp_server_for_a_three_node_cluster();
+    let mut peers = BTreeMap::new();
+    peers.insert(2, server.addr().to_string());
+    let transport = Arc::new(TcpRaftTransport::new(peers));
+
+    let workers: Vec<_> = (0..6)
+        .map(|_worker| {
+            let transport = Arc::clone(&transport);
+            std::thread::spawn(move || {
+                for _round in 0..10 {
+                    append_one(&transport).expect("every concurrent RPC has to be served");
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().expect("no worker panics");
+    }
+    server.shutdown().expect("shutdown");
+}
