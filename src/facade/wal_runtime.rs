@@ -194,7 +194,15 @@ impl PersistentRaftWalOptions {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             dir: dir.into(),
-            max_records_per_segment: 10_000,
+            // Ten thousand was right while a segment roll rewrote the whole
+            // retained log: rolling was expensive, so rolling rarely was the
+            // only sane choice, and halving this doubled the total cost.
+            // Rolls are cheap now and a sealed segment releases its records, so
+            // this is simply how much a node holds in memory --
+            // `segment size * ~672 bytes` for a 256-byte payload. Measured at
+            // 20,000 appends: 10,000 holds 6.72 MiB, 1,000 holds 672 KiB, while
+            // restart time and bytes written are identical either way.
+            max_records_per_segment: 1_000,
             max_segment_bytes: 64 * 1024 * 1024,
             min_keep_segments: 2,
             fsync_on_append: true,
