@@ -1287,8 +1287,14 @@ fn raft_node_runtime_loop(
     let mut blockers = Vec::<String>::new();
     let mut fatal_blockers = Vec::<String>::new();
     let mut membership_executor = MembershipExecutor::new();
+    // A command drained by proposal coalescing that turned out not to be a
+    // proposal; processed first on the next iteration, untouched.
+    let mut carried_command: Option<NodeRuntimeOp> = None;
     loop {
-        let command = match command_rx.recv_timeout(heartbeat_interval) {
+        let command = if let Some(command) = carried_command.take() {
+            command
+        } else {
+            match command_rx.recv_timeout(heartbeat_interval) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if state == NodeRuntimeState::Running {
@@ -1410,6 +1416,89 @@ fn raft_node_runtime_loop(
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        };
+        // Auto group commit. A durable proposal is its fsync and very little
+        // else, so a node answering concurrent proposers one at a time is
+        // capped at a few hundred per second whatever else it does. While one
+        // proposal's fsync runs, the next proposers queue; draining the queued
+        // proposals here applies them together, persists them with one fsync,
+        // and answers each sender individually. A lone proposal takes the
+        // ordinary path below unchanged, and a drained command that turned out
+        // not to be a proposal is carried into the next iteration.
+        let command = match command {
+            NodeRuntimeOp::Step(message @ Message::Propose { .. }, reply)
+                if state == NodeRuntimeState::Running =>
+            {
+                let mut pending = vec![(message, reply)];
+                // Bounded so a saturated queue cannot starve ticks and other
+                // commands indefinitely.
+                while pending.len() < 128 {
+                    match command_rx.try_recv() {
+                        Ok(NodeRuntimeOp::Step(next @ Message::Propose { .. }, next_reply)) => {
+                            pending.push((next, next_reply));
+                        }
+                        Ok(other) => {
+                            carried_command = Some(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if pending.len() == 1 {
+                    let (message, reply) = pending.pop().expect("one pending proposal");
+                    NodeRuntimeOp::Step(message, reply)
+                } else {
+                    let mut results = Vec::with_capacity(pending.len());
+                    let mut replies = Vec::with_capacity(pending.len());
+                    let mut any_applied = false;
+                    for (message, reply) in pending {
+                        let result = runtime_step_message(
+                            &mut cluster,
+                            &mut wal,
+                            &mut membership_executor,
+                            node_id,
+                            message,
+                            false,
+                        );
+                        any_applied |= result.is_ok();
+                        results.push(result);
+                        replies.push(reply);
+                    }
+                    // One record covers every proposal applied above, exactly
+                    // as step_batch persists. Nothing applied means nothing to
+                    // persist.
+                    let persisted: Result<(), RaftError> = if any_applied {
+                        match wal.as_mut() {
+                            Some(wal) => wal
+                                .append_built(|coverage| {
+                                    cluster.wal_record_for_coverage(node_id, coverage)
+                                })
+                                .map(|_| ()),
+                            None => Ok(()),
+                        }
+                    } else {
+                        Ok(())
+                    };
+                    for (result, reply) in results.into_iter().zip(replies) {
+                        // A proposal that applied but did not persist is not
+                        // durable, and must not be acknowledged as if it were.
+                        let result = match (&persisted, result) {
+                            (Err(error), Ok(_)) => Err(error.clone()),
+                            (_, result) => result,
+                        };
+                        let _ = reply.send(record_runtime_result(
+                            "propose",
+                            result,
+                            &mut blockers,
+                            &mut fatal_blockers,
+                            true,
+                        ));
+                    }
+                    continue;
+                }
+            }
+            other => other,
         };
         match command {
             NodeRuntimeOp::Start(reply) => {
