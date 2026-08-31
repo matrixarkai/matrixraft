@@ -2,9 +2,10 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    matrixraft_wal_checksum_format, matrixraft_wal_lifecycle_evidence, ApplySnapshotFence,
-    HardState, LogEntry, LogId, Membership, PersistentRaftWal, PersistentRaftWalOptions,
-    StorageApplyFence, WalRecord,
+    matrixraft_fold_wal_records, matrixraft_recover_from_wal_records,
+    matrixraft_recover_latest_wal_record, matrixraft_wal_checksum, matrixraft_wal_checksum_format,
+    matrixraft_wal_lifecycle_evidence, ApplySnapshotFence, HardState, LogEntry, LogId, Membership,
+    PersistentRaftWal, PersistentRaftWalOptions, StorageApplyFence, WalRecord,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -626,4 +627,72 @@ fn wal_payload_encoding_shrinks_a_realistic_record() {
         "expected the shared entry encoding to be unchanged, got {}",
         bare_entries.len()
     );
+}
+
+/// Builds a stored record: whole when `from` is zero, otherwise a delta that
+/// carries entries from `from` onward. Checksummed as the writer would.
+fn stored_record(last: u64, term: u64, from: u64) -> WalRecord {
+    let mut record = growing_wal_record(last, term);
+    if from > 0 {
+        record.entries.retain(|entry| entry.log_id.index >= from);
+        record.entries_are_delta = true;
+    }
+    record.checksum = matrixraft_wal_checksum(&record);
+    record
+}
+
+/// The streaming recovery has to pick exactly what the fold-everything path
+/// picked. It exists to avoid materialising a whole-log record per stored
+/// record, not to change which record recovery restores from.
+fn assert_recovery_agrees(case: &str, stored: &[WalRecord]) {
+    let folded = matrixraft_fold_wal_records(stored);
+    let expected_record = matrixraft_recover_latest_wal_record(&folded).ok();
+    let (surviving, recovered) = matrixraft_recover_from_wal_records(stored);
+
+    assert_eq!(
+        surviving,
+        folded.len(),
+        "{case}: surviving record count must match the fold"
+    );
+    assert_eq!(
+        recovered.as_ref().map(|record| record.entries.len()),
+        expected_record.as_ref().map(|record| record.entries.len()),
+        "{case}: recovered entry count must match"
+    );
+    assert_eq!(
+        recovered, expected_record,
+        "{case}: recovered record must match"
+    );
+}
+
+#[test]
+fn streaming_recovery_picks_what_folding_everything_picked() {
+    // A plain growing log stored as one whole record then deltas.
+    let mut deltas = vec![stored_record(1, 3, 0)];
+    for index in 2..=12 {
+        deltas.push(stored_record(index, 3, index));
+    }
+    assert_recovery_agrees("growing log", &deltas);
+
+    // A tail rewritten at the same index in a newer term, which the fold has to
+    // resolve in favour of the rewrite rather than appending after it.
+    let mut rewritten = deltas.clone();
+    rewritten.push(stored_record(12, 4, 10));
+    assert_recovery_agrees("rewritten tail", &rewritten);
+
+    // A corrupt record: everything after it is discarded, by both paths.
+    let mut corrupt = deltas.clone();
+    let mut bad = stored_record(13, 3, 13);
+    bad.checksum = "not-a-checksum".to_string();
+    corrupt.push(bad);
+    corrupt.push(stored_record(14, 3, 14));
+    assert_recovery_agrees("corrupt tail", &corrupt);
+
+    // Nothing valid at all.
+    let mut only_bad = stored_record(1, 3, 0);
+    only_bad.checksum = "not-a-checksum".to_string();
+    assert_recovery_agrees("no valid records", &[only_bad]);
+
+    // Empty.
+    assert_recovery_agrees("empty", &[]);
 }
