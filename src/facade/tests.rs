@@ -38,13 +38,13 @@ mod log_addressing_tests {
         assert_byte_count_matches_log(&node, "construction");
 
         for index in 1..=10 {
-            node.append_entry(entry(1, index, index as usize * 4));
+            node.append_entry(std::sync::Arc::new(entry(1, index, index as usize * 4)));
         }
         assert_byte_count_matches_log(&node, "appends");
         assert_eq!(node.retained_log_bytes(), (1..=10_u64).map(|i| i * 4).sum::<u64>());
 
         // Re-appending an occupied index drops the conflicting tail with it.
-        node.append_entry(entry(2, 6, 1));
+        node.append_entry(std::sync::Arc::new(entry(2, 6, 1)));
         assert_byte_count_matches_log(&node, "conflicting append");
         assert_eq!(node.log.len(), 6);
         assert_eq!(node.log_term_at(6), Some(2));
@@ -73,7 +73,7 @@ mod log_addressing_tests {
         let mut node = voter();
         for index in 1..=8 {
             let term = if index <= 4 { 1 } else { 2 };
-            node.append_entry(entry(term, index, 3));
+            node.append_entry(std::sync::Arc::new(entry(term, index, 3)));
         }
         node.discard_log_through(5);
 
@@ -90,7 +90,7 @@ mod log_addressing_tests {
     fn log_positions_agree_with_a_scan() {
         let mut node = voter();
         for index in 1..=32 {
-            node.append_entry(entry(1, index, 2));
+            node.append_entry(std::sync::Arc::new(entry(1, index, 2)));
         }
         node.discard_log_through(7);
 
@@ -1760,11 +1760,11 @@ mod tests {
             } else {
                 StateRole::Follower
             };
-            node.append_entry(LogEntry {
+            node.append_entry(std::sync::Arc::new(LogEntry {
                 log_id: LogId { term: 1, index: 1 },
                 payload: b"committed-before-election".to_vec(),
                 is_command: true,
-            });
+            }));
             node.advance_commit(1);
         }
         cluster.commit_index = 1;
@@ -1774,11 +1774,11 @@ mod tests {
                 .nodes
                 .get_mut(&node_id)
                 .expect("node")
-                .append_entry(LogEntry {
+                .append_entry(std::sync::Arc::new(LogEntry {
                     log_id: LogId { term: 1, index: 2 },
                     payload: b"previous-term-entry".to_vec(),
                     is_command: true,
-                });
+                }));
         }
         cluster.refresh_commit_index();
         assert_eq!(cluster.commit_index, 1);
@@ -1788,11 +1788,11 @@ mod tests {
                 .nodes
                 .get_mut(&node_id)
                 .expect("node")
-                .append_entry(LogEntry {
+                .append_entry(std::sync::Arc::new(LogEntry {
                     log_id: LogId { term: 2, index: 3 },
                     payload: b"current-term-entry".to_vec(),
                     is_command: true,
-                });
+                }));
         }
         cluster.refresh_commit_index();
         assert_eq!(cluster.commit_index, 3);
