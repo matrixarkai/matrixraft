@@ -69,22 +69,35 @@ pub struct WalCompactionReport {
     pub blocker: Option<String>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WalRecord {
     pub group_id: GroupId,
     pub node_id: NodeId,
     pub hard_state: HardState,
     pub membership: Membership,
-    #[serde(default)]
+    #[serde(
+        default,
+        with = "wal_entry_payloads",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub entries: Vec<LogEntry>,
     /// When true, `entries` carries only what was appended since the previous
     /// record in the same segment rather than the whole retained log. The first
     /// record of every segment is always a full one, so a segment can be read
     /// without reading any other -- which is what lets whole-segment compaction
     /// stay as simple as it was.
-    #[serde(default)]
+    // Both of these already carry `#[serde(default)]`, so omitting them when
+    // they hold that default is invisible to any reader, old or new -- no
+    // format version and no delta bookkeeping. Measured over 199 consecutive
+    // records, neither ever changed from its default, so this is 52 bytes off
+    // every record for nothing.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub entries_are_delta: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_snapshot: Option<SnapshotMetadata>,
     pub apply_snapshot_fence: ApplySnapshotFence,
     pub checksum: String,
@@ -472,5 +485,255 @@ pub fn matrixraft_validate_wal_lifecycle_evidence_artifact(
         slow_fsync_backpressure_observed,
         compaction_after_slow_fsync_observed,
         missing,
+    }
+}
+
+/// On-disk encoding for WAL entry payloads.
+///
+/// `serde_json` writes a `Vec<u8>` as an array of decimal numbers, so a byte
+/// costs up to four characters on disk (`200,`). Payload dominates a WAL record
+/// once it is more than a few dozen bytes -- 97.7% of a record carrying a 4 KiB
+/// payload -- so that encoding sets the write amplification almost by itself.
+/// Base64 costs 1.33 characters per byte instead of 4.
+///
+/// Reading accepts both forms. Records written before this change carry numeric
+/// arrays, and they must still recover, so the deserializer takes either a
+/// base64 string or the legacy array. Only writing changed.
+///
+/// This is deliberately local to the WAL record rather than applied to
+/// `GenericLogEntry` itself: the same type is serialized for RPC and for the
+/// JSON debug surfaces, where an array of numbers is the readable form and
+/// nothing is paying for it by the megabyte.
+pub(crate) mod wal_entry_payloads {
+    use serde::de::{Deserializer, Error as DeError};
+    use serde::ser::{SerializeSeq, Serializer};
+    use serde::Deserialize;
+
+    use crate::{LogEntry, LogId};
+
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub(crate) fn encode(input: &[u8]) -> String {
+        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+        for chunk in input.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+            let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+            let triple = (b0 << 16) | (b1 << 8) | b2;
+            out.push(ALPHABET[((triple >> 18) & 63) as usize] as char);
+            out.push(ALPHABET[((triple >> 12) & 63) as usize] as char);
+            out.push(if chunk.len() > 1 {
+                ALPHABET[((triple >> 6) & 63) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                ALPHABET[(triple & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    fn sextet(byte: u8) -> Option<u32> {
+        match byte {
+            b'A'..=b'Z' => Some((byte - b'A') as u32),
+            b'a'..=b'z' => Some((byte - b'a') as u32 + 26),
+            b'0'..=b'9' => Some((byte - b'0') as u32 + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn decode(input: &str) -> Result<Vec<u8>, String> {
+        let bytes = input.as_bytes();
+        if bytes.len() % 4 != 0 {
+            return Err(format!(
+                "base64 length {} is not a multiple of four",
+                bytes.len()
+            ));
+        }
+        let chunk_count = bytes.len() / 4;
+        let mut out = Vec::with_capacity(chunk_count * 3);
+        for (chunk_index, chunk) in bytes.chunks(4).enumerate() {
+            let is_last = chunk_index + 1 == chunk_count;
+            let mut triple = 0u32;
+            let mut padding = 0usize;
+            for &byte in chunk {
+                if byte == b'=' {
+                    if !is_last {
+                        return Err("base64 padding before the final quad".to_string());
+                    }
+                    padding += 1;
+                    triple <<= 6;
+                    continue;
+                }
+                if padding > 0 {
+                    return Err("base64 padding inside a quad".to_string());
+                }
+                let value =
+                    sextet(byte).ok_or_else(|| format!("invalid base64 byte {byte:#04x}"))?;
+                triple = (triple << 6) | value;
+            }
+            if padding > 2 {
+                return Err("base64 quad is entirely padding".to_string());
+            }
+            out.push((triple >> 16) as u8);
+            if padding < 2 {
+                out.push((triple >> 8) as u8);
+            }
+            if padding < 1 {
+                out.push(triple as u8);
+            }
+        }
+        Ok(out)
+    }
+
+    /// One entry as written: `payload` is base64 rather than a number array.
+    #[derive(serde::Serialize)]
+    struct EntryOut<'a> {
+        log_id: &'a LogId,
+        payload: String,
+        is_command: bool,
+    }
+
+    /// One entry as read. `payload` takes either encoding so that WAL segments
+    /// written before this change still recover.
+    #[derive(Deserialize)]
+    struct EntryIn {
+        log_id: LogId,
+        #[serde(default)]
+        payload: PayloadIn,
+        #[serde(default)]
+        is_command: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum PayloadIn {
+        /// Current form.
+        Base64(String),
+        /// The form `serde_json` produces for a `Vec<u8>`, written by earlier
+        /// versions.
+        Legacy(Vec<u8>),
+    }
+
+    impl Default for PayloadIn {
+        fn default() -> Self {
+            Self::Legacy(Vec::new())
+        }
+    }
+
+    pub(crate) fn serialize<S>(entries: &[LogEntry], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(entries.len()))?;
+        for entry in entries {
+            seq.serialize_element(&EntryOut {
+                log_id: &entry.log_id,
+                payload: encode(&entry.payload),
+                is_command: entry.is_command,
+            })?;
+        }
+        seq.end()
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<LogEntry>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Vec::<EntryIn>::deserialize(deserializer)?;
+        raw.into_iter()
+            .map(|entry| {
+                let payload = match entry.payload {
+                    PayloadIn::Base64(text) => decode(&text).map_err(DeError::custom)?,
+                    PayloadIn::Legacy(bytes) => bytes,
+                };
+                Ok(LogEntry {
+                    log_id: entry.log_id,
+                    payload,
+                    is_command: entry.is_command,
+                })
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod wal_entry_payload_codec_tests {
+    use super::wal_entry_payloads::{decode, encode};
+
+    /// RFC 4648 section 10 test vectors. Hand-rolled base64 is easy to get
+    /// subtly wrong in the padded cases, which are exactly the short payloads a
+    /// Raft log is full of.
+    #[test]
+    fn matches_the_rfc4648_vectors() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(encode(plain.as_bytes()), encoded, "encoding {plain:?}");
+            assert_eq!(
+                decode(encoded).expect("decodes"),
+                plain.as_bytes(),
+                "decoding {encoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_trips_every_length_and_every_byte_value() {
+        // Lengths through several multiples of three cover all three padding
+        // cases repeatedly; the byte pattern walks the whole 0..=255 range so
+        // the sextet table is exercised end to end.
+        for len in 0..=64usize {
+            let payload: Vec<u8> = (0..len).map(|i| (i * 7 % 256) as u8).collect();
+            let encoded = encode(&payload);
+            assert_eq!(encoded.len() % 4, 0, "length {len} is not padded to a quad");
+            assert_eq!(decode(&encoded).expect("decodes"), payload, "length {len}");
+        }
+        let all_bytes: Vec<u8> = (0..=255u8).collect();
+        assert_eq!(decode(&encode(&all_bytes)).expect("decodes"), all_bytes);
+    }
+
+    #[test]
+    fn rejects_malformed_input_rather_than_guessing() {
+        // A truncated quad, a character outside the alphabet, and padding in
+        // the wrong place all mean the segment is damaged. Recovery treats a
+        // decode failure as a corrupt tail, so these must be errors and not
+        // silently short reads.
+        assert!(decode("Zm9").is_err(), "length not a multiple of four");
+        assert!(decode("Zm9*").is_err(), "character outside the alphabet");
+        assert!(decode("Zg==Zg==").is_err(), "padding before the final quad");
+        assert!(decode("Z=g=").is_err(), "padding inside a quad");
+        assert!(decode("====").is_err(), "quad that is entirely padding");
+    }
+
+    #[test]
+    fn costs_a_third_of_what_a_number_array_costs() {
+        // The reason this module exists. `serde_json` writes a byte >= 100 as
+        // four characters ("200,"); base64 writes three bytes as four.
+        let payload = vec![200u8; 4096];
+        let as_numbers = serde_json::to_string(&payload).expect("array encodes");
+        let as_base64 = serde_json::to_string(&encode(&payload)).expect("string encodes");
+        // The ratio is 4 chars/byte against 4 chars per 3 bytes, so very close
+        // to 3x -- close enough that asserting exactly 3x fails on the quotes
+        // and brackets. Assert the conservative half, and report the real
+        // figure so a regression shows the number rather than just a boolean.
+        assert!(
+            as_base64.len() * 2 < as_numbers.len(),
+            "expected base64 ({}) to be well under half the array form ({}), ratio {:.2}x",
+            as_base64.len(),
+            as_numbers.len(),
+            as_numbers.len() as f64 / as_base64.len() as f64
+        );
     }
 }

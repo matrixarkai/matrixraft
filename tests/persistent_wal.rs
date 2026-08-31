@@ -523,3 +523,107 @@ fn a_tail_rewritten_at_the_same_index_is_stored_whole() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Build a real WAL record carrying `payload`, then rewrite its entry payloads
+/// back into the JSON number array that earlier versions wrote.
+///
+/// Derived from a live record rather than hand-written so it cannot drift from
+/// the struct shape -- only the payload encoding is turned back to the old form.
+fn legacy_wal_record_json(payload: &[u8]) -> (matrixraft::WalRecord, String) {
+    fn peer(node_id: u64) -> matrixraft::Peer {
+        matrixraft::Peer {
+            node_id,
+            raft_addr: format!("127.0.0.1:{}", 9_400 + node_id),
+            snapshot_addr: format!("127.0.0.1:{}", 9_500 + node_id),
+            role: matrixraft::ReplicaRole::Voter,
+            auto_promote: false,
+        }
+    }
+    let mut cluster = matrixraft::RaftCluster::new(
+        7,
+        matrixraft::Config::default(),
+        vec![peer(1), peer(2), peer(3)],
+    )
+    .expect("valid cluster");
+    cluster.start().expect("start");
+    cluster.campaign(1, true).expect("campaign");
+    cluster.propose(payload.to_vec()).expect("propose");
+    let record = cluster.wal_record_for(1).expect("wal record");
+
+    let mut value = serde_json::to_value(&record).expect("record to value");
+    for entry in value["entries"]
+        .as_array_mut()
+        .expect("entries is an array")
+        .iter_mut()
+    {
+        // Whatever this entry's payload is, write it the old way.
+        let bytes = record
+            .entries
+            .iter()
+            .find(|candidate| candidate.log_id.index == entry["log_id"]["index"].as_u64().unwrap())
+            .map(|candidate| candidate.payload.clone())
+            .expect("entry present in the typed record");
+        entry["payload"] =
+            serde_json::Value::Array(bytes.into_iter().map(serde_json::Value::from).collect());
+    }
+    (record, serde_json::to_string(&value).expect("legacy json"))
+}
+
+#[test]
+fn wal_records_written_before_base64_payloads_still_recover() {
+    // Segments in the old encoding exist on disk in deployments, so the reader
+    // has to keep taking them even though nothing writes them any more.
+    let (original, legacy_json) = legacy_wal_record_json(b"foobar");
+    assert!(
+        legacy_json.contains(r#""payload":[102,111,111,98,97,114]"#),
+        "fixture should be in the old number-array form: {legacy_json}"
+    );
+
+    let parsed: matrixraft::WalRecord =
+        serde_json::from_str(&legacy_json).expect("legacy WAL record still parses");
+    assert_eq!(
+        parsed, original,
+        "legacy decoding must reproduce the record"
+    );
+
+    // Re-encoding uses the compact form and round-trips, so a segment rewritten
+    // by compaction keeps its contents.
+    let reencoded = serde_json::to_string(&original).expect("record encodes");
+    assert!(
+        reencoded.contains(r#""payload":"Zm9vYmFy""#),
+        "expected a base64 payload, got: {reencoded}"
+    );
+    let reparsed: matrixraft::WalRecord =
+        serde_json::from_str(&reencoded).expect("re-encoded record parses");
+    assert_eq!(reparsed, original);
+}
+
+#[test]
+fn wal_payload_encoding_shrinks_a_realistic_record() {
+    // Guards the win, not the mechanism. A uniform 4 KiB payload is the case
+    // where `serde_json`'s number array costs four characters a byte, and it is
+    // ~98% of the record, so it sets the amplification on its own.
+    let (record, legacy_json) = legacy_wal_record_json(&vec![200u8; 4096]);
+    let encoded = serde_json::to_string(&record).expect("record encodes");
+
+    assert!(
+        legacy_json.len() > 16_000,
+        "expected the old form to cost over 16000 bytes, got {}",
+        legacy_json.len()
+    );
+    assert!(
+        encoded.len() < 6_500,
+        "expected a 4 KiB payload to cost under 6500 WAL bytes, got {}",
+        encoded.len()
+    );
+
+    // The shared entry type is untouched: RPC and the JSON debug surfaces still
+    // see a number array, which is the readable form there and is not paid for
+    // by the megabyte.
+    let bare_entries = serde_json::to_string(&record.entries).expect("bare entries encode");
+    assert!(
+        bare_entries.len() > 16_000,
+        "expected the shared entry encoding to be unchanged, got {}",
+        bare_entries.len()
+    );
+}
