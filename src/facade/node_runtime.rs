@@ -33,6 +33,10 @@ enum NodeRuntimeOp {
     Start(mpsc::Sender<Result<(), RaftError>>),
     Stop(mpsc::Sender<Result<(), RaftError>>),
     Status(mpsc::Sender<Result<NodeRuntimeStatus, RaftError>>),
+    TransferLeaderOutcome(
+        NodeId,
+        mpsc::Sender<Result<crate::LeaderTransferOutcome, RaftError>>,
+    ),
     WalLifecycleStatus(mpsc::Sender<Result<WalLifecycleStatus, RaftError>>),
     WalRecoveryReport(mpsc::Sender<Result<Option<WalRecoveryReport>, RaftError>>),
     Step(
@@ -825,6 +829,26 @@ impl NodeRuntime {
                 "unexpected leader transfer abort result: {other:?}"
             ))),
         }
+    }
+
+    /// Transfer leadership and report which of the three outcomes occurred.
+    ///
+    /// Prefer this to [`Self::transfer_leader`] when the caller needs to know
+    /// whether leadership actually moved: `transfer_leader` returns `Ok` for an
+    /// ignored request as well as a completed one.
+    pub fn transfer_leader_outcome(
+        &self,
+        target: NodeId,
+    ) -> Result<crate::LeaderTransferOutcome, RaftError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .send(NodeRuntimeOp::TransferLeaderOutcome(target, reply_tx))
+            .map_err(|err| {
+                RaftError::Transport(format!(
+                    "failed to transfer leadership through raft node: {err}"
+                ))
+            })?;
+        recv_runtime_reply(reply_rx)?
     }
 
     pub fn leader_transfer_state(&self) -> Result<Option<LeaderTransferState>, RaftError> {
@@ -1640,6 +1664,12 @@ fn raft_node_runtime_loop(
             NodeRuntimeOp::LeaderTransferState(reply) => {
                 let _ = reply.send(Ok(cluster.leader_transfer_state()));
             }
+            NodeRuntimeOp::TransferLeaderOutcome(target, reply) => {
+                // Performed and classified inside the runtime thread, so the
+                // outcome cannot be invalidated between doing the transfer and
+                // observing it.
+                let _ = reply.send(cluster.transfer_leader_outcome(target));
+            }
             NodeRuntimeOp::Shutdown(reply) => {
                 let result = cluster.stop();
                 let _ = reply.send(record_runtime_result(
@@ -1726,6 +1756,10 @@ fn respond_runtime_error(command: NodeRuntimeOp, error: RaftError) -> bool {
             false
         }
         NodeRuntimeOp::LeaderTransferState(reply) => {
+            let _ = reply.send(Err(error));
+            false
+        }
+        NodeRuntimeOp::TransferLeaderOutcome(_, reply) => {
             let _ = reply.send(Err(error));
             false
         }

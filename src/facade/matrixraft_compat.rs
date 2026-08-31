@@ -191,7 +191,21 @@ pub struct MatrixRaftTransferLeaderReport {
     pub transferee_node: Option<MatrixRaftNodeId>,
     #[serde(default)]
     pub state: Option<LeaderTransferState>,
+    /// True only when leadership actually moved. `state` cannot substitute for
+    /// this: it is `None` both for an ignored request and for a completed one.
     pub transferred: bool,
+    /// Which of the three things the request did. `transferred` is
+    /// `outcome == Transferred`; this says which of the two non-transfers it
+    /// was when it is false.
+    #[serde(default = "default_leader_transfer_outcome")]
+    pub outcome: crate::LeaderTransferOutcome,
+}
+
+/// Older payloads predate `outcome` and only ever carried `transferred: true`,
+/// which by then meant "the call returned Ok". `Ignored` is the honest default
+/// for a field that was not recorded.
+fn default_leader_transfer_outcome() -> crate::LeaderTransferOutcome {
+    crate::LeaderTransferOutcome::Ignored
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3615,12 +3629,27 @@ impl MatrixRaftNode {
         transferee: NodeId,
     ) -> Result<MatrixRaftTransferLeaderReport, RaftError> {
         let transferee_node = self.peers.get(&transferee).map(MatrixRaftNodeId::from);
-        self.transfer_leader(transferee)?;
+        if let Some(peer) = self.peers.get(&transferee) {
+            if !peer.role.can_be_leader() {
+                return Err(RaftError::InvalidRequest(format!(
+                    "matrixraft leader transfer target must be voter, got {:?}",
+                    peer.role
+                )));
+            }
+        }
+        // `transferred` reports whether leadership moved, not whether the call
+        // returned Ok. An unknown or ineligible transferee is ignored and a
+        // lagging one is queued; both of those are Ok and neither is a
+        // transfer. The runtime classifies the outcome in the same step that
+        // performs it, so this cannot be invalidated by anything happening in
+        // between.
+        let outcome = self.runtime.transfer_leader_outcome(transferee)?;
         Ok(MatrixRaftTransferLeaderReport {
             transferee_id: transferee,
             transferee_node,
             state: self.runtime.leader_transfer_state()?,
-            transferred: true,
+            transferred: outcome.is_transferred(),
+            outcome,
         })
     }
 

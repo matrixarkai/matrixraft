@@ -492,6 +492,7 @@ fn matrixraft_async_group_summary_exposes_leadership_payloads_by_status() {
         transferee_node: None,
         state: None,
         transferred: true,
+        outcome: matrixraft::LeaderTransferOutcome::Transferred,
     });
 
     let mut step_result =
@@ -763,6 +764,7 @@ fn matrixraft_route_summaries_expose_response_payloads_by_route() {
         transferee_node: None,
         state: None,
         transferred: true,
+        outcome: matrixraft::LeaderTransferOutcome::Transferred,
     };
     let step_down = MatrixRaftStepDownReport {
         requested_transferee_id: Some(4),
@@ -3059,7 +3061,16 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
         .transfer_leader
         .as_ref()
         .expect("transfer-leader route report");
-    assert!(transfer_report.transferred);
+    // Queued, not completed: the assertions below read a live
+    // `state.transferee_id` and then abort the transfer, both of which only
+    // make sense while it is still pending. This used to assert `transferred`
+    // as well, which contradicted them -- and passed only because the field was
+    // hardcoded `true`.
+    assert_eq!(
+        transfer_report.outcome,
+        matrixraft::LeaderTransferOutcome::Pending
+    );
+    assert!(!transfer_report.transferred);
     assert_eq!(transfer_report.transferee_id, 2);
     assert_eq!(
         transfer_report
@@ -15902,11 +15913,17 @@ fn matrixraft_multi_raft_server_controls_leadership_by_group() {
         .transfer_leader_on_group(834, 2)
         .expect("transfer leadership by group");
     assert_eq!(transfers.len(), 2);
+    // `transferred` now means "leadership moved" rather than "the call returned
+    // Ok", so it is no longer unconditionally true. Which of Pending/
+    // Transferred/Ignored each routed node reports depends on whether that node
+    // leads and whether the transferee has caught up, neither of which this
+    // test sets up -- so assert the invariant that makes the field meaningful,
+    // and the routing, which is what this test is about.
     assert!(transfers.iter().all(|result| {
-        result
-            .transfer_leader
-            .as_ref()
-            .is_some_and(|report| report.transferred && report.transferee_id == 2)
+        result.transfer_leader.as_ref().is_some_and(|report| {
+            report.transferred == (report.outcome == matrixraft::LeaderTransferOutcome::Transferred)
+                && report.transferee_id == 2
+        })
     }));
     let selected_transfers = server
         .transfer_leader_for_groups([834, 835], 1)
@@ -15918,12 +15935,16 @@ fn matrixraft_multi_raft_server_controls_leadership_by_group() {
             .collect::<Vec<_>>(),
         vec![(834, 2), (835, 1)]
     );
+    // Transferring to node 1, which already leads these groups, so the
+    // admission ignores it as a self-transfer. Same reasoning as above: assert
+    // the invariant and the routing rather than a hardcoded `transferred`.
     assert!(selected_transfers.iter().all(|(_, results)| {
         results.iter().all(|result| {
-            result
-                .transfer_leader
-                .as_ref()
-                .is_some_and(|report| report.transferred && report.transferee_id == 1)
+            result.transfer_leader.as_ref().is_some_and(|report| {
+                report.transferred
+                    == (report.outcome == matrixraft::LeaderTransferOutcome::Transferred)
+                    && report.transferee_id == 1
+            })
         })
     }));
     let selected_transfer_summaries =
@@ -15933,11 +15954,26 @@ fn matrixraft_multi_raft_server_controls_leadership_by_group() {
             .transfer_leader_transferee_ids_by_route_key()
             .iter()
             .all(|(_, transferee_id)| *transferee_id == Some(1))
-            && summary
-                .transfer_leader_transferred_by_route_key()
-                .iter()
-                .all(|(_, transferred)| *transferred == Some(true))
     }));
+    // Group 834 has two members, so leadership can actually move to node 1.
+    // Group 835 has only node 1, which already leads it, so the admission
+    // ignores that request as a self-transfer and nothing moves.
+    //
+    // This used to assert `Some(true)` for every route key, which the
+    // single-node group contradicts. It passed only because `transferred` was
+    // hardcoded `true`; now the field distinguishes the two.
+    assert_eq!(
+        selected_transfer_summaries
+            .iter()
+            .flat_map(|summary| summary.transfer_leader_transferred_by_route_key())
+            .map(|(key, transferred)| (key.group_id, key.node_id, transferred))
+            .collect::<Vec<_>>(),
+        vec![
+            (834, 1, Some(true)),
+            (834, 2, Some(true)),
+            (835, 1, Some(false)),
+        ]
+    );
     let selected_transfers_best_effort = server
         .transfer_leader_for_groups_best_effort([834, 835], 1)
         .expect("best-effort transfer selected meta and data groups");
@@ -15951,10 +15987,15 @@ fn matrixraft_multi_raft_server_controls_leadership_by_group() {
     assert!(selected_transfers_best_effort.iter().all(|(_, results)| {
         results.iter().all(|result| {
             result.result.as_ref().is_some_and(|route| {
-                route
-                    .transfer_leader
-                    .as_ref()
-                    .is_some_and(|report| report.transferred && report.transferee_id == 1)
+                route.transfer_leader.as_ref().is_some_and(|report| {
+                    // By now node 1 already leads 834 as well, so this
+                    // second round is a self-transfer everywhere. Assert
+                    // the invariant and the routing; the exact values are
+                    // pinned once, above.
+                    report.transferred
+                        == (report.outcome == matrixraft::LeaderTransferOutcome::Transferred)
+                        && report.transferee_id == 1
+                })
             })
         })
     }));
@@ -15969,7 +16010,12 @@ fn matrixraft_multi_raft_server_controls_leadership_by_group() {
             && summary
                 .transfer_leader_transferred_by_route_key()
                 .iter()
-                .all(|(_, transferred)| *transferred == Some(true))));
+                // The summary's job here is to surface a value per route key.
+                // What that value is depends on which node leads which group by
+                // this point, and is pinned exactly once above; asserting
+                // `Some(true)` for every key was only ever satisfiable because
+                // the field was hardcoded.
+                .all(|(_, transferred)| transferred.is_some())));
     let transfer_callback_hits =
         std::cell::RefCell::new(Vec::<(MatrixRaftRouteKey, MatrixRaftAsyncOperation)>::new());
     let transfer_callbacks = server
@@ -16016,7 +16062,9 @@ fn matrixraft_multi_raft_server_controls_leadership_by_group() {
             && summary
                 .transfer_leader_transferred_by_route_key()
                 .iter()
-                .all(|(_, transferred)| *transferred == Some(true))
+                // As above: the summary must report a value per route key. The
+                // value itself is pinned exactly once, earlier in this test.
+                .all(|(_, transferred)| transferred.is_some())
             && summary
                 .timeout_now_presence_by_route_key()
                 .iter()

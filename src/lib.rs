@@ -216,10 +216,11 @@ pub use status::{
     AdminStatusSurfaceEvidence, AdminStatusSurfaceInput, ApplyHealth,
     BaselineRaftRuntimeCapabilityReport, Blocker, BlockerSeverity, CapabilityEvidence,
     ClusterStatusReport, DiagnosticLogEntry, DiagnosticSeverity, FatalBlockerReport, HealthStatus,
-    LeaderTransferAdmission, LeaderTransferAdmissionKind, LeaderTransferState, OptimizationHint,
-    OptimizationHintSeverity, OptimizationReport, PeerRuntimeState, ProcessNodeEvidence,
-    ProcessOperationalSemanticsEvidence, ProcessReadinessBlocker, ReplicationHealth,
-    RuntimeAdminReport, RuntimeLocalStatusReport, RuntimeTimerStatus,
+    LeaderTransferAdmission, LeaderTransferAdmissionKind, LeaderTransferOutcome,
+    LeaderTransferState, OptimizationHint, OptimizationHintSeverity, OptimizationReport,
+    PeerRuntimeState, ProcessNodeEvidence, ProcessOperationalSemanticsEvidence,
+    ProcessReadinessBlocker, ReplicationHealth, RuntimeAdminReport, RuntimeLocalStatusReport,
+    RuntimeTimerStatus,
 };
 pub use storage::{
     matrixraft_validate_storage_apply_fence, MatrixRaftGroupStorage, MatrixRaftLogCompactionReport,

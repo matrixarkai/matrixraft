@@ -465,3 +465,74 @@ fn matrixraft_facade_enforces_witness_and_learner_semantic_edges() {
     let _ = fs::remove_dir_all(witness_wal_dir);
     let _ = fs::remove_dir_all(witness_snapshot_dir);
 }
+
+#[test]
+fn transfer_leader_report_distinguishes_an_ignored_transfer_from_a_completed_one() {
+    let wal_dir = temp_dir("transfer-report-wal");
+    let snapshot_dir = temp_dir("transfer-report-snapshot");
+    let options = NodeOptions {
+        group_id: 506,
+        node_id: 1,
+        raft_addr: "127.0.0.1:41001".to_string(),
+        snapshot_addr: "127.0.0.1:42001".to_string(),
+        wal_dir: wal_dir.display().to_string(),
+        snapshot_dir: snapshot_dir.display().to_string(),
+        role: ReplicaRole::Voter,
+        config: Config {
+            heartbeat_interval_ms: 5,
+            election_timeout_ms: 20,
+            leader_lease_ms: 10,
+            ..Default::default()
+        },
+        peers: vec![
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+        ],
+    };
+
+    let mut node = MatrixRaftNode::create(options, 1).expect("create node");
+    node.start(1).expect("start");
+
+    // The defect this pins: a transferee the group does not know is *ignored*,
+    // which is correct, but the report used to claim `transferred: true`.
+    let ignored = node
+        .transfer_leader_with_report(999)
+        .expect("report for an unknown transferee");
+    assert_eq!(
+        ignored.outcome,
+        matrixraft::LeaderTransferOutcome::Ignored,
+        "an unknown transferee cannot be transferred to"
+    );
+    assert!(
+        !ignored.transferred,
+        "an ignored transfer must not report success"
+    );
+    assert_eq!(ignored.transferee_node, None);
+    assert_ne!(
+        node.leader().expect("leader after ignored transfer"),
+        Some(999)
+    );
+
+    // And the invariant that makes the field meaningful at all: `transferred`
+    // is exactly "the outcome was Transferred", for a real peer too. Whether
+    // that peer has caught up yet decides Pending vs Transferred, and that is
+    // timing, so the outcome itself is not asserted here -- only that the two
+    // fields agree.
+    let real = node
+        .transfer_leader_with_report(2)
+        .expect("report for a known voter");
+    assert_eq!(
+        real.transferred,
+        real.outcome == matrixraft::LeaderTransferOutcome::Transferred
+    );
+    assert_ne!(
+        real.outcome,
+        matrixraft::LeaderTransferOutcome::Ignored,
+        "a known voter must not be ignored"
+    );
+
+    node.shutdown().expect("shutdown");
+    let _ = fs::remove_dir_all(wal_dir);
+    let _ = fs::remove_dir_all(snapshot_dir);
+}

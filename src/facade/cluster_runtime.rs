@@ -3455,17 +3455,27 @@ impl RaftCluster {
     }
 
     pub fn transfer_leader(&mut self, target: NodeId) -> Result<(), RaftError> {
+        self.transfer_leader_outcome(target).map(|_| ())
+    }
+
+    /// Transfer leadership, reporting which of the three things happened.
+    ///
+    /// `transfer_leader` collapses all three into `Ok(())`, which is why a
+    /// report built from its return value cannot tell "leadership moved" from
+    /// "the request was ignored".
+    pub fn transfer_leader_outcome(
+        &mut self,
+        target: NodeId,
+    ) -> Result<LeaderTransferOutcome, RaftError> {
         if self.begin_leader_transfer(target)?.is_none() {
-            return Ok(());
+            return Ok(LeaderTransferOutcome::Ignored);
         }
         if !self.leader_transfer_target_caught_up(target)? {
-            return Ok(());
+            return Ok(LeaderTransferOutcome::Pending);
         }
-        let result = self.campaign(target, true);
-        if result.is_ok() {
-            self.leader_transfer = None;
-        }
-        result
+        self.campaign(target, true)?;
+        self.leader_transfer = None;
+        Ok(LeaderTransferOutcome::Transferred)
     }
 
     pub fn try_complete_leader_transfer(&mut self) -> Result<bool, RaftError> {
