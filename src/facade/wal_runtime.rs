@@ -506,12 +506,11 @@ impl PersistentRaftWal {
 
     pub fn recover(&mut self) -> Result<WalRecoveryReport, RaftError> {
         let (segments, truncated_corrupt_tail) = read_wal_segments_from_dir(&self.options.dir)?;
-        let original_len = self.records().len();
-        let stored: Vec<_> = segments
-            .iter()
-            .flat_map(|segment| segment.records.iter().cloned())
-            .collect();
-        let records = matrixraft_fold_wal_records(&stored);
+        // Counting used to clone every retained record, payloads included.
+        let original_len = self.retained_record_count() as usize;
+        let records = matrixraft_fold_wal_record_iter(
+            segments.iter().flat_map(|segment| segment.records.iter()),
+        );
         self.segments = if segments.is_empty() {
             vec![WalSegment {
                 segment_id: 0,
@@ -620,7 +619,9 @@ impl PersistentRaftWal {
     }
 
     pub fn status(&self) -> WalLifecycleStatus {
-        let total_records = self.records().len() as u64;
+        // `status` is polled routinely, and this used to clone the entire
+        // WAL on each call just to read its length.
+        let total_records = self.retained_record_count();
         let total_bytes = self
             .segments
             .iter()
@@ -702,6 +703,14 @@ impl PersistentRaftWal {
 
     pub fn checksum_format(&self) -> WalChecksumFormat {
         matrixraft_wal_checksum_format()
+    }
+
+    /// Number of retained records, without materialising them.
+    fn retained_record_count(&self) -> u64 {
+        self.segments
+            .iter()
+            .map(|segment| segment.records.len() as u64)
+            .sum()
     }
 
     pub fn records(&self) -> Vec<WalRecord> {
