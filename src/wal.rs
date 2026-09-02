@@ -321,8 +321,21 @@ pub fn matrixraft_validate_apply_snapshot_fence(record: &WalRecord) -> Result<()
 /// scanning for a valid prefix would have stopped. The folded records are then
 /// re-checksummed so they validate as the whole-log records they now are.
 pub fn matrixraft_fold_wal_records(stored: &[WalRecord]) -> Vec<WalRecord> {
+    matrixraft_fold_wal_record_iter(stored)
+}
+
+/// Fold from any iterator of records.
+///
+/// Recovery holds its records in per-segment vectors, so the slice form above
+/// forced it to concatenate a clone of the whole WAL first -- payloads
+/// included -- purely to get one contiguous slice. This takes the segments as
+/// they are.
+pub fn matrixraft_fold_wal_record_iter<'a, I>(stored: I) -> Vec<WalRecord>
+where
+    I: IntoIterator<Item = &'a WalRecord>,
+{
     let mut folded_entries: Vec<LogEntry> = Vec::new();
-    let mut out = Vec::with_capacity(stored.len());
+    let mut out = Vec::new();
     for record in stored {
         if !matrixraft_wal_checksum_valid(record) {
             break;
