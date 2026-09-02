@@ -696,3 +696,93 @@ fn streaming_recovery_picks_what_folding_everything_picked() {
     // Empty.
     assert_recovery_agrees("empty", &[]);
 }
+
+fn group_commit_options(dir: PathBuf) -> PersistentRaftWalOptions {
+    PersistentRaftWalOptions {
+        dir,
+        max_records_per_segment: 1_000,
+        max_segment_bytes: u64::MAX,
+        min_keep_segments: 1,
+        fsync_on_append: true,
+    }
+}
+
+/// A durable append is its fsync, so what a batch has to prove is that it paid
+/// for one and not for each record. Asserted by counting: the count is exact,
+/// where the seconds move with the disk and whatever else is running.
+#[test]
+fn a_batch_pays_for_one_fsync_not_one_per_record() {
+    let dir = temp_wal_dir("group-commit-count");
+    let mut wal = PersistentRaftWal::open(group_commit_options(dir.clone())).expect("open");
+
+    assert_eq!(wal.fsync_count(), 0, "opening does not fsync a record");
+    wal.append_batch(Vec::new()).expect("an empty batch");
+    assert_eq!(wal.fsync_count(), 0, "an empty batch has nothing to sync");
+
+    let batch: Vec<_> = (1..=25).map(|index| growing_wal_record(index, 3)).collect();
+    let reports = wal.append_batch(batch).expect("batch");
+    assert_eq!(reports.len(), 25, "a report per record");
+    assert_eq!(
+        wal.fsync_count(),
+        1,
+        "twenty-five records should cost one fsync"
+    );
+
+    // One at a time still pays per record, which is what makes the batch worth
+    // having rather than a rewrite of the same cost.
+    for index in 26..=30 {
+        wal.append(growing_wal_record(index, 3)).expect("append");
+    }
+    assert_eq!(
+        wal.fsync_count(),
+        6,
+        "five single appends add five fsyncs to the batch's one"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Batching changes when the fsync happens, and nothing else. What is stored
+/// and what recovers has to be identical to appending one at a time.
+#[test]
+fn a_batched_wal_recovers_exactly_as_a_one_at_a_time_wal_does() {
+    let batched_dir = temp_wal_dir("group-commit-batched");
+    let single_dir = temp_wal_dir("group-commit-single");
+    {
+        let mut wal =
+            PersistentRaftWal::open(group_commit_options(batched_dir.clone())).expect("open");
+        let batch: Vec<_> = (1..=40).map(|index| growing_wal_record(index, 3)).collect();
+        wal.append_batch(batch).expect("batch");
+    }
+    {
+        let mut wal =
+            PersistentRaftWal::open(group_commit_options(single_dir.clone())).expect("open");
+        for index in 1..=40 {
+            wal.append(growing_wal_record(index, 3)).expect("append");
+        }
+    }
+
+    let mut batched =
+        PersistentRaftWal::open(group_commit_options(batched_dir.clone())).expect("reopen");
+    let mut single =
+        PersistentRaftWal::open(group_commit_options(single_dir.clone())).expect("reopen");
+    let batched_report = batched.recover().expect("recover batched");
+    let single_report = single.recover().expect("recover single");
+
+    assert_eq!(
+        batched_report.surviving_records, single_report.surviving_records,
+        "the same records survive either way"
+    );
+    assert_eq!(
+        batched_report.recovered, single_report.recovered,
+        "the recovered record must not depend on when the fsync happened"
+    );
+    assert_eq!(
+        batched_report
+            .recovered
+            .as_ref()
+            .map(|record| record.entries.len()),
+        Some(40)
+    );
+    fs::remove_dir_all(&batched_dir).ok();
+    fs::remove_dir_all(&single_dir).ok();
+}
