@@ -473,8 +473,9 @@ fn each_segment_can_be_read_without_the_ones_compaction_removed() {
             wal.append(growing_wal_record(index, 3)).expect("append");
         }
         assert!(wal.segments().len() >= 4);
-        // Drop the early segments. Every segment opens with a whole-log record,
-        // so the survivors stay readable on their own.
+        // Drop the early segments. Segments no longer open with a whole-log
+        // record, so compaction has to materialise the first surviving one
+        // before it deletes the records that one is a delta against.
         wal.compact_through(20).expect("compact");
     }
 
@@ -741,6 +742,62 @@ fn a_batch_pays_for_one_fsync_not_one_per_record() {
     fs::remove_dir_all(&dir).ok();
 }
 
+fn roll_options(dir: PathBuf) -> PersistentRaftWalOptions {
+    PersistentRaftWalOptions {
+        dir,
+        max_records_per_segment: 10,
+        max_segment_bytes: u64::MAX,
+        min_keep_segments: 1,
+        fsync_on_append: false,
+    }
+}
+
+fn retained_entries(wal: &PersistentRaftWal) -> usize {
+    wal.segments()
+        .iter()
+        .flat_map(|segment| segment.records.iter())
+        .map(|record| record.entries.len())
+        .sum()
+}
+
+fn whole_record_count(wal: &PersistentRaftWal) -> usize {
+    wal.segments()
+        .iter()
+        .flat_map(|segment| segment.records.iter())
+        .filter(|record| !record.entries_are_delta)
+        .count()
+}
+
+/// A segment roll used to rewrite the whole retained log, so N appends cost
+/// about N^2/2S entries rather than N.
+///
+/// This asserts the shape by counting rather than by timing: entries held has
+/// an exact expected value, and does not move with machine load.
+#[test]
+fn a_segment_roll_no_longer_rewrites_the_whole_log() {
+    let dir = temp_wal_dir("roll-cost");
+    let mut wal = PersistentRaftWal::open(roll_options(dir.clone())).expect("open");
+    for index in 1..=50 {
+        wal.append(growing_wal_record(index, 3)).expect("append");
+    }
+
+    assert!(
+        wal.segments().len() >= 5,
+        "the log has to cross several segments for this to mean anything"
+    );
+    assert_eq!(
+        whole_record_count(&wal),
+        1,
+        "only the very first record of the WAL is stored whole"
+    );
+    assert_eq!(
+        retained_entries(&wal),
+        50,
+        "each append should retain one entry; rewriting the log at every roll          retained 150 here, and grows quadratically from there"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// Batching changes when the fsync happens, and nothing else. What is stored
 /// and what recovers has to be identical to appending one at a time.
 #[test]
@@ -785,4 +842,83 @@ fn a_batched_wal_recovers_exactly_as_a_one_at_a_time_wal_does() {
     );
     fs::remove_dir_all(&batched_dir).ok();
     fs::remove_dir_all(&single_dir).ok();
+}
+
+/// Compaction deletes whole segment files. A survivor that opens with a delta
+/// has just lost the records it was a delta against, so compaction has to turn
+/// it back into a whole record first -- and must do it without losing an entry.
+#[test]
+fn compaction_materialises_the_record_its_survivors_depend_on() {
+    let dir = temp_wal_dir("materialise");
+    let options = roll_options(dir.clone());
+    {
+        let mut wal = PersistentRaftWal::open(options.clone()).expect("open");
+        for index in 1..=50 {
+            wal.append(growing_wal_record(index, 3)).expect("append");
+        }
+        let first_survivor_was_a_delta = wal.segments()[1]
+            .records
+            .first()
+            .expect("the second segment has records")
+            .entries_are_delta;
+        assert!(
+            first_survivor_was_a_delta,
+            "the segment that survives has to start as a delta, or this proves nothing"
+        );
+        wal.compact_through(20).expect("compact");
+    }
+
+    let mut reopened = PersistentRaftWal::open(options).expect("reopen");
+    assert!(
+        !reopened.segments()[0]
+            .records
+            .first()
+            .expect("the surviving segment has records")
+            .entries_are_delta,
+        "the first surviving record must have been materialised on disk"
+    );
+    let recovered = reopened
+        .recover()
+        .expect("recover")
+        .recovered
+        .expect("a record survives recovery");
+    assert_eq!(
+        recovered.entries.len(),
+        50,
+        "compaction must not drop an entry it was still the base for"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Compaction happening more than once is the case where a materialised record
+/// becomes the base for the next materialisation.
+#[test]
+fn a_log_recovers_exactly_after_repeated_compaction() {
+    let dir = temp_wal_dir("repeat-compaction");
+    let options = roll_options(dir.clone());
+    {
+        let mut wal = PersistentRaftWal::open(options.clone()).expect("open");
+        for index in 1..=30 {
+            wal.append(growing_wal_record(index, 3)).expect("append");
+        }
+        wal.compact_through(10).expect("first compaction");
+        for index in 31..=60 {
+            wal.append(growing_wal_record(index, 3)).expect("append");
+        }
+        wal.compact_through(40).expect("second compaction");
+    }
+
+    let mut reopened = PersistentRaftWal::open(options).expect("reopen");
+    let recovered = reopened
+        .recover()
+        .expect("recover")
+        .recovered
+        .expect("a record survives recovery");
+    assert_eq!(recovered.entries.len(), 60);
+    assert_eq!(
+        recovered.entries.last().expect("tail").log_id.index,
+        60,
+        "the tail has to survive two compactions intact"
+    );
+    fs::remove_dir_all(&dir).ok();
 }

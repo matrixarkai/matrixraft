@@ -286,7 +286,7 @@ impl PersistentRaftWal {
             fsync_count: 0,
             active_covered: None,
         };
-        wal.active_covered = wal.covered_from_active_segment();
+        wal.active_covered = wal.covered_from_segments();
         Ok(wal)
     }
 
@@ -330,16 +330,19 @@ impl PersistentRaftWal {
         delta
     }
 
-    /// Rebuilds the active segment's coverage by folding what is already on
-    /// disk, so an appended-to WAL keeps writing deltas after a reopen.
+    /// Rebuilds what the retained records already cover, by folding what is
+    /// already on disk, so an appended-to WAL keeps writing deltas after a
+    /// reopen.
     ///
-    /// Only the log as the segment leaves it is wanted here. Folding to a record
-    /// per step built one whole-log record for every record in the segment --
-    /// at the default ten thousand records per segment that is ten thousand
-    /// copies of the log, on every open.
-    fn covered_from_active_segment(&self) -> Option<(LogIndex, LogIndex, Term)> {
-        let segment = self.segments.last()?;
-        let entries = matrixraft_fold_wal_entries(segment.records.iter());
+    /// This folds every segment rather than only the active one: a segment's
+    /// first record is now a delta against the segment before it, so the active
+    /// segment on its own no longer describes the whole log.
+    fn covered_from_segments(&self) -> Option<(LogIndex, LogIndex, Term)> {
+        let entries = matrixraft_fold_wal_entries(
+            self.segments
+                .iter()
+                .flat_map(|segment| segment.records.iter()),
+        );
         let first = entries.first()?;
         let last = entries.last()?;
         Some((first.log_id.index, last.log_id.index, last.log_id.term))
@@ -403,19 +406,9 @@ impl PersistentRaftWal {
                 .map(|segment| segment.records.len())
                 .unwrap_or_default();
             let rolling_by_count = active_records >= self.options.max_records_per_segment;
-            let stored = if rolling_by_count {
-                whole_record(&record)
-            } else {
-                self.delta_record(&record)
-            };
+            let stored = self.delta_record(&record);
             // Deferred deliberately: one fsync covers the whole batch, below.
-            reports.push(self.write_record(
-                stored,
-                active_records,
-                rolling_by_count,
-                false,
-                || Ok(whole_record(&record)),
-            )?);
+            reports.push(self.write_record(stored, active_records, rolling_by_count, false)?);
         }
         if self.options.fsync_on_append {
             let (elapsed_ms, slow) = self.fsync_active_segment()?;
@@ -445,10 +438,12 @@ impl PersistentRaftWal {
     /// Appends a record the caller builds on demand.
     ///
     /// `build` is handed the coverage the record should be written against, or
-    /// `None` when a whole-log record is required -- at the start of a segment,
-    /// and again if rolling turns out to be necessary after the record was
-    /// built. Callers that can produce a delta cheaply should use this instead
-    /// of [`Self::append`], which has to be given the whole log every time.
+    /// `None` when a whole-log record is required -- at the very start of the
+    /// log, before anything is covered. A roll no longer forces one: the new
+    /// segment opens with the delta, and compaction materialises the whole
+    /// record at the boundary it actually moves. Callers that can produce a
+    /// delta cheaply should use this instead of [`Self::append`], which has to
+    /// be given the whole log every time.
     pub fn append_built<F>(&mut self, mut build: F) -> Result<WalWriteReport, RaftError>
     where
         F: FnMut(
@@ -461,18 +456,12 @@ impl PersistentRaftWal {
             .map(|segment| segment.records.len())
             .unwrap_or_default();
         let rolling_by_count = active_records >= self.options.max_records_per_segment;
-        let coverage = if rolling_by_count {
-            None
-        } else {
-            self.active_covered
-        };
-        let record = build(coverage)?;
+        let record = build(self.active_covered)?;
         self.write_record(
             record,
             active_records,
             rolling_by_count,
             self.options.fsync_on_append,
-            || build(None),
         )
     }
 
@@ -490,36 +479,29 @@ impl PersistentRaftWal {
             .map(|segment| segment.records.len())
             .unwrap_or_default();
         let rolling_by_count = active_records >= self.options.max_records_per_segment;
-        let stored = if rolling_by_count {
-            whole_record(&record)
-        } else {
-            self.delta_record(&record)
-        };
+        let stored = self.delta_record(&record);
         self.write_record(
             stored,
             active_records,
             rolling_by_count,
             self.options.fsync_on_append,
-            || Ok(whole_record(&record)),
         )
     }
 
     /// Writes a record that has already been reduced to what will be stored.
     ///
-    /// `whole` is only called when rolling turns out to be necessary after the
-    /// record was built, since the segment it was a delta against is then
-    /// sealed and the new segment has to open with a whole-log record.
-    fn write_record<W>(
+    /// Rolling a segment no longer rewrites the record whole. A segment used to
+    /// open with the entire retained log so that it could be read without
+    /// reading any other, which cost a copy of the log at every roll and made N
+    /// appends cost about N^2/2S entries. Compaction materialises that record
+    /// instead, at the one moment the boundary it protects actually moves.
+    fn write_record(
         &mut self,
-        mut record: WalRecord,
+        record: WalRecord,
         active_records: usize,
         rolling_by_count: bool,
         fsync: bool,
-        whole: W,
-    ) -> Result<WalWriteReport, RaftError>
-    where
-        W: FnOnce() -> Result<WalRecord, RaftError>,
-    {
+    ) -> Result<WalWriteReport, RaftError> {
         let hard_state_persisted = matrixraft_validate_hard_state_persistence(&record).is_ok();
         let active_len = self
             .active_segment
@@ -528,8 +510,8 @@ impl PersistentRaftWal {
                 RaftError::Storage(format!("failed to read WAL active segment metadata: {err}"))
             })?
             .len();
-        let mut encoded = encode_wal_record(&record)?;
-        let mut record_bytes = encoded.len() as u64 + 1;
+        let encoded = encode_wal_record(&record)?;
+        let record_bytes = encoded.len() as u64 + 1;
 
         let mut segment_rolled = false;
         if rolling_by_count
@@ -537,13 +519,6 @@ impl PersistentRaftWal {
         {
             self.roll_segment()?;
             segment_rolled = true;
-            if record.entries_are_delta {
-                record = whole()?;
-                record.entries_are_delta = false;
-                record.checksum = matrixraft_wal_checksum(&record);
-                encoded = encode_wal_record(&record)?;
-                record_bytes = encoded.len() as u64 + 1;
-            }
         }
 
         self.active_segment
@@ -617,7 +592,7 @@ impl PersistentRaftWal {
         }
         self.active_segment = open_segment_for_append(&self.options.dir, active_id)?;
         self.next_segment_id = active_id + 1;
-        self.active_covered = self.covered_from_active_segment();
+        self.active_covered = self.covered_from_segments();
         let observed_corrupt_tail = self.truncated_corrupt_tail || truncated_corrupt_tail;
         self.truncated_corrupt_tail = observed_corrupt_tail;
         Ok(WalRecoveryReport {
@@ -646,6 +621,13 @@ impl PersistentRaftWal {
             .filter(|segment| segment.last_index > 0 && segment.last_index <= log_index)
             .map(|segment| segment.segment_id)
             .collect();
+        // A surviving segment can now open with a delta against a segment that
+        // is about to be deleted. Turn it back into a whole record, and write it
+        // before anything is removed: a crash between the two leaves the base
+        // still on disk, and recovery folds it exactly as it did before.
+        if !removable_ids.is_empty() {
+            self.materialize_first_surviving_record(&removable_ids)?;
+        }
         for segment_id in &removable_ids {
             let path = wal_segment_path(&self.options.dir, *segment_id);
             match fs::remove_file(&path) {
@@ -668,6 +650,44 @@ impl PersistentRaftWal {
             }
         }
         Ok(removable_ids.len() as u64)
+    }
+
+    /// Turns the first surviving record into a whole one when compaction is
+    /// about to delete the records it is a delta against.
+    ///
+    /// This is the cost that used to be paid at every segment roll. It is paid
+    /// here instead, once per compaction that actually removes something, which
+    /// is the only point where a segment stops having its base on disk.
+    fn materialize_first_surviving_record(
+        &mut self,
+        removable_ids: &[u64],
+    ) -> Result<(), RaftError> {
+        let Some(position) = self
+            .segments
+            .iter()
+            .position(|segment| !removable_ids.contains(&segment.segment_id))
+        else {
+            return Ok(());
+        };
+        let entries = {
+            let Some(first) = self.segments[position].records.first() else {
+                return Ok(());
+            };
+            if !first.entries_are_delta {
+                return Ok(());
+            }
+            matrixraft_fold_wal_entries(
+                self.segments[..position]
+                    .iter()
+                    .flat_map(|segment| segment.records.iter())
+                    .chain(std::iter::once(first)),
+            )
+        };
+        let record = &mut self.segments[position].records[0];
+        record.entries = entries;
+        record.entries_are_delta = false;
+        record.checksum = matrixraft_wal_checksum(record);
+        write_wal_segment_file(&self.options.dir, &self.segments[position])
     }
 
     pub fn compact_through_with_fence(
