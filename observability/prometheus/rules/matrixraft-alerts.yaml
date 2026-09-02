@@ -1,0 +1,115 @@
+groups:
+  - name: matrixraft
+    rules:
+      - alert: RustRaftOptimizationNotReady
+        expr: "rustraft_optimization_ready == 0"
+        for: 5m
+        labels:
+          severity: "warning"
+        annotations:
+          summary: "RustRaft optimization readiness is not passing; follow resolve_critical_optimization_hints."
+      - alert: RustRaftOptimizationCriticalHints
+        expr: "rustraft_optimization_critical_total > 0"
+        for: 5m
+        labels:
+          severity: "critical"
+        annotations:
+          summary: "RustRaft has critical optimization hints; follow resolve_critical_optimization_hints before rollout."
+      - alert: RustRaftOptimizationWarningHints
+        expr: "rustraft_optimization_warning_total > 0"
+        for: 10m
+        labels:
+          severity: "warning"
+        annotations:
+          summary: "RustRaft has warning optimization hints to review before rollout."
+      - alert: RustRaftFatalEvents
+        expr: "rustraft_fatal_total > 0"
+        for: 1m
+        labels:
+          severity: "critical"
+        annotations:
+          summary: "RustRaft fatal blocker events are present."
+      - alert: RustRaftDiagnosticErrors
+        expr: "rustraft_diagnostic_log_total{severity=\"error\"} > 0"
+        for: 1m
+        labels:
+          severity: "critical"
+        annotations:
+          summary: "RustRaft diagnostic errors are present; follow inspect_error_diagnostics."
+      - alert: RustRaftBlockersPresent
+        expr: "rustraft_blocker_total > 0"
+        for: 5m
+        labels:
+          severity: "warning"
+        annotations:
+          summary: "RustRaft readiness blockers are present."
+      - alert: RustRaftOperatorTriageWatch
+        expr: "rustraft_operator_triage_status{status=\"watch\"} > 0"
+        for: 5m
+        labels:
+          severity: "warning"
+        annotations:
+          summary: "RustRaft operator triage is in watch status."
+      - alert: RustRaftOperatorTriageNeedsAttention
+        expr: "rustraft_operator_triage_status{status=\"needs_attention\"} > 0"
+        for: 1m
+        labels:
+          severity: "critical"
+        annotations:
+          summary: "RustRaft operator triage needs attention."
+      - alert: RustRaftRunbookCriticalSteps
+        expr: "rustraft_operator_runbook_step_total{severity=\"critical\"} > 0"
+        for: 1m
+        labels:
+          severity: "critical"
+        annotations:
+          summary: "RustRaft critical runbook steps are active; inspect operator_runbook_first_step for the first action."
+      - alert: RustRaftDebugBundleValidationFailed
+        expr: "rustraft_debug_bundle_validation_ready == 0"
+        for: 5m
+        labels:
+          severity: "warning"
+        annotations:
+          summary: "RustRaft debug bundle validation is not passing."
+      - alert: RustRaftSupportEnvelopeValidationFailed
+        expr: "rustraft_debug_bundle_validation_ready{artifact=\"support_envelope\"} == 0"
+        for: 5m
+        labels:
+          severity: "warning"
+        annotations:
+          summary: "RustRaft support envelope validation is not passing; inspect rustraft_debug_bundle_validation_first_issue{artifact=\"support_envelope\"} and rustraft_debug_bundle_validation_issue{artifact=\"support_envelope\"} for debug_snapshot_stale or debug_snapshot_low_fresh."
+      - alert: RustRaftSupportEnvelopeCritical
+        expr: "rustraft_debug_bundle_validation_ready{artifact=\"support_envelope\",support_envelope_severity=\"critical\"} == 0"
+        for: 1m
+        labels:
+          severity: "critical"
+        annotations:
+          summary: "RustRaft support envelope is critical; inspect rustraft_debug_bundle_validation_first_issue{artifact=\"support_envelope\",support_envelope_severity=\"critical\"} and the support_envelope_status label."
+      - alert: RustRaftDebugSnapshotStale
+        expr: "rustraft_debug_snapshot_age_ms > rustraft_debug_snapshot_max_age_ms"
+        for: 5m
+        labels:
+          severity: "warning"
+        annotations:
+          summary: "RustRaft debug snapshot metadata is older than the configured freshness window."
+      - alert: RustRaftDebugSnapshotFreshnessLow
+        expr: "rustraft_debug_snapshot_low_fresh == 0"
+        for: 5m
+        labels:
+          severity: "warning"
+        annotations:
+          summary: "RustRaft debug snapshot has less than five minutes before the freshness window expires."
+      - alert: RustRaftDebugSnapshotFreshnessLost
+        expr: "rustraft_debug_snapshot_fresh == 0"
+        for: 5m
+        labels:
+          severity: "warning"
+        annotations:
+          summary: "RustRaft debug snapshot freshness flag is not passing."
+      - alert: RustRaftObservabilityProvisioningValidationFailed
+        expr: "rustraft_observability_provisioning_validation_ready == 0"
+        for: 5m
+        labels:
+          severity: "warning"
+        annotations:
+          summary: "RustRaft observability provisioning validation is not passing."

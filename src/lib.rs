@@ -85,6 +85,7 @@ pub mod mailbox;
 pub mod membership;
 pub mod metrics;
 pub mod node;
+pub mod observability_artifacts;
 pub mod operational_evidence;
 pub mod pipeline;
 pub mod rate_limit;
