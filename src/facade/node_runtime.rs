@@ -1270,7 +1270,9 @@ fn raft_node_runtime_loop(
     let mut last_wal_recovery_report = None;
     let mut wal = match PersistentRaftWal::open(PersistentRaftWalOptions {
         dir: PathBuf::from(&options.wal_dir),
-        max_records_per_segment: 10_000,
+        // See `PersistentRaftWalOptions::new`: this is now just how much the
+        // node holds in memory, and smaller is strictly cheaper.
+        max_records_per_segment: 1_000,
         max_segment_bytes: options.config.max_segment_bytes,
         min_keep_segments: options.config.min_keep_segment_num as usize,
         fsync_on_append: true,
