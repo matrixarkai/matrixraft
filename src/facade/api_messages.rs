@@ -108,6 +108,15 @@ pub struct AppendEntriesRequest {
     pub term: Term,
     pub leader_id: NodeId,
     pub prev_log_id: Option<LogId>,
+    /// Payloads travel as base64, not as JSON number arrays.
+    ///
+    /// A number array costs about 3.9 bytes per payload byte on the wire;
+    /// base64 costs a flat 1.37. The WAL stores entries the same way and for
+    /// the same reason, and this reuses its codec, which still accepts the
+    /// legacy number-array form on decode -- an old sender can talk to a new
+    /// receiver. The reverse is not true, so a mixed-version cluster upgrades
+    /// receivers first.
+    #[serde(default, with = "crate::wal::wal_entry_payloads")]
     pub entries: Vec<LogEntry>,
     pub leader_commit: LogIndex,
     #[serde(default)]
