@@ -766,6 +766,7 @@ impl PersistentRaftWal {
                 .unwrap_or(0),
             released_segment_count: self.released_segment_count,
             slow_fsync_backpressure_observed: self.slow_fsync_count > 0,
+            fsync_count: self.fsync_count,
             slow_fsync_threshold_ms: self.slow_fsync_threshold_ms,
             slow_fsync_count: self.slow_fsync_count,
             consecutive_slow_fsync_count: self.consecutive_slow_fsync_count,

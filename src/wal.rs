@@ -141,6 +141,10 @@ pub struct WalLifecycleStatus {
     pub last_log_index: u64,
     pub released_segment_count: u64,
     pub slow_fsync_backpressure_observed: bool,
+    /// Every fsync this WAL has done, not only the slow ones. This is what says
+    /// whether batching amortised anything.
+    #[serde(default)]
+    pub fsync_count: u64,
     #[serde(default)]
     pub slow_fsync_threshold_ms: u64,
     #[serde(default)]

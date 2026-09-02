@@ -165,6 +165,46 @@ impl NodeRuntime {
         }
     }
 
+    /// Proposes several payloads and persists them together.
+    ///
+    /// A durable append is its fsync and very little else, so proposing one at
+    /// a time caps a node at a few hundred entries per second however fast the
+    /// rest of it is. This applies the whole batch and writes one WAL record
+    /// for it, which is one fsync rather than one each.
+    ///
+    /// Every proposal is durable when this returns and none before, exactly as
+    /// with [`Self::propose`]. Do not acknowledge any of them until it returns.
+    pub fn propose_batch(&self, payloads: Vec<Payload>) -> Result<Vec<LogId>, RaftError> {
+        self.propose_batch_with_options(payloads, ProposeOptions::default())
+    }
+
+    /// [`Self::propose_batch`], with the same options applied to every payload.
+    pub fn propose_batch_with_options(
+        &self,
+        payloads: Vec<Payload>,
+        options: ProposeOptions,
+    ) -> Result<Vec<LogId>, RaftError> {
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+        let messages: Vec<Message> = payloads
+            .into_iter()
+            .map(|payload| Message::Propose {
+                payload,
+                options: options.clone(),
+            })
+            .collect();
+        self.step_batch(messages)?
+            .into_iter()
+            .map(|result| match result {
+                StepResult::Proposed(log_id) => Ok(log_id),
+                other => Err(RaftError::InvalidRequest(format!(
+                    "unexpected propose result: {other:?}"
+                ))),
+            })
+            .collect()
+    }
+
     pub fn step(&self, message: Message) -> Result<StepResult, RaftError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.sender()?
@@ -1119,12 +1159,19 @@ fn runtime_step_operation_name(message: &Message) -> &'static str {
     }
 }
 
+/// Applies one message.
+///
+/// `persist_proposal` is false when the caller will persist for a whole batch
+/// of messages instead. A WAL record describes the log as it stands, so one
+/// record covers every proposal applied before it -- and one fsync makes them
+/// all durable, rather than one fsync each.
 fn runtime_step_message(
     cluster: &mut RaftCluster,
     wal: &mut Option<PersistentRaftWal>,
     membership_executor: &mut MembershipExecutor,
     node_id: NodeId,
     message: Message,
+    persist_proposal: bool,
 ) -> Result<StepResult, RaftError> {
     match message {
         Message::Propose { payload, options } => {
@@ -1134,7 +1181,7 @@ fn runtime_step_message(
                 ));
             }
             let log_id = cluster.propose_with_options(payload, options)?;
-            if let Some(wal) = wal.as_mut() {
+            if let Some(wal) = wal.as_mut().filter(|_| persist_proposal) {
                 // Built against what the WAL already holds, so a proposal does
                 // not copy and hash the whole log to write one entry.
                 wal.append_built(|coverage| cluster.wal_record_for_coverage(node_id, coverage))?;
@@ -1483,6 +1530,7 @@ fn raft_node_runtime_loop(
                     &mut membership_executor,
                     node_id,
                     message,
+                    true,
                 );
                 if result
                     .as_ref()
@@ -1528,7 +1576,14 @@ fn raft_node_runtime_loop(
                     })
                     .count() as u64;
                 campaign_executions = campaign_executions.saturating_add(campaign_message_count);
-                let result: Result<Vec<StepResult>, RaftError> = messages
+                // A WAL record describes the log as it stands, so one record
+                // covers every proposal in the batch. Persisting per proposal
+                // made a batch of N cost N fsyncs, and an fsync is essentially
+                // the whole cost of a durable append.
+                let batch_has_proposal = messages
+                    .iter()
+                    .any(|message| matches!(message, Message::Propose { .. }));
+                let stepped: Result<Vec<StepResult>, RaftError> = messages
                     .into_iter()
                     .map(|message| {
                         runtime_step_message(
@@ -1537,9 +1592,29 @@ fn raft_node_runtime_loop(
                             &mut membership_executor,
                             node_id,
                             message,
+                            false,
                         )
                     })
                     .collect();
+                // Persisted even when a message failed, so what is on disk
+                // still describes what the node applied.
+                let persisted = if batch_has_proposal {
+                    match wal.as_mut() {
+                        Some(wal) => wal
+                            .append_built(|coverage| {
+                                cluster.wal_record_for_coverage(node_id, coverage)
+                            })
+                            .map(|_| ()),
+                        None => Ok(()),
+                    }
+                } else {
+                    Ok(())
+                };
+                let result: Result<Vec<StepResult>, RaftError> = match (stepped, persisted) {
+                    (Ok(results), Ok(())) => Ok(results),
+                    (Err(error), _) => Err(error),
+                    (Ok(_), Err(error)) => Err(error),
+                };
                 let _ = reply.send(record_runtime_result(
                     "step_batch",
                     result,
