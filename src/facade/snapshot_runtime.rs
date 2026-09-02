@@ -187,6 +187,18 @@ impl SnapshotLifecycle {
         })
     }
 
+    /// Splits a snapshot into the chunks a send will transmit.
+    ///
+    /// Every chunk is built up front, so the result is a second copy of the
+    /// payload. Measured with `examples/snapshot_checkpoint_cost`, that is
+    /// 1.01x the payload -- 258 MiB held for a 256 MiB snapshot, of which about
+    /// 1% is the per-chunk metadata clone and the rest is the payload itself.
+    ///
+    /// Chunks cannot simply be dropped as they are sent: a rejected response
+    /// rewinds `next_chunk`, so an earlier chunk can be asked for again.
+    /// Removing the second copy means the sender holding the snapshot and
+    /// slicing a chunk when it is asked for, which needs `begin_send` to share
+    /// the snapshot rather than take it by reference.
     pub fn checkpoint(
         snapshot: &RaftSnapshot,
         chunk_size: u64,
@@ -219,6 +231,12 @@ impl SnapshotLifecycle {
         Ok(chunks)
     }
 
+    /// Starts sending a snapshot.
+    ///
+    /// This holds every chunk for the whole transfer, so a send costs roughly
+    /// twice the snapshot in memory until it completes -- and it begins exactly
+    /// when a follower has fallen behind, which is not when a leader has memory
+    /// to spare. See [`Self::checkpoint`] for what it would take to avoid.
     pub fn begin_send(
         &mut self,
         snapshot: &RaftSnapshot,
