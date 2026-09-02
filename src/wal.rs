@@ -340,23 +340,116 @@ where
         if !matrixraft_wal_checksum_valid(record) {
             break;
         }
-        if record.entries_are_delta {
-            if let Some(first) = record.entries.first() {
-                let cut =
-                    folded_entries.partition_point(|entry| entry.log_id.index < first.log_id.index);
-                folded_entries.truncate(cut);
-            }
-            folded_entries.extend(record.entries.iter().cloned());
-        } else {
-            folded_entries.clone_from(&record.entries);
-        }
-        let mut whole = record.clone();
-        whole.entries.clone_from(&folded_entries);
-        whole.entries_are_delta = false;
-        whole.checksum = matrixraft_wal_checksum(&whole);
-        out.push(whole);
+        fold_wal_entries_step(&mut folded_entries, record);
+        out.push(whole_from_folded(record, &folded_entries));
     }
     out
+}
+
+/// Applies one stored record to the entries folded so far.
+///
+/// A whole record replaces them. A delta truncates back to where it starts and
+/// then extends, so a record that rewrites a diverged tail wins over what it
+/// replaces rather than being appended after it.
+fn fold_wal_entries_step(folded: &mut Vec<LogEntry>, record: &WalRecord) {
+    if record.entries_are_delta {
+        if let Some(first) = record.entries.first() {
+            let cut = folded.partition_point(|entry| entry.log_id.index < first.log_id.index);
+            folded.truncate(cut);
+        }
+        folded.extend(record.entries.iter().cloned());
+    } else {
+        folded.clone_from(&record.entries);
+    }
+}
+
+/// The whole-log record a stored record folds to, given the entries folded up
+/// to and including it.
+fn whole_from_folded(record: &WalRecord, folded: &[LogEntry]) -> WalRecord {
+    let mut whole = record.clone();
+    whole.entries.clear();
+    whole.entries.extend_from_slice(folded);
+    whole.entries_are_delta = false;
+    whole.checksum = matrixraft_wal_checksum(&whole);
+    whole
+}
+
+/// Folds `records` into the log they describe, without building a record per
+/// step.
+///
+/// [`matrixraft_fold_wal_records`] answers "what did the log look like at each
+/// record", and pays a whole-log record per step to do it. Callers that only
+/// want the log as it ends up -- reopening to see what a segment already
+/// covers, for one -- want this instead.
+///
+/// Like the record fold, this stops at the first record whose checksum does not
+/// validate, which is where a reader scanning for a valid prefix would stop.
+pub fn matrixraft_fold_wal_entries<'a, I>(records: I) -> Vec<LogEntry>
+where
+    I: IntoIterator<Item = &'a WalRecord>,
+{
+    let mut folded: Vec<LogEntry> = Vec::new();
+    for record in records {
+        if !matrixraft_wal_checksum_valid(record) {
+            break;
+        }
+        fold_wal_entries_step(&mut folded, record);
+    }
+    folded
+}
+
+/// What recovery needs from a WAL: how many records survived, and the one
+/// record it would restore from.
+///
+/// [`matrixraft_fold_wal_records`] builds a whole-log record for *every* stored
+/// record, and each of those carries the log as it stood at that point. For an
+/// N-record WAL that is about N^2/2 entries held at once -- a gigabyte at four
+/// thousand records, and quadratic from there, which is enough to stop a node
+/// restarting at all.
+///
+/// Recovery never needed all of them. It needs the surviving count and the
+/// single latest valid record, so this folds in one streaming pass, keeping only
+/// the log itself, and then replays to rebuild just the record it picked.
+///
+/// The record chosen is the same one [`matrixraft_recover_latest_wal_record`]
+/// would choose: among records that pass hard-state and fence validation, the
+/// one with the highest committed index, and the last of those on a tie.
+pub fn matrixraft_recover_from_wal_records(stored: &[WalRecord]) -> (usize, Option<WalRecord>) {
+    // One pass for the surviving prefix and each record's committed index. The
+    // validity checks look at the folded entries, so they cannot be decided
+    // here -- candidates are ranked now and verified by replay below.
+    let mut surviving = 0usize;
+    let mut candidates: Vec<(u64, usize)> = Vec::new();
+    for (position, record) in stored.iter().enumerate() {
+        if !matrixraft_wal_checksum_valid(record) {
+            break;
+        }
+        surviving += 1;
+        let committed = record
+            .hard_state
+            .committed
+            .as_ref()
+            .map(|log_id| log_id.index)
+            .unwrap_or_default();
+        candidates.push((committed, position));
+    }
+    // Highest committed index first, and the later position on a tie, which is
+    // what `max_by_key` settles on.
+    candidates.sort_by(|left, right| right.cmp(left));
+
+    for (_, position) in candidates {
+        let mut folded: Vec<LogEntry> = Vec::new();
+        for record in stored.iter().take(position + 1) {
+            fold_wal_entries_step(&mut folded, record);
+        }
+        let whole = whole_from_folded(&stored[position], &folded);
+        if matrixraft_validate_hard_state_persistence(&whole).is_ok()
+            && matrixraft_validate_apply_snapshot_fence(&whole).is_ok()
+        {
+            return (surviving, Some(whole));
+        }
+    }
+    (surviving, None)
 }
 
 /// Whether `entries` extends `covered` rather than diverging from it.

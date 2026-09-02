@@ -328,12 +328,14 @@ impl PersistentRaftWal {
 
     /// Rebuilds the active segment's coverage by folding what is already on
     /// disk, so an appended-to WAL keeps writing deltas after a reopen.
-    fn covered_from_active_segment(
-        &self,
-    ) -> Option<(LogIndex, LogIndex, Term)> {
+    ///
+    /// Only the log as the segment leaves it is wanted here. Folding to a record
+    /// per step built one whole-log record for every record in the segment --
+    /// at the default ten thousand records per segment that is ten thousand
+    /// copies of the log, on every open.
+    fn covered_from_active_segment(&self) -> Option<(LogIndex, LogIndex, Term)> {
         let segment = self.segments.last()?;
-        let folded = matrixraft_fold_wal_records(&segment.records);
-        let entries = &folded.last()?.entries;
+        let entries = matrixraft_fold_wal_entries(segment.records.iter());
         let first = entries.first()?;
         let last = entries.last()?;
         Some((first.log_id.index, last.log_id.index, last.log_id.term))
@@ -508,9 +510,12 @@ impl PersistentRaftWal {
         let (segments, truncated_corrupt_tail) = read_wal_segments_from_dir(&self.options.dir)?;
         // Counting used to clone every retained record, payloads included.
         let original_len = self.retained_record_count() as usize;
-        let records = matrixraft_fold_wal_record_iter(
-            segments.iter().flat_map(|segment| segment.records.iter()),
-        );
+        let stored: Vec<_> = segments
+            .iter()
+            .flat_map(|segment| segment.records.iter().cloned())
+            .collect();
+        // One streaming pass rather than a whole-log record per stored record.
+        let (surviving_records, recovered) = matrixraft_recover_from_wal_records(&stored);
         self.segments = if segments.is_empty() {
             vec![WalSegment {
                 segment_id: 0,
@@ -536,10 +541,10 @@ impl PersistentRaftWal {
         let observed_corrupt_tail = self.truncated_corrupt_tail || truncated_corrupt_tail;
         self.truncated_corrupt_tail = observed_corrupt_tail;
         Ok(WalRecoveryReport {
-            recovered: matrixraft_recover_latest_wal_record(&records).ok(),
+            recovered,
             truncated_corrupt_tail: observed_corrupt_tail,
-            surviving_records: records.len(),
-            removed_records: original_len.saturating_sub(records.len()),
+            surviving_records,
+            removed_records: original_len.saturating_sub(surviving_records),
             segments_scanned: self.segments.len() as u64,
             checksum_format: Some(matrixraft_wal_checksum_format()),
             retained_range: Some(wal_retained_range(&self.segments)),
