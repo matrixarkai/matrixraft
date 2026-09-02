@@ -14,7 +14,12 @@ documentation = "https://docs.rs/matrixraft"
 exclude = ["/scripts", "/.github"]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+# "rc" lets `Arc<LogEntry>` derive Serialize/Deserialize. A node's log holds
+# entries behind an `Arc` so that the peers a `RaftCluster` models share one
+# copy of each payload instead of one per node. Note that serde does not
+# preserve sharing across a round trip -- a deserialized cluster starts with
+# separate allocations again, which costs memory but not correctness.
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
 

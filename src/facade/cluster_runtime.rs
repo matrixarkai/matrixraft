@@ -34,7 +34,15 @@ struct Node {
     replica_role: ReplicaRole,
     raft_role: StateRole,
     hard_state: HardState,
-    log: Vec<LogEntry>,
+    /// Entries are shared, not copied per node.
+    ///
+    /// A `RaftCluster` models every node of a group in one object, so a
+    /// proposal used to clone the whole entry -- payload included -- into each
+    /// node's log. Memory then grew with the group: measured at exactly 7x the
+    /// logical data for a seven-node group. An entry is immutable once
+    /// appended (conflict handling truncates, it never edits), so the nodes can
+    /// share one allocation behind an `Arc`.
+    log: Vec<Arc<LogEntry>>,
     // Running total of `log` payload bytes. Maintained by every log mutation so
     // that the admission checks on the propose path do not sum the log.
     #[serde(default)]
@@ -160,7 +168,21 @@ impl Node {
 
     fn set_log(&mut self, log: Vec<LogEntry>) {
         self.retained_log_bytes = log.iter().map(|entry| entry.payload.len() as u64).sum();
-        self.log = log;
+        self.log = log.into_iter().map(Arc::new).collect();
+    }
+
+    /// The log as owned entries, for callers that hand it to something outside
+    /// the cluster. This copies every payload, so it is for record-building and
+    /// RPC construction rather than anything on the propose path.
+    fn log_entries(&self) -> Vec<LogEntry> {
+        self.log.iter().map(|entry| (**entry).clone()).collect()
+    }
+
+    fn log_entries_from(&self, position: usize) -> Vec<LogEntry> {
+        self.log[position..]
+            .iter()
+            .map(|entry| (**entry).clone())
+            .collect()
     }
 
     fn log_term_at(&self, log_index: LogIndex) -> Option<Term> {
@@ -186,7 +208,9 @@ impl Node {
             || (candidate.term == local_term && candidate.index >= local_index)
     }
 
-    fn append_entry(&mut self, entry: LogEntry) {
+    /// Appends a shared entry. Callers appending the same entry to several
+    /// nodes should build one `Arc` and hand each node a clone of the handle.
+    fn append_entry(&mut self, entry: Arc<LogEntry>) {
         // An entry past the tail cannot collide with a retained index, so the
         // steady-state append never looks at the rest of the log.
         let extends_tail = self
@@ -234,22 +258,21 @@ impl Node {
         }
     }
 
-    fn append_witness_entry(&mut self, entry: LogEntry, preserve_payload: bool) {
+    /// A witness stores a rewritten entry -- `is_command` cleared, and the
+    /// payload dropped unless preserved -- so it cannot share the caller's
+    /// allocation and gets its own.
+    fn append_witness_entry(&mut self, entry: &LogEntry, preserve_payload: bool) {
         self.acknowledge_witness_index(entry.log_id.index);
-        let entry = if preserve_payload {
-            LogEntry {
-                log_id: entry.log_id,
-                payload: entry.payload,
-                is_command: false,
-            }
-        } else {
-            LogEntry {
-                log_id: entry.log_id,
-                payload: Vec::new(),
-                is_command: false,
-            }
+        let stored = LogEntry {
+            log_id: entry.log_id.clone(),
+            payload: if preserve_payload {
+                entry.payload.clone()
+            } else {
+                Vec::new()
+            },
+            is_command: false,
         };
-        self.append_entry(entry);
+        self.append_entry(Arc::new(stored));
     }
 
     fn advance_commit(&mut self, commit_index: LogIndex) {
@@ -1445,6 +1468,7 @@ impl RaftCluster {
             is_command: true,
         };
         self.last_log_index = log_id.index;
+        let entry = Arc::new(entry);
 
         let node_ids: Vec<_> = self.nodes.keys().copied().collect();
         for node_id in node_ids {
@@ -1452,14 +1476,14 @@ impl RaftCluster {
                 continue;
             };
             if node_id == leader_id {
-                node.append_entry(entry.clone());
+                node.append_entry(Arc::clone(&entry));
                 continue;
             }
             if node.healthy && node.match_index().saturating_add(1) == entry.log_id.index {
                 if node.replica_role.can_serve_data() {
-                    node.append_entry(entry.clone());
+                    node.append_entry(Arc::clone(&entry));
                 } else if node.replica_role == ReplicaRole::Witness {
-                    node.append_witness_entry(entry.clone(), false);
+                    node.append_witness_entry(&entry, false);
                 }
             }
         }
@@ -2595,6 +2619,9 @@ impl RaftCluster {
             is_command: options.is_command && !proposed_as_membership_change,
         };
         self.last_log_index = log_id.index;
+        // One allocation for the payload, shared by every node's log, rather
+        // than a clone per node.
+        let entry = Arc::new(entry);
 
         let mut lease_acknowledgements = vec![leader_id];
         let node_ids: Vec<_> = self.nodes.keys().copied().collect();
@@ -2603,7 +2630,7 @@ impl RaftCluster {
                 continue;
             };
             if node_id == leader_id {
-                node.append_entry(entry.clone());
+                node.append_entry(Arc::clone(&entry));
                 continue;
             }
             let response = if let Some(pipeline) = self.peer_pipelines.get_mut(&node_id) {
@@ -2614,9 +2641,9 @@ impl RaftCluster {
                     let append_is_contiguous = match_index.saturating_add(1) == entry.log_id.index;
                     if append_is_contiguous {
                         if node.replica_role.can_serve_data() {
-                            node.append_entry(entry.clone());
+                            node.append_entry(Arc::clone(&entry));
                         } else if node.replica_role == ReplicaRole::Witness {
-                            node.append_witness_entry(entry.clone(), proposed_as_membership_change);
+                            node.append_witness_entry(&entry, proposed_as_membership_change);
                         }
                     }
                     let match_index = node.match_index();
@@ -2671,7 +2698,7 @@ impl RaftCluster {
             node_id,
             hard_state: node.hard_state.clone(),
             membership: self.membership(),
-            entries: node.log.clone(),
+            entries: node.log_entries(),
             installed_snapshot,
             apply_snapshot_fence: ApplySnapshotFence {
                 applied_index: node.applied_index,
@@ -2727,10 +2754,10 @@ impl RaftCluster {
         let mut record = self.wal_record_shell(node_id, node);
         match extends {
             Some(from) => {
-                record.entries = node.log[from..].to_vec();
+                record.entries = node.log_entries_from(from);
                 record.entries_are_delta = true;
             }
-            None => record.entries = node.log.clone(),
+            None => record.entries = node.log_entries(),
         }
         record.checksum = matrixraft_wal_checksum(&record);
         Ok(record)
@@ -3138,13 +3165,13 @@ impl RaftCluster {
                     pending_membership_change_index = Some(entry.log_id.index);
                     self.membership_change_indexes.insert(entry.log_id.index);
                 }
-                node.append_entry(entry);
+                node.append_entry(Arc::new(entry));
                 appended_entries_count = appended_entries_count.saturating_add(1);
                 if cap_busy_data_append_batch {
                     break;
                 }
             } else if node.replica_role == ReplicaRole::Witness {
-                node.append_witness_entry(entry, is_membership_change);
+                node.append_witness_entry(&entry, is_membership_change);
                 appended_entries_count = appended_entries_count.saturating_add(1);
             }
         }
@@ -4050,7 +4077,7 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(leader_id))?;
         let missing_tail: Vec<LogEntry> = leader
             .log_position_at_or_after(current_match.saturating_add(1))
-            .map(|position| leader.log[position..].to_vec())
+            .map(|position| leader.log_entries_from(position))
             .unwrap_or_default();
 
         let peer = self
@@ -4059,9 +4086,9 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(peer_id))?;
         for entry in missing_tail {
             if peer.replica_role == ReplicaRole::Witness {
-                peer.append_witness_entry(entry, false);
+                peer.append_witness_entry(&entry, false);
             } else {
-                peer.append_entry(entry);
+                peer.append_entry(Arc::new(entry));
             }
         }
         peer.advance_commit(leader_commit_index.min(peer.match_index()));
@@ -4425,7 +4452,7 @@ impl RaftCluster {
             .get_mut(&target)
             .ok_or(RaftError::NodeNotFound(target))?;
         for entry in tail_entries {
-            node.append_entry(entry);
+            node.append_entry(Arc::new(entry));
         }
         node.advance_commit(self.commit_index.max(node.match_index()));
         if let Some(pipeline) = self.peer_pipelines.get_mut(&target) {
