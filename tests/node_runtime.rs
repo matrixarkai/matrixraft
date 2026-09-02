@@ -2235,3 +2235,60 @@ fn propose_batch_persists_once_and_returns_a_log_id_per_payload() {
     );
     runtime.stop().expect("stop");
 }
+
+/// Concurrent proposers must share fsyncs without opting into anything: while
+/// one proposal's fsync runs the others queue, and the runtime applies the
+/// queued ones together and persists once. Asserted on the fsync count, which
+/// is exact where elapsed time on this box is not.
+#[test]
+fn concurrent_proposers_share_fsyncs_without_opting_in() {
+    use std::sync::Arc;
+
+    let mut runtime = NodeRuntime::create(node_options_in(temp_runtime_dir("auto-batch")))
+        .expect("create runtime");
+    runtime.start().expect("start");
+    runtime.campaign(true).expect("campaign");
+    let before = runtime.wal_lifecycle_status().expect("status").fsync_count;
+
+    let runtime = Arc::new(runtime);
+    let threads = 8;
+    let per_thread = 25;
+    let workers: Vec<_> = (0..threads)
+        .map(|worker| {
+            let runtime = Arc::clone(&runtime);
+            std::thread::spawn(move || {
+                let mut log_ids = Vec::with_capacity(per_thread);
+                for index in 0..per_thread {
+                    let payload = format!("w{worker}-{index}").into_bytes();
+                    log_ids.push(runtime.propose(payload).expect("propose"));
+                }
+                log_ids
+            })
+        })
+        .collect();
+    let mut all: Vec<_> = workers
+        .into_iter()
+        .flat_map(|worker| worker.join().expect("no worker panics"))
+        .collect();
+
+    let proposals = (threads * per_thread) as u64;
+    all.sort_by_key(|log_id| log_id.index);
+    all.dedup_by_key(|log_id| log_id.index);
+    assert_eq!(
+        all.len() as u64,
+        proposals,
+        "every proposal gets its own log index"
+    );
+
+    let after = runtime.wal_lifecycle_status().expect("status").fsync_count;
+    let fsyncs = after - before;
+    assert!(
+        fsyncs >= 1 && fsyncs < proposals / 2,
+        "two hundred concurrent proposals should coalesce well below one fsync \
+         each; got {fsyncs} for {proposals} -- exactly {proposals} means \
+         coalescing is not happening at all"
+    );
+
+    let mut runtime = Arc::into_inner(runtime).expect("all workers joined");
+    runtime.stop().expect("stop");
+}
