@@ -844,6 +844,24 @@ impl RaftCluster {
         confirmation_epoch: u64,
         duration_ms: u64,
     ) -> bool {
+        self.receive_leader_lease_confirmation_inner(node_id, confirmation_epoch, duration_ms, true)
+    }
+
+    /// `recompute_quorum` lets a caller recording a whole round of
+    /// confirmations evaluate the lease quorum once at the end rather than
+    /// after each one.
+    ///
+    /// `leader_lease_quorum_reached` walks every confirmation and looks up its
+    /// node, so recomputing per confirmation makes a round of N cost O(N^2).
+    /// The result depends only on the final set, so the intermediate passes
+    /// cannot change it.
+    fn receive_leader_lease_confirmation_inner(
+        &mut self,
+        node_id: NodeId,
+        confirmation_epoch: u64,
+        duration_ms: u64,
+        recompute_quorum: bool,
+    ) -> bool {
         if self.leader_id == Some(node_id) {
             return false;
         }
@@ -877,7 +895,9 @@ impl RaftCluster {
                 && existing_remaining_ms >= duration_ms
             {
                 existing.confirmation_epoch = confirmation_epoch;
-                self.leader_lease_valid = self.leader_lease_quorum_reached();
+                if recompute_quorum {
+                    self.leader_lease_valid = self.leader_lease_quorum_reached();
+                }
                 return true;
             }
         }
@@ -893,18 +913,29 @@ impl RaftCluster {
                 elapsed_ms: 0,
             },
         );
-        self.leader_lease_valid = self.leader_lease_quorum_reached();
+        if recompute_quorum {
+            self.leader_lease_valid = self.leader_lease_quorum_reached();
+        }
         true
     }
 
-    fn record_leader_lease_confirmation(&mut self, node_id: NodeId) {
+    /// Record a self-generated confirmation for `node_id`.
+    ///
+    /// `recompute_quorum` is false when the caller records a round of these and
+    /// evaluates the quorum once afterwards.
+    fn record_leader_lease_confirmation_inner(&mut self, node_id: NodeId, recompute_quorum: bool) {
         let confirmation_epoch = self
             .leader_lease_confirmation_epochs
             .get(&node_id)
             .copied()
             .unwrap_or_default()
             .saturating_add(1);
-        let _ = self.receive_leader_lease_confirmation(node_id, confirmation_epoch);
+        let _ = self.receive_leader_lease_confirmation_inner(
+            node_id,
+            confirmation_epoch,
+            self.config.leader_lease_ms,
+            recompute_quorum,
+        );
     }
 
     fn renew_leader_lease_from_acknowledgements<I>(&mut self, acknowledgements: I) -> bool
@@ -919,7 +950,10 @@ impl RaftCluster {
         self.leader_lease_elapsed_ms = 0;
         self.leader_lease_confirmations.clear();
         for node_id in acknowledgements {
-            self.record_leader_lease_confirmation(node_id);
+            // Deferred: the quorum is evaluated once below, so evaluating it
+            // per acknowledgement was O(N^2) for a result that only depends on
+            // the final set.
+            self.record_leader_lease_confirmation_inner(node_id, false);
         }
         self.leader_lease_valid = self.leader_lease_quorum_reached();
         self.leader_lease_valid
@@ -2270,6 +2304,27 @@ impl RaftCluster {
         peer_id: NodeId,
         response: AppendEntriesResponse,
     ) -> Result<(), RaftError> {
+        self.handle_append_entries_response_inner(local_node_id, peer_id, response, true)
+    }
+
+    /// `recompute_aggregates` exists so a caller applying a whole round of
+    /// responses can recompute the two group-wide aggregates -- the commit
+    /// index and the leader-lease quorum -- once at the end, instead of once
+    /// per response.
+    ///
+    /// Both walk every node: `refresh_commit_index` collects, sorts and
+    /// re-walks the node set, and `leader_lease_quorum_reached` walks every
+    /// confirmation and looks up its node. Doing either per response makes a
+    /// round of N responses cost O(N^2). Both results depend only on the final
+    /// state, so the intermediate passes cannot change the outcome -- only how
+    /// long it takes to reach it.
+    fn handle_append_entries_response_inner(
+        &mut self,
+        local_node_id: NodeId,
+        peer_id: NodeId,
+        response: AppendEntriesResponse,
+        recompute_aggregates: bool,
+    ) -> Result<(), RaftError> {
         self.nodes
             .get(&local_node_id)
             .ok_or(RaftError::NodeNotFound(local_node_id))?;
@@ -2303,13 +2358,14 @@ impl RaftCluster {
             return Ok(());
         }
         if response.lease_confirmation_epoch > 0 && response.lease_duration_ms > 0 {
-            let _ = self.receive_leader_lease_confirmation_with_duration(
+            let _ = self.receive_leader_lease_confirmation_inner(
                 peer_id,
                 response.lease_confirmation_epoch,
                 response.lease_duration_ms,
+                recompute_aggregates,
             );
         } else if self.config.enable_lease_read {
-            self.record_leader_lease_confirmation(peer_id);
+            self.record_leader_lease_confirmation_inner(peer_id, recompute_aggregates);
         }
         let mut append_response_result = Ok(());
         if let Some(pipeline) = self.peer_pipelines.get_mut(&peer_id) {
@@ -2319,7 +2375,9 @@ impl RaftCluster {
                 self.config.election_timeout_ms.max(1),
             );
             append_response_result = pipeline.handle_append_response(&response);
-            self.refresh_commit_index();
+            if recompute_aggregates {
+                self.refresh_commit_index();
+            }
         }
         if let Some(required_snapshot_index) = response.require_snapshot {
             self.trigger_new_snapshot_if_leader_snapshot_is_stale(
@@ -2584,7 +2642,12 @@ impl RaftCluster {
                 if response.success {
                     lease_acknowledgements.push(node_id);
                 }
-                let _ = self.handle_append_entries_response(leader_id, node_id, response);
+                // Defer the commit-index refresh: this loop applies one response
+                // per node and then refreshes once below, so refreshing inside
+                // each response made a proposal cost O(N^2 log N) in group size.
+                let _ = self.handle_append_entries_response_inner(
+                    leader_id, node_id, response, false,
+                );
             }
         }
         self.refresh_commit_index();
