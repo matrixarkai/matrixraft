@@ -110,6 +110,31 @@ pub enum LeaderTransferAdmissionKind {
     Replaced,
 }
 
+/// What a leader-transfer request actually did.
+///
+/// `transfer_leader` returns `Ok` for all three, because none of them is an
+/// error: an unknown or ineligible transferee is *ignored* (as etcd/raft drops
+/// a `MsgTransferLeader` naming a peer it does not know), and a transferee that
+/// is still catching up leaves the transfer queued. Only `Transferred` means
+/// leadership moved.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaderTransferOutcome {
+    /// The admission declined the request; nothing changed.
+    Ignored,
+    /// Accepted, but the transferee has not caught up yet, so it is queued.
+    Pending,
+    /// Leadership moved to the transferee.
+    Transferred,
+}
+
+impl LeaderTransferOutcome {
+    /// True only when leadership actually moved.
+    pub fn is_transferred(self) -> bool {
+        matches!(self, Self::Transferred)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LeaderTransferAdmission {
     pub kind: LeaderTransferAdmissionKind,

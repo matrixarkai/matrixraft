@@ -354,6 +354,15 @@ pub fn matrixraft_read_safety_runtime_decision(
     }
 }
 
+/// The built-in read-safety **conformance vector**.
+///
+/// Unlike the membership reference artifact, this one does exercise real logic:
+/// each case is a fixed [`ReadSafetyRuntimeInput`] run through
+/// [`matrixraft_read_safety_runtime_decision`]. Only the inputs are fixed.
+///
+/// So it is evidence about *this crate*, not about a caller's deployment. The
+/// bundle validation report sets `read_safety_is_reference` when a bundle still
+/// carries this rather than something observed.
 pub fn matrixraft_read_safety_evidence_artifact() -> ReadSafetyEvidenceArtifact {
     ReadSafetyEvidenceArtifact {
         schema: "rustraft.read_safety_evidence.v1".to_string(),
