@@ -376,11 +376,63 @@ pub enum TcpRaftTransportResponse {
 #[derive(Debug, Clone, Default)]
 pub struct TcpRaftTransport {
     peers: BTreeMap<NodeId, String>,
+    /// Connections kept open per peer, so an RPC does not pay a TCP handshake.
+    ///
+    /// Shared across clones on purpose: a cloned transport talks to the same
+    /// peers, and a per-clone pool would only multiply idle sockets. The reader
+    /// is pooled rather than the raw stream so that anything a read buffered
+    /// stays with its connection instead of being dropped.
+    idle: Arc<Mutex<BTreeMap<NodeId, Vec<BufReader<TcpStream>>>>>,
 }
 
+/// Enough to keep a leader's concurrent RPCs to one follower off the handshake
+/// path, without holding sockets open for a peer that has gone quiet.
+const MAX_IDLE_CONNECTIONS_PER_PEER: usize = 4;
+
 impl TcpRaftTransport {
+    fn take_idle(&self, target: NodeId) -> Option<BufReader<TcpStream>> {
+        self.idle.lock().ok()?.get_mut(&target)?.pop()
+    }
+
+    fn store_idle(&self, target: NodeId, connection: BufReader<TcpStream>) {
+        if let Ok(mut idle) = self.idle.lock() {
+            let pooled = idle.entry(target).or_default();
+            if pooled.len() < MAX_IDLE_CONNECTIONS_PER_PEER {
+                pooled.push(connection);
+            }
+        }
+    }
+
+    /// Sends one framed request and reads one framed response.
+    ///
+    /// Hands the connection back so a successful exchange can return it to the
+    /// pool. A failed one drops it, which is what closes a broken socket.
+    fn exchange(
+        &self,
+        mut connection: BufReader<TcpStream>,
+        encoded: &[u8],
+    ) -> Result<(String, BufReader<TcpStream>), RaftError> {
+        connection
+            .get_mut()
+            .write_all(encoded)
+            .map_err(|err| RaftError::Transport(format!("failed to write raft RPC: {err}")))?;
+        let mut response = String::new();
+        connection
+            .read_line(&mut response)
+            .map_err(|err| RaftError::Transport(format!("failed to read raft RPC: {err}")))?;
+        if response.is_empty() {
+            return Err(RaftError::Transport(
+                "raft RPC connection closed before a response".to_string(),
+            ));
+        }
+        Ok((response, connection))
+    }
+
     pub fn new(peers: BTreeMap<NodeId, String>) -> Self {
-        Self { peers }
+        Self {
+            peers,
+            idle: Arc::default(),
+        }
     }
 
     pub fn set_peer_addr(&mut self, node_id: NodeId, addr: impl Into<String>) {
@@ -395,26 +447,38 @@ impl TcpRaftTransport {
         let addr = self.peers.get(&target).ok_or_else(|| {
             RaftError::Transport(format!("raft transport target {target} has no address"))
         })?;
-        let mut stream = TcpStream::connect(addr)
-            .map_err(|err| RaftError::Transport(format!("failed to connect to {addr}: {err}")))?;
-        // Raft RPCs are small request/response exchanges, which is the shape
-        // Nagle delays. Without this the framing newline below can sit in the
-        // sender's buffer waiting for an ACK the peer will not send until it
-        // has the newline -- the classic write/write/read stall.
-        let _ = stream.set_nodelay(true);
         let mut encoded = serde_json::to_vec(&request)
             .map_err(|err| RaftError::Transport(format!("failed to encode raft RPC: {err}")))?;
         // One write, not a body followed by a one-byte newline: the peer reads
         // a line, so splitting them puts a round trip between the request and
         // the peer being able to see it.
         encoded.push(b'\n');
-        stream
-            .write_all(&encoded)
-            .map_err(|err| RaftError::Transport(format!("failed to write raft RPC: {err}")))?;
-        let mut response = String::new();
-        BufReader::new(stream)
-            .read_line(&mut response)
-            .map_err(|err| RaftError::Transport(format!("failed to read raft RPC: {err}")))?;
+
+        // A pooled connection can have been closed by the peer while it sat
+        // idle, and there is no way to learn that but to use it. So a failure
+        // on a *pooled* connection is retried once on a fresh one, while a
+        // failure on a fresh connection is returned. The retry is sound because
+        // it only happens where the peer had closed the socket, and because
+        // these are the RPCs Raft already re-sends: an AppendEntries or a Vote
+        // at the same term from the same sender lands the same way twice.
+        if let Some(connection) = self.take_idle(target) {
+            if let Ok((response, connection)) = self.exchange(connection, &encoded) {
+                self.store_idle(target, connection);
+                return serde_json::from_str(&response).map_err(|err| {
+                    RaftError::Transport(format!("failed to decode raft RPC: {err}"))
+                });
+            }
+        }
+
+        let stream = TcpStream::connect(addr)
+            .map_err(|err| RaftError::Transport(format!("failed to connect to {addr}: {err}")))?;
+        // Raft RPCs are small request/response exchanges, which is the shape
+        // Nagle delays. Without this the framing newline below can sit in the
+        // sender's buffer waiting for an ACK the peer will not send until it
+        // has the newline -- the classic write/write/read stall.
+        let _ = stream.set_nodelay(true);
+        let (response, connection) = self.exchange(BufReader::new(stream), &encoded)?;
+        self.store_idle(target, connection);
         serde_json::from_str(&response)
             .map_err(|err| RaftError::Transport(format!("failed to decode raft RPC: {err}")))
     }
@@ -562,7 +626,29 @@ impl TcpRaftTransportServer {
                                 break;
                             }
                             let _ = stream.set_nodelay(true);
-                            let _ = handle_tcp_raft_stream(stream, handler.as_ref());
+                            // A connection is served on its own thread now. It
+                            // used to be served inline here, so one peer's RPC
+                            // blocked every other peer's for its whole round
+                            // trip -- and with connections kept alive that
+                            // would have been a stall for as long as the
+                            // connection lived rather than for one exchange.
+                            let conn_handler = Arc::clone(&handler);
+                            let conn_shutdown = Arc::clone(&worker_shutdown);
+                            let spawned = thread::Builder::new()
+                                .name("rustraft-tcp-conn".to_string())
+                                .spawn(move || {
+                                    let _ = serve_tcp_raft_connection(
+                                        stream,
+                                        conn_handler.as_ref(),
+                                        &conn_shutdown,
+                                    );
+                                });
+                            if spawned.is_err() {
+                                // Out of threads. Drop the connection rather
+                                // than serve it here and stall the listener;
+                                // the peer sees a closed socket and retries.
+                                continue;
+                            }
                         }
                         Err(_) => break,
                     }
@@ -600,31 +686,59 @@ impl Drop for TcpRaftTransportServer {
     }
 }
 
-fn handle_tcp_raft_stream<T>(stream: TcpStream, handler: &T) -> Result<(), RaftError>
+/// Serves one connection until the peer closes it.
+///
+/// This used to serve exactly one request and hang up, which made every RPC pay
+/// a TCP handshake. The loop is what lets a caller keep the connection.
+fn serve_tcp_raft_connection<T>(
+    stream: TcpStream,
+    handler: &T,
+    shutdown: &AtomicBool,
+) -> Result<(), RaftError>
 where
     T: Transport + ?Sized,
 {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|err| RaftError::Transport(format!("failed to read raft TCP request: {err}")))?;
-    if line.trim().is_empty() {
-        return Ok(());
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        line.clear();
+        let read = reader.read_line(&mut line).map_err(|err| {
+            RaftError::Transport(format!("failed to read raft TCP request: {err}"))
+        })?;
+        // A zero-length read is the peer closing, which is the ordinary way a
+        // kept-alive connection ends rather than a failure.
+        if read == 0 {
+            return Ok(());
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Re-checked after the read, not only before it. A thread parked in
+        // `read_line` when shutdown was signalled would otherwise wake on the
+        // next request and serve it, so a kept-alive connection could be served
+        // by a server that had already been shut down.
+        if shutdown.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let request: TcpRaftTransportRequest = serde_json::from_str(&line).map_err(|err| {
+            RaftError::Transport(format!("failed to decode raft TCP request: {err}"))
+        })?;
+        require_transport_validation(matrixraft_validate_tcp_transport_request(&request))?;
+        let response = handle_tcp_raft_request(request, handler);
+        let mut encoded = serde_json::to_vec(&response).map_err(|err| {
+            RaftError::Transport(format!("failed to encode raft TCP response: {err}"))
+        })?;
+        // One write, for the same reason the request side does it: the caller
+        // is reading a line, so a separate one-byte newline puts a round trip
+        // between the response and the caller being able to see it.
+        encoded.push(b'\n');
+        reader.get_mut().write_all(&encoded).map_err(|err| {
+            RaftError::Transport(format!("failed to write raft TCP response: {err}"))
+        })?;
     }
-    let request: TcpRaftTransportRequest = serde_json::from_str(&line)
-        .map_err(|err| RaftError::Transport(format!("failed to decode raft TCP request: {err}")))?;
-    require_transport_validation(matrixraft_validate_tcp_transport_request(&request))?;
-    let response = handle_tcp_raft_request(request, handler);
-    let encoded = serde_json::to_vec(&response).map_err(|err| {
-        RaftError::Transport(format!("failed to encode raft TCP response: {err}"))
-    })?;
-    let stream = reader.get_mut();
-    stream
-        .write_all(&encoded)
-        .and_then(|_| stream.write_all(b"\n"))
-        .map_err(|err| RaftError::Transport(format!("failed to write raft TCP response: {err}")))?;
-    Ok(())
 }
 
 fn handle_tcp_raft_request<T>(
