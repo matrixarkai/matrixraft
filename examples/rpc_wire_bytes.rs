@@ -7,7 +7,10 @@
 //! request is exactly its encoded length -- a count, not a timing, and so
 //! independent of machine load.
 
-use matrixraft::{AppendEntriesRequest, LogEntry, LogId, TcpRaftTransportRequest};
+use matrixraft::{
+    AppendEntriesRequest, InstallSnapshotRequest, LogEntry, LogId, SnapshotChunk, SnapshotMetadata,
+    TcpRaftTransportRequest,
+};
 
 fn request(payload_bytes: usize, entries: usize) -> TcpRaftTransportRequest {
     TcpRaftTransportRequest::AppendEntries {
@@ -33,6 +36,31 @@ fn request(payload_bytes: usize, entries: usize) -> TcpRaftTransportRequest {
     }
 }
 
+fn snapshot_request(chunk_bytes: usize) -> TcpRaftTransportRequest {
+    TcpRaftTransportRequest::InstallSnapshot {
+        target: 2,
+        request: InstallSnapshotRequest {
+            group_id: 3,
+            term: 1,
+            leader_id: 1,
+            chunk: SnapshotChunk {
+                meta: SnapshotMetadata {
+                    snapshot_id: "snap-1".to_string(),
+                    last_log_id: LogId {
+                        term: 1,
+                        index: 100,
+                    },
+                    membership: vec![1, 2, 3],
+                    members: Vec::new(),
+                },
+                offset: 0,
+                data: (0..chunk_bytes).map(|byte| byte as u8).collect(),
+                done: false,
+            },
+        },
+    }
+}
+
 fn main() {
     println!(
         "{:>12}  {:>8}  {:>12}  {:>16}",
@@ -49,6 +77,19 @@ fn main() {
         println!(
             "{payload:>12}  {entries:>8}  {:>12}  {per:>16.2}",
             encoded.len()
+        );
+    }
+    println!();
+    println!(
+        "{:>12}  {:>12}  {:>16}",
+        "chunk bytes", "wire bytes", "bytes/data B"
+    );
+    for chunk in [4096usize, 65536] {
+        let encoded = serde_json::to_vec(&snapshot_request(chunk)).expect("encode");
+        println!(
+            "{chunk:>12}  {:>12}  {:>16.2}",
+            encoded.len(),
+            encoded.len() as f64 / chunk as f64
         );
     }
 }
