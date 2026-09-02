@@ -247,7 +247,8 @@ pub use unique_id::{
 };
 pub use wal::{
     matrixraft_fold_wal_entries, matrixraft_fold_wal_entries_from,
-    matrixraft_fold_wal_record_iter, matrixraft_fold_wal_records,
+    matrixraft_fold_wal_latest_record, matrixraft_fold_wal_record_iter,
+    matrixraft_fold_wal_records,
     matrixraft_recover_from_wal_records, matrixraft_recover_latest_wal_record,
     matrixraft_validate_apply_snapshot_fence, matrixraft_validate_hard_state_persistence,
     matrixraft_validate_wal_lifecycle_evidence_artifact, matrixraft_wal_checksum,

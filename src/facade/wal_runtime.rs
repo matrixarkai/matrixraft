@@ -876,13 +876,19 @@ impl PersistentRaftWal {
         matrixraft_wal_checksum_format()
     }
 
-    /// The retained records, folded whole.
+    /// Every retained record, each folded to the whole log it describes.
     ///
-    /// Sealed segments are read back from disk, so this is no longer free.
-    /// Callers that only want a count should use [`Self::status`], which no
-    /// longer materialises anything. A segment that cannot be read yields an
-    /// empty result rather than a partial one; [`Self::try_records`] returns
-    /// the error instead.
+    /// **This costs about N^2/2 entries for an N-record WAL**, because that is
+    /// what it is being asked for: a record per step, each carrying the log as
+    /// it stood then. A few thousand records is enough for that to be a
+    /// gigabyte.
+    ///
+    /// Almost nothing wants that. For the log as it ends up, use
+    /// [`Self::latest_record`]; for how many records are retained, use
+    /// [`Self::status`], which materialises nothing. Sealed segments are read
+    /// back from disk, so this is not even free at small sizes; a segment that
+    /// cannot be read yields an empty result rather than a partial one, and
+    /// [`Self::try_records`] returns the error instead.
     pub fn records(&self) -> Vec<WalRecord> {
         self.try_records().unwrap_or_default()
     }
@@ -894,6 +900,22 @@ impl PersistentRaftWal {
             stored.extend(self.segment_records(segment)?);
         }
         Ok(matrixraft_fold_wal_records(&stored))
+    }
+
+    /// The log as the retained records leave it.
+    ///
+    /// The cheap form of [`Self::records`]`.last()`: it folds once and builds
+    /// one record, rather than building one per stored record and discarding
+    /// all but the last. Sealed segments release their in-memory records, so
+    /// like [`Self::records`] this reads them back from disk; a segment that
+    /// cannot be read yields `None` rather than a fold of a partial prefix.
+    pub fn latest_record(&self) -> Option<WalRecord> {
+        let mut stored: Vec<WalRecord> =
+            Vec::with_capacity(self.retained_record_count() as usize);
+        for segment in &self.segments {
+            stored.extend(self.segment_records(segment).ok()?);
+        }
+        matrixraft_fold_wal_latest_record(&stored)
     }
 
     pub fn corrupt_tail_for_test(&mut self) -> Result<(), RaftError> {

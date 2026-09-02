@@ -429,6 +429,28 @@ where
     folded
 }
 
+/// The log as the retained records leave it, as a single whole record.
+///
+/// [`matrixraft_fold_wal_records`] answers the same question by building a
+/// whole-log record for every stored record, which costs about N^2/2 entries
+/// for an N-record WAL. Callers that want the final state -- which is most of
+/// them -- want this instead.
+///
+/// This is a plain fold, unlike [`matrixraft_recover_from_wal_records`], which
+/// also filters by hard-state and fence validity and picks by committed index.
+pub fn matrixraft_fold_wal_latest_record(stored: &[WalRecord]) -> Option<WalRecord> {
+    let mut folded: Vec<LogEntry> = Vec::new();
+    let mut last: Option<&WalRecord> = None;
+    for record in stored {
+        if !matrixraft_wal_checksum_valid(record) {
+            break;
+        }
+        fold_wal_entries_step(&mut folded, record);
+        last = Some(record);
+    }
+    last.map(|record| whole_from_folded(record, &folded))
+}
+
 /// What recovery needs from a WAL: how many records survived, and the one
 /// record it would restore from.
 ///
