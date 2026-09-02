@@ -8,6 +8,7 @@ use matrixraft::{
     PersistentRaftWal, PersistentRaftWalOptions, StorageApplyFence, WalRecord,
 };
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -752,20 +753,24 @@ fn roll_options(dir: PathBuf) -> PersistentRaftWalOptions {
     }
 }
 
-fn retained_entries(wal: &PersistentRaftWal) -> usize {
+/// Records held in memory, which is now only the active segment's.
+fn in_memory_record_count(wal: &PersistentRaftWal) -> usize {
     wal.segments()
         .iter()
-        .flat_map(|segment| segment.records.iter())
-        .map(|record| record.entries.len())
+        .map(|segment| segment.records.len())
         .sum()
 }
 
-fn whole_record_count(wal: &PersistentRaftWal) -> usize {
-    wal.segments()
-        .iter()
-        .flat_map(|segment| segment.records.iter())
-        .filter(|record| !record.entries_are_delta)
-        .count()
+/// A segment's first record, read from the file rather than from memory.
+///
+/// Sealed segments release their records once they are on disk, so a test that
+/// wants to see what was *stored* has to read the file, which is the point.
+fn first_stored_record(dir: &Path, segment_id: u64) -> WalRecord {
+    let path = dir.join(format!("{segment_id:020}.wal"));
+    let text =
+        fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    let line = text.lines().next().expect("the segment has a record");
+    serde_json::from_str(line).expect("a stored record parses")
 }
 
 /// A segment roll used to rewrite the whole retained log, so N appends cost
@@ -785,15 +790,26 @@ fn a_segment_roll_no_longer_rewrites_the_whole_log() {
         wal.segments().len() >= 5,
         "the log has to cross several segments for this to mean anything"
     );
+    // Counted from the files, because sealed segments no longer keep their
+    // records in memory. 50 records with one whole one means 49 deltas; a
+    // whole record per segment roll would leave 45.
     assert_eq!(
-        whole_record_count(&wal),
-        1,
-        "only the very first record of the WAL is stored whole"
+        stored_delta_count(&dir),
+        49,
+        "only the very first record of the WAL should be stored whole; a roll          that rewrote the log would leave 5 whole records here"
     );
     assert_eq!(
-        retained_entries(&wal),
-        50,
-        "each append should retain one entry; rewriting the log at every roll          retained 150 here, and grows quadratically from there"
+        in_memory_record_count(&wal),
+        wal.segments()
+            .last()
+            .expect("an active segment")
+            .records
+            .len(),
+        "only the active segment's records belong in memory"
+    );
+    assert!(
+        in_memory_record_count(&wal) <= 10,
+        "memory should be bounded by the segment being written, not the log"
     );
     fs::remove_dir_all(&dir).ok();
 }
@@ -856,11 +872,8 @@ fn compaction_materialises_the_record_its_survivors_depend_on() {
         for index in 1..=50 {
             wal.append(growing_wal_record(index, 3)).expect("append");
         }
-        let first_survivor_was_a_delta = wal.segments()[1]
-            .records
-            .first()
-            .expect("the second segment has records")
-            .entries_are_delta;
+        let first_survivor_was_a_delta =
+            first_stored_record(&dir, wal.segments()[1].segment_id).entries_are_delta;
         assert!(
             first_survivor_was_a_delta,
             "the segment that survives has to start as a delta, or this proves nothing"
@@ -870,11 +883,7 @@ fn compaction_materialises_the_record_its_survivors_depend_on() {
 
     let mut reopened = PersistentRaftWal::open(options).expect("reopen");
     assert!(
-        !reopened.segments()[0]
-            .records
-            .first()
-            .expect("the surviving segment has records")
-            .entries_are_delta,
+        !first_stored_record(&dir, reopened.segments()[0].segment_id).entries_are_delta,
         "the first surviving record must have been materialised on disk"
     );
     let recovered = reopened
