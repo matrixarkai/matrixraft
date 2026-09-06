@@ -36,6 +36,7 @@ use matrixraft::{
     matrixraft_optimization_diagnostic_log_entries, matrixraft_optimization_report,
     matrixraft_optimization_report_prometheus, matrixraft_peer_pipeline_metrics_prometheus,
     matrixraft_production_readiness_report_with_runtime_pressure_policy,
+    matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness,
     matrixraft_runtime_admin_report, matrixraft_runtime_local_status_report,
     matrixraft_runtime_pressure_admission,
     matrixraft_runtime_pressure_admission_with_pipeline_pressure,
@@ -1554,16 +1555,34 @@ fn benchmark_readiness_artifact_validator_accepts_matching_read_backlog_evidence
         &labels,
     )
     .expect("read backlog artifact");
+    let artifact_freshness = matrixraft_runtime_pressure_freshness_report(
+        artifact.generated_at_unix_ms,
+        artifact.generated_at_unix_ms,
+        24 * 60 * 60 * 1_000,
+        24 * 60 * 60 * 100,
+    );
+    let expected_artifact_report =
+        matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
+            &readiness_input,
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+            &artifact_freshness,
+        );
+    assert_eq!(artifact.report, expected_artifact_report);
+    assert_eq!(
+        artifact.diagnostic_json_lines,
+        matrixraft::matrixraft_production_readiness_diagnostic_json_lines(
+            &expected_artifact_report
+        )
+    );
+    assert!(artifact
+        .report
+        .satisfied
+        .contains(&"runtime_pressure:freshness_evidence_fresh".to_string()));
     let expected_policy_report =
         matrixraft_production_readiness_report_with_runtime_pressure_policy(
             &readiness_input,
             &RuntimePressureAdmissionPolicy::fail_closed(),
         );
-    assert_eq!(artifact.report, expected_policy_report);
-    assert_eq!(
-        artifact.diagnostic_json_lines,
-        matrixraft::matrixraft_production_readiness_diagnostic_json_lines(&expected_policy_report)
-    );
     let one_call_report =
         matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
             &input,
@@ -1787,12 +1806,27 @@ fn benchmark_readiness_artifact_validator_preserves_timer_aware_release_baseline
             &RuntimePressureAdmissionPolicy::fail_closed(),
         )
         .expect("timer-aware readiness input");
+    let expected_timer_artifact_report =
+        matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
+            &baseline_readiness_input,
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+            &matrixraft_runtime_pressure_freshness_report(
+                baseline_artifact.generated_at_unix_ms,
+                baseline_artifact.generated_at_unix_ms,
+                24 * 60 * 60 * 1_000,
+                24 * 60 * 60 * 100,
+            ),
+        );
+    assert_eq!(baseline_artifact.report, expected_timer_artifact_report);
+    assert!(baseline_artifact
+        .report
+        .satisfied
+        .contains(&"runtime_pressure:freshness_evidence_fresh".to_string()));
     let expected_timer_policy_report =
         matrixraft_production_readiness_report_with_runtime_pressure_policy(
             &baseline_readiness_input,
             &RuntimePressureAdmissionPolicy::fail_closed(),
         );
-    assert_eq!(baseline_artifact.report, expected_timer_policy_report);
     let one_call_timer_report =
         matrixraft_production_readiness_report_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
             &input,
