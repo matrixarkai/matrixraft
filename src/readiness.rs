@@ -1258,6 +1258,13 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "matrixraft_runtime_pressure_freshness_prometheus",
         "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
         "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
+        "MailBox",
+        "MailBox::try_send_checked",
+        "MailBox::fetch_checked",
+        "MailChannel",
+        "MailChannel::try_send_checked",
+        "ChannelSelector",
+        "ChannelSelector::select_checked",
         "matrixraft_public_api_contract_validation_prometheus",
         "matrixraft_snapshot_lifecycle_evidence_prometheus",
         "matrixraft_wal_lifecycle_evidence_prometheus",
@@ -1463,6 +1470,64 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             byteraft_or_baseline_reference: "read_index_response / lease_read_result"
                 .to_string(),
             note: "ReadIndexResponse separates safe-read proof, lease-read eligibility, and bounded-stale fallback status."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailBox".to_string(),
+            matrixraft_facade: "MatrixRaftMailBox".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore scheduler mailbox".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft event queue".to_string(),
+            note: "MailBox is the priority queue boundary for scheduler and transport work that embedders can monitor for pressure."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailBox::try_send_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailBox::TrySendChecked".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore non-blocking mailbox send with backpressure".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked event enqueue".to_string(),
+            note: "The checked send path returns queue saturation and lock failures as values so production runtimes can shed or retry work without process aborts."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailBox::fetch_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailBox::FetchChecked".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore bounded mailbox drain".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked event dequeue".to_string(),
+            note: "The checked fetch path preserves priority ordering and deadline behavior while surfacing queue runtime failures as RaftError."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailChannel".to_string(),
+            matrixraft_facade: "MatrixRaftMailChannel".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore per-peer ready queue".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft per-replica event lane".to_string(),
+            note: "MailChannel names the per-replica queue used by the selector to track burst pressure and preserve per-peer scheduling."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailChannel::try_send_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailChannel::TrySendChecked".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore per-peer enqueue with flow-control feedback".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked per-peer enqueue".to_string(),
+            note: "The checked channel send keeps overflow as a recoverable result that returns the caller's mail while reporting runtime failures as RaftError."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "ChannelSelector".to_string(),
+            matrixraft_facade: "MatrixRaftChannelSelector".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore ready peer selector".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft replica scheduler selector".to_string(),
+            note: "ChannelSelector is the fairness and fanout boundary for selecting active peer queues under release-scale workloads."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "ChannelSelector::select_checked".to_string(),
+            matrixraft_facade: "MatrixRaftChannelSelector::SelectChecked".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore bounded ready-poll loop".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked ready-queue selector".to_string(),
+            note: "The checked selector keeps deadline-bound polling and global-mail draining available without converting poisoned queue state into a process panic."
                 .to_string(),
         },
         ApiNameMapping {
@@ -2712,6 +2777,13 @@ pub fn matrixraft_core_interface_names() -> Vec<String> {
         "RuntimeTimerStatus",
         "RuntimeAdminReport",
         "AdminCommand::ReleaseMemory",
+        "MailBox",
+        "MailBox::try_send_checked",
+        "MailBox::fetch_checked",
+        "MailChannel",
+        "MailChannel::try_send_checked",
+        "ChannelSelector",
+        "ChannelSelector::select_checked",
         "PersistentRaftWal",
         "DebugSnapshot",
         "DiagnosticLogEntry",
@@ -2738,6 +2810,8 @@ pub fn matrixraft_public_module_names() -> Vec<String> {
         "storage",
         "benchmark",
         "fault",
+        "mailbox",
+        "channel_selector",
     ]
     .into_iter()
     .map(str::to_string)
