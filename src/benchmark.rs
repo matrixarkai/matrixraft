@@ -26,13 +26,14 @@ use crate::{
     matrixraft_runtime_pressure_admission_prometheus,
     matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure,
     matrixraft_runtime_pressure_admission_with_scale_pipeline_read_backlog_and_node_runtime_timer_pressure,
-    matrixraft_runtime_pressure_freshness_report, matrixraft_scale_optimization_hints,
-    AdminStatusSurfaceInput, ApplySnapshotFence, Config, DebugSnapshot, GrafanaPanel, HardState,
-    LatencyMetrics, LatencyOptimizationThresholds, LogEntry, LogId, Membership, MemoryMetrics,
-    MemoryOptimizationThresholds, NodeRuntimeTimerThresholds, OperatorRunbookStep,
-    OptimizationHint, Peer, PersistentRaftWal, PersistentRaftWalOptions, ProductionReadinessInput,
-    ProductionReadinessReport, PrometheusMetricSet, RaftCluster, RaftError, ReadBacklogMetrics,
-    ReadBacklogThresholds, ReplicaRole, RuntimeAdminReport, RuntimePressureAdmissionPolicy,
+    matrixraft_runtime_pressure_freshness_prometheus, matrixraft_runtime_pressure_freshness_report,
+    matrixraft_scale_optimization_hints, AdminStatusSurfaceInput, ApplySnapshotFence, Config,
+    DebugSnapshot, GrafanaPanel, HardState, LatencyMetrics, LatencyOptimizationThresholds,
+    LogEntry, LogId, Membership, MemoryMetrics, MemoryOptimizationThresholds,
+    NodeRuntimeTimerThresholds, OperatorRunbookStep, OptimizationHint, Peer, PersistentRaftWal,
+    PersistentRaftWalOptions, ProductionReadinessInput, ProductionReadinessReport,
+    PrometheusMetricSet, RaftCluster, RaftError, ReadBacklogMetrics, ReadBacklogThresholds,
+    ReplicaRole, RuntimeAdminReport, RuntimePressureAdmissionPolicy,
     RuntimePressureFreshnessReport, RuntimeTimerStatus, ScaleMetrics, ScaleOptimizationTargets,
     ScaleRateMetrics, SnapshotMetadata, WalRecord,
 };
@@ -899,6 +900,8 @@ pub struct BenchmarkRuntimePressureReadinessArtifact {
     pub prometheus: PrometheusMetricSet,
     #[serde(default)]
     pub runtime_pressure_prometheus: PrometheusMetricSet,
+    #[serde(default)]
+    pub runtime_pressure_freshness_prometheus: PrometheusMetricSet,
     pub diagnostic_json_lines: String,
 }
 
@@ -1026,6 +1029,8 @@ pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlo
         .unwrap_or_default();
     let generated_at_unix_ms = benchmark_now_unix_ms();
     let freshness = benchmark_runtime_pressure_freshness_report(generated_at_unix_ms);
+    let runtime_pressure_freshness_prometheus =
+        matrixraft_runtime_pressure_freshness_prometheus(&freshness, labels);
     let report = matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
         &readiness_input,
         policy,
@@ -1043,6 +1048,7 @@ pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlo
         report,
         prometheus,
         runtime_pressure_prometheus,
+        runtime_pressure_freshness_prometheus,
         diagnostic_json_lines,
     })
 }
@@ -1082,6 +1088,8 @@ pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_re
         .unwrap_or_default();
     let generated_at_unix_ms = benchmark_now_unix_ms();
     let freshness = benchmark_runtime_pressure_freshness_report(generated_at_unix_ms);
+    let runtime_pressure_freshness_prometheus =
+        matrixraft_runtime_pressure_freshness_prometheus(&freshness, labels);
     let report = matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
         &readiness_input,
         policy,
@@ -1099,6 +1107,7 @@ pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_re
         report,
         prometheus,
         runtime_pressure_prometheus,
+        runtime_pressure_freshness_prometheus,
         diagnostic_json_lines,
     })
 }
@@ -1142,6 +1151,8 @@ pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlo
         .unwrap_or_default();
     let generated_at_unix_ms = benchmark_now_unix_ms();
     let freshness = benchmark_runtime_pressure_freshness_report(generated_at_unix_ms);
+    let runtime_pressure_freshness_prometheus =
+        matrixraft_runtime_pressure_freshness_prometheus(&freshness, labels);
     let report = matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
         &readiness_input,
         policy,
@@ -1159,6 +1170,7 @@ pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlo
         report,
         prometheus,
         runtime_pressure_prometheus,
+        runtime_pressure_freshness_prometheus,
         diagnostic_json_lines,
     })
 }
@@ -1202,6 +1214,8 @@ pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_re
         .unwrap_or_default();
     let generated_at_unix_ms = benchmark_now_unix_ms();
     let freshness = benchmark_runtime_pressure_freshness_report(generated_at_unix_ms);
+    let runtime_pressure_freshness_prometheus =
+        matrixraft_runtime_pressure_freshness_prometheus(&freshness, labels);
     let report = matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
         &readiness_input,
         policy,
@@ -1219,6 +1233,7 @@ pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_re
         report,
         prometheus,
         runtime_pressure_prometheus,
+        runtime_pressure_freshness_prometheus,
         diagnostic_json_lines,
     })
 }
@@ -1346,6 +1361,69 @@ fn benchmark_runtime_pressure_metric_names_from_text(text: &str) -> Vec<String> 
     names
 }
 
+fn benchmark_runtime_pressure_required_freshness_metric_names() -> Vec<String> {
+    let metrics = matrixraft_runtime_pressure_metric_names();
+    vec![
+        metrics.freshness_generated_at_unix_ms,
+        metrics.freshness_age_ms,
+        metrics.freshness_max_age_ms,
+        metrics.freshness_stale_after_unix_ms,
+        metrics.freshness_remaining_fresh_ms,
+        metrics.freshness_low_fresh_ms,
+        metrics.freshness_low_fresh,
+        metrics.freshness_fresh,
+        metrics.freshness_status,
+        metrics.freshness_issue_total,
+        metrics.freshness_issue,
+    ]
+}
+
+fn benchmark_runtime_pressure_freshness_prometheus_blockers(
+    artifact: &BenchmarkRuntimePressureReadinessArtifact,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    let metrics = &artifact.runtime_pressure_freshness_prometheus;
+    if metrics.format != "prometheus_text_v0.0.4" {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_freshness_prometheus_format_mismatch".to_string(),
+        );
+    }
+    if metrics.text.is_empty() {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_freshness_prometheus_metrics_missing".to_string(),
+        );
+    }
+    if metrics.metric_count != metrics.text.lines().count() as u64 {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_freshness_prometheus_metric_count_mismatch"
+                .to_string(),
+        );
+    }
+    if !matrixraft_prometheus_sample_lines_are_well_formed(&metrics.text) {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_freshness_prometheus_malformed_sample"
+                .to_string(),
+        );
+    }
+    for required_metric in benchmark_runtime_pressure_required_freshness_metric_names() {
+        if !matrixraft_prometheus_text_has_metric_sample(&metrics.text, &required_metric) {
+            blockers.push(format!(
+                "benchmark:runtime_pressure_readiness_freshness_prometheus_metric_missing:{}",
+                required_metric
+            ));
+        }
+    }
+    blockers
+}
+
+fn benchmark_runtime_pressure_expected_freshness_prometheus(
+    artifact: &BenchmarkRuntimePressureReadinessArtifact,
+    labels: &[(&str, &str)],
+) -> PrometheusMetricSet {
+    let freshness = benchmark_runtime_pressure_freshness_report(artifact.generated_at_unix_ms);
+    matrixraft_runtime_pressure_freshness_prometheus(&freshness, labels)
+}
+
 fn benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(
     artifact: &BenchmarkRuntimePressureReadinessArtifact,
     required_metrics: &[String],
@@ -1427,6 +1505,9 @@ pub fn matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_re
         artifact.generated_at_unix_ms,
     ));
     blockers.extend(benchmark_runtime_pressure_prometheus_blockers(artifact));
+    blockers.extend(benchmark_runtime_pressure_freshness_prometheus_blockers(
+        artifact,
+    ));
 
     let expected = matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
         input,
@@ -1451,6 +1532,12 @@ pub fn matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_re
     if artifact.runtime_pressure_prometheus != expected.runtime_pressure_prometheus {
         blockers
             .push("benchmark:runtime_pressure_readiness_runtime_prometheus_mismatch".to_string());
+    }
+    let expected_freshness_prometheus =
+        benchmark_runtime_pressure_expected_freshness_prometheus(artifact, labels);
+    if artifact.runtime_pressure_freshness_prometheus != expected_freshness_prometheus {
+        blockers
+            .push("benchmark:runtime_pressure_readiness_freshness_prometheus_mismatch".to_string());
     }
     let expected_runtime_pressure_metrics = benchmark_runtime_pressure_metric_names_from_text(
         &expected.runtime_pressure_prometheus.text,
@@ -1506,6 +1593,9 @@ pub fn matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifac
         artifact.generated_at_unix_ms,
     ));
     blockers.extend(benchmark_runtime_pressure_prometheus_blockers(artifact));
+    blockers.extend(benchmark_runtime_pressure_freshness_prometheus_blockers(
+        artifact,
+    ));
 
     let expected =
         matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
@@ -1531,6 +1621,12 @@ pub fn matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifac
     if artifact.runtime_pressure_prometheus != expected.runtime_pressure_prometheus {
         blockers
             .push("benchmark:runtime_pressure_readiness_runtime_prometheus_mismatch".to_string());
+    }
+    let expected_freshness_prometheus =
+        benchmark_runtime_pressure_expected_freshness_prometheus(artifact, labels);
+    if artifact.runtime_pressure_freshness_prometheus != expected_freshness_prometheus {
+        blockers
+            .push("benchmark:runtime_pressure_readiness_freshness_prometheus_mismatch".to_string());
     }
     let expected_runtime_pressure_metrics = benchmark_runtime_pressure_metric_names_from_text(
         &expected.runtime_pressure_prometheus.text,
@@ -1590,6 +1686,9 @@ pub fn matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_re
     blockers.extend(
         benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(artifact, &[]),
     );
+    blockers.extend(benchmark_runtime_pressure_freshness_prometheus_blockers(
+        artifact,
+    ));
 
     let expected =
         matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer(
@@ -1617,6 +1716,12 @@ pub fn matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_re
     if artifact.runtime_pressure_prometheus != expected.runtime_pressure_prometheus {
         blockers
             .push("benchmark:runtime_pressure_readiness_runtime_prometheus_mismatch".to_string());
+    }
+    let expected_freshness_prometheus =
+        benchmark_runtime_pressure_expected_freshness_prometheus(artifact, labels);
+    if artifact.runtime_pressure_freshness_prometheus != expected_freshness_prometheus {
+        blockers
+            .push("benchmark:runtime_pressure_readiness_freshness_prometheus_mismatch".to_string());
     }
     let expected_runtime_pressure_metrics = benchmark_runtime_pressure_metric_names_from_text(
         &expected.runtime_pressure_prometheus.text,
@@ -1676,6 +1781,9 @@ pub fn matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifac
     blockers.extend(
         benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(artifact, &[]),
     );
+    blockers.extend(benchmark_runtime_pressure_freshness_prometheus_blockers(
+        artifact,
+    ));
 
     let expected =
         matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer(
@@ -1703,6 +1811,12 @@ pub fn matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifac
     if artifact.runtime_pressure_prometheus != expected.runtime_pressure_prometheus {
         blockers
             .push("benchmark:runtime_pressure_readiness_runtime_prometheus_mismatch".to_string());
+    }
+    let expected_freshness_prometheus =
+        benchmark_runtime_pressure_expected_freshness_prometheus(artifact, labels);
+    if artifact.runtime_pressure_freshness_prometheus != expected_freshness_prometheus {
+        blockers
+            .push("benchmark:runtime_pressure_readiness_freshness_prometheus_mismatch".to_string());
     }
     let expected_runtime_pressure_metrics = benchmark_runtime_pressure_metric_names_from_text(
         &expected.runtime_pressure_prometheus.text,
