@@ -7,6 +7,8 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::{MailPriority, NodeId, RaftError};
 
 pub const MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS: u64 = i64::MAX as u64;
@@ -31,6 +33,8 @@ struct MailChannelInner<Mail> {
     size: usize,
     previous_channel_mail_count: i64,
     selector_total_mail_count: i64,
+    max_depth: usize,
+    rejected_send_count: u64,
     channels: [VecDeque<Mail>; 3],
     buffered: [VecDeque<Mail>; 3],
 }
@@ -41,10 +45,22 @@ impl<Mail> MailChannelInner<Mail> {
             size: 0,
             previous_channel_mail_count: 0,
             selector_total_mail_count: 0,
+            max_depth: 0,
+            rejected_send_count: 0,
             channels: std::array::from_fn(|_| VecDeque::new()),
             buffered: std::array::from_fn(|_| VecDeque::new()),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MailChannelPressureStats {
+    pub replica_id: NodeId,
+    pub num_mail_limit: usize,
+    pub queued_len: usize,
+    pub selector_total_mail_count: i64,
+    pub max_depth: usize,
+    pub rejected_send_count: u64,
 }
 
 #[derive(Debug)]
@@ -79,10 +95,12 @@ impl<Mail> MailChannel<Mail> {
     ) -> Result<Result<(), Mail>, RaftError> {
         let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
         if self.overflow(&inner) {
+            inner.rejected_send_count = inner.rejected_send_count.saturating_add(1);
             return Ok(Err(mail));
         }
         inner.channels[priority_index(priority)].push_back(mail);
         inner.size += 1;
+        inner.max_depth = inner.max_depth.max(inner.size);
         Ok(Ok(()))
     }
 
@@ -98,9 +116,13 @@ impl<Mail> MailChannel<Mail> {
     ) -> Result<Result<(), Vec<Mail>>, RaftError> {
         let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
         if self.overflow(&inner) || inner.size.saturating_add(mails.len()) > self.num_mail_limit {
+            inner.rejected_send_count = inner
+                .rejected_send_count
+                .saturating_add(mails.len().try_into().unwrap_or(u64::MAX));
             return Ok(Err(mails));
         }
         inner.size += mails.len();
+        inner.max_depth = inner.max_depth.max(inner.size);
         inner.channels[priority_index(priority)].extend(mails);
         Ok(Ok(()))
     }
@@ -114,6 +136,7 @@ impl<Mail> MailChannel<Mail> {
         let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
         inner.channels[priority_index(priority)].push_back(mail);
         inner.size += 1;
+        inner.max_depth = inner.max_depth.max(inner.size);
         Ok(())
     }
 
@@ -152,6 +175,23 @@ impl<Mail> MailChannel<Mail> {
             .lock()
             .map_err(mail_channel_poisoned)?
             .selector_total_mail_count)
+    }
+
+    pub fn pressure_stats(&self) -> MailChannelPressureStats {
+        self.pressure_stats_checked()
+            .expect("mail channel mutex poisoned")
+    }
+
+    pub fn pressure_stats_checked(&self) -> Result<MailChannelPressureStats, RaftError> {
+        let inner = self.inner.lock().map_err(mail_channel_poisoned)?;
+        Ok(MailChannelPressureStats {
+            replica_id: self.replica_id,
+            num_mail_limit: self.num_mail_limit,
+            queued_len: inner.size,
+            selector_total_mail_count: inner.selector_total_mail_count,
+            max_depth: inner.max_depth,
+            rejected_send_count: inner.rejected_send_count,
+        })
     }
 
     fn consume_checked(&self, selector: &ChannelSelector<Mail>) -> Result<(), RaftError> {

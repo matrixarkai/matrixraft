@@ -252,20 +252,32 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     assert!(api.core_interfaces.contains(&"MailBox".to_string()));
     assert!(api
         .core_interfaces
+        .contains(&"MailBoxPressureStats".to_string()));
+    assert!(api
+        .core_interfaces
         .contains(&"MailBox::try_send_checked".to_string()));
     assert!(api
         .core_interfaces
         .contains(&"MailBox::try_send_many_checked".to_string()));
     assert!(api
         .core_interfaces
+        .contains(&"MailBox::pressure_stats_checked".to_string()));
+    assert!(api
+        .core_interfaces
         .contains(&"MailBox::fetch_checked".to_string()));
     assert!(api.core_interfaces.contains(&"MailChannel".to_string()));
+    assert!(api
+        .core_interfaces
+        .contains(&"MailChannelPressureStats".to_string()));
     assert!(api
         .core_interfaces
         .contains(&"MailChannel::try_send_checked".to_string()));
     assert!(api
         .core_interfaces
         .contains(&"MailChannel::try_send_many_checked".to_string()));
+    assert!(api
+        .core_interfaces
+        .contains(&"MailChannel::pressure_stats_checked".to_string()));
     assert!(api.core_interfaces.contains(&"ChannelSelector".to_string()));
     assert!(api
         .core_interfaces
@@ -372,11 +384,39 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
             && mapping.note.contains("high QPS")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "MailBoxPressureStats"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("queue pressure snapshot")
+            && mapping.note.contains("rejected enqueue count")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "MailBox::pressure_stats_checked"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("checked mailbox pressure read")
+            && mapping.note.contains("runtime queue telemetry")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "MailChannel::try_send_many_checked"
             && mapping
                 .raft_rs_or_tikv_reference
                 .contains("bounded per-peer batch enqueue")
             && mapping.note.contains("memory pressure bounded")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "MailChannelPressureStats"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("per-replica queue pressure snapshot")
+            && mapping.note.contains("selector-visible total")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "MailChannel::pressure_stats_checked"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("checked per-peer pressure read")
+            && mapping.note.contains("per-peer burst pressure")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "ChannelSelector::select_checked"

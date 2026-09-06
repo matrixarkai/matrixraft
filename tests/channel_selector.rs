@@ -174,6 +174,14 @@ fn channel_selector_checked_api_preserves_overflow_and_selection_contract() {
         .try_send_to_channel_checked(Arc::clone(&channel), MailPriority::Normal, "four")
         .expect("checked overflow")
         .is_err());
+    let stats = channel
+        .pressure_stats_checked()
+        .expect("checked pressure stats");
+    assert_eq!(stats.replica_id, 7);
+    assert_eq!(stats.num_mail_limit, 1);
+    assert_eq!(stats.queued_len, 0);
+    assert_eq!(stats.max_depth, 2);
+    assert_eq!(stats.rejected_send_count, 1);
     assert_eq!(channel.queued_len_checked().expect("checked queued len"), 0);
 }
 
@@ -192,6 +200,14 @@ fn mail_channel_checked_batch_send_rejects_oversized_bursts_before_queueing() {
         .try_send_many_checked(MailPriority::Normal, vec!["two", "three"])
         .expect("checked burst send")
         .is_ok());
+    let stats = channel
+        .pressure_stats_checked()
+        .expect("checked pressure stats");
+    assert_eq!(stats.replica_id, 8);
+    assert_eq!(stats.num_mail_limit, 2);
+    assert_eq!(stats.queued_len, 2);
+    assert_eq!(stats.max_depth, 2);
+    assert_eq!(stats.rejected_send_count, 3);
     assert!(selector
         .fire_checked(Arc::clone(&channel))
         .expect("checked fire"));
