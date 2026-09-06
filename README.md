@@ -549,6 +549,11 @@ fail-closed all-faulted-peers-recovered gate.
 The public API validator also checks that every mapped canonical name appears in
 one of those advertised surfaces, so a name map cannot silently drift away from
 the supported API list.
+Runtime queue surfaces are advertised in the same contract: `MailBox`,
+`MailChannel`, `ChannelSelector`, and their checked send/fetch/select methods
+map to TiKV raftstore-style mailboxes and BaselineRaft per-replica queues, so
+production embedders can handle queue pressure and runtime lock failures without
+turning them into process aborts.
 `matrixraft_reference_mapped_interface_names` is the fail-closed subset of that
 surface: election RPCs, append/read/snapshot RPCs, storage/transport, WAL,
 peer progress, runtime pressure, runtime-pressure freshness, scale-target

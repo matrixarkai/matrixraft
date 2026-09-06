@@ -247,6 +247,23 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     assert!(api
         .rpc_messages
         .contains(&"InMemoryRaftTransport".to_string()));
+    assert!(api.public_modules.contains(&"mailbox".to_string()));
+    assert!(api.public_modules.contains(&"channel_selector".to_string()));
+    assert!(api.core_interfaces.contains(&"MailBox".to_string()));
+    assert!(api
+        .core_interfaces
+        .contains(&"MailBox::try_send_checked".to_string()));
+    assert!(api
+        .core_interfaces
+        .contains(&"MailBox::fetch_checked".to_string()));
+    assert!(api.core_interfaces.contains(&"MailChannel".to_string()));
+    assert!(api
+        .core_interfaces
+        .contains(&"MailChannel::try_send_checked".to_string()));
+    assert!(api.core_interfaces.contains(&"ChannelSelector".to_string()));
+    assert!(api
+        .core_interfaces
+        .contains(&"ChannelSelector::select_checked".to_string()));
     assert!(api
         .safety_helpers
         .contains(&"matrixraft_fatal_blocker_report".to_string()));
@@ -332,6 +349,18 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
         mapping.canonical == "RuntimePressureAdmission"
             && mapping.raft_rs_or_tikv_reference.contains("backpressure")
             && mapping.note.contains("peer pipeline telemetry")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "MailBox::try_send_checked"
+            && mapping.raft_rs_or_tikv_reference.contains("backpressure")
+            && mapping.note.contains("without process aborts")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "ChannelSelector::select_checked"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("checked ready-queue selector")
+            && mapping.note.contains("deadline-bound polling")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_runtime_pressure_admission_with_scale_targets"
