@@ -1227,6 +1227,13 @@ fn benchmark_report_derives_scale_rates_and_baseline_backed_targets() {
     let error = matrixraft_validate_benchmark_scale_optimization_inputs(&drifted_inputs, &report)
         .expect_err("scale rate drift must fail verifier");
     assert!(error.contains("benchmark:scale_optimization_rates_mismatch"));
+    let mut zero_target_inputs = inputs.clone();
+    zero_target_inputs.scale_targets.min_read_index_qps = 0;
+    let error =
+        matrixraft_validate_benchmark_scale_optimization_inputs(&zero_target_inputs, &report)
+            .expect_err("zero release-scale target must fail verifier");
+    assert!(error.contains("benchmark:scale_optimization_targets_mismatch"));
+    assert!(error.contains("benchmark:scale_optimization_target_zero:min_read_index_qps"));
 
     let _ = fs::remove_dir_all(root);
 }

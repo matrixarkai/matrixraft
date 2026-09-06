@@ -4581,18 +4581,37 @@ pub fn matrixraft_validate_benchmark_scale_optimization_inputs(
     let expected = matrixraft_scale_optimization_inputs_from_benchmark_report(report);
     let mut blockers = Vec::new();
     if scale_inputs.scale_rates != expected.scale_rates {
-        blockers.push("benchmark:scale_optimization_rates_mismatch");
+        blockers.push("benchmark:scale_optimization_rates_mismatch".to_string());
     }
     if scale_inputs.scale_targets != expected.scale_targets {
-        blockers.push("benchmark:scale_optimization_targets_mismatch");
+        blockers.push("benchmark:scale_optimization_targets_mismatch".to_string());
     }
     if scale_inputs.hints != expected.hints {
-        blockers.push("benchmark:scale_optimization_hints_mismatch");
+        blockers.push("benchmark:scale_optimization_hints_mismatch".to_string());
     }
+    push_zero_scale_target_blockers(&mut blockers, &scale_inputs.scale_targets);
     if blockers.is_empty() {
         Ok(())
     } else {
         Err(blockers.join("; "))
+    }
+}
+
+fn push_zero_scale_target_blockers(blockers: &mut Vec<String>, targets: &ScaleOptimizationTargets) {
+    for (field, value) in [
+        ("min_proposal_qps", targets.min_proposal_qps),
+        ("min_append_entries_qps", targets.min_append_entries_qps),
+        ("min_read_index_qps", targets.min_read_index_qps),
+        ("min_apply_entries_qps", targets.min_apply_entries_qps),
+        (
+            "min_replication_mib_per_sec",
+            targets.min_replication_mib_per_sec,
+        ),
+        ("min_apply_mib_per_sec", targets.min_apply_mib_per_sec),
+    ] {
+        if value == 0 {
+            blockers.push(format!("benchmark:scale_optimization_target_zero:{field}"));
+        }
     }
 }
 
