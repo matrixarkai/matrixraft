@@ -565,6 +565,12 @@ operators can tune QPS and memory pressure before release-scale queues saturate.
 Use `matrixraft_queue_pressure_prometheus` and
 `matrixraft_queue_pressure_grafana_panels` to publish those counters in the
 standard RustRaft scrape and dashboard contract.
+`matrixraft_runtime_pressure_admission_with_queue_pressure` promotes the same
+stats into runtime admission and diagnostic logs. By default,
+`QueuePressureThresholds` warns at 80 percent queue utilization or any rejected
+send; observe-only policy records the pressure, while fail-closed policy can
+reject on `queue.*` pressure before producer bursts turn into memory or latency
+regressions.
 `matrixraft_reference_mapped_interface_names` is the fail-closed subset of that
 surface: election RPCs, append/read/snapshot RPCs, storage/transport, WAL,
 peer progress, runtime pressure, runtime-pressure freshness, scale-target

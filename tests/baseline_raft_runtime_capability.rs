@@ -492,6 +492,8 @@ fn ready_input() -> ProductionReadinessInput {
             pipeline_pressure_details: Vec::new(),
             read_backlog_pressure: false,
             read_backlog_pressure_details: Vec::new(),
+            queue_pressure: false,
+            queue_pressure_details: Vec::new(),
             node_runtime_timer_pressure: false,
             node_runtime_timer_pressure_details: Vec::new(),
             reason: "accepted_no_pressure".to_string(),

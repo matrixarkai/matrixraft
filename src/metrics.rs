@@ -456,6 +456,8 @@ pub struct RuntimePressureAdmissionPolicy {
     #[serde(default)]
     pub reject_on_read_backlog_pressure: bool,
     #[serde(default)]
+    pub reject_on_queue_pressure: bool,
+    #[serde(default)]
     pub reject_on_node_runtime_timer_pressure: bool,
 }
 
@@ -467,6 +469,7 @@ impl RuntimePressureAdmissionPolicy {
             reject_on_scale_pressure: false,
             reject_on_pipeline_pressure: false,
             reject_on_read_backlog_pressure: false,
+            reject_on_queue_pressure: false,
             reject_on_node_runtime_timer_pressure: false,
         }
     }
@@ -478,6 +481,7 @@ impl RuntimePressureAdmissionPolicy {
             reject_on_scale_pressure: true,
             reject_on_pipeline_pressure: true,
             reject_on_read_backlog_pressure: true,
+            reject_on_queue_pressure: true,
             reject_on_node_runtime_timer_pressure: true,
         }
     }
@@ -510,6 +514,10 @@ pub struct RuntimePressureAdmission {
     pub read_backlog_pressure: bool,
     #[serde(default)]
     pub read_backlog_pressure_details: Vec<ReadBacklogPressureDetail>,
+    #[serde(default)]
+    pub queue_pressure: bool,
+    #[serde(default)]
+    pub queue_pressure_details: Vec<QueuePressureDetail>,
     #[serde(default)]
     pub node_runtime_timer_pressure: bool,
     #[serde(default)]
@@ -596,6 +604,12 @@ fn matrixraft_runtime_pressure_expected_actions(component: &str) -> &'static [&'
         "read_backlog.pending_bounded_stale" => {
             &["reduce_bounded_stale_read_fanout_or_tighten_replica_read_deadlines"]
         }
+        "queue.mailbox_depth" | "queue.mail_channel_depth" => {
+            &["raise_queue_capacity_or_reduce_producer_burst"]
+        }
+        "queue.mailbox_rejected" | "queue.mail_channel_rejected" => {
+            &["shed_or_retry_queue_producers"]
+        }
         "node_runtime.timer_utilization" => &["raise_timer_queue_capacity_or_reduce_tick_burst"],
         _ => &[],
     }
@@ -634,6 +648,12 @@ fn matrixraft_runtime_pressure_action_sources(
         .chain(
             admission
                 .read_backlog_pressure_details
+                .iter()
+                .map(|detail| detail.component.as_str()),
+        )
+        .chain(
+            admission
+                .queue_pressure_details
                 .iter()
                 .map(|detail| detail.component.as_str()),
         )
@@ -705,6 +725,15 @@ pub fn matrixraft_runtime_pressure_bottleneck_summary(
                 )
             }),
     );
+    bottlenecks.extend(admission.queue_pressure_details.iter().map(|detail| {
+        runtime_pressure_bottleneck(
+            "queue",
+            &detail.component,
+            detail.observed_value,
+            detail.threshold_value,
+            detail.excess,
+        )
+    }));
     bottlenecks.extend(
         admission
             .node_runtime_timer_pressure_details
@@ -738,11 +767,12 @@ pub fn matrixraft_runtime_pressure_bottleneck_summary(
 fn runtime_pressure_category_priority(category: &str) -> u8 {
     match category {
         "read_backlog" => 0,
-        "node_runtime_timer" => 1,
-        "pipeline" => 2,
-        "latency" => 3,
-        "scale" => 4,
-        "memory" => 5,
+        "queue" => 1,
+        "node_runtime_timer" => 2,
+        "pipeline" => 3,
+        "latency" => 4,
+        "scale" => 5,
+        "memory" => 6,
         _ => u8::MAX,
     }
 }
@@ -919,6 +949,7 @@ pub fn matrixraft_validate_runtime_pressure_admission_evidence(
         || admission.scale_pressure
         || admission.pipeline_pressure
         || admission.read_backlog_pressure
+        || admission.queue_pressure
         || admission.node_runtime_timer_pressure;
     let mut pressure_components = BTreeSet::new();
     pressure_components.extend(
@@ -948,6 +979,12 @@ pub fn matrixraft_validate_runtime_pressure_admission_evidence(
     pressure_components.extend(
         admission
             .read_backlog_pressure_details
+            .iter()
+            .map(|detail| detail.component.as_str()),
+    );
+    pressure_components.extend(
+        admission
+            .queue_pressure_details
             .iter()
             .map(|detail| detail.component.as_str()),
     );
@@ -1005,6 +1042,12 @@ pub fn matrixraft_validate_runtime_pressure_admission_evidence(
     }
     if !admission.read_backlog_pressure && !admission.read_backlog_pressure_details.is_empty() {
         issues.insert("runtime_pressure:read_backlog_pressure_details_without_signal".to_string());
+    }
+    if admission.queue_pressure && admission.queue_pressure_details.is_empty() {
+        issues.insert("runtime_pressure:queue_pressure_details_missing".to_string());
+    }
+    if !admission.queue_pressure && !admission.queue_pressure_details.is_empty() {
+        issues.insert("runtime_pressure:queue_pressure_details_without_signal".to_string());
     }
     if admission.node_runtime_timer_pressure
         && admission.node_runtime_timer_pressure_details.is_empty()
@@ -1242,6 +1285,30 @@ pub fn matrixraft_validate_runtime_pressure_admission_evidence(
         }
     }
 
+    for detail in &admission.queue_pressure_details {
+        if detail.component.is_empty() {
+            issues.insert("runtime_pressure:queue_pressure_detail_component_empty".to_string());
+        }
+        if detail.threshold_value == 0 {
+            issues.insert(format!(
+                "runtime_pressure:queue_pressure_detail_threshold_zero:{}",
+                detail.component
+            ));
+        } else if detail.observed_value < detail.threshold_value {
+            issues.insert(format!(
+                "runtime_pressure:queue_pressure_detail_not_over_threshold:{}:{}:{}",
+                detail.component, detail.observed_value, detail.threshold_value
+            ));
+        }
+        let expected_excess = detail.observed_value.saturating_sub(detail.threshold_value);
+        if detail.excess != expected_excess {
+            issues.insert(format!(
+                "runtime_pressure:queue_pressure_detail_excess_mismatch:{}:{}:{}",
+                detail.component, detail.excess, expected_excess
+            ));
+        }
+    }
+
     for detail in &admission.node_runtime_timer_pressure_details {
         if detail.component.is_empty() {
             issues.insert(
@@ -1293,6 +1360,7 @@ pub fn matrixraft_validate_runtime_pressure_admission_evidence_with_policy(
         admission.scale_pressure,
         admission.pipeline_pressure,
         admission.read_backlog_pressure,
+        admission.queue_pressure,
         admission.node_runtime_timer_pressure,
         policy,
     );
@@ -1358,6 +1426,12 @@ fn runtime_pressure_component_names(admission: &RuntimePressureAdmission) -> Vec
         )
         .chain(
             admission
+                .queue_pressure_details
+                .iter()
+                .map(|detail| detail.component.clone()),
+        )
+        .chain(
+            admission
                 .node_runtime_timer_pressure_details
                 .iter()
                 .map(|detail| detail.component.clone()),
@@ -1385,6 +1459,29 @@ pub struct PipelinePressureDetail {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReadBacklogPressureDetail {
+    pub component: String,
+    pub observed_value: u64,
+    pub threshold_value: u64,
+    pub excess: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuePressureThresholds {
+    pub utilization_warning_percent: u64,
+    pub rejected_send_warning: u64,
+}
+
+impl Default for QueuePressureThresholds {
+    fn default() -> Self {
+        Self {
+            utilization_warning_percent: 80,
+            rejected_send_warning: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuePressureDetail {
     pub component: String,
     pub observed_value: u64,
     pub threshold_value: u64,
@@ -1534,6 +1631,160 @@ pub fn matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure(
     )
 }
 
+pub fn matrixraft_runtime_pressure_admission_with_queue_pressure(
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    mailboxes: &[(&str, MailBoxPressureStats)],
+    mail_channels: &[MailChannelPressureStats],
+    queue_thresholds: &QueuePressureThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> RuntimePressureAdmission {
+    let mut admission = matrixraft_runtime_pressure_admission_inner(
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        policy,
+    );
+    matrixraft_runtime_pressure_attach_queue_pressure(
+        &mut admission,
+        mailboxes,
+        mail_channels,
+        queue_thresholds,
+        policy,
+    );
+    admission
+}
+
+fn matrixraft_runtime_pressure_attach_queue_pressure(
+    admission: &mut RuntimePressureAdmission,
+    mailboxes: &[(&str, MailBoxPressureStats)],
+    mail_channels: &[MailChannelPressureStats],
+    thresholds: &QueuePressureThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) {
+    let queue_details = queue_pressure_details(mailboxes, mail_channels, thresholds);
+    if queue_details.is_empty() {
+        return;
+    }
+
+    admission.queue_pressure = true;
+    admission.queue_pressure_details = queue_details;
+
+    let mut actions = admission.actions.iter().cloned().collect::<BTreeSet<_>>();
+    for detail in &admission.queue_pressure_details {
+        for action in matrixraft_runtime_pressure_expected_actions(&detail.component) {
+            actions.insert((*action).to_string());
+        }
+    }
+    admission.actions = actions.into_iter().collect();
+
+    let pressure_components = runtime_pressure_component_names(admission);
+    admission.rejected_component = matrixraft_runtime_pressure_rejected_component(
+        &pressure_components,
+        admission.memory_pressure,
+        admission.latency_pressure,
+        admission.scale_pressure,
+        admission.pipeline_pressure,
+        admission.read_backlog_pressure,
+        admission.queue_pressure,
+        admission.node_runtime_timer_pressure,
+        policy,
+    );
+    admission.accepted = admission.rejected_component.is_none();
+    admission.reason = if admission.accepted {
+        "accepted_observe_only_pressure"
+    } else {
+        "rejected_runtime_pressure"
+    }
+    .to_string();
+}
+
+fn queue_pressure_details(
+    mailboxes: &[(&str, MailBoxPressureStats)],
+    mail_channels: &[MailChannelPressureStats],
+    thresholds: &QueuePressureThresholds,
+) -> Vec<QueuePressureDetail> {
+    let mut details = Vec::new();
+
+    let mailbox_depth_utilization = mailboxes
+        .iter()
+        .filter(|(_, stats)| stats.high_watermark > 0)
+        .map(|(_, stats)| {
+            (stats.total_len as u64).saturating_mul(100) / stats.high_watermark as u64
+        })
+        .max()
+        .unwrap_or(0);
+    push_queue_pressure_detail(
+        &mut details,
+        "queue.mailbox_depth",
+        mailbox_depth_utilization,
+        thresholds.utilization_warning_percent,
+    );
+
+    let mailbox_rejected = mailboxes
+        .iter()
+        .map(|(_, stats)| stats.rejected_send_count)
+        .sum::<u64>();
+    push_queue_pressure_detail(
+        &mut details,
+        "queue.mailbox_rejected",
+        mailbox_rejected,
+        thresholds.rejected_send_warning,
+    );
+
+    let channel_depth_utilization = mail_channels
+        .iter()
+        .filter(|stats| stats.num_mail_limit > 0)
+        .map(|stats| (stats.queued_len as u64).saturating_mul(100) / stats.num_mail_limit as u64)
+        .max()
+        .unwrap_or(0);
+    push_queue_pressure_detail(
+        &mut details,
+        "queue.mail_channel_depth",
+        channel_depth_utilization,
+        thresholds.utilization_warning_percent,
+    );
+
+    let channel_rejected = mail_channels
+        .iter()
+        .map(|stats| stats.rejected_send_count)
+        .sum::<u64>();
+    push_queue_pressure_detail(
+        &mut details,
+        "queue.mail_channel_rejected",
+        channel_rejected,
+        thresholds.rejected_send_warning,
+    );
+
+    details
+}
+
+fn push_queue_pressure_detail(
+    details: &mut Vec<QueuePressureDetail>,
+    component: &str,
+    observed_value: u64,
+    threshold_value: u64,
+) {
+    if threshold_value > 0 && observed_value >= threshold_value {
+        details.push(QueuePressureDetail {
+            component: component.to_string(),
+            observed_value,
+            threshold_value,
+            excess: observed_value.saturating_sub(threshold_value),
+        });
+    }
+}
+
 pub fn matrixraft_runtime_pressure_admission_with_scale_and_pipeline_pressure(
     memory_metrics: &MemoryMetrics,
     memory_thresholds: &MemoryOptimizationThresholds,
@@ -1643,6 +1894,8 @@ fn matrixraft_runtime_pressure_admission_inner(
     let mut pipeline_pressure_details = Vec::new();
     let mut read_backlog_pressure = false;
     let mut read_backlog_pressure_details = Vec::new();
+    let queue_pressure = false;
+    let queue_pressure_details = Vec::new();
     let mut node_runtime_timer_pressure = false;
     let mut node_runtime_timer_pressure_details = Vec::new();
     let mut actions = BTreeSet::new();
@@ -1716,6 +1969,7 @@ fn matrixraft_runtime_pressure_admission_inner(
         scale_pressure,
         pipeline_pressure,
         read_backlog_pressure,
+        queue_pressure,
         node_runtime_timer_pressure,
         policy,
     );
@@ -1728,6 +1982,7 @@ fn matrixraft_runtime_pressure_admission_inner(
             || scale_pressure
             || pipeline_pressure
             || read_backlog_pressure
+            || queue_pressure
             || node_runtime_timer_pressure,
     ) {
         (true, false) => "accepted_no_pressure",
@@ -1748,6 +2003,8 @@ fn matrixraft_runtime_pressure_admission_inner(
         pipeline_pressure_details,
         read_backlog_pressure,
         read_backlog_pressure_details,
+        queue_pressure,
+        queue_pressure_details,
         node_runtime_timer_pressure,
         node_runtime_timer_pressure_details,
         reason,
@@ -1775,6 +2032,7 @@ fn matrixraft_runtime_pressure_rejected_component(
     scale_pressure: bool,
     pipeline_pressure: bool,
     read_backlog_pressure: bool,
+    queue_pressure: bool,
     node_runtime_timer_pressure: bool,
     policy: &RuntimePressureAdmissionPolicy,
 ) -> Option<String> {
@@ -1783,6 +2041,7 @@ fn matrixraft_runtime_pressure_rejected_component(
             read_backlog_pressure && policy.reject_on_read_backlog_pressure,
             "read_backlog.",
         ),
+        (queue_pressure && policy.reject_on_queue_pressure, "queue."),
         (
             node_runtime_timer_pressure && policy.reject_on_node_runtime_timer_pressure,
             "node_runtime.",
@@ -3802,6 +4061,7 @@ pub fn matrixraft_runtime_pressure_diagnostic_log_entries(
         || admission.scale_pressure
         || admission.pipeline_pressure
         || admission.read_backlog_pressure
+        || admission.queue_pressure
         || admission.node_runtime_timer_pressure
     {
         DiagnosticSeverity::Warn
@@ -3861,6 +4121,16 @@ pub fn matrixraft_runtime_pressure_diagnostic_log_entries(
     );
     action_provenance.extend(
         admission
+            .queue_pressure_details
+            .iter()
+            .filter_map(|detail| {
+                let actions =
+                    matrixraft_runtime_pressure_recommended_actions_field(&detail.component);
+                (!actions.is_empty()).then(|| format!("{}=>{}", detail.component, actions))
+            }),
+    );
+    action_provenance.extend(
+        admission
             .node_runtime_timer_pressure_details
             .iter()
             .filter_map(|detail| {
@@ -3910,6 +4180,7 @@ pub fn matrixraft_runtime_pressure_diagnostic_log_entries(
             + admission.scale_pressure_details.len()
             + admission.pipeline_pressure_details.len()
             + admission.read_backlog_pressure_details.len()
+            + admission.queue_pressure_details.len()
             + admission.node_runtime_timer_pressure_details.len(),
     );
     entries.push(DiagnosticLogEntry {
@@ -3983,6 +4254,10 @@ pub fn matrixraft_runtime_pressure_diagnostic_log_entries(
                 admission.read_backlog_pressure.to_string(),
             ),
             (
+                "queue_pressure".to_string(),
+                admission.queue_pressure.to_string(),
+            ),
+            (
                 "node_runtime_timer_pressure".to_string(),
                 admission.node_runtime_timer_pressure.to_string(),
             ),
@@ -4016,6 +4291,27 @@ pub fn matrixraft_runtime_pressure_diagnostic_log_entries(
                 "read_backlog_pressure_details".to_string(),
                 admission
                     .read_backlog_pressure_details
+                    .iter()
+                    .map(|detail| {
+                        format!(
+                            "{}:{}/{}/excess={}",
+                            detail.component,
+                            detail.observed_value,
+                            detail.threshold_value,
+                            detail.excess
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            (
+                "queue_pressure_detail_count".to_string(),
+                admission.queue_pressure_details.len().to_string(),
+            ),
+            (
+                "queue_pressure_details".to_string(),
+                admission
+                    .queue_pressure_details
                     .iter()
                     .map(|detail| {
                         format!(
@@ -4216,6 +4512,33 @@ pub fn matrixraft_runtime_pressure_diagnostic_log_entries(
                 target: "rustraft.runtime_pressure.read_backlog".to_string(),
                 severity,
                 message: "read backlog pressure component".to_string(),
+                fields: vec![
+                    ("component".to_string(), detail.component.clone()),
+                    (
+                        "observed_value".to_string(),
+                        detail.observed_value.to_string(),
+                    ),
+                    (
+                        "threshold_value".to_string(),
+                        detail.threshold_value.to_string(),
+                    ),
+                    ("excess".to_string(), detail.excess.to_string()),
+                    (
+                        "recommended_actions".to_string(),
+                        matrixraft_runtime_pressure_recommended_actions_field(&detail.component),
+                    ),
+                    ("accepted".to_string(), admission.accepted.to_string()),
+                ],
+            }),
+    );
+    entries.extend(
+        admission
+            .queue_pressure_details
+            .iter()
+            .map(|detail| DiagnosticLogEntry {
+                target: "rustraft.runtime_pressure.queue".to_string(),
+                severity,
+                message: "queue pressure component".to_string(),
                 fields: vec![
                     ("component".to_string(), detail.component.clone()),
                     (

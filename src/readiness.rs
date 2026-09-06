@@ -1251,6 +1251,7 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "matrixraft_validate_runtime_pressure_admission_evidence_with_policy",
         "matrixraft_runtime_pressure_admission_with_scale_targets",
         "matrixraft_runtime_pressure_admission_with_pipeline_pressure",
+        "matrixraft_runtime_pressure_admission_with_queue_pressure",
         "matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure",
         "matrixraft_runtime_pressure_admission_with_scale_pipeline_read_backlog_and_node_runtime_timer_pressure",
         "matrixraft_runtime_pressure_bottleneck_summary",
@@ -1268,6 +1269,8 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "MailBox::pressure_stats_checked",
         "MailBox::fetch_checked",
         "QueuePressureMetricNames",
+        "QueuePressureThresholds",
+        "QueuePressureDetail",
         "MailChannel",
         "MailChannelPressureStats",
         "MailChannel::try_send_checked",
@@ -1922,6 +1925,31 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference: "TiKV raftstore queue pressure dashboards".to_string(),
             byteraft_or_baseline_reference: "BaselineRaft queue pressure dashboard panels".to_string(),
             note: "Queue-pressure Grafana panels surface queue depth and rejection rate beside memory and runtime-pressure panels for release-scale tuning."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "QueuePressureThresholds".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressureThresholds".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore mailbox saturation thresholds".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft queue saturation and rejection thresholds".to_string(),
+            note: "QueuePressureThresholds pins utilization and rejected-send thresholds used by queue-aware runtime admission."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "QueuePressureDetail".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressureDetail".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore queue pressure detail".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue pressure detail".to_string(),
+            note: "QueuePressureDetail records queue saturation and rejected enqueue evidence for bottleneck ranking and diagnostic logs."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_admission_with_queue_pressure".to_string(),
+            matrixraft_facade: "MatrixRaftQueueAwareRuntimePressureAdmission".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore queue-aware flow control".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue-aware admission gate".to_string(),
+            note: "Queue-aware runtime-pressure admission can stay observe-only or fail closed when mailbox and per-replica queues saturate under release-scale QPS."
                 .to_string(),
         },
         ApiNameMapping {
@@ -3043,6 +3071,7 @@ pub fn matrixraft_observability_interface_names() -> Vec<String> {
         "matrixraft_runtime_pressure_admission",
         "matrixraft_runtime_pressure_admission_with_scale_targets",
         "matrixraft_runtime_pressure_admission_with_pipeline_pressure",
+        "matrixraft_runtime_pressure_admission_with_queue_pressure",
         "matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure",
         "matrixraft_runtime_pressure_admission_with_scale_and_pipeline_pressure",
         "matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure",
@@ -3071,6 +3100,8 @@ pub fn matrixraft_observability_interface_names() -> Vec<String> {
         "RuntimePressureAdmissionPolicy",
         "RuntimePressureMetricNames",
         "QueuePressureMetricNames",
+        "QueuePressureThresholds",
+        "QueuePressureDetail",
         "SnapshotLifecycleEvidence",
         "matrixraft_snapshot_lifecycle_metric_names",
         "matrixraft_snapshot_lifecycle_evidence_prometheus",

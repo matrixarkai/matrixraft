@@ -24,6 +24,7 @@ use matrixraft::{
         matrixraft_runtime_pressure_admission, matrixraft_runtime_pressure_admission_prometheus,
         matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure,
         matrixraft_runtime_pressure_admission_with_pipeline_pressure,
+        matrixraft_runtime_pressure_admission_with_queue_pressure,
         matrixraft_runtime_pressure_admission_with_read_backlog_pressure,
         matrixraft_runtime_pressure_admission_with_scale_and_pipeline_pressure,
         matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure,
@@ -42,8 +43,9 @@ use matrixraft::{
         matrixraft_wal_lifecycle_evidence_prometheus, matrixraft_wal_lifecycle_grafana_panels,
         matrixraft_wal_lifecycle_metric_names, LatencyBucket, LatencyHistogram, LatencyMetrics,
         LatencyOptimizationThresholds, MemoryMetrics, MemoryOptimizationThresholds,
-        NodeRuntimeTimerThresholds, ReadBacklogMetrics, ReadBacklogThresholds,
-        RuntimePressureAdmissionPolicy, ScaleMetrics, ScaleOptimizationTargets, ScaleRateMetrics,
+        NodeRuntimeTimerThresholds, QueuePressureThresholds, ReadBacklogMetrics,
+        ReadBacklogThresholds, RuntimePressureAdmissionPolicy, ScaleMetrics,
+        ScaleOptimizationTargets, ScaleRateMetrics,
     },
     MailBoxPressureStats, MailChannelPressureStats, PeerProgress, PipelineLimits,
     RuntimeTimerStatus, SnapshotLifecycleEvidence, WalLifecycleEvidence,
@@ -2342,6 +2344,100 @@ fn runtime_pressure_admission_can_fail_closed_on_node_runtime_timer_pressure() {
                 "raise_timer_queue_capacity_or_reduce_tick_burst".to_string(),
             ))
     }));
+}
+
+#[test]
+fn runtime_pressure_admission_handles_queue_pressure_as_actionable_signal() {
+    let mailboxes = [(
+        "scheduler",
+        MailBoxPressureStats {
+            high_watermark: 100,
+            total_len: 92,
+            max_channel_depth: 96,
+            rejected_send_count: 0,
+        },
+    )];
+    let mail_channels = [MailChannelPressureStats {
+        replica_id: 7,
+        num_mail_limit: 50,
+        queued_len: 12,
+        selector_total_mail_count: 12,
+        max_depth: 20,
+        rejected_send_count: 3,
+    }];
+    let thresholds = QueuePressureThresholds {
+        utilization_warning_percent: 80,
+        rejected_send_warning: 1,
+    };
+
+    let observe_only = matrixraft_runtime_pressure_admission_with_queue_pressure(
+        &MemoryMetrics::zero(),
+        &MemoryOptimizationThresholds::default(),
+        &LatencyMetrics::zero(),
+        &LatencyOptimizationThresholds::default(),
+        &mailboxes,
+        &mail_channels,
+        &thresholds,
+        &RuntimePressureAdmissionPolicy::observe_only(),
+    );
+
+    assert!(observe_only.accepted);
+    assert!(observe_only.queue_pressure);
+    assert_eq!(observe_only.reason, "accepted_observe_only_pressure");
+    assert_eq!(observe_only.queue_pressure_details.len(), 2);
+    assert!(observe_only.queue_pressure_details.iter().any(|detail| {
+        detail.component == "queue.mailbox_depth"
+            && detail.observed_value == 92
+            && detail.threshold_value == 80
+            && detail.excess == 12
+    }));
+    assert!(observe_only.queue_pressure_details.iter().any(|detail| {
+        detail.component == "queue.mail_channel_rejected"
+            && detail.observed_value == 3
+            && detail.threshold_value == 1
+            && detail.excess == 2
+    }));
+    assert!(observe_only
+        .actions
+        .contains(&"raise_queue_capacity_or_reduce_producer_burst".to_string()));
+    assert!(observe_only
+        .actions
+        .contains(&"shed_or_retry_queue_producers".to_string()));
+    matrixraft::metrics::matrixraft_validate_runtime_pressure_admission_evidence(&observe_only)
+        .expect("observe-only queue pressure evidence validates");
+
+    let diagnostics = matrixraft_runtime_pressure_diagnostic_log_entries(&observe_only);
+    assert!(diagnostics.iter().any(|entry| {
+        entry.target == "rustraft.runtime_pressure.queue"
+            && entry.severity == matrixraft::DiagnosticSeverity::Warn
+            && entry.fields.contains(&(
+                "recommended_actions".to_string(),
+                "raise_queue_capacity_or_reduce_producer_burst".to_string(),
+            ))
+    }));
+
+    let fail_closed = matrixraft_runtime_pressure_admission_with_queue_pressure(
+        &MemoryMetrics::zero(),
+        &MemoryOptimizationThresholds::default(),
+        &LatencyMetrics::zero(),
+        &LatencyOptimizationThresholds::default(),
+        &mailboxes,
+        &mail_channels,
+        &thresholds,
+        &RuntimePressureAdmissionPolicy::fail_closed(),
+    );
+
+    assert!(!fail_closed.accepted);
+    assert!(fail_closed.queue_pressure);
+    assert_eq!(
+        fail_closed.rejected_component,
+        Some("queue.mailbox_depth".to_string())
+    );
+    matrixraft::metrics::matrixraft_validate_runtime_pressure_admission_evidence_with_policy(
+        &fail_closed,
+        &RuntimePressureAdmissionPolicy::fail_closed(),
+    )
+    .expect("fail-closed queue pressure evidence validates");
 }
 
 #[test]
