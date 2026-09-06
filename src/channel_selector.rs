@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::{MailPriority, NodeId};
+use crate::{MailPriority, NodeId, RaftError};
 
 pub const MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS: u64 = i64::MAX as u64;
 
@@ -68,63 +68,104 @@ impl<Mail> MailChannel<Mail> {
     }
 
     pub fn try_send(&self, priority: MailPriority, mail: Mail) -> Result<(), Mail> {
-        let mut inner = self.inner.lock().expect("mail channel mutex poisoned");
+        self.try_send_checked(priority, mail)
+            .expect("mail channel mutex poisoned")
+    }
+
+    pub fn try_send_checked(
+        &self,
+        priority: MailPriority,
+        mail: Mail,
+    ) -> Result<Result<(), Mail>, RaftError> {
+        let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
         if self.overflow(&inner) {
-            return Err(mail);
+            return Ok(Err(mail));
         }
         inner.channels[priority_index(priority)].push_back(mail);
         inner.size += 1;
-        Ok(())
+        Ok(Ok(()))
     }
 
     pub fn try_send_many(&self, priority: MailPriority, mails: Vec<Mail>) -> Result<(), Vec<Mail>> {
-        let mut inner = self.inner.lock().expect("mail channel mutex poisoned");
+        self.try_send_many_checked(priority, mails)
+            .expect("mail channel mutex poisoned")
+    }
+
+    pub fn try_send_many_checked(
+        &self,
+        priority: MailPriority,
+        mails: Vec<Mail>,
+    ) -> Result<Result<(), Vec<Mail>>, RaftError> {
+        let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
         if self.overflow(&inner) {
-            return Err(mails);
+            return Ok(Err(mails));
         }
         inner.size += mails.len();
         inner.channels[priority_index(priority)].extend(mails);
-        Ok(())
+        Ok(Ok(()))
     }
 
     pub fn send(&self, priority: MailPriority, mail: Mail) {
-        let mut inner = self.inner.lock().expect("mail channel mutex poisoned");
+        self.send_checked(priority, mail)
+            .expect("mail channel mutex poisoned");
+    }
+
+    pub fn send_checked(&self, priority: MailPriority, mail: Mail) -> Result<(), RaftError> {
+        let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
         inner.channels[priority_index(priority)].push_back(mail);
         inner.size += 1;
+        Ok(())
     }
 
     pub fn fetch(&self, selector: &ChannelSelector<Mail>) -> Vec<Mail> {
-        self.consume(selector);
-        let mut inner = self.inner.lock().expect("mail channel mutex poisoned");
+        self.fetch_checked(selector)
+            .expect("mail channel mutex poisoned")
+    }
+
+    pub fn fetch_checked(&self, selector: &ChannelSelector<Mail>) -> Result<Vec<Mail>, RaftError> {
+        self.consume_checked(selector)?;
+        let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
         let mut mails = Vec::new();
         for channel in &mut inner.buffered {
             mails.extend(channel.drain(..));
         }
-        mails
+        Ok(mails)
     }
 
     pub fn queued_len(&self) -> usize {
-        self.inner.lock().expect("mail channel mutex poisoned").size
+        self.queued_len_checked()
+            .expect("mail channel mutex poisoned")
+    }
+
+    pub fn queued_len_checked(&self) -> Result<usize, RaftError> {
+        Ok(self.inner.lock().map_err(mail_channel_poisoned)?.size)
     }
 
     pub fn selector_total_mail_count(&self) -> i64 {
-        self.inner
-            .lock()
+        self.selector_total_mail_count_checked()
             .expect("mail channel mutex poisoned")
-            .selector_total_mail_count
     }
 
-    fn consume(&self, selector: &ChannelSelector<Mail>) {
-        let mut inner = self.inner.lock().expect("mail channel mutex poisoned");
+    pub fn selector_total_mail_count_checked(&self) -> Result<i64, RaftError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(mail_channel_poisoned)?
+            .selector_total_mail_count)
+    }
+
+    fn consume_checked(&self, selector: &ChannelSelector<Mail>) -> Result<(), RaftError> {
+        let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
         let num_mails = inner.size as i64;
         let diff = num_mails - inner.previous_channel_mail_count;
         inner.previous_channel_mail_count = num_mails;
-        inner.selector_total_mail_count = selector.add_total_mail_count(diff);
+        inner.selector_total_mail_count = selector.add_total_mail_count_checked(diff)?;
         inner.size = 0;
 
         let mut channels = std::array::from_fn(|_| VecDeque::new());
         std::mem::swap(&mut inner.channels, &mut channels);
         inner.buffered = channels;
+        Ok(())
     }
 
     fn overflow(&self, inner: &MailChannelInner<Mail>) -> bool {
@@ -183,9 +224,15 @@ impl<Mail> ChannelSelector<Mail> {
     }
 
     pub fn send_global(&self, mail: Mail) {
-        let mut inner = self.inner.lock().expect("channel selector mutex poisoned");
+        self.send_global_checked(mail)
+            .expect("channel selector mutex poisoned");
+    }
+
+    pub fn send_global_checked(&self, mail: Mail) -> Result<(), RaftError> {
+        let mut inner = self.inner.lock().map_err(channel_selector_poisoned)?;
         inner.global_mails.push_back(mail);
         self.readable.notify_one();
+        Ok(())
     }
 
     pub fn send_to_channel(
@@ -194,8 +241,19 @@ impl<Mail> ChannelSelector<Mail> {
         priority: MailPriority,
         mail: Mail,
     ) {
-        channel.send(priority, mail);
-        self.fire(channel);
+        self.send_to_channel_checked(channel, priority, mail)
+            .expect("channel selector mutex poisoned");
+    }
+
+    pub fn send_to_channel_checked(
+        &self,
+        channel: Arc<MailChannel<Mail>>,
+        priority: MailPriority,
+        mail: Mail,
+    ) -> Result<(), RaftError> {
+        channel.send_checked(priority, mail)?;
+        let _ = self.fire_checked(channel)?;
+        Ok(())
     }
 
     pub fn try_send_to_channel(
@@ -204,20 +262,37 @@ impl<Mail> ChannelSelector<Mail> {
         priority: MailPriority,
         mail: Mail,
     ) -> Result<(), Mail> {
-        channel.try_send(priority, mail)?;
-        self.fire(channel);
-        Ok(())
+        self.try_send_to_channel_checked(channel, priority, mail)
+            .expect("channel selector mutex poisoned")
+    }
+
+    pub fn try_send_to_channel_checked(
+        &self,
+        channel: Arc<MailChannel<Mail>>,
+        priority: MailPriority,
+        mail: Mail,
+    ) -> Result<Result<(), Mail>, RaftError> {
+        if let Err(mail) = channel.try_send_checked(priority, mail)? {
+            return Ok(Err(mail));
+        }
+        let _ = self.fire_checked(channel)?;
+        Ok(Ok(()))
     }
 
     pub fn fire(&self, channel: Arc<MailChannel<Mail>>) -> bool {
+        self.fire_checked(channel)
+            .expect("channel selector mutex poisoned")
+    }
+
+    pub fn fire_checked(&self, channel: Arc<MailChannel<Mail>>) -> Result<bool, RaftError> {
         let replica_id = channel.replica_id();
-        let mut inner = self.inner.lock().expect("channel selector mutex poisoned");
+        let mut inner = self.inner.lock().map_err(channel_selector_poisoned)?;
         if !inner.active_channels.insert(replica_id) {
-            return false;
+            return Ok(false);
         }
         inner.channel_list.push_back(channel);
         self.readable.notify_one();
-        true
+        Ok(true)
     }
 
     pub fn select(
@@ -225,7 +300,16 @@ impl<Mail> ChannelSelector<Mail> {
         policy: ChannelSelectorPolicy,
         input: &[Arc<MailChannel<Mail>>],
     ) -> ChannelSelection<Mail> {
-        let mut inner = self.inner.lock().expect("channel selector mutex poisoned");
+        self.select_checked(policy, input)
+            .expect("channel selector mutex poisoned")
+    }
+
+    pub fn select_checked(
+        &self,
+        policy: ChannelSelectorPolicy,
+        input: &[Arc<MailChannel<Mail>>],
+    ) -> Result<ChannelSelection<Mail>, RaftError> {
+        let mut inner = self.inner.lock().map_err(channel_selector_poisoned)?;
         self.rearrange(&mut inner, input);
         if !inner.has_ready_work()
             && policy.timeout_ms == MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS
@@ -234,7 +318,7 @@ impl<Mail> ChannelSelector<Mail> {
                 inner = self
                     .readable
                     .wait(inner)
-                    .expect("channel selector mutex poisoned");
+                    .map_err(channel_selector_poisoned)?;
             }
         } else if !inner.has_ready_work() && policy.timeout_ms != 0 {
             let deadline = Instant::now() + Duration::from_millis(policy.timeout_ms);
@@ -247,7 +331,7 @@ impl<Mail> ChannelSelector<Mail> {
                 let (next_inner, timeout) = self
                     .readable
                     .wait_timeout(inner, wait_for)
-                    .expect("channel selector mutex poisoned");
+                    .map_err(channel_selector_poisoned)?;
                 inner = next_inner;
                 if timeout.timed_out() {
                     break;
@@ -265,32 +349,44 @@ impl<Mail> ChannelSelector<Mail> {
             inner.active_channels.remove(&channel.replica_id());
             channels.push(channel);
         }
-        ChannelSelection {
+        Ok(ChannelSelection {
             channels,
             global_mails,
             has_active_channels_left: !inner.active_channels.is_empty(),
-        }
+        })
     }
 
     pub fn total_mail_count(&self) -> i64 {
-        self.inner
-            .lock()
+        self.total_mail_count_checked()
             .expect("channel selector mutex poisoned")
-            .total_mail_count
+    }
+
+    pub fn total_mail_count_checked(&self) -> Result<i64, RaftError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(channel_selector_poisoned)?
+            .total_mail_count)
     }
 
     pub fn active_channel_count(&self) -> usize {
-        self.inner
-            .lock()
+        self.active_channel_count_checked()
             .expect("channel selector mutex poisoned")
-            .active_channels
-            .len()
     }
 
-    fn add_total_mail_count(&self, diff: i64) -> i64 {
-        let mut inner = self.inner.lock().expect("channel selector mutex poisoned");
+    pub fn active_channel_count_checked(&self) -> Result<usize, RaftError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(channel_selector_poisoned)?
+            .active_channels
+            .len())
+    }
+
+    fn add_total_mail_count_checked(&self, diff: i64) -> Result<i64, RaftError> {
+        let mut inner = self.inner.lock().map_err(channel_selector_poisoned)?;
         inner.total_mail_count += diff;
-        inner.total_mail_count
+        Ok(inner.total_mail_count)
     }
 
     fn rearrange(&self, inner: &mut ChannelSelectorInner<Mail>, input: &[Arc<MailChannel<Mail>>]) {
@@ -300,6 +396,14 @@ impl<Mail> ChannelSelector<Mail> {
             }
         }
     }
+}
+
+fn mail_channel_poisoned<T>(_error: T) -> RaftError {
+    RaftError::Storage("mail channel mutex poisoned".to_string())
+}
+
+fn channel_selector_poisoned<T>(_error: T) -> RaftError {
+    RaftError::Storage("channel selector mutex poisoned".to_string())
 }
 
 fn priority_index(priority: MailPriority) -> usize {
