@@ -634,6 +634,9 @@ memory parity before a readiness report is built.
 CPU and peak resident-memory parity require complete baseline/RustRaft sample
 pairs; one-sided resource evidence is rejected instead of being treated as an
 absent optional metric.
+Benchmark report, summary, and runtime-pressure artifact schemas use the
+`matrixraft.*` namespace; scrape metric names remain `rustraft_*` for existing
+Grafana and alert compatibility.
 `matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts` extends
 that release bundle with runtime-pressure admission, Prometheus, and diagnostic
 log evidence derived from the same BaselineRaft-backed scale targets.

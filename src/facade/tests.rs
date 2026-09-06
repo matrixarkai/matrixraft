@@ -1063,7 +1063,7 @@ mod tests {
         let mut input = ready_production_input();
         input.baseline_raft_benchmark = None;
         let mut benchmark = ready_benchmark_report();
-        benchmark.schema = "rustraft.baseline_raft_benchmark_report.v0".to_string();
+        benchmark.schema = "matrixraft.baseline_raft_benchmark_report.v0".to_string();
         let summary =
             crate::benchmark::matrixraft_baseline_raft_benchmark_failure_summary(&benchmark);
 
@@ -1076,7 +1076,7 @@ mod tests {
         assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker
-                == "benchmark:report_schema_mismatch:rustraft.baseline_raft_benchmark_report.v0:rustraft.baseline_raft_benchmark_report.v1"
+                == "benchmark:report_schema_mismatch:matrixraft.baseline_raft_benchmark_report.v0:matrixraft.baseline_raft_benchmark_report.v1"
         }));
     }
 
@@ -1372,7 +1372,7 @@ mod tests {
         let benchmark = ready_benchmark_report();
         let mut summary =
             crate::benchmark::matrixraft_baseline_raft_benchmark_failure_summary(&benchmark);
-        summary.schema = "rustraft.baseline_raft_benchmark_summary.v0".to_string();
+        summary.schema = "matrixraft.baseline_raft_benchmark_summary.v0".to_string();
         let input = matrixraft_production_readiness_input_with_benchmark_summary(input, &summary);
 
         let report = matrixraft_production_readiness_report(&input);
@@ -1381,7 +1381,7 @@ mod tests {
         assert_eq!(report.production_status, ProductionStatus::Blocked);
         assert!(report.production_blockers.iter().any(|blocker| {
             blocker
-                == "benchmark:summary_schema_mismatch:rustraft.baseline_raft_benchmark_summary.v0:rustraft.baseline_raft_benchmark_summary.v1"
+                == "benchmark:summary_schema_mismatch:matrixraft.baseline_raft_benchmark_summary.v0:matrixraft.baseline_raft_benchmark_summary.v1"
         }));
     }
 
@@ -2582,7 +2582,8 @@ mod tests {
         .expect("valid benchmark artifacts should produce a release artifact");
 
         let mut stale_schema = artifact.clone();
-        stale_schema.schema = "rustraft.benchmark_runtime_pressure_readiness_artifact.v0".to_string();
+        stale_schema.schema =
+            "matrixraft.benchmark_runtime_pressure_readiness_artifact.v0".to_string();
         let error = crate::benchmark::matrixraft_validate_benchmark_runtime_pressure_readiness_artifact(
             &stale_schema,
             &input,
