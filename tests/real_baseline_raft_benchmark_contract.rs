@@ -1336,7 +1336,7 @@ fn direct_baseline_raft_benchmark_example_writes_summary_atomically() {
     let summary_json: serde_json::Value = serde_json::from_str(&summary).expect("summary json");
     assert_eq!(
         summary_json["schema"],
-        "rustraft.baseline_raft_benchmark_summary.v1"
+        "matrixraft.baseline_raft_benchmark_summary.v1"
     );
     let scale = fs::read_to_string(&scale_path).expect("scale artifact");
     let scale_json: serde_json::Value = serde_json::from_str(&scale).expect("scale json");

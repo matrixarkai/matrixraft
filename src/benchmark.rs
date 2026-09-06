@@ -45,10 +45,11 @@ pub const MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD: usize = 1
 pub const MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_BATCH_SIZE: usize = 2;
 pub const MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES: usize = 4096;
 pub const MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT: f64 = 10.0;
-pub const MATRIXRAFT_BENCHMARK_REPORT_SCHEMA: &str = "rustraft.baseline_raft_benchmark_report.v1";
-pub const MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA: &str = "rustraft.baseline_raft_benchmark_summary.v1";
+pub const MATRIXRAFT_BENCHMARK_REPORT_SCHEMA: &str = "matrixraft.baseline_raft_benchmark_report.v1";
+pub const MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA: &str =
+    "matrixraft.baseline_raft_benchmark_summary.v1";
 pub const MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA: &str =
-    "rustraft.benchmark_runtime_pressure_readiness_artifact.v1";
+    "matrixraft.benchmark_runtime_pressure_readiness_artifact.v1";
 
 static MATRIXRAFT_BENCHMARK_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static MATRIXRAFT_BENCHMARK_ARTIFACT_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -3042,6 +3043,7 @@ pub fn matrixraft_assert_production_baseline_raft_parity(
         && evidence.matrixraft_runtime
         && evidence.correctness_passed
         && evidence.performance_within_threshold
+        && evidence.resource_within_threshold
         && evidence.blockers.is_empty()
     {
         return Ok(());
