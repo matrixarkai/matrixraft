@@ -3684,6 +3684,7 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
             workload.baseline_raft_p50_latency_micros,
             workload.baseline_raft_p99_latency_micros,
             workload.baseline_raft_throughput_ops_per_sec,
+            workload.baseline_raft_cpu_utilization_percent,
             workload.baseline_raft_operation_count,
             workload.baseline_raft_timed_iteration_count,
             workload.baseline_raft_total_duration_micros,
@@ -3694,10 +3695,26 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
             workload.matrixraft_p50_latency_micros,
             workload.matrixraft_p99_latency_micros,
             workload.matrixraft_throughput_ops_per_sec,
+            workload.matrixraft_cpu_utilization_percent,
             workload.matrixraft_operation_count,
             workload.matrixraft_timed_iteration_count,
             workload.matrixraft_total_duration_micros,
         ));
+        push_resource_pair_shape_blockers(
+            &mut blockers,
+            &format!("benchmark:summary_cpu_resource:{}", workload.workload.id()),
+            workload.baseline_raft_cpu_utilization_percent,
+            workload.matrixraft_cpu_utilization_percent,
+        );
+        push_resource_pair_shape_blockers(
+            &mut blockers,
+            &format!(
+                "benchmark:summary_peak_resident_memory_resource:{}",
+                workload.workload.id()
+            ),
+            workload.baseline_raft_peak_resident_memory_bytes as f64,
+            workload.matrixraft_peak_resident_memory_bytes as f64,
+        );
         push_workload_summary_ratio_finite_blocker(
             &mut blockers,
             workload.workload,
@@ -5241,12 +5258,24 @@ fn comparison_has_resource_parity_regression(
     {
         return true;
     }
+    if resource_pair_incomplete(
+        comparison.baseline_raft.cpu_utilization_percent,
+        comparison.rustraft.cpu_utilization_percent,
+    ) {
+        return true;
+    }
     if resource_pair_reported(
         comparison.baseline_raft.peak_resident_memory_bytes as f64,
         comparison.rustraft.peak_resident_memory_bytes as f64,
     ) && (!comparison.peak_resident_memory_ratio.is_finite()
         || comparison.peak_resident_memory_ratio > max_resource_ratio)
     {
+        return true;
+    }
+    if resource_pair_incomplete(
+        comparison.baseline_raft.peak_resident_memory_bytes as f64,
+        comparison.rustraft.peak_resident_memory_bytes as f64,
+    ) {
         return true;
     }
     comparison
@@ -5266,6 +5295,13 @@ fn benchmark_blocker_is_resource_parity(blocker: &str) -> bool {
         || blocker.contains("benchmark:summary_peak_resident_memory_regression")
         || blocker.contains("benchmark:comparison_missing_cpu_regression_blocker")
         || blocker.contains("benchmark:comparison_missing_peak_resident_memory_regression_blocker")
+        || blocker.contains("benchmark:comparison_cpu_resource")
+        || blocker.contains("benchmark:comparison_peak_resident_memory_resource")
+        || blocker.contains("benchmark:summary_cpu_resource")
+        || blocker.contains("benchmark:summary_peak_resident_memory_resource")
+        || blocker.contains("sample_cpu_invalid")
+        || blocker.contains("summary_baseline_raft_cpu_invalid")
+        || blocker.contains("summary_rustraft_cpu_invalid")
 }
 
 fn benchmark_report_has_required_workload_set(report: &BenchmarkReport) -> bool {
@@ -5613,6 +5649,9 @@ fn benchmark_sample_shape_blockers(
             throughput_from_duration(sample.operation_count, sample.total_duration_micros)
         ));
     }
+    if !sample.cpu_utilization_percent.is_finite() || sample.cpu_utilization_percent < 0.0 {
+        blockers.push(format!("benchmark:{engine}_sample_cpu_invalid"));
+    }
     blockers
 }
 
@@ -5668,6 +5707,18 @@ fn benchmark_comparison_integrity_blockers(
             expected_peak_resident_memory,
         );
     }
+    push_resource_pair_shape_blockers(
+        &mut blockers,
+        "benchmark:comparison_cpu_resource",
+        comparison.baseline_raft.cpu_utilization_percent,
+        comparison.rustraft.cpu_utilization_percent,
+    );
+    push_resource_pair_shape_blockers(
+        &mut blockers,
+        "benchmark:comparison_peak_resident_memory_resource",
+        comparison.baseline_raft.peak_resident_memory_bytes as f64,
+        comparison.rustraft.peak_resident_memory_bytes as f64,
+    );
     push_ratio_mismatch(&mut blockers, "p50", comparison.p50_ratio, expected_p50);
     push_ratio_mismatch(&mut blockers, "p99", comparison.p99_ratio, expected_p99);
     push_ratio_mismatch(
@@ -5872,6 +5923,7 @@ fn summary_sample_metric_blockers(
     p50_latency_micros: u64,
     p99_latency_micros: u64,
     throughput_ops_per_sec: f64,
+    cpu_utilization_percent: f64,
     operation_count: usize,
     timed_iteration_count: usize,
     total_duration_micros: u64,
@@ -5923,6 +5975,11 @@ fn summary_sample_metric_blockers(
             "benchmark:summary_{engine}_throughput_duration_mismatch:{workload_id}:{:.6}:{:.6}",
             throughput_ops_per_sec,
             throughput_from_duration(operation_count, total_duration_micros)
+        ));
+    }
+    if !cpu_utilization_percent.is_finite() || cpu_utilization_percent < 0.0 {
+        blockers.push(format!(
+            "benchmark:summary_{engine}_cpu_invalid:{workload_id}"
         ));
     }
     blockers
@@ -6414,7 +6471,14 @@ fn classify_benchmark_blocker(
         || blocker.contains("benchmark:comparison_missing_throughput_regression_blocker")
         || blocker.contains("benchmark:comparison_missing_cpu_regression_blocker")
         || blocker.contains("benchmark:comparison_missing_peak_resident_memory_regression_blocker")
+        || blocker.contains("benchmark:comparison_cpu_resource")
+        || blocker.contains("benchmark:comparison_peak_resident_memory_resource")
+        || blocker.contains("benchmark:summary_cpu_resource")
+        || blocker.contains("benchmark:summary_peak_resident_memory_resource")
         || blocker.contains("benchmark:comparison_passed_despite_regression")
+        || blocker.contains("sample_cpu_invalid")
+        || blocker.contains("summary_baseline_raft_cpu_invalid")
+        || blocker.contains("summary_rustraft_cpu_invalid")
         || blocker.contains("cpu_ratio")
         || blocker.contains("peak_resident_memory_ratio")
     {
@@ -6608,6 +6672,30 @@ fn optional_resource_ratio(numerator: f64, denominator: f64) -> f64 {
 
 fn resource_pair_reported(baseline: f64, rustraft: f64) -> bool {
     baseline > 0.0 && rustraft > 0.0
+}
+
+fn resource_pair_incomplete(baseline: f64, rustraft: f64) -> bool {
+    (baseline == 0.0 && rustraft > 0.0) || (baseline > 0.0 && rustraft == 0.0)
+}
+
+fn push_resource_pair_shape_blockers(
+    blockers: &mut Vec<String>,
+    prefix: &str,
+    baseline: f64,
+    rustraft: f64,
+) {
+    if !baseline.is_finite() || baseline < 0.0 {
+        blockers.push(format!("{prefix}_invalid_baseline_raft"));
+    }
+    if !rustraft.is_finite() || rustraft < 0.0 {
+        blockers.push(format!("{prefix}_invalid_rustraft"));
+    }
+    if baseline == 0.0 && rustraft > 0.0 {
+        blockers.push(format!("{prefix}_missing_baseline_raft"));
+    }
+    if baseline > 0.0 && rustraft == 0.0 {
+        blockers.push(format!("{prefix}_missing_rustraft"));
+    }
 }
 
 fn run_same_machine_model_workload(
