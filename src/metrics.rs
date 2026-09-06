@@ -165,6 +165,10 @@ pub struct RuntimePressureMetricNames {
     pub read_backlog_pressure_observed_value: String,
     pub read_backlog_pressure_threshold_value: String,
     pub read_backlog_pressure_excess: String,
+    pub queue_pressure: String,
+    pub queue_pressure_observed_value: String,
+    pub queue_pressure_threshold_value: String,
+    pub queue_pressure_excess: String,
     pub node_runtime_timer_pressure: String,
     pub node_runtime_timer_pressure_observed_percent: String,
     pub node_runtime_timer_pressure_threshold_percent: String,
@@ -2897,6 +2901,11 @@ pub fn matrixraft_runtime_pressure_metric_names() -> RuntimePressureMetricNames 
         read_backlog_pressure_threshold_value:
             "rustraft_runtime_pressure_read_backlog_threshold_value".to_string(),
         read_backlog_pressure_excess: "rustraft_runtime_pressure_read_backlog_excess".to_string(),
+        queue_pressure: "rustraft_runtime_pressure_queue".to_string(),
+        queue_pressure_observed_value: "rustraft_runtime_pressure_queue_observed_value".to_string(),
+        queue_pressure_threshold_value: "rustraft_runtime_pressure_queue_threshold_value"
+            .to_string(),
+        queue_pressure_excess: "rustraft_runtime_pressure_queue_excess".to_string(),
         node_runtime_timer_pressure: "rustraft_runtime_pressure_node_runtime_timer".to_string(),
         node_runtime_timer_pressure_observed_percent:
             "rustraft_runtime_pressure_node_runtime_timer_observed_percent".to_string(),
@@ -3352,6 +3361,12 @@ pub fn matrixraft_runtime_pressure_admission_prometheus(
     );
     push_metric(
         &mut text,
+        &names.queue_pressure,
+        labels,
+        bool_metric(admission.queue_pressure),
+    );
+    push_metric(
+        &mut text,
         &names.node_runtime_timer_pressure,
         labels,
         bool_metric(admission.node_runtime_timer_pressure),
@@ -3609,6 +3624,46 @@ pub fn matrixraft_runtime_pressure_admission_prometheus(
             &detail_labels,
             0,
         );
+    }
+
+    for detail in &admission.queue_pressure_details {
+        let mut detail_labels = labels.to_vec();
+        detail_labels.push(("component", detail.component.as_str()));
+        push_metric(
+            &mut text,
+            &names.queue_pressure_observed_value,
+            &detail_labels,
+            detail.observed_value,
+        );
+        push_metric(
+            &mut text,
+            &names.queue_pressure_threshold_value,
+            &detail_labels,
+            detail.threshold_value,
+        );
+        push_metric(
+            &mut text,
+            &names.queue_pressure_excess,
+            &detail_labels,
+            detail.excess,
+        );
+    }
+    if admission.queue_pressure_details.is_empty() {
+        let mut detail_labels = labels.to_vec();
+        detail_labels.push(("component", "none"));
+        push_metric(
+            &mut text,
+            &names.queue_pressure_observed_value,
+            &detail_labels,
+            0,
+        );
+        push_metric(
+            &mut text,
+            &names.queue_pressure_threshold_value,
+            &detail_labels,
+            0,
+        );
+        push_metric(&mut text, &names.queue_pressure_excess, &detail_labels, 0);
     }
 
     for detail in &admission.node_runtime_timer_pressure_details {
@@ -6064,6 +6119,55 @@ pub fn matrixraft_runtime_pressure_grafana_panels() -> Vec<GrafanaPanel> {
                     .to_string(),
         },
         GrafanaPanel {
+            id: 1800,
+            title: "Runtime Queue Pressure".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: metrics.queue_pressure,
+            unit: "bool".to_string(),
+            description:
+                "Runtime admission queue-pressure signal derived from mailbox and channel depth, utilization, and rejection counters."
+                    .to_string(),
+        },
+        GrafanaPanel {
+            id: 1801,
+            title: "Runtime Queue Pressure Detail".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!(
+                "sum by (service, group, workload, component) ({})",
+                metrics.queue_pressure_observed_value
+            ),
+            unit: "short".to_string(),
+            description:
+                "Observed mailbox and channel queue values used by runtime pressure admission."
+                    .to_string(),
+        },
+        GrafanaPanel {
+            id: 1802,
+            title: "Runtime Queue Pressure Excess".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!(
+                "sum by (service, group, workload, component) ({})",
+                metrics.queue_pressure_excess
+            ),
+            unit: "short".to_string(),
+            description:
+                "Mailbox and channel queue pressure amount above the configured admission threshold."
+                    .to_string(),
+        },
+        GrafanaPanel {
+            id: 1803,
+            title: "Runtime Queue Pressure Threshold".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!(
+                "sum by (service, group, workload, component) ({})",
+                metrics.queue_pressure_threshold_value
+            ),
+            unit: "short".to_string(),
+            description:
+                "Configured mailbox and channel queue thresholds used by runtime admission."
+                    .to_string(),
+        },
+        GrafanaPanel {
             id: 1170,
             title: "Runtime Node Timer Pressure".to_string(),
             panel_type: "timeseries".to_string(),
@@ -6821,6 +6925,10 @@ pub fn matrixraft_observability_provisioning() -> ObservabilityProvisioning {
             runtime_pressure_metrics.read_backlog_pressure_observed_value,
             runtime_pressure_metrics.read_backlog_pressure_threshold_value,
             runtime_pressure_metrics.read_backlog_pressure_excess,
+            runtime_pressure_metrics.queue_pressure,
+            runtime_pressure_metrics.queue_pressure_observed_value,
+            runtime_pressure_metrics.queue_pressure_threshold_value,
+            runtime_pressure_metrics.queue_pressure_excess,
             runtime_pressure_metrics.node_runtime_timer_pressure,
             runtime_pressure_metrics.node_runtime_timer_pressure_observed_percent,
             runtime_pressure_metrics.node_runtime_timer_pressure_threshold_percent,

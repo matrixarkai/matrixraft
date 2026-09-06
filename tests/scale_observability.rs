@@ -1068,7 +1068,7 @@ fn runtime_pressure_observability_exports_canonical_metrics_panels_and_alert() {
     );
 
     let panels = matrixraft_runtime_pressure_grafana_panels();
-    assert_eq!(panels.len(), 43);
+    assert_eq!(panels.len(), 47);
     assert_eq!(
         panels
             .iter()
@@ -1766,7 +1766,7 @@ fn runtime_pressure_admission_exports_prometheus_payload() {
 
     assert_eq!(metrics.format, "prometheus_text_v0.0.4");
     assert_eq!(metrics.metric_count, metrics.text.lines().count() as u64);
-    assert_eq!(metrics.metric_count, 32);
+    assert_eq!(metrics.metric_count, 36);
     assert!(metrics.text.contains(
         "rustraft_runtime_pressure_admission_accepted{service=\"raft\\\"a\",group=\"g1\",workload=\"release-scale\",reason=\"rejected_runtime_pressure\",rejected_component=\"memory.process_resident\"} 0"
     ));
@@ -2185,7 +2185,7 @@ fn runtime_pressure_admission_can_fail_closed_on_read_backlog_pressure() {
         ],
     );
     assert_eq!(metrics.metric_count, metrics.text.lines().count() as u64);
-    assert_eq!(metrics.metric_count, 38);
+    assert_eq!(metrics.metric_count, 42);
     assert!(metrics
         .text
         .contains("rustraft_runtime_pressure_read_backlog{service=\"raft\",group=\"g1\",workload=\"read-scale\"} 1"));
@@ -2405,6 +2405,25 @@ fn runtime_pressure_admission_handles_queue_pressure_as_actionable_signal() {
         .contains(&"shed_or_retry_queue_producers".to_string()));
     matrixraft::metrics::matrixraft_validate_runtime_pressure_admission_evidence(&observe_only)
         .expect("observe-only queue pressure evidence validates");
+    let queue_metrics = matrixraft_runtime_pressure_admission_prometheus(
+        &observe_only,
+        &[("service", "raft"), ("group", "g1")],
+    );
+    assert!(queue_metrics
+        .text
+        .contains("rustraft_runtime_pressure_queue{service=\"raft\",group=\"g1\"} 1"));
+    assert!(queue_metrics.text.contains(
+        "rustraft_runtime_pressure_queue_observed_value{service=\"raft\",group=\"g1\",component=\"queue.mailbox_depth\"} 92"
+    ));
+    assert!(queue_metrics.text.contains(
+        "rustraft_runtime_pressure_queue_threshold_value{service=\"raft\",group=\"g1\",component=\"queue.mailbox_depth\"} 80"
+    ));
+    assert!(queue_metrics.text.contains(
+        "rustraft_runtime_pressure_queue_excess{service=\"raft\",group=\"g1\",component=\"queue.mail_channel_rejected\"} 2"
+    ));
+    assert!(queue_metrics.text.contains(
+        "rustraft_runtime_pressure_action_source_total{service=\"raft\",group=\"g1\",component=\"queue.mailbox_depth\",action=\"raise_queue_capacity_or_reduce_producer_burst\"} 1"
+    ));
 
     let diagnostics = matrixraft_runtime_pressure_diagnostic_log_entries(&observe_only);
     assert!(diagnostics.iter().any(|entry| {

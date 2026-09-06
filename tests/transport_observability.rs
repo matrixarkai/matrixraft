@@ -622,10 +622,11 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     // peer-count scale panels joined, 174 -> 176 when WAL slow-fsync
     // compaction count panels joined, 176 -> 187 when runtime-pressure
     // freshness panels joined, 187 -> 194 when benchmark artifact freshness
-    // panels joined, 194 -> 202 when public API validation panels joined, and
-    // 202 -> 206 when queue-pressure panels joined;
+    // panels joined, 194 -> 202 when public API validation panels joined,
+    // 202 -> 206 when queue-pressure panels joined, and 206 -> 210 when
+    // runtime queue-pressure admission panels joined;
     // naming them keeps the number from being a figure nobody can check.
-    assert_eq!(dashboard.panels.len(), 206);
+    assert_eq!(dashboard.panels.len(), 210);
     let panel_ids = dashboard
         .panels
         .iter()
@@ -677,6 +678,10 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
         "Runtime Read Backlog Detail",
         "Runtime Read Backlog Excess",
         "Runtime Read Backlog Threshold",
+        "Runtime Queue Pressure",
+        "Runtime Queue Pressure Detail",
+        "Runtime Queue Pressure Excess",
+        "Runtime Queue Pressure Threshold",
         "Snapshot Sender Lifecycle",
         "Snapshot Downloader Lifecycle",
         "Snapshot Sustained Sender Load",
@@ -813,6 +818,10 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
         runtime_pressure_metrics.read_backlog_pressure_observed_value,
         runtime_pressure_metrics.read_backlog_pressure_threshold_value,
         runtime_pressure_metrics.read_backlog_pressure_excess,
+        runtime_pressure_metrics.queue_pressure,
+        runtime_pressure_metrics.queue_pressure_observed_value,
+        runtime_pressure_metrics.queue_pressure_threshold_value,
+        runtime_pressure_metrics.queue_pressure_excess,
         runtime_pressure_metrics.node_runtime_timer_pressure,
         runtime_pressure_metrics.node_runtime_timer_pressure_observed_percent,
         runtime_pressure_metrics.node_runtime_timer_pressure_threshold_percent,
@@ -891,8 +900,9 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     // Same pin, checked through the serialized JSON: the struct and the exported document
     // must agree on how many panels there are.
     // 194 -> 202 when public API validation panels joined, 202 -> 206 when
-    // queue-pressure panels joined.
-    assert_eq!(parsed["panels"].as_array().expect("panels").len(), 206);
+    // queue-pressure panels joined, and 206 -> 210 when runtime queue-pressure
+    // admission panels joined.
+    assert_eq!(parsed["panels"].as_array().expect("panels").len(), 210);
     assert!(json.contains("histogram_quantile(0.99"));
     assert!(json.contains("rustraft_blocker_total"));
     assert!(json.contains("rustraft_fatal_total"));
@@ -912,6 +922,8 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     );
     assert!(json.contains("rustraft_runtime_pressure_scale"));
     assert!(json.contains("rustraft_runtime_pressure_pipeline"));
+    assert!(json.contains("rustraft_runtime_pressure_queue"));
+    assert!(json.contains("Runtime Queue Pressure"));
     assert!(json.contains("rustraft_node_runtime_timer_pending_ticks"));
     assert!(json.contains("rustraft_node_runtime_timer_max_pending_ticks"));
     assert!(json.contains("rustraft_node_runtime_timer_accepted_ticks_total"));
@@ -1677,6 +1689,19 @@ fn observability_required_metric_names_flatten_release_scale_catalog() {
             "flattened catalog missing queue pressure metric {metric_name}"
         );
     }
+
+    let runtime_pressure_metrics = matrixraft_runtime_pressure_metric_names();
+    for metric_name in [
+        runtime_pressure_metrics.queue_pressure,
+        runtime_pressure_metrics.queue_pressure_observed_value,
+        runtime_pressure_metrics.queue_pressure_threshold_value,
+        runtime_pressure_metrics.queue_pressure_excess,
+    ] {
+        assert!(
+            required.contains(&metric_name),
+            "flattened catalog missing runtime queue pressure metric {metric_name}"
+        );
+    }
 }
 
 #[test]
@@ -2192,6 +2217,10 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         runtime_pressure_metrics.read_backlog_pressure_observed_value,
         runtime_pressure_metrics.read_backlog_pressure_threshold_value,
         runtime_pressure_metrics.read_backlog_pressure_excess,
+        runtime_pressure_metrics.queue_pressure,
+        runtime_pressure_metrics.queue_pressure_observed_value,
+        runtime_pressure_metrics.queue_pressure_threshold_value,
+        runtime_pressure_metrics.queue_pressure_excess,
         runtime_pressure_metrics.node_runtime_timer_pressure,
         runtime_pressure_metrics.node_runtime_timer_pressure_observed_percent,
         runtime_pressure_metrics.node_runtime_timer_pressure_threshold_percent,
