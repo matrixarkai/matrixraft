@@ -385,6 +385,55 @@ pub fn matrixraft_production_readiness_report_with_runtime_pressure_policy(
     report
 }
 
+pub fn matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
+    input: &ProductionReadinessInput,
+    policy: &RuntimePressureAdmissionPolicy,
+    freshness: &RuntimePressureFreshnessReport,
+) -> ProductionReadinessReport {
+    let mut report = matrixraft_production_readiness_report_with_runtime_pressure_policy(input, policy);
+    if freshness.fresh && freshness.issues.is_empty() {
+        add_unique(
+            &mut report.satisfied,
+            "runtime_pressure:freshness_evidence_fresh",
+        );
+        if !freshness.low_fresh {
+            add_unique(
+                &mut report.recommended_next_actions,
+                "refresh runtime-pressure evidence soon before QPS, latency, or memory parity evidence becomes stale",
+            );
+        }
+    } else {
+        add_unique(&mut report.missing, "runtime_pressure:freshness_evidence_fresh");
+        add_unique(
+            &mut report.recommended_next_actions,
+            "refresh runtime-pressure evidence before claiming QPS, latency, or memory production parity",
+        );
+        if freshness.issues.is_empty() {
+            add_unique(
+                &mut report.production_blockers,
+                format!(
+                    "runtime_pressure:freshness_invalid:{}",
+                    freshness.freshness_status
+                ),
+            );
+        } else {
+            for issue in &freshness.issues {
+                add_unique(
+                    &mut report.production_blockers,
+                    format!("runtime_pressure:freshness_invalid:{issue}"),
+                );
+            }
+        }
+    }
+    report.ready = report.missing.is_empty() && report.production_blockers.is_empty();
+    report.production_status = if report.ready {
+        ProductionStatus::ProductionReady
+    } else {
+        ProductionStatus::Blocked
+    };
+    report
+}
+
 fn add_unique(values: &mut Vec<String>, value: impl Into<String>) {
     let value = value.into();
     if !values.contains(&value) {

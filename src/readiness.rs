@@ -1110,6 +1110,7 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "RuntimeAdminReport",
         "matrixraft_production_readiness_report",
         "matrixraft_production_readiness_report_with_runtime_pressure_policy",
+        "matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness",
         "matrixraft_runtime_local_status_report",
         "matrixraft_runtime_admin_report",
         "AdminCommand::ReleaseMemory",
@@ -1485,6 +1486,19 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             byteraft_or_baseline_reference:
                 "BaselineRaft fail-closed runtime-pressure deployment gate".to_string(),
             note: "Policy-aware production readiness reports keep the stable production gate while rejecting runtime-pressure evidence whose rejected_component does not match the configured fail-closed admission policy."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftFreshPolicyProductionReadinessReport".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore release gates require fresh flow-control and scheduler telemetry"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft fail-closed runtime-pressure freshness deployment gate".to_string(),
+            note: "Freshness-aware production readiness reports reject stale, invalid, missing, or future-dated runtime-pressure evidence before QPS, latency, or memory parity can be claimed."
                 .to_string(),
         },
         ApiNameMapping {
@@ -2775,6 +2789,7 @@ pub fn matrixraft_compatibility_report_names() -> Vec<String> {
         "matrixraft_standalone_readiness_report",
         "matrixraft_production_readiness_report",
         "matrixraft_production_readiness_report_with_runtime_pressure_policy",
+        "matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness",
         "matrixraft_production_readiness_report_prometheus",
         "matrixraft_data_node_process_rollout_readiness_report",
         "matrixraft_meta_process_rollout_readiness_report",
