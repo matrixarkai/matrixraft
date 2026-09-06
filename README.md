@@ -586,6 +586,10 @@ Use `matrixraft_debug_snapshot_with_runtime_pressure_evidence` when release
 runs also need the fail-closed runtime-pressure admission decision, runtime
 pressure Prometheus text, and `rustraft.runtime_pressure.*` diagnostic entries
 inside the same support bundle.
+Those runtime-pressure debug snapshots also carry freshness status, freshness
+Prometheus text, and `rustraft.runtime_pressure.freshness` diagnostic entries,
+so support bundles preserve the same QPS/latency/memory evidence-age gate used
+by release dashboards.
 Runtime-pressure metrics inside debug snapshots use exact Prometheus sample-name
 and malformed-sample validation, so shadow metric names or corrupted labels
 cannot satisfy the dashboard/debug-bundle contract.

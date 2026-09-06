@@ -2824,6 +2824,32 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
             |entry| entry.target == "rustraft.runtime_pressure.admission"
                 && entry.severity == DiagnosticSeverity::Error
         ));
+    let runtime_pressure_freshness = runtime_pressure_snapshot
+        .runtime_pressure_freshness
+        .as_ref()
+        .expect("runtime pressure snapshot should carry freshness evidence");
+    assert!(runtime_pressure_freshness.fresh);
+    assert_eq!(runtime_pressure_freshness.freshness_status, "fresh");
+    assert!(runtime_pressure_snapshot
+        .runtime_pressure_freshness_diagnostics
+        .iter()
+        .any(|entry| {
+            entry.target == "rustraft.runtime_pressure.freshness"
+                && entry.severity == DiagnosticSeverity::Info
+                && entry.message == "runtime_pressure_freshness_fresh"
+        }));
+    assert!(runtime_pressure_snapshot
+        .diagnostics
+        .iter()
+        .any(|entry| entry.target == "rustraft.runtime_pressure.freshness"));
+    assert!(runtime_pressure_snapshot
+        .runtime_pressure_freshness_prometheus
+        .text
+        .contains("rustraft_runtime_pressure_freshness_fresh"));
+    assert!(runtime_pressure_snapshot
+        .runtime_pressure_freshness_prometheus
+        .text
+        .contains("freshness_status=\"fresh\""));
     assert!(runtime_pressure_snapshot
         .diagnostics
         .iter()
@@ -2834,6 +2860,39 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .any(|entry| entry.target == "rustraft.runtime_pressure.read_backlog"));
     assert_eq!(runtime_pressure_snapshot.triage.status, "needs_attention");
     assert!(matrixraft_validate_debug_snapshot(&runtime_pressure_snapshot).ready);
+    let mut missing_freshness_diagnostic_snapshot = runtime_pressure_snapshot.clone();
+    missing_freshness_diagnostic_snapshot
+        .runtime_pressure_freshness_diagnostics
+        .clear();
+    let missing_freshness_diagnostic_validation =
+        matrixraft_validate_debug_snapshot(&missing_freshness_diagnostic_snapshot);
+    assert!(!missing_freshness_diagnostic_validation.ready);
+    assert!(missing_freshness_diagnostic_validation
+        .issues
+        .contains(&"runtime_pressure_freshness_diagnostic_log_contract_mismatch".to_string()));
+    let mut missing_freshness_prometheus_snapshot = runtime_pressure_snapshot.clone();
+    missing_freshness_prometheus_snapshot
+        .runtime_pressure_freshness_prometheus
+        .text = missing_freshness_prometheus_snapshot
+        .runtime_pressure_freshness_prometheus
+        .text
+        .lines()
+        .filter(|line| !line.starts_with("rustraft_runtime_pressure_freshness_fresh{"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    missing_freshness_prometheus_snapshot
+        .runtime_pressure_freshness_prometheus
+        .metric_count = missing_freshness_prometheus_snapshot
+        .runtime_pressure_freshness_prometheus
+        .text
+        .lines()
+        .count() as u64;
+    let missing_freshness_prometheus_validation =
+        matrixraft_validate_debug_snapshot(&missing_freshness_prometheus_snapshot);
+    assert!(!missing_freshness_prometheus_validation.ready);
+    assert!(missing_freshness_prometheus_validation
+        .issues
+        .contains(&"runtime_pressure_freshness_prometheus_metric_contract_missing".to_string()));
     let mut missing_action_source_snapshot = runtime_pressure_snapshot.clone();
     missing_action_source_snapshot
         .runtime_pressure_prometheus

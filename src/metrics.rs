@@ -2357,6 +2357,12 @@ pub struct DebugSnapshot {
     pub runtime_pressure_diagnostics: Vec<DiagnosticLogEntry>,
     #[serde(default)]
     pub runtime_pressure_prometheus: PrometheusMetricSet,
+    #[serde(default)]
+    pub runtime_pressure_freshness: Option<RuntimePressureFreshnessReport>,
+    #[serde(default)]
+    pub runtime_pressure_freshness_diagnostics: Vec<DiagnosticLogEntry>,
+    #[serde(default)]
+    pub runtime_pressure_freshness_prometheus: PrometheusMetricSet,
     pub optimization: OptimizationReport,
     pub optimization_prometheus: PrometheusMetricSet,
     pub grafana: GrafanaDashboard,
@@ -6742,6 +6748,86 @@ pub fn matrixraft_validate_debug_snapshot(snapshot: &DebugSnapshot) -> DebugBund
             issues.push("runtime_pressure_diagnostic_log_contract_mismatch".to_string());
         }
         expected_diagnostics.extend(expected_runtime_pressure_diagnostics);
+        let runtime_pressure_metrics = matrixraft_runtime_pressure_metric_names();
+        let expected_runtime_pressure_freshness =
+            matrixraft_debug_snapshot_runtime_pressure_freshness(snapshot);
+        match &snapshot.runtime_pressure_freshness {
+            Some(freshness) => {
+                if freshness != &expected_runtime_pressure_freshness {
+                    issues.push("runtime_pressure_freshness_contract_mismatch".to_string());
+                }
+                let expected_freshness_diagnostics =
+                    matrixraft_runtime_pressure_freshness_diagnostic_log_entries(freshness);
+                if snapshot.runtime_pressure_freshness_diagnostics != expected_freshness_diagnostics
+                {
+                    issues.push(
+                        "runtime_pressure_freshness_diagnostic_log_contract_mismatch".to_string(),
+                    );
+                }
+                expected_diagnostics.extend(expected_freshness_diagnostics);
+                if snapshot.runtime_pressure_freshness_prometheus.format != "prometheus_text_v0.0.4"
+                {
+                    issues
+                        .push("runtime_pressure_freshness_prometheus_format_mismatch".to_string());
+                }
+                if snapshot
+                    .runtime_pressure_freshness_prometheus
+                    .text
+                    .is_empty()
+                {
+                    issues
+                        .push("runtime_pressure_freshness_prometheus_metrics_missing".to_string());
+                }
+                if snapshot.runtime_pressure_freshness_prometheus.metric_count
+                    != snapshot
+                        .runtime_pressure_freshness_prometheus
+                        .text
+                        .lines()
+                        .count() as u64
+                {
+                    issues.push(
+                        "runtime_pressure_freshness_prometheus_metric_count_mismatch".to_string(),
+                    );
+                }
+                if !matrixraft_prometheus_sample_lines_are_well_formed(
+                    &snapshot.runtime_pressure_freshness_prometheus.text,
+                ) {
+                    issues
+                        .push("runtime_pressure_freshness_prometheus_malformed_sample".to_string());
+                }
+                for required_metric in [
+                    runtime_pressure_metrics
+                        .freshness_generated_at_unix_ms
+                        .as_str(),
+                    runtime_pressure_metrics.freshness_age_ms.as_str(),
+                    runtime_pressure_metrics.freshness_max_age_ms.as_str(),
+                    runtime_pressure_metrics
+                        .freshness_stale_after_unix_ms
+                        .as_str(),
+                    runtime_pressure_metrics
+                        .freshness_remaining_fresh_ms
+                        .as_str(),
+                    runtime_pressure_metrics.freshness_low_fresh_ms.as_str(),
+                    runtime_pressure_metrics.freshness_low_fresh.as_str(),
+                    runtime_pressure_metrics.freshness_fresh.as_str(),
+                    runtime_pressure_metrics.freshness_status.as_str(),
+                    runtime_pressure_metrics.freshness_issue_total.as_str(),
+                    runtime_pressure_metrics.freshness_issue.as_str(),
+                ] {
+                    if !matrixraft_prometheus_text_has_metric_sample(
+                        &snapshot.runtime_pressure_freshness_prometheus.text,
+                        required_metric,
+                    ) {
+                        issues.push(
+                            "runtime_pressure_freshness_prometheus_metric_contract_missing"
+                                .to_string(),
+                        );
+                        break;
+                    }
+                }
+            }
+            None => issues.push("runtime_pressure_freshness_missing".to_string()),
+        }
         if snapshot.runtime_pressure_prometheus.format != "prometheus_text_v0.0.4" {
             issues.push("runtime_pressure_prometheus_format_mismatch".to_string());
         }
@@ -6758,7 +6844,6 @@ pub fn matrixraft_validate_debug_snapshot(snapshot: &DebugSnapshot) -> DebugBund
         ) {
             issues.push("runtime_pressure_prometheus_malformed_sample".to_string());
         }
-        let runtime_pressure_metrics = matrixraft_runtime_pressure_metric_names();
         for required_metric in [
             runtime_pressure_metrics.admission_accepted.as_str(),
             runtime_pressure_metrics.admission_rejected.as_str(),
@@ -6784,6 +6869,13 @@ pub fn matrixraft_validate_debug_snapshot(snapshot: &DebugSnapshot) -> DebugBund
     } else if !snapshot.runtime_pressure_diagnostics.is_empty()
         || !snapshot.runtime_pressure_prometheus.text.is_empty()
         || snapshot.runtime_pressure_prometheus.metric_count != 0
+        || snapshot.runtime_pressure_freshness.is_some()
+        || !snapshot.runtime_pressure_freshness_diagnostics.is_empty()
+        || !snapshot
+            .runtime_pressure_freshness_prometheus
+            .text
+            .is_empty()
+        || snapshot.runtime_pressure_freshness_prometheus.metric_count != 0
     {
         issues.push("runtime_pressure_evidence_without_admission".to_string());
     }
@@ -8400,6 +8492,9 @@ pub fn matrixraft_debug_snapshot_with_performance_targets(
         runtime_pressure_admission: None,
         runtime_pressure_diagnostics: Vec::new(),
         runtime_pressure_prometheus: PrometheusMetricSet::default(),
+        runtime_pressure_freshness: None,
+        runtime_pressure_freshness_diagnostics: Vec::new(),
+        runtime_pressure_freshness_prometheus: PrometheusMetricSet::default(),
         optimization_prometheus: matrixraft_optimization_report_prometheus(&optimization, labels),
         optimization,
         grafana: matrixraft_grafana_dashboard(),
@@ -8408,6 +8503,31 @@ pub fn matrixraft_debug_snapshot_with_performance_targets(
         runbook_prometheus,
         runbook_steps,
     }
+}
+
+fn matrixraft_debug_snapshot_runtime_pressure_freshness(
+    snapshot: &DebugSnapshot,
+) -> RuntimePressureFreshnessReport {
+    matrixraft_runtime_pressure_freshness_report(
+        snapshot.generated_at_unix_ms,
+        snapshot.generated_at_unix_ms,
+        3_600_000,
+        300_000,
+    )
+}
+
+fn matrixraft_debug_snapshot_attach_runtime_pressure_freshness(
+    snapshot: &mut DebugSnapshot,
+    labels: &[(&str, &str)],
+) {
+    let freshness = matrixraft_debug_snapshot_runtime_pressure_freshness(snapshot);
+    let freshness_diagnostics =
+        matrixraft_runtime_pressure_freshness_diagnostic_log_entries(&freshness);
+    snapshot.diagnostics.extend(freshness_diagnostics.clone());
+    snapshot.runtime_pressure_freshness_prometheus =
+        matrixraft_runtime_pressure_freshness_prometheus(&freshness, labels);
+    snapshot.runtime_pressure_freshness = Some(freshness);
+    snapshot.runtime_pressure_freshness_diagnostics = freshness_diagnostics;
 }
 
 pub fn matrixraft_debug_snapshot_with_runtime_pressure_evidence(
@@ -8486,6 +8606,7 @@ pub fn matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence
     snapshot
         .diagnostics
         .extend(runtime_pressure_diagnostics.clone());
+    matrixraft_debug_snapshot_attach_runtime_pressure_freshness(&mut snapshot, labels);
     snapshot.diagnostic_prometheus =
         matrixraft_diagnostic_log_prometheus(&snapshot.diagnostics, labels);
     snapshot.runtime_pressure_prometheus =
@@ -8554,6 +8675,7 @@ pub fn matrixraft_debug_snapshot_with_runtime_pressure_read_backlog_and_node_run
     snapshot
         .diagnostics
         .extend(runtime_pressure_diagnostics.clone());
+    matrixraft_debug_snapshot_attach_runtime_pressure_freshness(&mut snapshot, labels);
     snapshot.diagnostic_prometheus =
         matrixraft_diagnostic_log_prometheus(&snapshot.diagnostics, labels);
     snapshot.runtime_pressure_prometheus =
