@@ -1466,6 +1466,9 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         .observability_interfaces
         .contains(&"matrixraft_observability_provisioning_runbook_steps".to_string()));
     assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_public_api_contract_validation_grafana_panels".to_string()));
+    assert!(api
         .diagnostic_interfaces
         .contains(&"matrixraft_optimization_diagnostic_json_lines".to_string()));
     assert!(api
@@ -1746,6 +1749,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"observability_provisioning\"",
         "\"validation\"",
         "\"validation_prometheus\"",
+        "\"public_api_contract_validation\"",
+        "\"public_api_contract_validation_prometheus\"",
         "\"provisioning_validation\"",
         "\"provisioning_validation_prometheus\"",
         "\"provisioning_runbook_prometheus\"",
@@ -1762,6 +1767,7 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("matrixraft_local_status_diagnostic_json_lines"));
     assert!(example.contains("matrixraft_runtime_pressure_freshness_diagnostic_json_lines"));
     assert!(example.contains("matrixraft_peer_pipeline_metrics_prometheus"));
+    assert!(example.contains("matrixraft_public_api_contract_validation_prometheus"));
     assert!(example.contains("matrixraft_snapshot_lifecycle_evidence_prometheus"));
     assert!(example.contains("matrixraft_wal_lifecycle_evidence_prometheus"));
     assert!(example.contains("matrixraft_membership_readiness_prometheus"));
@@ -1777,6 +1783,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("snapshot_lifecycle_prometheus"));
     assert!(example.contains("wal_lifecycle_prometheus"));
     assert!(example.contains("membership_readiness_prometheus"));
+    assert!(example.contains("public_api_contract_validation"));
+    assert!(example.contains("public_api_contract_validation_prometheus"));
     assert!(example.contains("snapshot.optimization_prometheus"));
     assert!(example.contains("snapshot.runbook_prometheus"));
     assert!(example.contains("matrixraft_operator_runbook_prometheus(&provisioning.runbook_steps"));

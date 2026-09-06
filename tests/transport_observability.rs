@@ -459,9 +459,10 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     // bottleneck scoring joined, 172 -> 174 when snapshot lifecycle
     // peer-count scale panels joined, 174 -> 176 when WAL slow-fsync
     // compaction count panels joined, 176 -> 187 when runtime-pressure
-    // freshness panels joined, and 187 -> 194 when benchmark artifact freshness
-    // panels joined; naming them keeps the number from being a figure nobody can check.
-    assert_eq!(dashboard.panels.len(), 194);
+    // freshness panels joined, 187 -> 194 when benchmark artifact freshness
+    // panels joined, and 194 -> 202 when public API validation panels joined;
+    // naming them keeps the number from being a figure nobody can check.
+    assert_eq!(dashboard.panels.len(), 202);
     let panel_ids = dashboard
         .panels
         .iter()
@@ -529,6 +530,14 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
         "Membership Transition Ready",
         "Membership Transition Missing",
         "Membership Missing Evidence",
+        "Public API Contract Ready",
+        "Public API Mapping Coverage",
+        "Public API Interface Names",
+        "Public API Reference Required",
+        "Public API Unmapped Required",
+        "Public API Unmapped Advertised",
+        "Public API Category Coverage",
+        "Public API Category Unmapped",
         "Production Readiness Ready",
         "Production Readiness Satisfied",
         "Production Readiness Missing",
@@ -710,7 +719,8 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     assert_eq!(parsed["title"], "RustRaft Runtime Overview");
     // Same pin, checked through the serialized JSON: the struct and the exported document
     // must agree on how many panels there are.
-    assert_eq!(parsed["panels"].as_array().expect("panels").len(), 194);
+    // 194 -> 202 when public API validation panels joined.
+    assert_eq!(parsed["panels"].as_array().expect("panels").len(), 202);
     assert!(json.contains("histogram_quantile(0.99"));
     assert!(json.contains("rustraft_blocker_total"));
     assert!(json.contains("rustraft_fatal_total"));
@@ -1463,6 +1473,9 @@ fn observability_required_metric_names_flatten_release_scale_catalog() {
         "rustraft_process_resident_memory_bytes",
         "rustraft_wal_lifecycle_compaction_after_slow_fsync_observed",
         "rustraft_production_readiness_runtime_pressure_bottleneck_score_percent",
+        "rustraft_public_api_contract_ready",
+        "rustraft_public_api_mapping_coverage_percent",
+        "rustraft_public_api_unmapped_reference_required_total",
     ] {
         assert!(
             required.iter().any(|required| required == metric_name),
@@ -2094,6 +2107,8 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         "snapshot_lifecycle_prometheus",
         "wal_lifecycle_prometheus",
         "membership_readiness_prometheus",
+        "public_api_contract_validation",
+        "public_api_contract_validation_prometheus",
         "benchmark_prometheus",
         "grafana_dashboard_json",
         "alert_rules_json",
@@ -2120,6 +2135,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         "snapshot_lifecycle_prometheus",
         "wal_lifecycle_prometheus",
         "membership_readiness_prometheus",
+        "public_api_contract_validation_prometheus",
         "benchmark_prometheus",
         "optimization_prometheus",
         "triage_prometheus",

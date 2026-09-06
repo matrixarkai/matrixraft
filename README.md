@@ -113,6 +113,7 @@ License: Apache-2.0.
 - `matrixraft_scale_optimization_targets_from_baseline_raft_report`
 - `matrixraft_public_api_contract`
 - `matrixraft_public_api_contract_validation_prometheus`
+- `matrixraft_public_api_contract_validation_grafana_panels`
 - `matrixraft_api_name_mappings`
 - `matrixraft_core_interface_names`
 - `matrixraft_evidence_interface_names`

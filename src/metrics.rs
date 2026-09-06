@@ -5950,6 +5950,77 @@ pub fn matrixraft_membership_readiness_grafana_panels() -> Vec<GrafanaPanel> {
     ]
 }
 
+pub fn matrixraft_public_api_contract_validation_grafana_panels() -> Vec<GrafanaPanel> {
+    [
+        (
+            1410,
+            "Public API Contract Ready",
+            "rustraft_public_api_contract_ready",
+            "bool",
+            "Fail-closed public API/reference mapping readiness; 1 means API names, TiKV references, and ByteRaft references are coherent.",
+        ),
+        (
+            1411,
+            "Public API Mapping Coverage",
+            "rustraft_public_api_mapping_coverage_percent",
+            "percent",
+            "Percent of advertised public API names that carry explicit TiKV/ByteRaft vocabulary mappings.",
+        ),
+        (
+            1412,
+            "Public API Interface Names",
+            "rustraft_public_api_interface_name_total",
+            "short",
+            "Advertised public interface names covered by the open-source API contract.",
+        ),
+        (
+            1413,
+            "Public API Reference Required",
+            "rustraft_public_api_reference_required_total",
+            "short",
+            "Fail-closed API names that must have reference vocabulary before release.",
+        ),
+        (
+            1414,
+            "Public API Unmapped Required",
+            "rustraft_public_api_unmapped_reference_required_total",
+            "short",
+            "Reference-required API names missing TiKV or ByteRaft vocabulary mappings.",
+        ),
+        (
+            1415,
+            "Public API Unmapped Advertised",
+            "rustraft_public_api_unmapped_advertised_total",
+            "short",
+            "Advertised API names without reference mappings.",
+        ),
+        (
+            1416,
+            "Public API Category Coverage",
+            "sum by (service, category) (rustraft_public_api_mapping_category_coverage_percent)",
+            "percent",
+            "Reference mapping coverage by public API category.",
+        ),
+        (
+            1417,
+            "Public API Category Unmapped",
+            "sum by (service, category) (rustraft_public_api_mapping_category_unmapped_total)",
+            "short",
+            "Unmapped advertised names by public API category.",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, title, expr, unit, description)| GrafanaPanel {
+        id,
+        title: title.to_string(),
+        panel_type: "timeseries".to_string(),
+        expr: expr.to_string(),
+        unit: unit.to_string(),
+        description: description.to_string(),
+    })
+    .collect()
+}
+
 pub fn matrixraft_production_readiness_grafana_panels() -> Vec<GrafanaPanel> {
     let metrics = matrixraft_production_readiness_metric_names();
     vec![
@@ -6240,6 +6311,14 @@ pub fn matrixraft_observability_provisioning() -> ObservabilityProvisioning {
             membership_readiness_metrics.transition_ready,
             membership_readiness_metrics.transition_missing_total,
             membership_readiness_metrics.transition_missing,
+            "rustraft_public_api_contract_ready".to_string(),
+            "rustraft_public_api_mapping_coverage_percent".to_string(),
+            "rustraft_public_api_interface_name_total".to_string(),
+            "rustraft_public_api_reference_required_total".to_string(),
+            "rustraft_public_api_unmapped_reference_required_total".to_string(),
+            "rustraft_public_api_unmapped_advertised_total".to_string(),
+            "rustraft_public_api_mapping_category_coverage_percent".to_string(),
+            "rustraft_public_api_mapping_category_unmapped_total".to_string(),
             production_readiness_metrics.ready,
             production_readiness_metrics.satisfied_total,
             production_readiness_metrics.missing_total,
@@ -6317,6 +6396,8 @@ pub fn matrixraft_observability_provisioning() -> ObservabilityProvisioning {
             "observability_provisioning".to_string(),
             "validation".to_string(),
             "validation_prometheus".to_string(),
+            "public_api_contract_validation".to_string(),
+            "public_api_contract_validation_prometheus".to_string(),
             "provisioning_validation".to_string(),
             "provisioning_validation_prometheus".to_string(),
             "provisioning_runbook_prometheus".to_string(),
@@ -6340,6 +6421,7 @@ pub fn matrixraft_observability_provisioning() -> ObservabilityProvisioning {
             "runbook_prometheus".to_string(),
             "debug_snapshot_metadata_prometheus".to_string(),
             "validation_prometheus".to_string(),
+            "public_api_contract_validation_prometheus".to_string(),
             "provisioning_validation_prometheus".to_string(),
             "provisioning_runbook_prometheus".to_string(),
             "support_envelope_validation_prometheus".to_string(),
@@ -9343,6 +9425,7 @@ pub fn matrixraft_grafana_dashboard() -> GrafanaDashboard {
             panels.extend(matrixraft_snapshot_lifecycle_grafana_panels());
             panels.extend(matrixraft_wal_lifecycle_grafana_panels());
             panels.extend(matrixraft_membership_readiness_grafana_panels());
+            panels.extend(matrixraft_public_api_contract_validation_grafana_panels());
             panels.extend(matrixraft_production_readiness_grafana_panels());
             panels.extend(matrixraft_baseline_raft_benchmark_grafana_panels());
             panels
