@@ -10,6 +10,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const INTENTIONAL_SLOW_FSYNC_THRESHOLD_MS: u64 = 50;
+const IGNORE_HOST_FSYNC_LATENCY_MS: u64 = u64::MAX;
+
 fn temp_wal_dir(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -207,7 +210,7 @@ fn persistent_wal_reports_slow_fsync_backpressure_through_lifecycle_status() {
     let dir = temp_wal_dir("slow-fsync");
     let options = wal_options(dir.clone());
     let mut wal = PersistentRaftWal::open(options).expect("open wal");
-    wal.set_slow_fsync_threshold_ms(50);
+    wal.set_slow_fsync_threshold_ms(INTENTIONAL_SLOW_FSYNC_THRESHOLD_MS);
 
     wal.inject_next_fsync_delay_for_test(75);
     let slow = wal
@@ -215,12 +218,18 @@ fn persistent_wal_reports_slow_fsync_backpressure_through_lifecycle_status() {
         .expect("append slow fsync");
     assert!(slow.fsync_on_append);
     assert!(slow.slow_fsync_observed);
-    assert_eq!(slow.slow_fsync_threshold_ms, 50);
-    assert!(slow.fsync_elapsed_ms >= 50);
+    assert_eq!(
+        slow.slow_fsync_threshold_ms,
+        INTENTIONAL_SLOW_FSYNC_THRESHOLD_MS
+    );
+    assert!(slow.fsync_elapsed_ms >= INTENTIONAL_SLOW_FSYNC_THRESHOLD_MS);
 
     let status = wal.status();
     assert!(status.slow_fsync_backpressure_observed);
-    assert_eq!(status.slow_fsync_threshold_ms, 50);
+    assert_eq!(
+        status.slow_fsync_threshold_ms,
+        INTENTIONAL_SLOW_FSYNC_THRESHOLD_MS
+    );
     assert_eq!(status.slow_fsync_count, 1);
     assert_eq!(status.consecutive_slow_fsync_count, 1);
     assert!(status.max_fsync_elapsed_ms >= slow.fsync_elapsed_ms);
@@ -228,6 +237,7 @@ fn persistent_wal_reports_slow_fsync_backpressure_through_lifecycle_status() {
     assert_eq!(status.slow_fsync_segment_count, 1);
     assert_eq!(status.compacted_slow_fsync_segment_count, 0);
 
+    wal.set_slow_fsync_threshold_ms(IGNORE_HOST_FSYNC_LATENCY_MS);
     wal.append_with_report(wal_record(2))
         .expect("append fast fsync");
     let status = wal.status();
@@ -256,6 +266,7 @@ fn persistent_wal_reports_slow_fsync_backpressure_through_lifecycle_status() {
     assert!(released.fence_valid);
     assert!(released.released_segments > 0);
 
+    wal.set_slow_fsync_threshold_ms(INTENTIONAL_SLOW_FSYNC_THRESHOLD_MS);
     let evidence = matrixraft_wal_lifecycle_evidence(&wal.status());
     assert!(evidence.compaction_observed);
     assert!(evidence.slow_fsync_backpressure_observed);
@@ -272,11 +283,12 @@ fn persistent_wal_compaction_after_slow_fsync_requires_releasing_a_slow_segment(
     let dir = temp_wal_dir("slow-fsync-retained");
     let options = wal_options(dir.clone());
     let mut wal = PersistentRaftWal::open(options).expect("open wal");
-    wal.set_slow_fsync_threshold_ms(50);
+    wal.set_slow_fsync_threshold_ms(IGNORE_HOST_FSYNC_LATENCY_MS);
 
     for index in 1..=4 {
         wal.append(wal_record(index)).expect("append fast segment");
     }
+    wal.set_slow_fsync_threshold_ms(INTENTIONAL_SLOW_FSYNC_THRESHOLD_MS);
     wal.inject_next_fsync_delay_for_test(75);
     wal.append_with_report(wal_record(5))
         .expect("slow append on retained active segment");
