@@ -226,6 +226,8 @@ pub use metrics::{
     matrixraft_runtime_pressure_bottleneck_summary,
     matrixraft_runtime_pressure_diagnostic_json_lines,
     matrixraft_runtime_pressure_diagnostic_log_entries,
+    matrixraft_runtime_pressure_freshness_diagnostic_json_lines,
+    matrixraft_runtime_pressure_freshness_diagnostic_log_entries,
     matrixraft_runtime_pressure_freshness_prometheus, matrixraft_runtime_pressure_freshness_report,
     matrixraft_runtime_pressure_grafana_panels, matrixraft_runtime_pressure_metric_names,
     matrixraft_scale_grafana_panels, matrixraft_scale_metric_names,

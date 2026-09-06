@@ -199,6 +199,8 @@ License: Apache-2.0.
 - `matrixraft_optimization_diagnostic_json_lines`
 - `matrixraft_runtime_pressure_diagnostic_log_entries`
 - `matrixraft_runtime_pressure_diagnostic_json_lines`
+- `matrixraft_runtime_pressure_freshness_diagnostic_log_entries`
+- `matrixraft_runtime_pressure_freshness_diagnostic_json_lines`
 - `matrixraft_node_runtime_status_prometheus`
 - `matrixraft_node_runtime_grafana_panels`
 - `matrixraft_membership_readiness_diagnostic_log_entries`
@@ -508,6 +510,10 @@ per-component `rustraft.runtime_pressure.memory`,
 `rustraft.runtime_pressure.pipeline`, and
 `rustraft.runtime_pressure.read_backlog` records so log queries can group
 rejected work by the exact pressure source.
+`matrixraft_runtime_pressure_freshness_diagnostic_json_lines` emits
+`rustraft.runtime_pressure.freshness` and per-issue freshness records, so
+log-only release gates can reject stale, invalid, low-fresh, or future-dated
+QPS, latency, and memory evidence without scraping Prometheus text.
 `matrixraft_membership_readiness_diagnostic_json_lines` renders per-scope
 failover, scale-up, and scale-down readiness decisions as structured JSON lines
 so missing joint-consensus, learner catch-up, witness, and scheduler evidence is

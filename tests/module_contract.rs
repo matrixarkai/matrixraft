@@ -339,6 +339,12 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         .mapped_canonical_names
         .contains(&"matrixraft_runtime_pressure_freshness_prometheus".to_string()));
     assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_runtime_pressure_freshness_diagnostic_log_entries".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_runtime_pressure_freshness_diagnostic_json_lines".to_string()));
+    assert!(validation
         .unmapped_advertised_names
         .contains(&"matrixraft_public_api_contract".to_string()));
     assert!(validation
@@ -469,6 +475,12 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(validation
         .reference_required_names
         .contains(&"matrixraft_runtime_pressure_freshness_prometheus".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_runtime_pressure_freshness_diagnostic_log_entries".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_runtime_pressure_freshness_diagnostic_json_lines".to_string()));
     assert!(validation
         .reference_required_names
         .contains(&"matrixraft_release_benchmark_runtime_timer_status".to_string()));
@@ -858,6 +870,14 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
                 .raft_rs_or_tikv_reference
                 .contains("Prometheus freshness scrape")
             && mapping.note.contains("Grafana")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_runtime_pressure_freshness_diagnostic_log_entries"
+            && mapping.note.contains("log-only release gates")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_runtime_pressure_freshness_diagnostic_json_lines"
+            && mapping.note.contains("centralized log queries")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "InstallSnapshotResponse"
