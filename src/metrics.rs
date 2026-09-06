@@ -6296,6 +6296,7 @@ pub fn matrixraft_observability_provisioning() -> ObservabilityProvisioning {
             "debug_snapshot_metadata_prometheus".to_string(),
             "diagnostic_json_lines".to_string(),
             "local_status_diagnostic_json_lines".to_string(),
+            "runtime_pressure_freshness_diagnostic_json_lines".to_string(),
             "diagnostic_prometheus".to_string(),
             "peer_pipeline_prometheus".to_string(),
             "latency_prometheus".to_string(),

@@ -2086,6 +2086,7 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         "debug_snapshot",
         "debug_snapshot_json",
         "diagnostic_json_lines",
+        "runtime_pressure_freshness_diagnostic_json_lines",
         "latency_prometheus",
         "memory_prometheus",
         "scale_prometheus",
