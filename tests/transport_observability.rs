@@ -266,6 +266,9 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     assert!(api.core_interfaces.contains(&"ChannelSelector".to_string()));
     assert!(api
         .core_interfaces
+        .contains(&"ChannelSelector::try_send_many_to_channel_checked".to_string()));
+    assert!(api
+        .core_interfaces
         .contains(&"ChannelSelector::select_checked".to_string()));
     assert!(api
         .safety_helpers
@@ -371,6 +374,13 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
                 .byteraft_or_baseline_reference
                 .contains("checked ready-queue selector")
             && mapping.note.contains("deadline-bound polling")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "ChannelSelector::try_send_many_to_channel_checked"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("ready-peer notification")
+            && mapping.note.contains("bounded fanout enqueue")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_runtime_pressure_admission_with_scale_targets"

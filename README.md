@@ -555,7 +555,9 @@ map to TiKV raftstore-style mailboxes and BaselineRaft per-replica queues, so
 production embedders can handle queue pressure and runtime lock failures without
 turning them into process aborts. `MailChannel::try_send_many_checked` also
 rejects oversized bursts before queueing them, which keeps per-peer fanout
-memory bounded under release-scale workloads.
+memory bounded under release-scale workloads; use
+`ChannelSelector::try_send_many_to_channel_checked` when the caller needs the
+same bounded batch enqueue plus selector wakeup as one checked operation.
 `matrixraft_reference_mapped_interface_names` is the fail-closed subset of that
 surface: election RPCs, append/read/snapshot RPCs, storage/transport, WAL,
 peer progress, runtime pressure, runtime-pressure freshness, scale-target

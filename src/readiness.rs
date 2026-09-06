@@ -1265,6 +1265,7 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "MailChannel::try_send_checked",
         "MailChannel::try_send_many_checked",
         "ChannelSelector",
+        "ChannelSelector::try_send_many_to_channel_checked",
         "ChannelSelector::select_checked",
         "matrixraft_public_api_contract_validation_prometheus",
         "matrixraft_snapshot_lifecycle_evidence_prometheus",
@@ -1530,6 +1531,17 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference: "TiKV raftstore ready peer selector".to_string(),
             byteraft_or_baseline_reference: "BaselineRaft replica scheduler selector".to_string(),
             note: "ChannelSelector is the fairness and fanout boundary for selecting active peer queues under release-scale workloads."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "ChannelSelector::try_send_many_to_channel_checked".to_string(),
+            matrixraft_facade: "MatrixRaftChannelSelector::TrySendManyToChannelChecked"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore bounded batch send and ready-peer notification".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft checked batch enqueue and selector wake".to_string(),
+            note: "The selector-level checked batch API keeps bounded fanout enqueue and selector wakeup in one recoverable operation for production callers."
                 .to_string(),
         },
         ApiNameMapping {
@@ -2794,6 +2806,7 @@ pub fn matrixraft_core_interface_names() -> Vec<String> {
         "MailChannel::try_send_checked",
         "MailChannel::try_send_many_checked",
         "ChannelSelector",
+        "ChannelSelector::try_send_many_to_channel_checked",
         "ChannelSelector::select_checked",
         "PersistentRaftWal",
         "DebugSnapshot",
