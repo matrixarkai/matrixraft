@@ -1016,7 +1016,9 @@ bash scripts/verify_baseline_raft_benchmark_artifacts.sh \
 
 When the scale path is supplied, the verifier recomputes the derived QPS and
 throughput scale optimization inputs and rejects scale-rate, scale-target, or
-hint drift. When the readiness paths are supplied, it also recomputes the
+hint drift; every release-scale QPS and throughput target must be non-zero, so
+an empty or malformed BaselineRaft sample cannot silently become a 0 percent
+production target. When the readiness paths are supplied, it also recomputes the
 combined asserted benchmark/runtime-pressure/read-backlog/node-runtime-timer
 readiness artifact through the production-clean benchmark gate and rejects
 readiness-report, Prometheus, diagnostic-log, or label drift before release
