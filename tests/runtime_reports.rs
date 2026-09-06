@@ -1578,6 +1578,14 @@ fn benchmark_readiness_artifact_validator_accepts_matching_read_backlog_evidence
         .report
         .satisfied
         .contains(&"runtime_pressure:freshness_evidence_fresh".to_string()));
+    assert!(artifact
+        .runtime_pressure_freshness_prometheus
+        .text
+        .contains("rustraft_runtime_pressure_freshness_fresh"));
+    assert!(artifact
+        .runtime_pressure_freshness_prometheus
+        .text
+        .contains("freshness_status=\"fresh\""));
     let expected_policy_report =
         matrixraft_production_readiness_report_with_runtime_pressure_policy(
             &readiness_input,
@@ -1689,6 +1697,44 @@ fn benchmark_readiness_artifact_validator_accepts_matching_read_backlog_evidence
         .expect_err("matching validator rejects artifacts missing latency detail metrics");
     assert!(missing_latency_detail_error.contains(
         "benchmark:runtime_pressure_readiness_runtime_prometheus_metric_missing:rustraft_runtime_pressure_latency_observed_p99_ms"
+    ));
+
+    let mut missing_freshness_metric_artifact = artifact.clone();
+    missing_freshness_metric_artifact
+        .runtime_pressure_freshness_prometheus
+        .text = missing_freshness_metric_artifact
+        .runtime_pressure_freshness_prometheus
+        .text
+        .lines()
+        .filter(|line| !line.starts_with("rustraft_runtime_pressure_freshness_fresh{"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    missing_freshness_metric_artifact
+        .runtime_pressure_freshness_prometheus
+        .metric_count = missing_freshness_metric_artifact
+        .runtime_pressure_freshness_prometheus
+        .text
+        .lines()
+        .count() as u64;
+    let missing_freshness_metric_error =
+        matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+            &missing_freshness_metric_artifact,
+            &input,
+            &benchmark_report,
+            &benchmark_summary,
+            &MemoryMetrics::zero(),
+            &MemoryOptimizationThresholds::default(),
+            &LatencyMetrics::zero(),
+            &LatencyOptimizationThresholds::default(),
+            &[peer.clone()],
+            &read_backlog_metrics,
+            &read_backlog_thresholds,
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+            &labels,
+        )
+        .expect_err("matching validator rejects artifacts missing freshness metrics");
+    assert!(missing_freshness_metric_error.contains(
+        "benchmark:runtime_pressure_readiness_freshness_prometheus_metric_missing:rustraft_runtime_pressure_freshness_fresh"
     ));
 
     matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
@@ -1822,6 +1868,14 @@ fn benchmark_readiness_artifact_validator_preserves_timer_aware_release_baseline
         .report
         .satisfied
         .contains(&"runtime_pressure:freshness_evidence_fresh".to_string()));
+    assert!(baseline_artifact
+        .runtime_pressure_freshness_prometheus
+        .text
+        .contains("rustraft_runtime_pressure_freshness_status"));
+    assert!(baseline_artifact
+        .runtime_pressure_freshness_prometheus
+        .text
+        .contains("freshness_status=\"fresh\""));
     let expected_timer_policy_report =
         matrixraft_production_readiness_report_with_runtime_pressure_policy(
             &baseline_readiness_input,

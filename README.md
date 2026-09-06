@@ -412,6 +412,10 @@ claim can pass.
 `matrixraft_runtime_pressure_freshness_prometheus` exports that evidence age,
 stale boundary, remaining freshness, status, and issue count so Grafana can
 guard release dashboards against stale runtime-pressure samples.
+Benchmark runtime-pressure readiness artifacts embed the same freshness
+Prometheus text beside runtime-pressure admission metrics, so Grafana and
+release automation can inspect the exact freshness gate carried by the embedded
+production-readiness report.
 The default policy is observe-only for dashboards and release dry runs;
 `RuntimePressureAdmissionPolicy::fail_closed()` lets production services reject
 new work when memory, p99 latency, scale target, peer pipeline, read-backlog, or
