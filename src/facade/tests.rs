@@ -773,6 +773,51 @@ mod tests {
         assert!(report.missing.is_empty());
         assert!(report.production_blockers.is_empty());
         assert_eq!(report.public_api.storage_trait, "Storage");
+        assert!(report
+            .satisfied
+            .contains(&"public_api:contract_valid".to_string()));
+        assert!(report
+            .satisfied
+            .contains(&"public_api:required_reference_mappings_present".to_string()));
+    }
+
+    #[test]
+    fn production_readiness_gate_fails_closed_on_public_api_mapping_drift() {
+        let mut satisfied = Vec::new();
+        let mut missing = Vec::new();
+        let mut blockers = Vec::new();
+        let mut actions = Vec::new();
+        let validation = PublicApiContractValidationReport {
+            ready: false,
+            mapped_canonical_names: vec!["Storage".to_string()],
+            unmapped_advertised_names: vec!["ReadIndexRequest".to_string()],
+            unmapped_reference_required_names: vec!["ReadIndexRequest".to_string()],
+            api_mapping_coverage_percent: 50,
+            mapping_coverage_by_category: Vec::new(),
+            reference_required_names: vec!["Storage".to_string(), "ReadIndexRequest".to_string()],
+            interface_name_count: 2,
+            blockers: vec![
+                "api_mapping:missing_required_canonical:ReadIndexRequest".to_string(),
+            ],
+        };
+
+        require_public_api_contract_validation(
+            &validation,
+            &mut satisfied,
+            &mut missing,
+            &mut blockers,
+            &mut actions,
+        );
+
+        assert!(satisfied.is_empty());
+        assert!(missing.contains(&"public_api:contract_valid".to_string()));
+        assert!(missing.contains(&"public_api:required_reference_mappings_present".to_string()));
+        assert!(blockers.contains(
+            &"public_api:api_mapping:missing_required_canonical:ReadIndexRequest".to_string()
+        ));
+        assert!(actions.iter().any(|action| {
+            action.contains("fix RustRaft public API canonical names and TiKV/ByteRaft mappings")
+        }));
     }
 
     #[test]
