@@ -7,7 +7,9 @@ use matrixraft::{
         matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog,
         matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer,
         matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts,
+        matrixraft_production_readiness_input_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts,
         matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts,
+        matrixraft_production_readiness_report_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts,
         matrixraft_release_benchmark_runtime_timer_status,
         matrixraft_validate_benchmark_runtime_pressure_readiness_artifact,
         matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog,
@@ -1768,6 +1770,47 @@ fn benchmark_readiness_artifact_validator_preserves_timer_aware_release_baseline
         .report
         .production_blockers
         .contains(&"runtime_pressure:no_node_runtime_timer_pressure".to_string()));
+    let baseline_readiness_input =
+        matrixraft_production_readiness_input_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+            input.clone(),
+            &benchmark_report,
+            &benchmark_summary,
+            &MemoryMetrics::zero(),
+            &MemoryOptimizationThresholds::default(),
+            &LatencyMetrics::zero(),
+            &LatencyOptimizationThresholds::default(),
+            &[peer.clone()],
+            &read_backlog_metrics,
+            &read_backlog_thresholds,
+            &timer_status,
+            &timer_thresholds,
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+        )
+        .expect("timer-aware readiness input");
+    let expected_timer_policy_report =
+        matrixraft_production_readiness_report_with_runtime_pressure_policy(
+            &baseline_readiness_input,
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+        );
+    assert_eq!(baseline_artifact.report, expected_timer_policy_report);
+    let one_call_timer_report =
+        matrixraft_production_readiness_report_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+            &input,
+            &benchmark_report,
+            &benchmark_summary,
+            &MemoryMetrics::zero(),
+            &MemoryOptimizationThresholds::default(),
+            &LatencyMetrics::zero(),
+            &LatencyOptimizationThresholds::default(),
+            &[peer.clone()],
+            &read_backlog_metrics,
+            &read_backlog_thresholds,
+            &timer_status,
+            &timer_thresholds,
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+        )
+        .expect("one-call timer-aware report");
+    assert_eq!(one_call_timer_report, expected_timer_policy_report);
 
     let mut missing_scale_metric_artifact = baseline_artifact.clone();
     missing_scale_metric_artifact
