@@ -6506,14 +6506,26 @@ pub fn matrixraft_validate_observability_provisioning(
     if provisioning.required_metric_names != expected.required_metric_names {
         issues.push("observability_required_metrics_mismatch".to_string());
     }
+    if matrixraft_string_list_has_duplicates(&provisioning.required_metric_names) {
+        issues.push("observability_required_metric_name_duplicate".to_string());
+    }
     if provisioning.validation_metric_names != expected.validation_metric_names {
         issues.push("observability_validation_metrics_mismatch".to_string());
+    }
+    if matrixraft_string_list_has_duplicates(&provisioning.validation_metric_names) {
+        issues.push("observability_validation_metric_name_duplicate".to_string());
     }
     if provisioning.debug_artifact_names != expected.debug_artifact_names {
         issues.push("observability_debug_artifacts_mismatch".to_string());
     }
+    if matrixraft_string_list_has_duplicates(&provisioning.debug_artifact_names) {
+        issues.push("observability_debug_artifact_name_duplicate".to_string());
+    }
     if provisioning.prometheus_artifact_names != expected.prometheus_artifact_names {
         issues.push("observability_prometheus_artifacts_mismatch".to_string());
+    }
+    if matrixraft_string_list_has_duplicates(&provisioning.prometheus_artifact_names) {
+        issues.push("observability_prometheus_artifact_name_duplicate".to_string());
     }
     if provisioning.dashboard != expected.dashboard {
         issues.push("observability_dashboard_mismatch".to_string());
@@ -6607,6 +6619,11 @@ fn matrixraft_dashboard_has_unadvertised_metrics(provisioning: &ObservabilityPro
 fn matrixraft_grafana_dashboard_has_duplicate_panel_ids(dashboard: &GrafanaDashboard) -> bool {
     let mut seen = BTreeSet::new();
     dashboard.panels.iter().any(|panel| !seen.insert(panel.id))
+}
+
+fn matrixraft_string_list_has_duplicates(values: &[String]) -> bool {
+    let mut seen = BTreeSet::new();
+    values.iter().any(|value| !seen.insert(value.as_str()))
 }
 
 fn matrixraft_dashboard_missing_runtime_pressure_metric_issues(
