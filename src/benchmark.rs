@@ -757,7 +757,7 @@ pub fn matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pr
             peer_pipeline,
             policy,
         )?;
-    Ok(matrixraft_production_readiness_report(&input))
+    Ok(matrixraft_production_readiness_report_with_runtime_pressure_policy(&input, policy))
 }
 
 pub fn matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
@@ -787,7 +787,7 @@ pub fn matrixraft_production_readiness_report_with_benchmark_runtime_pressure_an
         read_backlog_thresholds,
         policy,
     )?;
-    Ok(matrixraft_production_readiness_report(&input))
+    Ok(matrixraft_production_readiness_report_with_runtime_pressure_policy(&input, policy))
 }
 
 pub fn matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts(
@@ -817,7 +817,7 @@ pub fn matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pr
             read_backlog_thresholds,
             policy,
         )?;
-    Ok(matrixraft_production_readiness_report(&input))
+    Ok(matrixraft_production_readiness_report_with_runtime_pressure_policy(&input, policy))
 }
 
 pub fn matrixraft_production_readiness_report_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
