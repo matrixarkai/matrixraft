@@ -6518,6 +6518,9 @@ pub fn matrixraft_validate_observability_provisioning(
     if provisioning.dashboard != expected.dashboard {
         issues.push("observability_dashboard_mismatch".to_string());
     }
+    if matrixraft_grafana_dashboard_has_duplicate_panel_ids(&provisioning.dashboard) {
+        issues.push("observability_dashboard_panel_id_duplicate".to_string());
+    }
     if matrixraft_dashboard_has_unadvertised_metrics(provisioning) {
         issues.push("observability_dashboard_metric_not_advertised".to_string());
     }
@@ -6599,6 +6602,11 @@ fn matrixraft_dashboard_has_unadvertised_metrics(provisioning: &ObservabilityPro
             .iter()
             .any(|metric| matrixraft_expr_references_metric(&panel.expr, metric))
     })
+}
+
+fn matrixraft_grafana_dashboard_has_duplicate_panel_ids(dashboard: &GrafanaDashboard) -> bool {
+    let mut seen = BTreeSet::new();
+    dashboard.panels.iter().any(|panel| !seen.insert(panel.id))
 }
 
 fn matrixraft_dashboard_missing_runtime_pressure_metric_issues(
@@ -6782,6 +6790,9 @@ pub fn matrixraft_validate_debug_snapshot(snapshot: &DebugSnapshot) -> DebugBund
     }
     if snapshot.grafana.panels.is_empty() {
         issues.push("grafana_panels_missing".to_string());
+    }
+    if matrixraft_grafana_dashboard_has_duplicate_panel_ids(&snapshot.grafana) {
+        issues.push("grafana_panel_id_duplicate".to_string());
     }
     let expected_grafana = matrixraft_grafana_dashboard();
     if snapshot.grafana.uid != expected_grafana.uid

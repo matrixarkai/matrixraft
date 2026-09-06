@@ -2300,6 +2300,16 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         .issues
         .contains(&"observability_dashboard_metric_not_advertised".to_string()));
 
+    let mut duplicate_dashboard_panel = provisioning.clone();
+    duplicate_dashboard_panel.dashboard.panels[1].id =
+        duplicate_dashboard_panel.dashboard.panels[0].id;
+    let duplicate_dashboard_panel_validation =
+        matrixraft_validate_observability_provisioning(&duplicate_dashboard_panel);
+    assert!(!duplicate_dashboard_panel_validation.ready);
+    assert!(duplicate_dashboard_panel_validation
+        .issues
+        .contains(&"observability_dashboard_panel_id_duplicate".to_string()));
+
     let mut missing_runtime_pressure_panel = provisioning.clone();
     missing_runtime_pressure_panel
         .dashboard
