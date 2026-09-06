@@ -2310,6 +2310,50 @@ fn observability_provisioning_exports_dashboard_alerts_metrics_and_bundle_contra
         .issues
         .contains(&"observability_dashboard_panel_id_duplicate".to_string()));
 
+    let mut duplicate_required_metric = provisioning.clone();
+    duplicate_required_metric
+        .required_metric_names
+        .push(duplicate_required_metric.required_metric_names[0].clone());
+    let duplicate_required_metric_validation =
+        matrixraft_validate_observability_provisioning(&duplicate_required_metric);
+    assert!(!duplicate_required_metric_validation.ready);
+    assert!(duplicate_required_metric_validation
+        .issues
+        .contains(&"observability_required_metric_name_duplicate".to_string()));
+
+    let mut duplicate_validation_metric = provisioning.clone();
+    duplicate_validation_metric
+        .validation_metric_names
+        .push(duplicate_validation_metric.validation_metric_names[0].clone());
+    let duplicate_validation_metric_validation =
+        matrixraft_validate_observability_provisioning(&duplicate_validation_metric);
+    assert!(!duplicate_validation_metric_validation.ready);
+    assert!(duplicate_validation_metric_validation
+        .issues
+        .contains(&"observability_validation_metric_name_duplicate".to_string()));
+
+    let mut duplicate_debug_artifact = provisioning.clone();
+    duplicate_debug_artifact
+        .debug_artifact_names
+        .push(duplicate_debug_artifact.debug_artifact_names[0].clone());
+    let duplicate_debug_artifact_validation =
+        matrixraft_validate_observability_provisioning(&duplicate_debug_artifact);
+    assert!(!duplicate_debug_artifact_validation.ready);
+    assert!(duplicate_debug_artifact_validation
+        .issues
+        .contains(&"observability_debug_artifact_name_duplicate".to_string()));
+
+    let mut duplicate_prometheus_artifact = provisioning.clone();
+    duplicate_prometheus_artifact
+        .prometheus_artifact_names
+        .push(duplicate_prometheus_artifact.prometheus_artifact_names[0].clone());
+    let duplicate_prometheus_artifact_validation =
+        matrixraft_validate_observability_provisioning(&duplicate_prometheus_artifact);
+    assert!(!duplicate_prometheus_artifact_validation.ready);
+    assert!(duplicate_prometheus_artifact_validation
+        .issues
+        .contains(&"observability_prometheus_artifact_name_duplicate".to_string()));
+
     let mut missing_runtime_pressure_panel = provisioning.clone();
     missing_runtime_pressure_panel
         .dashboard
