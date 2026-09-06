@@ -1226,6 +1226,13 @@ fn runtime_pressure_observability_exports_canonical_metrics_panels_and_alert() {
                 .contains("rustraft_runtime_pressure_read_backlog")
             && alert.severity == "warning"
     }));
+    assert!(matrixraft_alert_rules().iter().any(|alert| {
+        alert.alert == "RustRaftRuntimeQueuePressure"
+            && alert.expr.contains("rustraft_runtime_pressure_queue")
+            && alert.severity == "warning"
+            && alert.summary.contains("Runtime Queue Pressure")
+            && alert.summary.contains("Runtime Pressure Action Sources")
+    }));
 }
 
 #[test]

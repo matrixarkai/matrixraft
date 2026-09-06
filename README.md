@@ -509,6 +509,10 @@ QPS or p99 latency parity is accepted.
 read queues, with `resolve_read_backlog_pressure` pointing operators at runtime
 read-backlog panels, read-index p99 latency, and deadline-bound replica reads
 before release-scale read QPS or random-replica reads are trusted.
+`RustRaftRuntimeQueuePressure` guards mailbox and channel queue pressure, with
+`resolve_runtime_queue_pressure` pointing operators at runtime queue-pressure
+detail, excess, and action-source panels before release-scale QPS or p99 latency
+evidence is trusted.
 `RustRaftMembershipTransitionMissing` guards missing membership evidence across
 metaserver and data-node failover/scale transitions, with
 `resolve_membership_transition_evidence` covering joint consensus, learner

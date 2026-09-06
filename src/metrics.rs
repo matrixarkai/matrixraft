@@ -5145,6 +5145,15 @@ pub fn matrixraft_alert_rules() -> Vec<AlertRule> {
                     .to_string(),
         },
         AlertRule {
+            alert: "RustRaftRuntimeQueuePressure".to_string(),
+            expr: format!("{} > 0", runtime_pressure_metrics.queue_pressure),
+            duration: "1m".to_string(),
+            severity: "warning".to_string(),
+            summary:
+                "RustRaft runtime admission observed mailbox or channel queue pressure; inspect Runtime Queue Pressure, Runtime Queue Pressure Detail, and Runtime Pressure Action Sources before trusting QPS or p99 latency."
+                    .to_string(),
+        },
+        AlertRule {
             alert: "RustRaftNodeRuntimeTimerBackpressure".to_string(),
             expr: "rustraft_node_runtime_timer_utilization_percent >= 80 or rustraft_node_runtime_timer_backpressure > 0 or rate(rustraft_node_runtime_timer_rejected_ticks_total[1m]) > 0"
                 .to_string(),
@@ -8633,6 +8642,19 @@ pub fn matrixraft_operator_runbook_steps(
             "read_backlog",
             "Inspect Runtime Read Backlog Pressure, pending ReadIndex, bounded-stale read backlog, and read latency panels before trusting release-scale read QPS or random-replica reads.",
             "rustraft_runtime_pressure_read_backlog is 0, rustraft_runtime_pressure_read_backlog_excess is 0, pending ReadIndex requests drain below threshold, bounded-stale replica reads remain deadline-bound, and read_index p99 latency stays below the configured warning threshold.",
+        ));
+    }
+    if triage.status != "ready"
+        && alerts
+            .iter()
+            .any(|rule| rule.alert == "RustRaftRuntimeQueuePressure")
+    {
+        steps.push(matrixraft_runbook_step(
+            "resolve_runtime_queue_pressure",
+            "warning",
+            "runtime_queue",
+            "Inspect Runtime Queue Pressure, Runtime Queue Pressure Detail, Runtime Queue Pressure Excess, and Runtime Pressure Action Sources before trusting release-scale QPS or p99 latency evidence.",
+            "rustraft_runtime_pressure_queue is 0, rustraft_runtime_pressure_queue_excess is 0, mailbox and channel queue depths drain below threshold, rejected send counters stop increasing, and runtime pressure action-source metrics no longer attribute pressure to queue components.",
         ));
     }
     if triage.status != "ready"
