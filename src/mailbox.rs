@@ -100,6 +100,27 @@ impl<Mail> MailBox<Mail> {
         Ok(true)
     }
 
+    pub fn try_send_many(&self, priority: MailPriority, mails: Vec<Mail>) -> Result<(), Vec<Mail>> {
+        self.try_send_many_checked(priority, mails)
+            .expect("mailbox mutex poisoned")
+    }
+
+    pub fn try_send_many_checked(
+        &self,
+        priority: MailPriority,
+        mails: Vec<Mail>,
+    ) -> Result<Result<(), Vec<Mail>>, RaftError> {
+        let mut inner = self.inner.lock().map_err(mailbox_poisoned)?;
+        let channel = &mut inner.channels[priority.index()];
+        if channel.len().saturating_add(mails.len()) > self.high_watermark {
+            return Ok(Err(mails));
+        }
+
+        channel.extend(mails);
+        self.readable.notify_one();
+        Ok(Ok(()))
+    }
+
     pub fn wait_and_send(&self, priority: MailPriority, mail: Mail) {
         self.wait_and_send_checked(priority, mail)
             .expect("mailbox mutex poisoned");
