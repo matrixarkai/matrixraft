@@ -740,6 +740,9 @@ Use
 when that CI gate must also fail closed on timer-queue saturation.
 Use the asserted complete-pressure report variant when CI must prove benchmark
 parity before combining read-backlog and timer-pressure evidence.
+Runtime-pressure benchmark artifacts must also carry the queue-pressure signal
+and queue observed/threshold/excess samples, even when queues are clean, so
+release evidence cannot silently omit mailbox or channel saturation checks.
 Use `matrixraft_release_benchmark_runtime_timer_status` in release benchmark
 producer and verifier paths when no timer pressure is observed yet; this keeps
 the serialized readiness artifact and verifier on the same scheduler/timer

@@ -2012,6 +2012,46 @@ fn benchmark_readiness_artifact_validator_preserves_timer_aware_release_baseline
         "benchmark:runtime_pressure_readiness_runtime_prometheus_metric_missing:rustraft_runtime_pressure_scale"
     ));
 
+    let mut missing_queue_metric_artifact = baseline_artifact.clone();
+    missing_queue_metric_artifact
+        .runtime_pressure_prometheus
+        .text = missing_queue_metric_artifact
+        .runtime_pressure_prometheus
+        .text
+        .lines()
+        .filter(|line| !line.starts_with("rustraft_runtime_pressure_queue{"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    missing_queue_metric_artifact
+        .runtime_pressure_prometheus
+        .metric_count = missing_queue_metric_artifact
+        .runtime_pressure_prometheus
+        .text
+        .lines()
+        .count() as u64;
+    let missing_queue_metric_error =
+        matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer(
+            &missing_queue_metric_artifact,
+            &input,
+            &benchmark_report,
+            &benchmark_summary,
+            &MemoryMetrics::zero(),
+            &MemoryOptimizationThresholds::default(),
+            &LatencyMetrics::zero(),
+            &LatencyOptimizationThresholds::default(),
+            &[peer.clone()],
+            &read_backlog_metrics,
+            &read_backlog_thresholds,
+            &timer_status,
+            &timer_thresholds,
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+            &labels,
+        )
+        .expect_err("timer-aware validator rejects artifacts missing queue pressure metrics");
+    assert!(missing_queue_metric_error.contains(
+        "benchmark:runtime_pressure_readiness_runtime_prometheus_metric_missing:rustraft_runtime_pressure_queue"
+    ));
+
     let mut missing_timer_metric_artifact = baseline_artifact.clone();
     missing_timer_metric_artifact
         .runtime_pressure_prometheus
