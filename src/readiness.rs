@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::matrixraft_metric_names;
+use crate::metrics::PrometheusMetricSet;
 use crate::{
     fault, AdminStatusSurfaceEvidence, BaselineRaftBenchmarkEvidence, DataNodeProcessRolloutReport,
     MembershipTransitionEvidence, MetaProcessRolloutReport, MetricNames, PipelineEvidence,
@@ -969,6 +970,124 @@ pub fn matrixraft_validate_public_api_contract(
     }
 }
 
+pub fn matrixraft_public_api_contract_validation_prometheus(
+    report: &PublicApiContractValidationReport,
+    labels: &[(&str, &str)],
+) -> PrometheusMetricSet {
+    let mut text = String::new();
+    let mut metric_count = 0_u64;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_contract_ready",
+        labels,
+        u64::from(report.ready),
+    );
+    metric_count += 1;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_mapping_coverage_percent",
+        labels,
+        report.api_mapping_coverage_percent as u64,
+    );
+    metric_count += 1;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_interface_name_total",
+        labels,
+        report.interface_name_count as u64,
+    );
+    metric_count += 1;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_reference_required_total",
+        labels,
+        report.reference_required_names.len() as u64,
+    );
+    metric_count += 1;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_unmapped_reference_required_total",
+        labels,
+        report.unmapped_reference_required_names.len() as u64,
+    );
+    metric_count += 1;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_unmapped_advertised_total",
+        labels,
+        report.unmapped_advertised_names.len() as u64,
+    );
+    metric_count += 1;
+
+    for coverage in &report.mapping_coverage_by_category {
+        let mut category_labels = labels.to_vec();
+        category_labels.push(("category", coverage.category.as_str()));
+        matrixraft_push_public_api_metric(
+            &mut text,
+            "rustraft_public_api_mapping_category_coverage_percent",
+            &category_labels,
+            coverage.coverage_percent as u64,
+        );
+        matrixraft_push_public_api_metric(
+            &mut text,
+            "rustraft_public_api_mapping_category_unmapped_total",
+            &category_labels,
+            coverage.unmapped_names.len() as u64,
+        );
+        metric_count += 2;
+    }
+
+    for blocker in &report.blockers {
+        let mut blocker_labels = labels.to_vec();
+        blocker_labels.push(("blocker", blocker.as_str()));
+        matrixraft_push_public_api_metric(
+            &mut text,
+            "rustraft_public_api_blocker_present",
+            &blocker_labels,
+            1,
+        );
+        metric_count += 1;
+    }
+
+    PrometheusMetricSet {
+        format: "prometheus_text_v0.0.4".to_string(),
+        metric_count,
+        text,
+    }
+}
+
+fn matrixraft_push_public_api_metric(
+    out: &mut String,
+    name: &str,
+    labels: &[(&str, &str)],
+    value: u64,
+) {
+    out.push_str(name);
+    if !labels.is_empty() {
+        out.push('{');
+        for (idx, (label_name, label_value)) in labels.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            out.push_str(label_name);
+            out.push_str("=\"");
+            out.push_str(&matrixraft_escape_public_api_prometheus_label(label_value));
+            out.push('"');
+        }
+        out.push('}');
+    }
+    out.push(' ');
+    out.push_str(&value.to_string());
+    out.push('\n');
+}
+
+fn matrixraft_escape_public_api_prometheus_label(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('\n', r"\n")
+        .replace('"', r#"\""#)
+}
+
 fn matrixraft_api_mapping_coverage_by_category(
     contract: &PublicApiContract,
     canonical_names: &BTreeSet<&str>,
@@ -1139,6 +1258,7 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "matrixraft_runtime_pressure_freshness_prometheus",
         "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
         "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
+        "matrixraft_public_api_contract_validation_prometheus",
         "matrixraft_snapshot_lifecycle_evidence_prometheus",
         "matrixraft_wal_lifecycle_evidence_prometheus",
         "matrixraft_membership_readiness_prometheus",
@@ -1790,6 +1910,16 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             byteraft_or_baseline_reference:
                 "ByteRaft release-scale freshness diagnostic JSON lines".to_string(),
             note: "Runtime-pressure freshness JSON lines preserve generated time, age, stale boundary, remaining freshness, status, and issue fields for release automation and centralized log queries."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_public_api_contract_validation_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftPublicApiContractValidationPrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore public API compatibility dashboard scrape".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft API mapping and release-contract drift telemetry".to_string(),
+            note: "Public API contract validation Prometheus exports API mapping readiness, coverage, category drift, and blocker metrics so release dashboards can fail closed on unmapped TiKV or ByteRaft reference vocabulary."
                 .to_string(),
         },
         ApiNameMapping {
@@ -2733,6 +2863,7 @@ pub fn matrixraft_observability_interface_names() -> Vec<String> {
         "matrixraft_runtime_pressure_freshness_prometheus",
         "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
         "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
+        "matrixraft_public_api_contract_validation_prometheus",
         "matrixraft_runtime_pressure_admission_prometheus",
         "matrixraft_validate_runtime_pressure_admission_evidence",
         "matrixraft_validate_runtime_pressure_admission_evidence_with_policy",

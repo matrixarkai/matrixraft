@@ -15,6 +15,7 @@ use matrixraft::{
         matrixraft_api_name_mappings, matrixraft_core_interface_names,
         matrixraft_evidence_interface_names, matrixraft_open_source_surface,
         matrixraft_parity_report, matrixraft_public_api_contract,
+        matrixraft_public_api_contract_validation_prometheus,
         matrixraft_reference_mapped_interface_names, matrixraft_standalone_readiness_report,
         matrixraft_temporalstore_adapter_shape, matrixraft_validate_public_api_contract,
         ReadinessSnapshot,
@@ -346,6 +347,9 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         .contains(&"matrixraft_runtime_pressure_freshness_diagnostic_json_lines".to_string()));
     assert!(validation
         .mapped_canonical_names
+        .contains(&"matrixraft_public_api_contract_validation_prometheus".to_string()));
+    assert!(validation
+        .mapped_canonical_names
         .contains(&"matrixraft_snapshot_lifecycle_evidence_prometheus".to_string()));
     assert!(validation
         .mapped_canonical_names
@@ -396,6 +400,9 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(!validation
         .unmapped_advertised_names
         .contains(&"matrixraft_membership_readiness_prometheus".to_string()));
+    assert!(!validation
+        .unmapped_advertised_names
+        .contains(&"matrixraft_public_api_contract_validation_prometheus".to_string()));
     assert!(
         validation.api_mapping_coverage_percent > 0
             && validation.api_mapping_coverage_percent < 100
@@ -485,7 +492,11 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(!observability_coverage
         .unmapped_names
         .contains(&"matrixraft_membership_readiness_prometheus".to_string()));
+    assert!(!observability_coverage
+        .unmapped_names
+        .contains(&"matrixraft_public_api_contract_validation_prometheus".to_string()));
     for required in [
+        "matrixraft_public_api_contract_validation_prometheus",
         "matrixraft_snapshot_lifecycle_evidence_prometheus",
         "matrixraft_wal_lifecycle_evidence_prometheus",
         "matrixraft_membership_readiness_prometheus",
@@ -523,6 +534,9 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(validation
         .reference_required_names
         .contains(&"matrixraft_runtime_pressure_freshness_diagnostic_json_lines".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_public_api_contract_validation_prometheus".to_string()));
     assert!(validation
         .reference_required_names
         .contains(&"matrixraft_release_benchmark_runtime_timer_status".to_string()));
@@ -1505,6 +1519,74 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(adapter_shape
         .temporalstore_owned
         .contains(&"apply semantics".to_string()));
+}
+
+#[test]
+fn public_api_contract_validation_prometheus_exports_mapping_drift_metrics() {
+    let api = matrixraft_public_api_contract();
+    let validation = matrixraft_validate_public_api_contract(&api);
+    assert!(validation.ready);
+
+    let prometheus = matrixraft_public_api_contract_validation_prometheus(
+        &validation,
+        &[("service", "raft\"a"), ("environment", "prod\\west")],
+    );
+    assert_eq!(prometheus.format, "prometheus_text_v0.0.4");
+    assert_eq!(
+        prometheus.metric_count,
+        6 + validation.mapping_coverage_by_category.len() as u64 * 2
+    );
+    assert!(prometheus.text.contains(
+        "rustraft_public_api_contract_ready{service=\"raft\\\"a\",environment=\"prod\\\\west\"} 1"
+    ));
+    assert!(prometheus
+        .text
+        .contains("rustraft_public_api_mapping_coverage_percent"));
+    assert!(prometheus
+        .text
+        .contains("rustraft_public_api_unmapped_reference_required_total"));
+    assert!(prometheus.text.contains(
+        "rustraft_public_api_mapping_category_coverage_percent{service=\"raft\\\"a\",environment=\"prod\\\\west\",category=\"observability_interfaces\"}"
+    ));
+    assert!(!prometheus
+        .text
+        .contains("rustraft_public_api_blocker_present"));
+
+    let mut broken = api;
+    broken.api_name_mappings.retain(|mapping| {
+        mapping.canonical != "ReadIndexRequest"
+            && mapping.canonical != "matrixraft_public_api_contract_validation_prometheus"
+    });
+    let broken_validation = matrixraft_validate_public_api_contract(&broken);
+    assert!(!broken_validation.ready);
+    assert!(broken_validation
+        .unmapped_reference_required_names
+        .contains(&"ReadIndexRequest".to_string()));
+    assert!(broken_validation
+        .unmapped_reference_required_names
+        .contains(&"matrixraft_public_api_contract_validation_prometheus".to_string()));
+
+    let broken_prometheus = matrixraft_public_api_contract_validation_prometheus(
+        &broken_validation,
+        &[("service", "raft-a")],
+    );
+    assert!(broken_prometheus
+        .text
+        .contains("rustraft_public_api_contract_ready{service=\"raft-a\"} 0"));
+    assert!(broken_prometheus
+        .text
+        .contains("rustraft_public_api_unmapped_reference_required_total{service=\"raft-a\"} 2"));
+    assert!(broken_prometheus.text.contains(
+        "rustraft_public_api_blocker_present{service=\"raft-a\",blocker=\"api_mapping:missing_required_canonical:ReadIndexRequest\"} 1"
+    ));
+    assert!(broken_prometheus.text.contains(
+        "rustraft_public_api_blocker_present{service=\"raft-a\",blocker=\"api_mapping:missing_required_canonical:matrixraft_public_api_contract_validation_prometheus\"} 1"
+    ));
+    assert_eq!(
+        broken_prometheus.metric_count,
+        6 + broken_validation.mapping_coverage_by_category.len() as u64 * 2
+            + broken_validation.blockers.len() as u64
+    );
 }
 
 #[test]
