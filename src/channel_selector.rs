@@ -279,6 +279,19 @@ impl<Mail> ChannelSelector<Mail> {
         Ok(Ok(()))
     }
 
+    pub fn try_send_many_to_channel_checked(
+        &self,
+        channel: Arc<MailChannel<Mail>>,
+        priority: MailPriority,
+        mails: Vec<Mail>,
+    ) -> Result<Result<(), Vec<Mail>>, RaftError> {
+        if let Err(mails) = channel.try_send_many_checked(priority, mails)? {
+            return Ok(Err(mails));
+        }
+        let _ = self.fire_checked(channel)?;
+        Ok(Ok(()))
+    }
+
     pub fn fire(&self, channel: Arc<MailChannel<Mail>>) -> bool {
         self.fire_checked(channel)
             .expect("channel selector mutex poisoned")

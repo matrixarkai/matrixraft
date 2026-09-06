@@ -212,3 +212,51 @@ fn mail_channel_checked_batch_send_rejects_oversized_bursts_before_queueing() {
     );
     assert_eq!(channel.queued_len_checked().expect("checked queued len"), 0);
 }
+
+#[test]
+fn channel_selector_checked_batch_send_fires_only_bounded_batches() {
+    let selector = ChannelSelector::new();
+    let channel = MailChannel::new(9, 2);
+
+    assert!(selector
+        .try_send_many_to_channel_checked(
+            Arc::clone(&channel),
+            MailPriority::Normal,
+            vec!["one", "two", "three"],
+        )
+        .expect("checked oversized selector burst")
+        .is_err());
+    assert_eq!(channel.queued_len_checked().expect("checked queued len"), 0);
+    assert_eq!(
+        selector
+            .active_channel_count_checked()
+            .expect("checked active count"),
+        0
+    );
+
+    assert!(selector
+        .try_send_many_to_channel_checked(
+            Arc::clone(&channel),
+            MailPriority::Normal,
+            vec!["one", "two"],
+        )
+        .expect("checked selector batch send")
+        .is_ok());
+
+    let selection = selector
+        .select_checked(
+            ChannelSelectorPolicy {
+                limit: 1,
+                timeout_ms: 0,
+            },
+            &[],
+        )
+        .expect("checked select");
+    assert_eq!(selection.channels[0].replica_id(), 9);
+    assert_eq!(
+        selection.channels[0]
+            .fetch_checked(&selector)
+            .expect("checked fetch"),
+        vec!["one", "two"]
+    );
+}
