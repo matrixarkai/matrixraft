@@ -51,18 +51,30 @@ impl Default for MailBoxFetchPolicy {
 #[derive(Debug)]
 struct MailBoxInner<Mail> {
     channels: [VecDeque<Mail>; 3],
+    max_channel_depth: usize,
+    rejected_send_count: u64,
 }
 
 impl<Mail> MailBoxInner<Mail> {
     fn new() -> Self {
         Self {
             channels: std::array::from_fn(|_| VecDeque::new()),
+            max_channel_depth: 0,
+            rejected_send_count: 0,
         }
     }
 
     fn has_new_mail(&self) -> bool {
         self.channels.iter().any(|channel| !channel.is_empty())
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MailBoxPressureStats {
+    pub high_watermark: usize,
+    pub total_len: usize,
+    pub max_channel_depth: usize,
+    pub rejected_send_count: u64,
 }
 
 #[derive(Debug)]
@@ -92,10 +104,13 @@ impl<Mail> MailBox<Mail> {
         let mut inner = self.inner.lock().map_err(mailbox_poisoned)?;
         let channel = &mut inner.channels[priority.index()];
         if channel.len() >= self.high_watermark {
+            inner.rejected_send_count = inner.rejected_send_count.saturating_add(1);
             return Ok(false);
         }
 
         channel.push_back(mail);
+        let depth = channel.len();
+        inner.max_channel_depth = inner.max_channel_depth.max(depth);
         self.readable.notify_one();
         Ok(true)
     }
@@ -113,10 +128,15 @@ impl<Mail> MailBox<Mail> {
         let mut inner = self.inner.lock().map_err(mailbox_poisoned)?;
         let channel = &mut inner.channels[priority.index()];
         if channel.len().saturating_add(mails.len()) > self.high_watermark {
+            inner.rejected_send_count = inner
+                .rejected_send_count
+                .saturating_add(mails.len().try_into().unwrap_or(u64::MAX));
             return Ok(Err(mails));
         }
 
         channel.extend(mails);
+        let depth = channel.len();
+        inner.max_channel_depth = inner.max_channel_depth.max(depth);
         self.readable.notify_one();
         Ok(Ok(()))
     }
@@ -137,6 +157,9 @@ impl<Mail> MailBox<Mail> {
         }
 
         inner.channels[priority.index()].push_back(mail);
+        inner.max_channel_depth = inner
+            .max_channel_depth
+            .max(inner.channels[priority.index()].len());
         self.readable.notify_one();
         Ok(())
     }
@@ -149,6 +172,9 @@ impl<Mail> MailBox<Mail> {
     pub fn send_checked(&self, priority: MailPriority, mail: Mail) -> Result<(), RaftError> {
         let mut inner = self.inner.lock().map_err(mailbox_poisoned)?;
         inner.channels[priority.index()].push_back(mail);
+        inner.max_channel_depth = inner
+            .max_channel_depth
+            .max(inner.channels[priority.index()].len());
         self.readable.notify_one();
         Ok(())
     }
@@ -248,6 +274,21 @@ impl<Mail> MailBox<Mail> {
 
     pub fn is_empty_checked(&self) -> Result<bool, RaftError> {
         Ok(self.total_len_checked()? == 0)
+    }
+
+    pub fn pressure_stats(&self) -> MailBoxPressureStats {
+        self.pressure_stats_checked()
+            .expect("mailbox mutex poisoned")
+    }
+
+    pub fn pressure_stats_checked(&self) -> Result<MailBoxPressureStats, RaftError> {
+        let inner = self.inner.lock().map_err(mailbox_poisoned)?;
+        Ok(MailBoxPressureStats {
+            high_watermark: self.high_watermark,
+            total_len: inner.channels.iter().map(VecDeque::len).sum(),
+            max_channel_depth: inner.max_channel_depth,
+            rejected_send_count: inner.rejected_send_count,
+        })
     }
 }
 

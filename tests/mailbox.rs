@@ -33,6 +33,11 @@ fn mailbox_checked_api_preserves_backpressure_and_fetch_order() {
     mailbox
         .send_checked(MailPriority::Urgent, "urgent")
         .expect("checked urgent send");
+    let stats = mailbox.pressure_stats_checked().expect("checked stats");
+    assert_eq!(stats.high_watermark, 1);
+    assert_eq!(stats.total_len, 2);
+    assert_eq!(stats.max_channel_depth, 1);
+    assert_eq!(stats.rejected_send_count, 1);
 
     assert_eq!(
         mailbox
@@ -72,6 +77,11 @@ fn mailbox_checked_batch_send_rejects_oversized_bursts_before_queueing() {
         .try_send_many_checked(MailPriority::Normal, vec!["three"])
         .expect("checked full mailbox")
         .is_err());
+    let stats = mailbox.pressure_stats_checked().expect("checked stats");
+    assert_eq!(stats.high_watermark, 2);
+    assert_eq!(stats.total_len, 2);
+    assert_eq!(stats.max_channel_depth, 2);
+    assert_eq!(stats.rejected_send_count, 4);
     assert_eq!(
         mailbox
             .fetch_checked(MailBoxFetchPolicy {

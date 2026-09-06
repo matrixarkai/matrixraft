@@ -156,7 +156,7 @@ pub use benchmark::{
 };
 pub use channel_selector::{
     ChannelSelection, ChannelSelector, ChannelSelectorPolicy, MailChannel,
-    MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
+    MailChannelPressureStats, MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
 };
 pub use checksum::{
     matrixraft_checksum_file_list, matrixraft_crc32c, matrixraft_murmur32, ChecksumContext,
@@ -179,7 +179,10 @@ pub use heartbeat_merge::{
 };
 pub use lease::{FollowerLease, LeaderLease, LeaderLeaseStatus, LeaseEpochId, LeasePeer};
 pub use log_buffer::{LogBuffer, LogBufferFlush, LogBufferRelease};
-pub use mailbox::{MailBox, MailBoxFetchPolicy, MailPriority, MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS};
+pub use mailbox::{
+    MailBox, MailBoxFetchPolicy, MailBoxPressureStats, MailPriority,
+    MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS,
+};
 pub use membership::{
     matrixraft_learner_promotion_decision, matrixraft_membership_readiness_report,
     matrixraft_membership_semantics_evidence_artifact,
