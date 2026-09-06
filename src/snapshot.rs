@@ -29,6 +29,12 @@ pub struct SnapshotLifecycleEvidence {
     pub sustained_sender_completion_present: bool,
     #[serde(default)]
     pub sustained_downloader_completion_present: bool,
+    #[serde(default)]
+    pub sustained_transfer_completion_present: bool,
+    #[serde(default)]
+    pub snapshot_peer_count: u64,
+    #[serde(default)]
+    pub sustained_transfer_completed_peer_count: u64,
     pub install_progress_present: bool,
     pub install_rollback_present: bool,
     pub membership_change_present: bool,
@@ -58,6 +64,9 @@ pub struct SnapshotLifecycleEvidenceValidationReport {
     pub sustained_downloader_load_present: bool,
     pub sustained_sender_completion_present: bool,
     pub sustained_downloader_completion_present: bool,
+    pub sustained_transfer_completion_present: bool,
+    pub snapshot_peer_count_match: bool,
+    pub sustained_transfer_completed_peer_count_match: bool,
     pub install_progress_present: bool,
     pub install_rollback_present: bool,
     pub membership_change_present: bool,
@@ -134,6 +143,22 @@ pub fn matrixraft_snapshot_lifecycle_evidence(
     send_snapshot_timeout_ms: u64,
     max_inflights_replicate: u64,
 ) -> SnapshotLifecycleEvidence {
+    let sustained_transfer_completed_peer_count = peers
+        .iter()
+        .filter(|peer| {
+            let required_snapshot_index = peer
+                .required_snapshot_index
+                .max(peer.snapshot_installed_index);
+            peer.snapshot_send_attempts >= max_inflights_replicate.max(2)
+                && peer.snapshot_install_total_chunks >= max_inflights_replicate.max(2)
+                && required_snapshot_index > 0
+                && peer.acked_snapshot_index >= required_snapshot_index
+                && peer.snapshot_installed_index >= required_snapshot_index
+                && peer.snapshot_install_progress_per_mille >= 1000
+                && !peer.snapshot_sending
+                && !peer.snapshot_installing
+        })
+        .count() as u64;
     SnapshotLifecycleEvidence {
         sender_lifecycle_present: send_snapshot_timeout_ms > 0
             && peers
@@ -181,6 +206,9 @@ pub fn matrixraft_snapshot_lifecycle_evidence(
                 && peer.snapshot_install_progress_per_mille >= 1000
                 && !peer.snapshot_installing
         }),
+        sustained_transfer_completion_present: sustained_transfer_completed_peer_count > 0,
+        snapshot_peer_count: peers.len() as u64,
+        sustained_transfer_completed_peer_count,
         install_progress_present: peers.iter().any(|peer| {
             peer.snapshot_installed_index > 0 || peer.snapshot_install_progress_per_mille > 0
         }),
@@ -244,6 +272,13 @@ pub fn matrixraft_validate_snapshot_lifecycle_evidence_artifact(
     let sustained_downloader_completion_present = recomputed
         .sustained_downloader_completion_present
         && artifact.evidence.sustained_downloader_completion_present;
+    let sustained_transfer_completion_present = recomputed.sustained_transfer_completion_present
+        && artifact.evidence.sustained_transfer_completion_present;
+    let snapshot_peer_count_match =
+        artifact.evidence.snapshot_peer_count == recomputed.snapshot_peer_count;
+    let sustained_transfer_completed_peer_count_match =
+        artifact.evidence.sustained_transfer_completed_peer_count
+            == recomputed.sustained_transfer_completed_peer_count;
     let install_progress_present =
         recomputed.install_progress_present && artifact.evidence.install_progress_present;
     let install_rollback_present =
@@ -278,6 +313,15 @@ pub fn matrixraft_validate_snapshot_lifecycle_evidence_artifact(
             sustained_downloader_completion_present,
             "sustained_downloader_completion_present",
         ),
+        (
+            sustained_transfer_completion_present,
+            "sustained_transfer_completion_present",
+        ),
+        (snapshot_peer_count_match, "snapshot_peer_count_match"),
+        (
+            sustained_transfer_completed_peer_count_match,
+            "sustained_transfer_completed_peer_count_match",
+        ),
         (install_progress_present, "install_progress_present"),
         (install_rollback_present, "install_rollback_present"),
         (membership_change_present, "membership_change_present"),
@@ -304,6 +348,9 @@ pub fn matrixraft_validate_snapshot_lifecycle_evidence_artifact(
         sustained_downloader_load_present,
         sustained_sender_completion_present,
         sustained_downloader_completion_present,
+        sustained_transfer_completion_present,
+        snapshot_peer_count_match,
+        sustained_transfer_completed_peer_count_match,
         install_progress_present,
         install_rollback_present,
         membership_change_present,

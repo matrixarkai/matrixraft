@@ -96,6 +96,11 @@ pub fn matrixraft_production_readiness_report(
                 "prove one peer recovers after both packet loss and reordered appends",
             ),
             (
+                pipeline.packet_loss_reorder_all_faulted_peers_recovered,
+                "pipeline:packet_loss_reorder_all_faulted_peers_recovered",
+                "prove every peer that saw both packet loss and reordered appends recovered",
+            ),
+            (
                 pipeline.stale_term_rejection_present,
                 "pipeline:stale_term_rejection",
                 "prove stale-term replication messages are rejected",
@@ -117,6 +122,14 @@ pub fn matrixraft_production_readiness_report(
             );
         }
     }
+
+    require_runtime_pressure_admission(
+        input.runtime_pressure_admission.as_ref(),
+        &mut satisfied,
+        &mut missing,
+        &mut production_blockers,
+        &mut recommended_next_actions,
+    );
 
     require_option(
         "snapshot:evidence_present",
@@ -178,6 +191,11 @@ pub fn matrixraft_production_readiness_report(
                 snapshot.sustained_downloader_completion_present,
                 "snapshot:sustained_downloader_completion",
                 "prove snapshot downloader install completion under sustained load",
+            ),
+            (
+                snapshot.sustained_transfer_completion_present,
+                "snapshot:sustained_transfer_completion",
+                "prove one sustained snapshot transfer completed sender ack and downloader install",
             ),
             (
                 snapshot.install_progress_present,
@@ -331,6 +349,301 @@ pub fn matrixraft_production_readiness_report(
     }
 }
 
+pub fn matrixraft_production_readiness_report_with_runtime_pressure_policy(
+    input: &ProductionReadinessInput,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> ProductionReadinessReport {
+    let mut report = matrixraft_production_readiness_report(input);
+    if let Some(admission) = input.runtime_pressure_admission.as_ref() {
+        if let Err(policy_issues) =
+            crate::metrics::matrixraft_validate_runtime_pressure_admission_evidence_with_policy(
+                admission, policy,
+            )
+        {
+            add_unique(
+                &mut report.missing,
+                "runtime_pressure:policy_evidence_valid",
+            );
+            add_unique(
+                &mut report.recommended_next_actions,
+                "fix runtime-pressure admission policy evidence before claiming production readiness",
+            );
+            for issue in policy_issues {
+                add_unique(
+                    &mut report.production_blockers,
+                    format!("runtime_pressure:policy_evidence_invalid:{issue}"),
+                );
+            }
+        }
+    }
+    report.ready = report.missing.is_empty() && report.production_blockers.is_empty();
+    report.production_status = if report.ready {
+        ProductionStatus::ProductionReady
+    } else {
+        ProductionStatus::Blocked
+    };
+    report
+}
+
+fn add_unique(values: &mut Vec<String>, value: impl Into<String>) {
+    let value = value.into();
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+pub fn matrixraft_production_readiness_report_prometheus(
+    report: &ProductionReadinessReport,
+    labels: &[(&str, &str)],
+) -> PrometheusMetricSet {
+    let names = crate::metrics::matrixraft_production_readiness_metric_names();
+    let mut text = String::new();
+    let status = match report.production_status {
+        ProductionStatus::ProductionReady => "production_ready",
+        ProductionStatus::Blocked => "blocked",
+    };
+    let mut status_labels = labels.to_vec();
+    status_labels.push(("status", status));
+
+    push_production_readiness_metric(
+        &mut text,
+        &names.ready,
+        &status_labels,
+        u64::from(report.ready),
+    );
+    push_production_readiness_metric(
+        &mut text,
+        &names.satisfied_total,
+        labels,
+        report.satisfied.len() as u64,
+    );
+    push_production_readiness_metric(
+        &mut text,
+        &names.missing_total,
+        labels,
+        report.missing.len() as u64,
+    );
+    push_production_readiness_metric(
+        &mut text,
+        &names.blocker_total,
+        labels,
+        report.production_blockers.len() as u64,
+    );
+    push_production_readiness_metric(
+        &mut text,
+        &names.next_action_total,
+        labels,
+        report.recommended_next_actions.len() as u64,
+    );
+
+    for missing in &report.missing {
+        let mut missing_labels = labels.to_vec();
+        missing_labels.push(("missing", missing.as_str()));
+        push_production_readiness_metric(
+            &mut text,
+            &names.missing_present,
+            &missing_labels,
+            1,
+        );
+    }
+    for blocker in &report.production_blockers {
+        let mut blocker_labels = labels.to_vec();
+        blocker_labels.push(("blocker", blocker.as_str()));
+        push_production_readiness_metric(
+            &mut text,
+            &names.blocker_present,
+            &blocker_labels,
+            1,
+        );
+        if let Some(bottleneck) = parse_runtime_pressure_top_bottleneck(blocker) {
+            let mut bottleneck_labels = labels.to_vec();
+            bottleneck_labels.push(("rank", bottleneck.rank));
+            bottleneck_labels.push(("category", bottleneck.category));
+            bottleneck_labels.push(("component", bottleneck.component));
+            push_production_readiness_metric(
+                &mut text,
+                &names.runtime_pressure_bottleneck_score_percent,
+                &bottleneck_labels,
+                bottleneck.score_percent,
+            );
+        }
+    }
+    for action in &report.recommended_next_actions {
+        let mut action_labels = labels.to_vec();
+        action_labels.push(("action", action.as_str()));
+        push_production_readiness_metric(
+            &mut text,
+            &names.next_action_present,
+            &action_labels,
+            1,
+        );
+    }
+
+    PrometheusMetricSet {
+        format: "prometheus_text_v0.0.4".to_string(),
+        metric_count: 5
+            + report.missing.len() as u64
+            + report.production_blockers.len() as u64
+            + report
+                .production_blockers
+                .iter()
+                .filter(|blocker| parse_runtime_pressure_top_bottleneck(blocker).is_some())
+                .count() as u64
+            + report.recommended_next_actions.len() as u64,
+        text,
+    }
+}
+
+pub fn matrixraft_production_readiness_diagnostic_log_entries(
+    report: &ProductionReadinessReport,
+) -> Vec<DiagnosticLogEntry> {
+    let mut entries = Vec::new();
+    entries.push(DiagnosticLogEntry {
+        target: "rustraft.production_readiness".to_string(),
+        severity: if report.ready {
+            DiagnosticSeverity::Info
+        } else {
+            DiagnosticSeverity::Error
+        },
+        message: if report.ready {
+            "rustraft production readiness ready".to_string()
+        } else {
+            "rustraft production readiness blocked".to_string()
+        },
+        fields: vec![
+            ("ready".to_string(), report.ready.to_string()),
+            (
+                "production_status".to_string(),
+                format!("{:?}", report.production_status),
+            ),
+            (
+                "satisfied_count".to_string(),
+                report.satisfied.len().to_string(),
+            ),
+            ("missing_count".to_string(), report.missing.len().to_string()),
+            (
+                "blocker_count".to_string(),
+                report.production_blockers.len().to_string(),
+            ),
+            (
+                "next_action_count".to_string(),
+                report.recommended_next_actions.len().to_string(),
+            ),
+        ],
+    });
+    entries.extend(report.missing.iter().map(|missing| DiagnosticLogEntry {
+        target: "rustraft.production_readiness.missing".to_string(),
+        severity: DiagnosticSeverity::Warn,
+        message: missing.clone(),
+        fields: vec![("ready".to_string(), report.ready.to_string())],
+    }));
+    entries.extend(report.production_blockers.iter().map(|blocker| {
+        DiagnosticLogEntry {
+            target: "rustraft.production_readiness.blocker".to_string(),
+            severity: DiagnosticSeverity::Error,
+            message: blocker.clone(),
+            fields: production_readiness_blocker_fields(blocker, report.ready),
+        }
+    }));
+    entries.extend(
+        report
+            .production_blockers
+            .iter()
+            .filter_map(|blocker| {
+                blocker
+                    .strip_prefix("runtime_pressure:evidence_invalid:")
+                    .map(|issue| DiagnosticLogEntry {
+                        target: "rustraft.production_readiness.runtime_pressure_evidence"
+                            .to_string(),
+                        severity: DiagnosticSeverity::Error,
+                        message: issue.to_string(),
+                        fields: vec![
+                            ("ready".to_string(), report.ready.to_string()),
+                            ("blocker".to_string(), blocker.clone()),
+                        ],
+                    })
+            }),
+    );
+    entries.extend(
+        report
+            .recommended_next_actions
+            .iter()
+            .map(|action| DiagnosticLogEntry {
+                target: "rustraft.production_readiness.next_action".to_string(),
+                severity: if report.ready {
+                    DiagnosticSeverity::Info
+                } else {
+                    DiagnosticSeverity::Warn
+                },
+                message: action.clone(),
+                fields: vec![("ready".to_string(), report.ready.to_string())],
+            }),
+    );
+    entries
+}
+
+fn production_readiness_blocker_fields(blocker: &str, ready: bool) -> Vec<(String, String)> {
+    let mut fields = vec![("ready".to_string(), ready.to_string())];
+    if let Some(bottleneck) = parse_runtime_pressure_top_bottleneck(blocker) {
+        fields.push((
+            "runtime_pressure_bottleneck_rank".to_string(),
+            bottleneck.diagnostic_rank.to_string(),
+        ));
+        fields.push((
+            "runtime_pressure_bottleneck_category".to_string(),
+            bottleneck.category.to_string(),
+        ));
+        fields.push((
+            "runtime_pressure_bottleneck_component".to_string(),
+            bottleneck.component.to_string(),
+        ));
+        fields.push((
+            "runtime_pressure_bottleneck_score_percent".to_string(),
+            bottleneck.score_percent.to_string(),
+        ));
+    }
+    fields
+}
+
+struct ParsedRuntimePressureBottleneck<'a> {
+    rank: &'a str,
+    diagnostic_rank: &'a str,
+    category: &'a str,
+    component: &'a str,
+    score_percent: u64,
+}
+
+fn parse_runtime_pressure_top_bottleneck(
+    blocker: &str,
+) -> Option<ParsedRuntimePressureBottleneck<'_>> {
+    let rest = blocker.strip_prefix("runtime_pressure:top_bottleneck:")?;
+    let parts = rest.split(':').collect::<Vec<_>>();
+    let [rank, category, component, "score_percent", score_percent] = parts.as_slice() else {
+        return None;
+    };
+    let score_percent = score_percent.parse().ok()?;
+    Some(ParsedRuntimePressureBottleneck {
+        rank: rank.strip_prefix("rank").unwrap_or(rank),
+        diagnostic_rank: rank,
+        category,
+        component,
+        score_percent,
+    })
+}
+
+pub fn matrixraft_production_readiness_diagnostic_json_lines(
+    report: &ProductionReadinessReport,
+) -> String {
+    matrixraft_production_readiness_diagnostic_log_entries(report)
+        .into_iter()
+        .map(|entry| {
+            serde_json::to_string(&entry)
+                .expect("RustRaft production readiness diagnostic entry must serialize")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn require_baseline_raft_benchmark(
     benchmark: Option<&BaselineRaftBenchmarkEvidence>,
     satisfied: &mut Vec<String>,
@@ -381,6 +694,11 @@ fn require_baseline_raft_benchmark(
             benchmark.performance_within_threshold,
             "benchmark:performance_threshold",
             "bring RustRaft p50/p99 latency and throughput within the configured BaselineRaft threshold",
+        ),
+        (
+            benchmark.resource_within_threshold,
+            "benchmark:resource_threshold",
+            "bring RustRaft CPU and peak resident memory within the configured BaselineRaft threshold",
         ),
     ] {
         require_bool(present, id, satisfied, missing, blockers, actions, action);
@@ -503,6 +821,44 @@ fn require_baseline_raft_benchmark(
     }
 }
 
+fn push_production_readiness_metric(
+    out: &mut String,
+    name: &str,
+    labels: &[(&str, &str)],
+    value: u64,
+) {
+    out.push_str(name);
+    if !labels.is_empty() {
+        out.push('{');
+        for (idx, (label_name, label_value)) in labels.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            out.push_str(label_name);
+            out.push_str("=\"");
+            out.push_str(&escape_production_readiness_label_value(label_value));
+            out.push('"');
+        }
+        out.push('}');
+    }
+    out.push(' ');
+    out.push_str(&value.to_string());
+    out.push('\n');
+}
+
+fn escape_production_readiness_label_value(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 fn require_benchmark_blocker_category(
     category_id: &str,
     category_blockers: &[String],
@@ -527,6 +883,118 @@ fn require_benchmark_blocker_category(
     for blocker in category_blockers {
         require_bool(
             false, blocker, satisfied, missing, blockers, actions, action,
+        );
+    }
+}
+
+fn require_runtime_pressure_admission(
+    admission: Option<&RuntimePressureAdmission>,
+    satisfied: &mut Vec<String>,
+    missing: &mut Vec<String>,
+    blockers: &mut Vec<String>,
+    actions: &mut Vec<String>,
+) {
+    require_option(
+        "runtime_pressure:admission_evidence_present",
+        admission,
+        satisfied,
+        missing,
+        blockers,
+        actions,
+        "attach runtime-pressure admission evidence from the release-scale RustRaft run",
+    );
+    let Some(admission) = admission else {
+        blockers.push("runtime_pressure:admission_missing".to_string());
+        return;
+    };
+
+    if let Err(evidence_issues) =
+        crate::metrics::matrixraft_validate_runtime_pressure_admission_evidence(admission)
+    {
+        require_bool(
+            false,
+            "runtime_pressure:evidence_valid",
+            satisfied,
+            missing,
+            blockers,
+            actions,
+            "fix malformed runtime-pressure admission evidence before claiming production readiness",
+        );
+        for issue in evidence_issues {
+            require_bool(
+                false,
+                &format!("runtime_pressure:evidence_invalid:{issue}"),
+                satisfied,
+                missing,
+                blockers,
+                actions,
+                "fix malformed runtime-pressure admission evidence before claiming production readiness",
+            );
+        }
+    } else {
+        satisfied.push("runtime_pressure:evidence_valid".to_string());
+    }
+
+    for (present, id, action) in [
+        (
+            admission.accepted,
+            "runtime_pressure:admission_accepted",
+            "clear runtime-pressure admission rejection before claiming production readiness",
+        ),
+        (
+            !admission.memory_pressure,
+            "runtime_pressure:no_memory_pressure",
+            "clear memory pressure before claiming production readiness",
+        ),
+        (
+            !admission.latency_pressure,
+            "runtime_pressure:no_latency_pressure",
+            "clear p99 latency pressure before claiming production readiness",
+        ),
+        (
+            !admission.scale_pressure,
+            "runtime_pressure:no_scale_pressure",
+            "meet release QPS and throughput targets before claiming production readiness",
+        ),
+        (
+            !admission.pipeline_pressure,
+            "runtime_pressure:no_pipeline_pressure",
+            "clear per-peer append/apply/reorder pipeline pressure before claiming production readiness",
+        ),
+        (
+            !admission.read_backlog_pressure,
+            "runtime_pressure:no_read_backlog_pressure",
+            "clear pending ReadIndex and bounded-stale read backlog before claiming production readiness",
+        ),
+        (
+            !admission.node_runtime_timer_pressure,
+            "runtime_pressure:no_node_runtime_timer_pressure",
+            "clear node-runtime timer queue saturation before claiming production readiness",
+        ),
+        (
+            admission.actions.is_empty(),
+            "runtime_pressure:no_pending_actions",
+            "resolve runtime-pressure tuning actions before claiming production readiness",
+        ),
+    ] {
+        require_bool(present, id, satisfied, missing, blockers, actions, action);
+    }
+
+    for bottleneck in crate::metrics::matrixraft_runtime_pressure_bottleneck_summary(admission) {
+        require_bool(
+            false,
+            &format!(
+                "runtime_pressure:top_bottleneck:rank{}:{}:{}:score_percent:{}",
+                bottleneck.rank,
+                bottleneck.category,
+                bottleneck.component,
+                bottleneck.score_percent
+            ),
+            satisfied,
+            missing,
+            blockers,
+            actions,
+            "resolve the top runtime-pressure bottleneck before claiming QPS, latency, or memory parity",
         );
     }
 }
@@ -823,8 +1291,62 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
                 "pipeline.packet_loss_reorder_same_peer_recovered",
             ),
             (
+                pipeline.is_some_and(|evidence| {
+                    evidence.packet_loss_reorder_all_faulted_peers_recovered
+                }),
+                "pipeline.packet_loss_reorder_all_faulted_peers_recovered",
+            ),
+            (
                 pipeline.is_some_and(|evidence| evidence.stale_term_rejection_present),
                 "pipeline.stale_term_rejection_present",
+            ),
+        ],
+    ));
+
+    let runtime_pressure = input.runtime_pressure_admission.as_ref();
+    let runtime_pressure_evidence_valid = runtime_pressure.is_some_and(|admission| {
+        crate::metrics::matrixraft_validate_runtime_pressure_admission_evidence(admission).is_ok()
+    });
+    capability_evidence.push(runtime_capability(
+        "runtime_pressure_admission_gate",
+        "RuntimePressureAdmission",
+        &[
+            (
+                runtime_pressure_evidence_valid,
+                "runtime_pressure.evidence_valid",
+            ),
+            (
+                runtime_pressure.is_some_and(|admission| admission.accepted),
+                "runtime_pressure.accepted",
+            ),
+            (
+                runtime_pressure.is_some_and(|admission| !admission.memory_pressure),
+                "runtime_pressure.no_memory_pressure",
+            ),
+            (
+                runtime_pressure.is_some_and(|admission| !admission.latency_pressure),
+                "runtime_pressure.no_latency_pressure",
+            ),
+            (
+                runtime_pressure.is_some_and(|admission| !admission.scale_pressure),
+                "runtime_pressure.no_scale_pressure",
+            ),
+            (
+                runtime_pressure.is_some_and(|admission| !admission.pipeline_pressure),
+                "runtime_pressure.no_pipeline_pressure",
+            ),
+            (
+                runtime_pressure.is_some_and(|admission| !admission.read_backlog_pressure),
+                "runtime_pressure.no_read_backlog_pressure",
+            ),
+            (
+                runtime_pressure
+                    .is_some_and(|admission| !admission.node_runtime_timer_pressure),
+                "runtime_pressure.no_node_runtime_timer_pressure",
+            ),
+            (
+                runtime_pressure.is_some_and(|admission| admission.actions.is_empty()),
+                "runtime_pressure.no_pending_actions",
             ),
         ],
     ));
@@ -873,6 +1395,10 @@ pub fn matrixraft_baseline_raft_runtime_capability_report(
             (
                 snapshot.is_some_and(|evidence| evidence.sustained_downloader_completion_present),
                 "snapshot.sustained_downloader_completion_present",
+            ),
+            (
+                snapshot.is_some_and(|evidence| evidence.sustained_transfer_completion_present),
+                "snapshot.sustained_transfer_completion_present",
             ),
             (
                 snapshot.is_some_and(|evidence| evidence.install_progress_present),
@@ -1386,8 +1912,16 @@ pub fn matrixraft_validate_cross_plane_process_evidence_artifact(
         && summary.multi_process_log_store_validated_on_both_planes
         && summary.restart_recovery_validated_on_both_planes
         && summary.read_index_observed_on_both_planes;
+    let expected_prometheus =
+        matrixraft_cross_plane_process_evidence_prometheus(&artifact.summary, &[]);
+    let normalized_actual_prometheus =
+        matrixraft_process_evidence_prometheus_without_labels(&artifact.prometheus.text);
+    let normalized_expected_prometheus =
+        matrixraft_process_evidence_prometheus_without_labels(&expected_prometheus.text);
     let prometheus_complete = artifact.prometheus.format == "prometheus_text_v0.0.4"
         && artifact.prometheus.metric_count >= 21
+        && artifact.prometheus.metric_count == expected_prometheus.metric_count
+        && normalized_actual_prometheus == normalized_expected_prometheus
         && artifact
             .prometheus
             .text
@@ -1460,7 +1994,8 @@ pub fn matrixraft_validate_cross_plane_process_evidence_artifact(
     }
     if !prometheus_complete {
         missing.push(
-            "prometheus must include process evidence count and readiness metrics".to_string(),
+            "prometheus must match recomputed process evidence count and readiness metrics"
+                .to_string(),
         );
     }
     CrossPlaneProcessEvidenceArtifactValidationReport {
@@ -1471,6 +2006,33 @@ pub fn matrixraft_validate_cross_plane_process_evidence_artifact(
         prometheus_complete,
         missing,
     }
+}
+
+fn matrixraft_process_evidence_prometheus_without_labels(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| {
+            let Some((metric_and_labels, value)) = line.rsplit_once(' ') else {
+                return line.to_string();
+            };
+            let Some(label_start) = metric_and_labels.find('{') else {
+                return line.to_string();
+            };
+            let Some(labels_with_suffix) = metric_and_labels.strip_suffix('}') else {
+                return line.to_string();
+            };
+            let metric_name = &metric_and_labels[..label_start];
+            let labels = &labels_with_suffix[label_start + 1..];
+            let evidence_labels = labels
+                .split(',')
+                .filter(|label| {
+                    label.starts_with("plane=\"") || label.starts_with("evidence=\"")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{metric_name}{{{evidence_labels}}} {value}")
+        })
+        .collect()
 }
 
 pub fn matrixraft_data_node_process_rollout_readiness_report(

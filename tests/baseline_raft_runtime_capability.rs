@@ -4,7 +4,6 @@
 use matrixraft::{
     fault, matrixraft_admin_status_surface_evidence,
     matrixraft_baseline_raft_operational_evidence_bundle,
-    matrixraft_baseline_raft_operational_evidence_bundle_from_artifacts,
     matrixraft_baseline_raft_runtime_capability_prometheus,
     matrixraft_baseline_raft_runtime_capability_report, matrixraft_capability_evidence_from_fields,
     matrixraft_cross_plane_process_evidence_artifact,
@@ -13,9 +12,12 @@ use matrixraft::{
     matrixraft_cross_plane_process_readiness_blocker_report,
     matrixraft_cross_plane_process_readiness_report, matrixraft_data_node_process_rollout_blockers,
     matrixraft_data_node_strict_process_rollout_validated,
-    matrixraft_membership_semantics_evidence_artifact, matrixraft_meta_process_rollout_blockers,
-    matrixraft_meta_strict_process_rollout_validated, matrixraft_named_readiness_blockers,
-    matrixraft_process_readiness_blocker, matrixraft_production_readiness_report,
+    matrixraft_membership_semantics_evidence_artifact,
+    matrixraft_membership_semantics_evidence_artifact_from_runtime,
+    matrixraft_meta_process_rollout_blockers, matrixraft_meta_strict_process_rollout_validated,
+    matrixraft_named_readiness_blockers, matrixraft_process_readiness_blocker,
+    matrixraft_production_readiness_report,
+    matrixraft_production_readiness_report_with_runtime_pressure_policy,
     matrixraft_read_safety_evidence_artifact, matrixraft_replication_pipeline_evidence_artifact,
     matrixraft_require_production_ready, matrixraft_runtime_capability_report_from_evidence,
     matrixraft_snapshot_lifecycle_evidence_artifact,
@@ -393,6 +395,9 @@ fn complete_snapshot_lifecycle_peers() -> Vec<PeerProgress> {
     sender.snapshot_during_membership_change = true;
     sender.required_snapshot_index = 128;
     sender.acked_snapshot_index = 128;
+    sender.snapshot_sending = false;
+    sender.snapshot_installed_index = 128;
+    sender.snapshot_install_progress_per_mille = 1000;
 
     let mut installer = PeerProgress::new(3, 105, limits);
     installer.snapshot_install_total_chunks = 4;
@@ -419,12 +424,13 @@ fn complete_wal_lifecycle_status() -> WalLifecycleStatus {
         last_log_index: 228,
         released_segment_count: 4,
         slow_fsync_backpressure_observed: true,
-        fsync_count: 0,
         slow_fsync_threshold_ms: 10,
         slow_fsync_count: 2,
         consecutive_slow_fsync_count: 1,
         max_fsync_elapsed_ms: 42,
         compacted_after_slow_fsync_count: 2,
+        slow_fsync_segment_count: 2,
+        compacted_slow_fsync_segment_count: 2,
     }
 }
 
@@ -466,8 +472,30 @@ fn ready_input() -> ProductionReadinessInput {
             packet_loss_recovery_present: true,
             reorder_convergence_present: true,
             packet_loss_reorder_same_peer_recovered: true,
+            peer_pipeline_observed_peer_count: 2,
+            packet_loss_reorder_faulted_peer_count: 1,
+            packet_loss_reorder_recovered_peer_count: 1,
+            packet_loss_reorder_all_faulted_peers_recovered: true,
             stale_term_rejection_present: true,
             reorder_queue_enabled: true,
+        }),
+        runtime_pressure_admission: Some(matrixraft::RuntimePressureAdmission {
+            accepted: true,
+            memory_pressure: false,
+            memory_pressure_details: Vec::new(),
+            latency_pressure: false,
+            latency_pressure_details: Vec::new(),
+            scale_pressure: false,
+            scale_pressure_details: Vec::new(),
+            pipeline_pressure: false,
+            pipeline_pressure_details: Vec::new(),
+            read_backlog_pressure: false,
+            read_backlog_pressure_details: Vec::new(),
+            node_runtime_timer_pressure: false,
+            node_runtime_timer_pressure_details: Vec::new(),
+            reason: "accepted_no_pressure".to_string(),
+            rejected_component: None,
+            actions: Vec::new(),
         }),
         snapshot_lifecycle: Some(SnapshotLifecycleEvidence {
             sender_lifecycle_present: true,
@@ -480,6 +508,9 @@ fn ready_input() -> ProductionReadinessInput {
             sustained_downloader_load_present: true,
             sustained_sender_completion_present: true,
             sustained_downloader_completion_present: true,
+            sustained_transfer_completion_present: true,
+            snapshot_peer_count: 2,
+            sustained_transfer_completed_peer_count: 1,
             install_progress_present: true,
             install_rollback_present: true,
             membership_change_present: true,
@@ -493,6 +524,10 @@ fn ready_input() -> ProductionReadinessInput {
             compaction_observed: true,
             slow_fsync_backpressure_observed: true,
             compaction_after_slow_fsync_observed: true,
+            released_segment_count: 1,
+            compacted_after_slow_fsync_count: 1,
+            slow_fsync_segment_count: 1,
+            compacted_slow_fsync_segment_count: 1,
         }),
         admin_status_surface: Some(ready_admin_status_surface()),
         fault_harness: Some(ready_fault_harness()),
@@ -506,6 +541,7 @@ fn ready_input() -> ProductionReadinessInput {
             matrixraft_rust_candidate: true,
             correctness_passed: true,
             performance_within_threshold: true,
+            resource_within_threshold: true,
             workloads: matrixraft::benchmark::matrixraft_baseline_raft_benchmark_workloads()
                 .into_iter()
                 .map(|workload| workload.id().to_string())
@@ -531,6 +567,55 @@ fn baseline_raft_runtime_capability_report_accepts_complete_evidence() {
     assert!(report
         .satisfied
         .contains(&"read_index_and_lease_safety".to_string()));
+    assert!(report
+        .satisfied
+        .contains(&"runtime_pressure_admission_gate".to_string()));
+}
+
+#[test]
+fn production_readiness_report_with_runtime_pressure_policy_rejects_priority_drift() {
+    let mut input = ready_input();
+    let admission = input
+        .runtime_pressure_admission
+        .as_mut()
+        .expect("ready input has runtime-pressure evidence");
+    admission.accepted = false;
+    admission.memory_pressure = true;
+    admission.memory_pressure_details = vec![matrixraft::MemoryPressureDetail {
+        component: "memory.process_resident".to_string(),
+        observed_value: 10,
+        threshold_value: 8,
+        excess: 2,
+    }];
+    admission.latency_pressure = true;
+    admission.latency_pressure_details = vec![matrixraft::LatencyPressureDetail {
+        component: "latency.append".to_string(),
+        sample_count: 100,
+        observed_p95_ms: 120,
+        observed_p99_ms: 120,
+        threshold_p99_ms: 100,
+        excess_ms: 20,
+    }];
+    admission.reason = "rejected_runtime_pressure".to_string();
+    admission.rejected_component = Some("memory.process_resident".to_string());
+    admission.actions = vec![
+        "release_memory".to_string(),
+        "reduce_append_batch_or_raise_replication_parallelism".to_string(),
+    ];
+
+    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy(
+        &input,
+        &matrixraft::RuntimePressureAdmissionPolicy::fail_closed(),
+    );
+
+    assert!(!report.ready);
+    assert!(report
+        .missing
+        .contains(&"runtime_pressure:policy_evidence_valid".to_string()));
+    assert!(report.production_blockers.contains(
+        &"runtime_pressure:policy_evidence_invalid:runtime_pressure:policy_rejected_component_mismatch:memory.process_resident:latency.append"
+            .to_string()
+    ));
 }
 
 #[test]
@@ -607,6 +692,10 @@ fn baseline_raft_runtime_capability_report_fails_closed_on_missing_wal_lifecycle
         compaction_observed: true,
         slow_fsync_backpressure_observed: false,
         compaction_after_slow_fsync_observed: false,
+        released_segment_count: 1,
+        compacted_after_slow_fsync_count: 0,
+        slow_fsync_segment_count: 0,
+        compacted_slow_fsync_segment_count: 0,
     });
 
     let report = matrixraft_baseline_raft_runtime_capability_report(&input);
@@ -617,6 +706,83 @@ fn baseline_raft_runtime_capability_report_fails_closed_on_missing_wal_lifecycle
     assert!(report.blockers.iter().any(|blocker| {
         blocker == "wal_segment_lifecycle:missing:wal.slow_fsync_backpressure_observed"
     }));
+}
+
+#[test]
+fn baseline_raft_runtime_capability_report_requires_clean_runtime_pressure_admission() {
+    let mut input = ready_input();
+    let admission = input
+        .runtime_pressure_admission
+        .as_mut()
+        .expect("ready input has runtime-pressure evidence");
+    admission.accepted = false;
+    admission.latency_pressure = true;
+    admission.pipeline_pressure = true;
+    admission.node_runtime_timer_pressure = true;
+    admission.node_runtime_timer_pressure_details =
+        vec![matrixraft::NodeRuntimeTimerPressureDetail {
+            component: "node_runtime.timer_utilization".to_string(),
+            observed_percent: 80,
+            threshold_percent: 80,
+            excess_percent: 0,
+        }];
+    admission
+        .actions
+        .push("raise_apply_worker_capacity".to_string());
+    admission
+        .actions
+        .push("raise_timer_queue_capacity_or_reduce_tick_burst".to_string());
+    admission.reason = "rejected_runtime_pressure".to_string();
+    admission.rejected_component = Some("latency.append".to_string());
+
+    let report = matrixraft_baseline_raft_runtime_capability_report(&input);
+
+    assert!(!report.ready);
+    assert!(report
+        .missing
+        .contains(&"runtime_pressure_admission_gate".to_string()));
+    for blocker in [
+        "runtime_pressure_admission_gate:missing:runtime_pressure.accepted",
+        "runtime_pressure_admission_gate:missing:runtime_pressure.no_latency_pressure",
+        "runtime_pressure_admission_gate:missing:runtime_pressure.no_pipeline_pressure",
+        "runtime_pressure_admission_gate:missing:runtime_pressure.no_node_runtime_timer_pressure",
+        "runtime_pressure_admission_gate:missing:runtime_pressure.no_pending_actions",
+    ] {
+        assert!(
+            report.blockers.contains(&blocker.to_string()),
+            "missing blocker {blocker}: {report:#?}"
+        );
+    }
+}
+
+#[test]
+fn baseline_raft_runtime_capability_report_rejects_malformed_runtime_pressure_evidence() {
+    let mut input = ready_input();
+    let admission = input
+        .runtime_pressure_admission
+        .as_mut()
+        .expect("ready input has runtime-pressure evidence");
+    admission.latency_pressure_details = vec![matrixraft::LatencyPressureDetail {
+        component: "latency.append".to_string(),
+        sample_count: 0,
+        observed_p95_ms: 0,
+        observed_p99_ms: 120,
+        threshold_p99_ms: 100,
+        excess_ms: 20,
+    }];
+
+    let report = matrixraft_baseline_raft_runtime_capability_report(&input);
+
+    assert!(!report.ready);
+    assert!(report
+        .missing
+        .contains(&"runtime_pressure_admission_gate".to_string()));
+    assert!(report.blockers.contains(
+        &"runtime_pressure_admission_gate:missing:runtime_pressure.evidence_valid".to_string()
+    ));
+    assert!(!report.blockers.contains(
+        &"runtime_pressure_admission_gate:missing:runtime_pressure.accepted".to_string()
+    ));
 }
 
 #[test]
@@ -870,6 +1036,30 @@ fn cross_plane_process_evidence_artifact_validator_is_library_owned() {
 }
 
 #[test]
+fn cross_plane_process_evidence_artifact_validator_rejects_prometheus_drift() {
+    let data = ready_data_rollout_three_processes();
+    let meta = ready_meta_rollout_three_processes();
+    let mut artifact =
+        matrixraft_cross_plane_process_evidence_artifact(&data, &meta, &[("cluster", "raft-a")]);
+    artifact.prometheus.text = artifact.prometheus.text.replace(
+        "evidence=\"spawned_process_count\"} 6",
+        "evidence=\"spawned_process_count\"} 5",
+    );
+
+    let validation = matrixraft_validate_cross_plane_process_evidence_artifact(&artifact);
+
+    assert!(!validation.valid);
+    assert!(validation.schema_valid);
+    assert!(validation.readiness_ready);
+    assert!(validation.summary_ready);
+    assert!(!validation.prometheus_complete);
+    assert!(validation.missing.contains(
+        &"prometheus must match recomputed process evidence count and readiness metrics"
+            .to_string()
+    ));
+}
+
+#[test]
 fn cross_plane_process_evidence_artifact_validator_reports_missing_fields() {
     let data = ready_data_rollout_three_processes();
     let meta = ready_meta_rollout_three_processes();
@@ -903,7 +1093,8 @@ fn cross_plane_process_evidence_artifact_validator_reports_missing_fields() {
         .missing
         .contains(&"summary.independent_wal_dirs_on_both_planes must be true".to_string()));
     assert!(validation.missing.contains(
-        &"prometheus must include process evidence count and readiness metrics".to_string()
+        &"prometheus must match recomputed process evidence count and readiness metrics"
+            .to_string()
     ));
 }
 
@@ -949,6 +1140,7 @@ fn read_safety_evidence_artifact_validator_reports_missing_fields() {
     let artifact = matrixraft_read_safety_evidence_artifact();
     let valid = matrixraft_validate_read_safety_evidence_artifact(&artifact);
     assert!(valid.valid);
+    assert!(valid.canonical_scenarios_match);
     assert!(valid.missing.is_empty());
 
     let mut broken = artifact;
@@ -960,10 +1152,14 @@ fn read_safety_evidence_artifact_validator_reports_missing_fields() {
 
     assert!(!invalid.valid);
     assert!(!invalid.schema_valid);
+    assert!(!invalid.canonical_scenarios_match);
     assert!(!invalid.stale_leader_lease_rejected);
     assert!(!invalid.bounded_stale_read_accepted);
     assert!(!invalid.minority_partition_write_rejected);
     assert!(invalid.missing.contains(&"schema_valid".to_string()));
+    assert!(invalid
+        .missing
+        .contains(&"canonical_read_safety_scenarios_match".to_string()));
     assert!(invalid
         .missing
         .contains(&"stale_leader_lease_rejected".to_string()));
@@ -973,6 +1169,22 @@ fn read_safety_evidence_artifact_validator_reports_missing_fields() {
     assert!(invalid
         .missing
         .contains(&"minority_partition_write_rejected".to_string()));
+}
+
+#[test]
+fn read_safety_evidence_artifact_validator_rejects_canonical_scenario_drift() {
+    let mut artifact = matrixraft_read_safety_evidence_artifact();
+    artifact.healed_follower_catchup.read_index += 1;
+
+    let invalid = matrixraft_validate_read_safety_evidence_artifact(&artifact);
+
+    assert!(!invalid.valid);
+    assert!(invalid.schema_valid);
+    assert!(!invalid.canonical_scenarios_match);
+    assert!(invalid.healed_follower_catchup_observed);
+    assert!(invalid
+        .missing
+        .contains(&"canonical_read_safety_scenarios_match".to_string()));
 }
 
 #[test]
@@ -1003,10 +1215,35 @@ fn membership_semantics_evidence_artifact_is_library_owned() {
 }
 
 #[test]
+fn membership_semantics_evidence_artifact_is_runtime_observed() {
+    let artifact = matrixraft_membership_semantics_evidence_artifact_from_runtime()
+        .expect("runtime membership semantics evidence");
+    let validation = matrixraft_validate_membership_semantics_evidence_artifact(&artifact);
+
+    assert!(validation.valid, "{:?}", validation.missing);
+    assert_eq!(artifact.learner_catchup.learner_id, 4);
+    assert_eq!(artifact.learner_catchup.reason, "caught_up");
+    assert!(artifact.learner_add.joint_consensus_used);
+    assert!(artifact
+        .learner_add
+        .joint_acknowledged_voters
+        .iter()
+        .all(|node| artifact.learner_add.before_voters.contains(node)
+            || artifact.learner_add.after_voters.contains(node)));
+    assert!(artifact.auto_promote_learner_observed);
+    assert!(artifact.auto_promote_blocked_by_pending_joint_observed);
+    assert!(artifact.pending_joint_consensus_restart_observed);
+    assert!(artifact.pending_joint_consensus_restart_recovered);
+    assert!(artifact.witness_role_supported);
+    assert!(artifact.witness_promotion_rejected_observed);
+}
+
+#[test]
 fn membership_semantics_evidence_artifact_validator_reports_missing_fields() {
     let artifact = matrixraft_membership_semantics_evidence_artifact();
     let valid = matrixraft_validate_membership_semantics_evidence_artifact(&artifact);
     assert!(valid.valid);
+    assert!(valid.canonical_scenarios_match);
     assert!(valid.missing.is_empty());
 
     let mut broken = artifact;
@@ -1036,6 +1273,7 @@ fn membership_semantics_evidence_artifact_validator_reports_missing_fields() {
 
     assert!(!invalid.valid);
     assert!(!invalid.schema_valid);
+    assert!(!invalid.canonical_scenarios_match);
     assert!(!invalid.learner_caught_up);
     assert!(!invalid.learner_promoted);
     assert!(!invalid.leader_transferred);
@@ -1048,6 +1286,7 @@ fn membership_semantics_evidence_artifact_validator_reports_missing_fields() {
     assert!(!invalid.witness_role_accounted_for);
     for expected in [
         "schema_valid",
+        "canonical_membership_semantics_scenarios_match",
         "learner_caught_up",
         "learner_promoted",
         "leader_transferred",
@@ -1061,6 +1300,27 @@ fn membership_semantics_evidence_artifact_validator_reports_missing_fields() {
     ] {
         assert!(invalid.missing.contains(&expected.to_string()));
     }
+}
+
+#[test]
+fn membership_semantics_evidence_artifact_validator_rejects_canonical_scenario_drift() {
+    let mut artifact = matrixraft_membership_semantics_evidence_artifact();
+    artifact.leader_transfer.applied_index_after += 1;
+
+    let invalid = matrixraft_validate_membership_semantics_evidence_artifact(&artifact);
+
+    assert!(!invalid.valid);
+    assert!(invalid.schema_valid);
+    assert!(!invalid.canonical_scenarios_match);
+    assert!(invalid.learner_added);
+    assert!(invalid.learner_caught_up);
+    assert!(invalid.learner_promoted);
+    assert!(invalid.leader_transferred);
+    assert!(invalid.voter_removed);
+    assert_eq!(
+        invalid.missing,
+        vec!["canonical_membership_semantics_scenarios_match".to_string()]
+    );
 }
 
 #[test]
@@ -1102,6 +1362,17 @@ fn replication_pipeline_evidence_artifact_is_library_owned() {
     assert!(artifact.evidence.packet_loss_recovery_present);
     assert!(artifact.evidence.reorder_convergence_present);
     assert!(artifact.evidence.packet_loss_reorder_same_peer_recovered);
+    assert_eq!(artifact.evidence.peer_pipeline_observed_peer_count, 2);
+    assert_eq!(artifact.evidence.packet_loss_reorder_faulted_peer_count, 1);
+    assert_eq!(
+        artifact.evidence.packet_loss_reorder_recovered_peer_count,
+        1
+    );
+    assert!(
+        artifact
+            .evidence
+            .packet_loss_reorder_all_faulted_peers_recovered
+    );
     assert!(artifact.evidence.stale_term_rejection_present);
     assert!(artifact.evidence.reorder_queue_enabled);
 }
@@ -1125,6 +1396,9 @@ fn replication_pipeline_evidence_artifact_validator_reports_missing_fields() {
     broken.evidence.packet_loss_recovery_present = false;
     broken.evidence.reorder_convergence_present = false;
     broken.evidence.packet_loss_reorder_same_peer_recovered = false;
+    broken
+        .evidence
+        .packet_loss_reorder_all_faulted_peers_recovered = false;
     broken.evidence.reorder_queue_enabled = false;
 
     let invalid = matrixraft_validate_replication_pipeline_evidence_artifact(&broken);
@@ -1137,6 +1411,7 @@ fn replication_pipeline_evidence_artifact_validator_reports_missing_fields() {
     assert!(!invalid.packet_loss_recovery_present);
     assert!(!invalid.reorder_convergence_present);
     assert!(!invalid.packet_loss_reorder_same_peer_recovered);
+    assert!(!invalid.packet_loss_reorder_all_faulted_peers_recovered);
     assert!(!invalid.reorder_queue_enabled);
     for expected in [
         "schema_valid",
@@ -1146,6 +1421,7 @@ fn replication_pipeline_evidence_artifact_validator_reports_missing_fields() {
         "packet_loss_recovery_present",
         "reorder_convergence_present",
         "packet_loss_reorder_same_peer_recovered",
+        "packet_loss_reorder_all_faulted_peers_recovered",
         "reorder_queue_enabled",
     ] {
         assert!(invalid.missing.contains(&expected.to_string()));
@@ -1214,6 +1490,34 @@ fn replication_pipeline_evidence_rejects_split_peer_packet_loss_and_reorder_reco
 }
 
 #[test]
+fn replication_pipeline_evidence_rejects_unrecovered_packet_loss_reorder_peer() {
+    let limits = PipelineLimits::production_default();
+    let mut peers = complete_replication_pipeline_peers();
+
+    let mut peer_4 = PeerProgress::new(4, 105, limits);
+    peer_4.packet_loss_events = 1;
+    peer_4.network_error_probe_transitions = 1;
+    peer_4.out_of_order_append_rejections = 1;
+    peer_4.append_accepted = 0;
+    peer_4.match_index = 100;
+    peer_4.next_index = 105;
+    peer_4.reorder_queue_depth = 1;
+    peers.push(peer_4);
+
+    let artifact = matrixraft_replication_pipeline_evidence_artifact(peers, limits);
+    let invalid = matrixraft_validate_replication_pipeline_evidence_artifact(&artifact);
+
+    assert!(!invalid.valid);
+    assert_eq!(invalid.peer_pipeline_observed_peer_count, 3);
+    assert_eq!(invalid.packet_loss_reorder_faulted_peer_count, 2);
+    assert_eq!(invalid.packet_loss_reorder_recovered_peer_count, 1);
+    assert!(!invalid.packet_loss_reorder_all_faulted_peers_recovered);
+    assert!(invalid
+        .missing
+        .contains(&"packet_loss_reorder_all_faulted_peers_recovered".to_string()));
+}
+
+#[test]
 fn snapshot_lifecycle_evidence_artifact_is_library_owned() {
     let artifact = matrixraft_snapshot_lifecycle_evidence_artifact(
         complete_snapshot_lifecycle_peers(),
@@ -1235,6 +1539,9 @@ fn snapshot_lifecycle_evidence_artifact_is_library_owned() {
     assert!(artifact.evidence.sustained_downloader_load_present);
     assert!(artifact.evidence.sustained_sender_completion_present);
     assert!(artifact.evidence.sustained_downloader_completion_present);
+    assert!(artifact.evidence.sustained_transfer_completion_present);
+    assert_eq!(artifact.evidence.snapshot_peer_count, 2);
+    assert_eq!(artifact.evidence.sustained_transfer_completed_peer_count, 1);
     assert!(artifact.evidence.install_progress_present);
     assert!(artifact.evidence.install_rollback_present);
     assert!(artifact.evidence.membership_change_present);
@@ -1260,6 +1567,9 @@ fn snapshot_lifecycle_evidence_artifact_validator_reports_missing_fields() {
     broken.evidence.sustained_sender_load_present = false;
     broken.evidence.sustained_sender_completion_present = false;
     broken.evidence.sustained_downloader_completion_present = false;
+    broken.evidence.sustained_transfer_completion_present = false;
+    broken.evidence.snapshot_peer_count = 99;
+    broken.evidence.sustained_transfer_completed_peer_count = 99;
     broken.evidence.install_rollback_present = false;
 
     let invalid = matrixraft_validate_snapshot_lifecycle_evidence_artifact(&broken);
@@ -1273,6 +1583,9 @@ fn snapshot_lifecycle_evidence_artifact_validator_reports_missing_fields() {
     assert!(!invalid.sustained_downloader_load_present);
     assert!(!invalid.sustained_sender_completion_present);
     assert!(!invalid.sustained_downloader_completion_present);
+    assert!(!invalid.sustained_transfer_completion_present);
+    assert!(!invalid.snapshot_peer_count_match);
+    assert!(!invalid.sustained_transfer_completed_peer_count_match);
     assert!(!invalid.install_rollback_present);
     assert!(!invalid.rejoin_after_compacted_log_present);
     for expected in [
@@ -1284,6 +1597,9 @@ fn snapshot_lifecycle_evidence_artifact_validator_reports_missing_fields() {
         "sustained_downloader_load_present",
         "sustained_sender_completion_present",
         "sustained_downloader_completion_present",
+        "sustained_transfer_completion_present",
+        "snapshot_peer_count_match",
+        "sustained_transfer_completed_peer_count_match",
         "install_rollback_present",
         "rejoin_after_compacted_log_present",
     ] {
@@ -1299,12 +1615,13 @@ fn snapshot_lifecycle_evidence_requires_sustained_completion() {
         .find(|peer| peer.snapshot_send_attempts > 0)
         .expect("sender peer");
     sender.acked_snapshot_index = sender.required_snapshot_index.saturating_sub(1);
-    let downloader = peers
+    for downloader in peers
         .iter_mut()
-        .find(|peer| peer.snapshot_installed_index > 0)
-        .expect("downloader peer");
-    downloader.snapshot_installing = true;
-    downloader.snapshot_install_progress_per_mille = 750;
+        .filter(|peer| peer.snapshot_installed_index > 0)
+    {
+        downloader.snapshot_installing = true;
+        downloader.snapshot_install_progress_per_mille = 750;
+    }
 
     let artifact = matrixraft_snapshot_lifecycle_evidence_artifact(peers, 1_000, 1);
     let invalid = matrixraft_validate_snapshot_lifecycle_evidence_artifact(&artifact);
@@ -1314,12 +1631,44 @@ fn snapshot_lifecycle_evidence_requires_sustained_completion() {
     assert!(invalid.sustained_downloader_load_present);
     assert!(!invalid.sustained_sender_completion_present);
     assert!(!invalid.sustained_downloader_completion_present);
+    assert!(!invalid.sustained_transfer_completion_present);
     assert!(invalid
         .missing
         .contains(&"sustained_sender_completion_present".to_string()));
     assert!(invalid
         .missing
         .contains(&"sustained_downloader_completion_present".to_string()));
+    assert!(invalid
+        .missing
+        .contains(&"sustained_transfer_completion_present".to_string()));
+}
+
+#[test]
+fn snapshot_lifecycle_evidence_rejects_split_peer_transfer_completion() {
+    let limits = PipelineLimits::production_default();
+    let mut sender = PeerProgress::new(2, 105, limits);
+    sender.snapshot_send_attempts = 3;
+    sender.snapshot_install_total_chunks = 8;
+    sender.snapshot_install_progress_per_mille = 500;
+    sender.required_snapshot_index = 128;
+    sender.acked_snapshot_index = 128;
+
+    let mut installer = PeerProgress::new(3, 105, limits);
+    installer.snapshot_install_total_chunks = 8;
+    installer.snapshot_install_progress_per_mille = 1000;
+    installer.snapshot_installed_index = 128;
+
+    let artifact =
+        matrixraft_snapshot_lifecycle_evidence_artifact(vec![sender, installer], 1_000, 1);
+    let invalid = matrixraft_validate_snapshot_lifecycle_evidence_artifact(&artifact);
+
+    assert!(!invalid.valid);
+    assert!(invalid.sustained_sender_completion_present);
+    assert!(invalid.sustained_downloader_completion_present);
+    assert!(!invalid.sustained_transfer_completion_present);
+    assert!(invalid
+        .missing
+        .contains(&"sustained_transfer_completion_present".to_string()));
 }
 
 #[test]
@@ -1337,6 +1686,10 @@ fn wal_lifecycle_evidence_artifact_is_library_owned() {
     assert!(artifact.evidence.compaction_observed);
     assert!(artifact.evidence.slow_fsync_backpressure_observed);
     assert!(artifact.evidence.compaction_after_slow_fsync_observed);
+    assert_eq!(artifact.evidence.released_segment_count, 4);
+    assert_eq!(artifact.evidence.compacted_after_slow_fsync_count, 2);
+    assert_eq!(artifact.evidence.slow_fsync_segment_count, 2);
+    assert_eq!(artifact.evidence.compacted_slow_fsync_segment_count, 2);
 }
 
 #[test]
@@ -1354,7 +1707,10 @@ fn wal_lifecycle_evidence_artifact_validator_reports_missing_fields() {
     broken.status.released_segment_count = 0;
     broken.status.slow_fsync_backpressure_observed = false;
     broken.status.compacted_after_slow_fsync_count = 0;
+    broken.status.compacted_slow_fsync_segment_count = 0;
     broken.evidence.retained_range_present = false;
+    broken.evidence.released_segment_count = 4;
+    broken.evidence.compacted_after_slow_fsync_count = 2;
 
     let invalid = matrixraft_validate_wal_lifecycle_evidence_artifact(&broken);
 
@@ -1367,6 +1723,8 @@ fn wal_lifecycle_evidence_artifact_validator_reports_missing_fields() {
     assert!(!invalid.compaction_observed);
     assert!(!invalid.slow_fsync_backpressure_observed);
     assert!(!invalid.compaction_after_slow_fsync_observed);
+    assert!(!invalid.released_segment_count_match);
+    assert!(!invalid.compacted_after_slow_fsync_count_match);
     for expected in [
         "schema_valid",
         "segment_lifecycle_present",
@@ -1376,6 +1734,8 @@ fn wal_lifecycle_evidence_artifact_validator_reports_missing_fields() {
         "compaction_observed",
         "slow_fsync_backpressure_observed",
         "compaction_after_slow_fsync_observed",
+        "released_segment_count_match",
+        "compacted_after_slow_fsync_count_match",
     ] {
         assert!(invalid.missing.contains(&expected.to_string()));
     }
@@ -1399,47 +1759,13 @@ fn baseline_raft_operational_evidence_bundle_is_library_owned() {
     let validation = matrixraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
     assert!(validation.valid, "{validation:#?}");
     assert!(validation.read_safety_valid);
+    assert!(validation.read_safety_canonical_scenarios_match);
     assert!(validation.membership_valid);
+    assert!(validation.membership_canonical_scenarios_match);
     assert!(validation.replication_pipeline_valid);
     assert!(validation.snapshot_lifecycle_valid);
     assert!(validation.wal_lifecycle_valid);
     assert!(validation.missing.is_empty());
-
-    // The name of this test is the point: the bundle is library-owned. Its
-    // read-safety and membership halves take no inputs and so cannot describe
-    // any deployment, and the report now says so. Without these flags,
-    // `membership_valid: true` reads as a fact about the caller's cluster --
-    // and it is unfalsifiable, because the producer hardcodes exactly the
-    // fields the validator checks.
-    assert!(validation.read_safety_is_reference);
-    assert!(validation.membership_is_reference);
-}
-
-#[test]
-fn baseline_raft_operational_evidence_bundle_marks_supplied_evidence_as_not_reference() {
-    let mut observed_membership = matrixraft_membership_semantics_evidence_artifact();
-    // Stand in for evidence taken from a running cluster: same shape, different
-    // commit indices than the reference artifact's fixed 128/144.
-    observed_membership.learner_add.commit_index_before = 900;
-    observed_membership.learner_add.commit_index_after = 916;
-
-    let bundle = matrixraft_baseline_raft_operational_evidence_bundle_from_artifacts(
-        matrixraft_read_safety_evidence_artifact(),
-        observed_membership,
-        complete_replication_pipeline_peers(),
-        PipelineLimits::production_default(),
-        complete_snapshot_lifecycle_peers(),
-        1_000,
-        1,
-        complete_wal_lifecycle_status(),
-    );
-
-    let validation = matrixraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
-    assert!(validation.valid, "{validation:#?}");
-    // Membership came from the caller, so it is no longer the reference; the
-    // read-safety half still is, and the two are reported independently.
-    assert!(!validation.membership_is_reference);
-    assert!(validation.read_safety_is_reference);
 }
 
 #[test]
@@ -1454,6 +1780,8 @@ fn baseline_raft_operational_evidence_bundle_validator_prefixes_missing_fields()
     );
     bundle.schema = "old.schema".to_string();
     bundle.read_safety.stale_leader_lease.allowed = true;
+    bundle.read_safety.healed_follower_catchup.read_index += 1;
+    bundle.membership.leader_transfer.applied_index_after += 1;
     bundle.replication_pipeline.peers.clear();
     bundle.snapshot_lifecycle.peers.clear();
     bundle.wal_lifecycle.status.released_segment_count = 0;
@@ -1463,18 +1791,80 @@ fn baseline_raft_operational_evidence_bundle_validator_prefixes_missing_fields()
     assert!(!validation.valid);
     assert!(!validation.schema_valid);
     assert!(!validation.read_safety_valid);
+    assert!(!validation.read_safety_canonical_scenarios_match);
+    assert!(!validation.membership_valid);
+    assert!(!validation.membership_canonical_scenarios_match);
     assert!(!validation.replication_pipeline_valid);
     assert!(!validation.snapshot_lifecycle_valid);
     assert!(!validation.wal_lifecycle_valid);
     for expected in [
         "schema_valid",
+        "read_safety.canonical_read_safety_scenarios_match",
         "read_safety.stale_leader_lease_rejected",
+        "membership.canonical_membership_semantics_scenarios_match",
         "replication_pipeline.peer_state_present",
         "snapshot_lifecycle.sender_lifecycle_present",
         "wal_lifecycle.compaction_observed",
     ] {
         assert!(validation.missing.contains(&expected.to_string()));
     }
+}
+
+#[test]
+fn baseline_raft_operational_evidence_bundle_surfaces_membership_canonical_drift() {
+    let mut bundle = matrixraft_baseline_raft_operational_evidence_bundle(
+        complete_replication_pipeline_peers(),
+        PipelineLimits::production_default(),
+        complete_snapshot_lifecycle_peers(),
+        1_000,
+        1,
+        complete_wal_lifecycle_status(),
+    );
+    bundle.membership.leader_transfer.applied_index_after += 1;
+
+    let validation = matrixraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
+
+    assert!(!validation.valid);
+    assert!(validation.schema_valid);
+    assert!(validation.read_safety_valid);
+    assert!(validation.read_safety_canonical_scenarios_match);
+    assert!(!validation.membership_valid);
+    assert!(!validation.membership_canonical_scenarios_match);
+    assert!(validation.replication_pipeline_valid);
+    assert!(validation.snapshot_lifecycle_valid);
+    assert!(validation.wal_lifecycle_valid);
+    assert_eq!(
+        validation.missing,
+        vec!["membership.canonical_membership_semantics_scenarios_match".to_string()]
+    );
+}
+
+#[test]
+fn baseline_raft_operational_evidence_bundle_surfaces_read_safety_canonical_drift() {
+    let mut bundle = matrixraft_baseline_raft_operational_evidence_bundle(
+        complete_replication_pipeline_peers(),
+        PipelineLimits::production_default(),
+        complete_snapshot_lifecycle_peers(),
+        1_000,
+        1,
+        complete_wal_lifecycle_status(),
+    );
+    bundle.read_safety.healed_follower_catchup.read_index += 1;
+
+    let validation = matrixraft_validate_baseline_raft_operational_evidence_bundle(&bundle);
+
+    assert!(!validation.valid);
+    assert!(validation.schema_valid);
+    assert!(!validation.read_safety_valid);
+    assert!(!validation.read_safety_canonical_scenarios_match);
+    assert!(validation.membership_valid);
+    assert!(validation.replication_pipeline_valid);
+    assert!(validation.snapshot_lifecycle_valid);
+    assert!(validation.wal_lifecycle_valid);
+    assert_eq!(
+        validation.missing,
+        vec!["read_safety.canonical_read_safety_scenarios_match".to_string()]
+    );
 }
 
 #[test]

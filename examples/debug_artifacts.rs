@@ -7,14 +7,30 @@
 #![recursion_limit = "4096"]
 
 use matrixraft::{
+    benchmark::{
+        matrixraft_baseline_raft_benchmark_failure_summary,
+        matrixraft_baseline_raft_benchmark_required_workloads,
+        matrixraft_baseline_raft_benchmark_workloads,
+        matrixraft_debug_snapshot_with_benchmark_artifacts,
+        matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts,
+        matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts, BenchmarkComparison,
+        BenchmarkEngine, BenchmarkEngineSource, BenchmarkHarnessKind, BenchmarkImplementation,
+        BenchmarkOptions, BenchmarkReport, BenchmarkSample, BenchmarkWorkload,
+        MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT,
+        MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT,
+        MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES,
+    },
     matrixraft_capability_evidence, matrixraft_debug_bundle_validation_prometheus,
-    matrixraft_debug_snapshot, matrixraft_debug_snapshot_metadata_prometheus,
+    matrixraft_debug_snapshot_metadata_prometheus, matrixraft_local_status_diagnostic_json_lines,
     matrixraft_observability_provisioning,
     matrixraft_observability_provisioning_validation_prometheus,
     matrixraft_operator_runbook_prometheus, matrixraft_operator_triage_prometheus,
-    matrixraft_runtime_admin_report, matrixraft_validate_debug_snapshot,
-    matrixraft_validate_observability_provisioning, DebugBundleValidationReport, Peer,
-    PeerProgress, ProgressState, RaftCluster, ReadinessSnapshot, ReplicaRole,
+    matrixraft_peer_pipeline_metrics_prometheus, matrixraft_runtime_admin_report,
+    matrixraft_runtime_local_status_report, matrixraft_validate_debug_snapshot,
+    matrixraft_validate_observability_provisioning, DebugBundleValidationReport, LatencyMetrics,
+    LatencyOptimizationThresholds, MemoryMetrics, MemoryOptimizationThresholds, Peer, PeerProgress,
+    ProgressState, RaftCluster, ReadBacklogMetrics, ReadBacklogThresholds, ReadinessSnapshot,
+    ReplicaRole, RuntimePressureAdmissionPolicy, ScaleMetrics,
 };
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -90,6 +106,7 @@ fn pipeline_peer(peer_id: u64, match_index: u64, next_index: u64) -> PeerProgres
         reorder_queue_depth: 0,
         out_of_order_append_rejections: 0,
         reorder_entries_rejected: 0,
+        reorder_entries_converged: 0,
         reorder_entry_timeouts: 0,
         reorder_dropped_packages: 0,
         stale_term_rejections: 0,
@@ -125,6 +142,121 @@ fn pipeline_peer(peer_id: u64, match_index: u64, next_index: u64) -> PeerProgres
     }
 }
 
+fn benchmark_sample(
+    workload: BenchmarkWorkload,
+    engine: BenchmarkEngine,
+    engine_source: BenchmarkEngineSource,
+    p50_latency_micros: u64,
+    p99_latency_micros: u64,
+    throughput_ops_per_sec: f64,
+) -> BenchmarkSample {
+    let operation_count = match workload {
+        BenchmarkWorkload::BatchedWrites | BenchmarkWorkload::ReplicationBatching => 128 * 16,
+        _ => 128,
+    };
+    let operations_per_timed_iteration = match workload {
+        BenchmarkWorkload::BatchedWrites | BenchmarkWorkload::ReplicationBatching => 16,
+        _ => 1,
+    };
+    let total_duration_micros =
+        ((operation_count as f64 / throughput_ops_per_sec) * 1_000_000.0).round() as u64;
+    BenchmarkSample {
+        workload,
+        engine,
+        engine_source,
+        benchmark_run_id: "debug-artifact-benchmark-run".to_string(),
+        implementation: match engine {
+            BenchmarkEngine::BaselineRaft => BenchmarkImplementation::BaselineRaft,
+            BenchmarkEngine::RustRaft => BenchmarkImplementation::RustRaftRust,
+        },
+        binary_path: Some(match engine {
+            BenchmarkEngine::BaselineRaft => "/opt/baseline-raft/bin/kvbench".to_string(),
+            BenchmarkEngine::RustRaft => "/opt/rustraft/bin/rustraft-kvbench".to_string(),
+        }),
+        git_revision: Some(match engine {
+            BenchmarkEngine::BaselineRaft => "1111111111111111111111111111111111111111".to_string(),
+            BenchmarkEngine::RustRaft => "2222222222222222222222222222222222222222".to_string(),
+        }),
+        build_profile: "release".to_string(),
+        harness_kind: match engine {
+            BenchmarkEngine::BaselineRaft => BenchmarkHarnessKind::FullBaselineRaftHarness,
+            BenchmarkEngine::RustRaft => BenchmarkHarnessKind::RustRaftRuntime,
+        },
+        node_count: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT,
+        iterations_per_workload: 128,
+        batch_size: 16,
+        payload_size_bytes: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES,
+        timed_iteration_count: 128,
+        operations_per_timed_iteration,
+        total_duration_micros,
+        operation_count,
+        p50_latency_micros,
+        p99_latency_micros,
+        throughput_ops_per_sec,
+        cpu_utilization_percent: match engine {
+            BenchmarkEngine::BaselineRaft => 50.0,
+            BenchmarkEngine::RustRaft => 52.0,
+        },
+        peak_resident_memory_bytes: match engine {
+            BenchmarkEngine::BaselineRaft => 512 * 1024 * 1024,
+            BenchmarkEngine::RustRaft => 544 * 1024 * 1024,
+        },
+        correctness_passed: true,
+        blockers: Vec::new(),
+    }
+}
+
+fn benchmark_report() -> BenchmarkReport {
+    let comparisons = matrixraft_baseline_raft_benchmark_workloads()
+        .into_iter()
+        .map(|workload| {
+            let baseline_raft = benchmark_sample(
+                workload,
+                BenchmarkEngine::BaselineRaft,
+                BenchmarkEngineSource::RealBaselineRaft,
+                100,
+                200,
+                1_000.0,
+            );
+            let rustraft = benchmark_sample(
+                workload,
+                BenchmarkEngine::RustRaft,
+                BenchmarkEngineSource::RustRaftRuntime,
+                110,
+                220,
+                900.0,
+            );
+            BenchmarkComparison {
+                workload,
+                baseline_raft,
+                rustraft,
+                p50_ratio: 1.1,
+                p99_ratio: 1.1,
+                throughput_ratio: 0.9,
+                cpu_ratio: 1.04,
+                peak_resident_memory_ratio: 1.0625,
+                passed: true,
+                blockers: Vec::new(),
+            }
+        })
+        .collect();
+    BenchmarkReport {
+        schema: matrixraft::benchmark::MATRIXRAFT_BENCHMARK_REPORT_SCHEMA.to_string(),
+        generated_at_unix_ms: now_unix_ms(),
+        benchmark_run_id: "debug-artifact-benchmark-run".to_string(),
+        environment_fingerprint:
+            "os=linux;arch=x86_64;target=x86_64-unknown-linux-gnu;debug_assertions=false"
+                .to_string(),
+        node_count: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT,
+        options: BenchmarkOptions::default(),
+        pass_tolerance_percent: MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT,
+        correctness_required: true,
+        required_workloads: matrixraft_baseline_raft_benchmark_required_workloads(),
+        passed: true,
+        comparisons,
+    }
+}
+
 fn main() {
     let mut cluster = RaftCluster::new(5, Default::default(), vec![peer(1), peer(2), peer(3)])
         .expect("cluster builds");
@@ -153,9 +285,89 @@ fn main() {
         wal_last_log_index: 10,
         wal_segment_lifecycle_present: true,
     };
-    let labels = [("service", "rustraft-example")];
-    let snapshot = matrixraft_debug_snapshot(&report, &status_surface, &labels);
+    let labels = [
+        ("service", "rustraft-example"),
+        ("workload", "release-scale"),
+    ];
+    let benchmark_report = benchmark_report();
+    let benchmark_summary = matrixraft_baseline_raft_benchmark_failure_summary(&benchmark_report);
+    let snapshot = matrixraft_debug_snapshot_with_benchmark_artifacts(
+        &report,
+        &status_surface,
+        &LatencyMetrics::zero(),
+        &MemoryMetrics::zero(),
+        &ScaleMetrics {
+            proposal_total: 10_000,
+            append_entries_total: 25_000,
+            read_index_total: 8_000,
+            apply_entries_total: 9_500,
+            replication_bytes_total: 512 * 1024 * 1024,
+            apply_bytes_total: 384 * 1024 * 1024,
+        },
+        &benchmark_report,
+        &benchmark_summary,
+        &labels,
+    );
     let snapshot_json = serde_json::to_string_pretty(&snapshot).expect("debug snapshot serializes");
+    let mut benchmark_runtime_pressure_peer = pipeline_peer(2, 10, 11);
+    benchmark_runtime_pressure_peer.append_queue_limit = 4;
+    benchmark_runtime_pressure_peer.append_queue_depth = 4;
+    let benchmark_runtime_pressure_snapshot =
+        matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts(
+            &report,
+            &status_surface,
+            &LatencyMetrics::zero(),
+            &LatencyOptimizationThresholds::default(),
+            &MemoryMetrics::zero(),
+            &MemoryOptimizationThresholds::default(),
+            &ScaleMetrics {
+                proposal_total: 10_000,
+                append_entries_total: 25_000,
+                read_index_total: 8_000,
+                apply_entries_total: 9_500,
+                replication_bytes_total: 512 * 1024 * 1024,
+                apply_bytes_total: 384 * 1024 * 1024,
+            },
+            &benchmark_report,
+            &benchmark_summary,
+            &[benchmark_runtime_pressure_peer.clone()],
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+            &labels,
+        );
+    let benchmark_runtime_pressure_validation =
+        matrixraft_validate_debug_snapshot(&benchmark_runtime_pressure_snapshot);
+    let benchmark_full_pressure_snapshot =
+        matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
+            &report,
+            &status_surface,
+            &LatencyMetrics::zero(),
+            &LatencyOptimizationThresholds::default(),
+            &MemoryMetrics::zero(),
+            &MemoryOptimizationThresholds::default(),
+            &ScaleMetrics {
+                proposal_total: 10_000,
+                append_entries_total: 25_000,
+                read_index_total: 8_000,
+                apply_entries_total: 9_500,
+                replication_bytes_total: 512 * 1024 * 1024,
+                apply_bytes_total: 384 * 1024 * 1024,
+            },
+            &benchmark_report,
+            &benchmark_summary,
+            &[benchmark_runtime_pressure_peer],
+            &ReadBacklogMetrics {
+                pending_read_index_requests: 2_048,
+                pending_bounded_stale_reads: 128,
+            },
+            &ReadBacklogThresholds {
+                pending_read_index_warning: 1_024,
+                pending_bounded_stale_read_warning: 1_024,
+            },
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+            &labels,
+        );
+    let benchmark_full_pressure_validation =
+        matrixraft_validate_debug_snapshot(&benchmark_full_pressure_snapshot);
     let diagnostic_json_lines = snapshot
         .diagnostics
         .iter()
@@ -164,6 +376,20 @@ fn main() {
         .join("\n");
     let snapshot_metadata_prometheus =
         matrixraft_debug_snapshot_metadata_prometheus(&snapshot, &labels);
+    let local_status = matrixraft_runtime_local_status_report(
+        report
+            .cluster_status
+            .nodes
+            .first()
+            .expect("cluster status includes a local node")
+            .clone(),
+        status_surface.peer_pipeline.clone(),
+        report.readiness.clone(),
+    );
+    let local_status_diagnostic_json_lines =
+        matrixraft_local_status_diagnostic_json_lines(&local_status);
+    let peer_pipeline_prometheus =
+        matrixraft_peer_pipeline_metrics_prometheus(&local_status, &labels);
     let validation = matrixraft_validate_debug_snapshot(&snapshot);
     let validation_prometheus = matrixraft_debug_bundle_validation_prometheus(&validation, &labels);
     let triage_prometheus = matrixraft_operator_triage_prometheus(&snapshot.triage, &labels);
@@ -187,7 +413,14 @@ fn main() {
         "debug_snapshot_json",
         "debug_snapshot_metadata_prometheus",
         "diagnostic_json_lines",
+        "local_status_diagnostic_json_lines",
         "diagnostic_prometheus",
+        "peer_pipeline_prometheus",
+        "latency_prometheus",
+        "memory_prometheus",
+        "scale_prometheus",
+        "scale_target_prometheus",
+        "benchmark_prometheus",
         "optimization_prometheus",
         "triage_prometheus",
         "runbook_prometheus",
@@ -345,6 +578,10 @@ fn main() {
             "RustRaftDebugSnapshotStale",
             "RustRaftDebugSnapshotFreshnessLow",
             "RustRaftDebugSnapshotFreshnessLost",
+            "RustRaftRuntimePressureFreshnessLow",
+            "RustRaftRuntimePressureFreshnessLost",
+            "RustRaftRuntimePressureFreshnessInvalid",
+            "RustRaftBaselineRaftBenchmarkFreshnessLost",
         ],
         "critical_alert_links": [
             "RustRaftSupportEnvelopeCritical",
@@ -356,6 +593,12 @@ fn main() {
             "RustRaftObservabilityProvisioningValidationFailed": "wire_critical_alerts",
             "RustRaftDiagnosticErrors": "inspect_error_diagnostics",
             "RustRaftOptimizationCriticalHints": "resolve_critical_optimization_hints",
+            "RustRaftRuntimePressureBottleneckActive": "inspect_runtime_pressure_bottleneck_warning",
+            "RustRaftProductionReadinessRuntimePressureBottleneck": "resolve_production_readiness_runtime_pressure_bottleneck",
+            "RustRaftRuntimePressureFreshnessLow": "refresh_runtime_pressure_evidence",
+            "RustRaftRuntimePressureFreshnessLost": "refresh_runtime_pressure_evidence",
+            "RustRaftRuntimePressureFreshnessInvalid": "refresh_runtime_pressure_evidence",
+            "RustRaftBaselineRaftBenchmarkFreshnessLost": "refresh_baseline_raft_benchmark_evidence",
             "RustRaftDebugSnapshotStale": "refresh_debug_snapshot",
             "RustRaftDebugSnapshotFreshnessLow": "refresh_debug_snapshot",
             "RustRaftDebugSnapshotFreshnessLost": "refresh_debug_snapshot",
@@ -377,6 +620,25 @@ fn main() {
                 "optimization_prometheus",
                 "rustraft_optimization_critical_total",
             ],
+            "inspect_runtime_pressure_bottleneck_warning": [
+                "runbook_prometheus",
+                "rustraft_runtime_pressure_bottleneck_score_percent",
+            ],
+            "resolve_production_readiness_runtime_pressure_bottleneck": [
+                "runbook_prometheus",
+                "rustraft_production_readiness_runtime_pressure_bottleneck_score_percent",
+                "rustraft_production_readiness_blocker_total",
+            ],
+            "refresh_runtime_pressure_evidence": [
+                "runtime_pressure_freshness_prometheus",
+                "rustraft_runtime_pressure_freshness_fresh",
+                "rustraft_runtime_pressure_freshness_issue_total",
+            ],
+            "refresh_baseline_raft_benchmark_evidence": [
+                "benchmark_prometheus",
+                "rustraft_baseline_raft_benchmark_fresh",
+                "rustraft_baseline_raft_benchmark_freshness_status",
+            ],
             "refresh_debug_snapshot": [
                 "debug_snapshot_json",
                 "rustraft_debug_snapshot_fresh",
@@ -387,6 +649,10 @@ fn main() {
             "wire_critical_alerts",
             "inspect_error_diagnostics",
             "resolve_critical_optimization_hints",
+            "inspect_runtime_pressure_bottleneck_warning",
+            "resolve_production_readiness_runtime_pressure_bottleneck",
+            "refresh_runtime_pressure_evidence",
+            "refresh_baseline_raft_benchmark_evidence",
             "refresh_debug_snapshot",
         ],
         "handoff_command_map": {
@@ -394,6 +660,10 @@ fn main() {
             "wire_critical_alerts": "cargo run --example debug_artifacts --quiet | rg RustRaftSupportEnvelopeCritical",
             "inspect_error_diagnostics": "cargo run --example debug_artifacts --quiet | rg rustraft_diagnostic_log_total",
             "resolve_critical_optimization_hints": "cargo run --example debug_artifacts --quiet | rg rustraft_optimization_critical_total",
+            "inspect_runtime_pressure_bottleneck_warning": "cargo run --example debug_artifacts --quiet | rg rustraft_runtime_pressure_bottleneck_score_percent",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "cargo run --example debug_artifacts --quiet | rg rustraft_production_readiness_runtime_pressure_bottleneck_score_percent",
+            "refresh_runtime_pressure_evidence": "cargo run --example debug_artifacts --quiet | rg rustraft_runtime_pressure_freshness_fresh",
+            "refresh_baseline_raft_benchmark_evidence": "cargo run --example debug_artifacts --quiet | rg rustraft_baseline_raft_benchmark_fresh",
             "refresh_debug_snapshot": "cargo run --example debug_artifacts --quiet | rg rustraft_debug_snapshot_fresh",
         },
         "handoff_success_map": {
@@ -401,6 +671,10 @@ fn main() {
             "wire_critical_alerts": "critical alert rule is present and routed to the support envelope runbook",
             "inspect_error_diagnostics": "diagnostic error metric is present with zero unexpected error logs",
             "resolve_critical_optimization_hints": "critical optimization total is zero after applying the top hint",
+            "inspect_runtime_pressure_bottleneck_warning": "runtime pressure bottleneck score is visible and can be cleared before parity claims",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "production-readiness runtime pressure bottleneck score is visible and cleared before release claims",
+            "refresh_runtime_pressure_evidence": "runtime-pressure freshness metric is one, issue total is zero, and status is fresh",
+            "refresh_baseline_raft_benchmark_evidence": "benchmark freshness metric is one and status is fresh before QPS, latency, CPU, or memory claims",
             "refresh_debug_snapshot": "debug snapshot freshness metric is one and freshness status is fresh",
         },
         "handoff_dashboard_map": {
@@ -419,6 +693,22 @@ fn main() {
             "resolve_critical_optimization_hints": [
                 "Optimization Critical Hints",
                 "Triage Top Optimization Hint",
+            ],
+            "inspect_runtime_pressure_bottleneck_warning": [
+                "Runtime Pressure Bottlenecks",
+                "Runtime Pressure Action Sources",
+            ],
+            "resolve_production_readiness_runtime_pressure_bottleneck": [
+                "Production Runtime Pressure Bottlenecks",
+                "Production Readiness Blockers",
+            ],
+            "refresh_runtime_pressure_evidence": [
+                "Runtime Pressure Freshness",
+                "Runtime Pressure Freshness Issues",
+            ],
+            "refresh_baseline_raft_benchmark_evidence": [
+                "Benchmark Freshness",
+                "Benchmark Freshness Remaining",
             ],
             "refresh_debug_snapshot": [
                 "Support Envelope Freshness Status",
@@ -442,6 +732,18 @@ fn main() {
                 "optimization_prometheus",
                 "triage_prometheus",
             ],
+            "resolve_production_readiness_runtime_pressure_bottleneck": [
+                "runbook_prometheus",
+                "provisioning_runbook_prometheus",
+            ],
+            "refresh_runtime_pressure_evidence": [
+                "runtime_pressure_freshness_prometheus",
+                "provisioning_runbook_prometheus",
+            ],
+            "refresh_baseline_raft_benchmark_evidence": [
+                "benchmark_prometheus",
+                "provisioning_runbook_prometheus",
+            ],
             "refresh_debug_snapshot": [
                 "debug_snapshot_json",
                 "validation_prometheus",
@@ -452,6 +754,9 @@ fn main() {
             "wire_critical_alerts": "raft-runtime-incident-commander",
             "inspect_error_diagnostics": "raft-diagnostics-owner",
             "resolve_critical_optimization_hints": "raft-performance-owner",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "raft-production-readiness-owner",
+            "refresh_runtime_pressure_evidence": "raft-performance-owner",
+            "refresh_baseline_raft_benchmark_evidence": "raft-performance-owner",
             "refresh_debug_snapshot": "raft-runtime-owner",
         },
         "handoff_priority_map": {
@@ -459,6 +764,9 @@ fn main() {
             "wire_critical_alerts": "P0",
             "inspect_error_diagnostics": "P1",
             "resolve_critical_optimization_hints": "P1",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "P0",
+            "refresh_runtime_pressure_evidence": "P1",
+            "refresh_baseline_raft_benchmark_evidence": "P1",
             "refresh_debug_snapshot": "P2",
         },
         "handoff_response_time_map": {
@@ -466,6 +774,9 @@ fn main() {
             "wire_critical_alerts": "immediate",
             "inspect_error_diagnostics": "within 5 minutes",
             "resolve_critical_optimization_hints": "within 15 minutes",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "immediate",
+            "refresh_runtime_pressure_evidence": "within 15 minutes",
+            "refresh_baseline_raft_benchmark_evidence": "within 15 minutes",
             "refresh_debug_snapshot": "within 30 minutes",
         },
         "handoff_escalation_trigger_map": {
@@ -473,6 +784,9 @@ fn main() {
             "wire_critical_alerts": "critical support envelope alert is missing or unrouted",
             "inspect_error_diagnostics": "diagnostic error metric remains nonzero after first inspection",
             "resolve_critical_optimization_hints": "critical optimization total remains nonzero after mitigation",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "production-readiness runtime pressure bottleneck score remains nonzero",
+            "refresh_runtime_pressure_evidence": "runtime-pressure freshness metric remains zero or issue total remains nonzero",
+            "refresh_baseline_raft_benchmark_evidence": "benchmark freshness metric remains zero or status is not fresh",
             "refresh_debug_snapshot": "debug snapshot freshness metric remains zero after refresh",
         },
         "handoff_recovery_action_map": {
@@ -480,6 +794,9 @@ fn main() {
             "wire_critical_alerts": "rebuild alert rules JSON and verify critical support envelope routing",
             "inspect_error_diagnostics": "capture diagnostic JSON lines and isolate the first repeated error target",
             "resolve_critical_optimization_hints": "apply the top optimization hint and recheck critical total",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "inspect production-readiness pressure sources and reduce every blocking runtime pressure score",
+            "refresh_runtime_pressure_evidence": "rerun release-scale runtime-pressure capture and recheck freshness Prometheus",
+            "refresh_baseline_raft_benchmark_evidence": "rerun release-mode BaselineRaft parity benchmarks and recheck benchmark freshness Prometheus",
             "refresh_debug_snapshot": "regenerate debug snapshot artifacts and rerun validation Prometheus checks",
         },
         "handoff_closure_check_map": {
@@ -487,6 +804,9 @@ fn main() {
             "wire_critical_alerts": "critical alert link is present and runbook target is wire_critical_alerts",
             "inspect_error_diagnostics": "diagnostic error total is zero for the inspected target",
             "resolve_critical_optimization_hints": "rustraft_optimization_critical_total is zero",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "rustraft_production_readiness_runtime_pressure_bottleneck_score_percent is zero",
+            "refresh_runtime_pressure_evidence": "rustraft_runtime_pressure_freshness_fresh is one and issue total is zero",
+            "refresh_baseline_raft_benchmark_evidence": "rustraft_baseline_raft_benchmark_fresh is one and freshness status is fresh",
             "refresh_debug_snapshot": "rustraft_debug_snapshot_fresh is one and validation Prometheus is present",
         },
         "handoff_retained_artifact_map": {
@@ -494,6 +814,9 @@ fn main() {
             "wire_critical_alerts": "alert_rules_json",
             "inspect_error_diagnostics": "diagnostic_json_lines",
             "resolve_critical_optimization_hints": "optimization_prometheus",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "runbook_prometheus",
+            "refresh_runtime_pressure_evidence": "runtime_pressure_freshness_prometheus",
+            "refresh_baseline_raft_benchmark_evidence": "benchmark_prometheus",
             "refresh_debug_snapshot": "debug_snapshot_json",
         },
         "handoff_audit_note_map": {
@@ -501,6 +824,8 @@ fn main() {
             "wire_critical_alerts": "records the alert rule and runbook route used during escalation",
             "inspect_error_diagnostics": "records the repeated diagnostic target and error evidence",
             "resolve_critical_optimization_hints": "records the optimization hint and critical-total recovery evidence",
+            "refresh_runtime_pressure_evidence": "records refreshed runtime-pressure sample timestamp and freshness status",
+            "refresh_baseline_raft_benchmark_evidence": "records refreshed benchmark timestamp and freshness status",
             "refresh_debug_snapshot": "records the refreshed debug snapshot and validation scrape",
         },
         "handoff_review_question_map": {
@@ -508,6 +833,8 @@ fn main() {
             "wire_critical_alerts": "which critical alert route confirmed on-call coverage",
             "inspect_error_diagnostics": "which diagnostic target repeated before recovery",
             "resolve_critical_optimization_hints": "which optimization hint removed the critical total",
+            "refresh_runtime_pressure_evidence": "which refreshed runtime-pressure sample proved current QPS, latency, and memory evidence",
+            "refresh_baseline_raft_benchmark_evidence": "which refreshed BaselineRaft parity run proved current QPS, latency, CPU, and memory evidence",
             "refresh_debug_snapshot": "which refreshed snapshot proved current debug evidence",
         },
         "handoff_metric_probe_map": {
@@ -515,6 +842,8 @@ fn main() {
             "wire_critical_alerts": "rustraft_support_envelope_critical_alert_total",
             "inspect_error_diagnostics": "rustraft_diagnostic_log_errors",
             "resolve_critical_optimization_hints": "rustraft_optimization_critical_total",
+            "refresh_runtime_pressure_evidence": "rustraft_runtime_pressure_freshness_fresh",
+            "refresh_baseline_raft_benchmark_evidence": "rustraft_baseline_raft_benchmark_fresh",
             "refresh_debug_snapshot": "rustraft_debug_snapshot_fresh",
         },
         "handoff_triage_signal_map": {
@@ -522,6 +851,8 @@ fn main() {
             "wire_critical_alerts": "rustraft_operator_triage_top_alert",
             "inspect_error_diagnostics": "rustraft_operator_triage_top_diagnostic",
             "resolve_critical_optimization_hints": "rustraft_operator_triage_top_optimization_hint",
+            "refresh_runtime_pressure_evidence": "rustraft_runtime_pressure_freshness_status",
+            "refresh_baseline_raft_benchmark_evidence": "rustraft_baseline_raft_benchmark_freshness_status",
             "refresh_debug_snapshot": "rustraft_operator_triage_first_action",
         },
         "handoff_validation_gate_map": {
@@ -529,6 +860,8 @@ fn main() {
             "wire_critical_alerts": "support_envelope_validation.alert_links_present",
             "inspect_error_diagnostics": "debug_snapshot_validation.diagnostic_log_contract",
             "resolve_critical_optimization_hints": "debug_snapshot_validation.optimization_prometheus_contract",
+            "refresh_runtime_pressure_evidence": "runtime_pressure_freshness_contract",
+            "refresh_baseline_raft_benchmark_evidence": "benchmark_freshness_contract",
             "refresh_debug_snapshot": "debug_snapshot_validation.freshness_contract",
         },
         "handoff_promql_query_map": {
@@ -536,6 +869,8 @@ fn main() {
             "wire_critical_alerts": "rustraft_support_envelope_critical_alert_total > 0",
             "inspect_error_diagnostics": "rustraft_diagnostic_log_errors == 0",
             "resolve_critical_optimization_hints": "rustraft_optimization_critical_total == 0",
+            "refresh_runtime_pressure_evidence": "rustraft_runtime_pressure_freshness_fresh == 1",
+            "refresh_baseline_raft_benchmark_evidence": "rustraft_baseline_raft_benchmark_fresh == 1",
             "refresh_debug_snapshot": "rustraft_debug_snapshot_fresh == 1",
         },
         "handoff_log_query_map": {
@@ -543,6 +878,8 @@ fn main() {
             "wire_critical_alerts": "alert_rules_json | rg RustRaftSupportEnvelopeCritical",
             "inspect_error_diagnostics": "diagnostic_json_lines | rg rustraft.summary",
             "resolve_critical_optimization_hints": "triage_prometheus | rg rustraft_operator_triage_top_optimization_hint",
+            "refresh_runtime_pressure_evidence": "runtime_pressure_freshness_prometheus | rg freshness_status",
+            "refresh_baseline_raft_benchmark_evidence": "benchmark_prometheus | rg freshness_status",
             "refresh_debug_snapshot": "debug_snapshot_json | rg generated_at_unix_ms",
         },
         "handoff_annotation_map": {
@@ -550,6 +887,8 @@ fn main() {
             "wire_critical_alerts": "RustRaft critical alert route verified",
             "inspect_error_diagnostics": "RustRaft diagnostic evidence inspected",
             "resolve_critical_optimization_hints": "RustRaft optimization critical total cleared",
+            "refresh_runtime_pressure_evidence": "RustRaft runtime-pressure evidence refreshed",
+            "refresh_baseline_raft_benchmark_evidence": "RustRaft benchmark evidence refreshed",
             "refresh_debug_snapshot": "RustRaft debug snapshot refreshed",
         },
         "handoff_correlation_key_map": {
@@ -557,6 +896,7 @@ fn main() {
             "wire_critical_alerts": "rustraft.support_envelope.alert_route",
             "inspect_error_diagnostics": "rustraft.diagnostics.error_target",
             "resolve_critical_optimization_hints": "rustraft.optimization.critical_hint",
+            "refresh_runtime_pressure_evidence": "rustraft.runtime_pressure.freshness",
             "refresh_debug_snapshot": "rustraft.debug_snapshot.refresh",
         },
         "handoff_retention_window_map": {
@@ -564,6 +904,7 @@ fn main() {
             "wire_critical_alerts": "retain for 30 days",
             "inspect_error_diagnostics": "retain for 14 days",
             "resolve_critical_optimization_hints": "retain for 14 days",
+            "refresh_runtime_pressure_evidence": "retain until next release-scale evidence refresh",
             "refresh_debug_snapshot": "retain until next successful refresh",
         },
         "handoff_cleanup_guard_map": {
@@ -571,6 +912,7 @@ fn main() {
             "wire_critical_alerts": "do not clean until alert route annotation is archived",
             "inspect_error_diagnostics": "do not clean until diagnostic JSON lines are archived",
             "resolve_critical_optimization_hints": "do not clean until optimization Prometheus is archived",
+            "refresh_runtime_pressure_evidence": "do not clean until replacement runtime-pressure evidence is validated",
             "refresh_debug_snapshot": "do not clean until replacement debug snapshot is validated",
         },
         "handoff_final_summary_map": {
@@ -578,6 +920,7 @@ fn main() {
             "wire_critical_alerts": "summarize alert route, owner, and annotation key",
             "inspect_error_diagnostics": "summarize diagnostic target, severity, and log query",
             "resolve_critical_optimization_hints": "summarize optimization hint, PromQL result, and retained artifact",
+            "refresh_runtime_pressure_evidence": "summarize runtime-pressure sample age, freshness status, and parity dashboard timestamp",
             "refresh_debug_snapshot": "summarize snapshot age, freshness status, and cleanup guard",
         },
         "handoff_reopen_trigger_map": {
@@ -1684,6 +2027,9 @@ fn main() {
             "wire_critical_alerts": "critical_alert_handoff",
             "inspect_error_diagnostics": "diagnostic_log_prometheus",
             "resolve_critical_optimization_hints": "optimization_handoff",
+            "inspect_runtime_pressure_bottleneck_warning": "runtime_pressure_handoff",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "production_readiness_runtime_pressure_handoff",
+            "refresh_baseline_raft_benchmark_evidence": "benchmark_freshness_handoff",
             "refresh_debug_snapshot": "debug_snapshot_json",
         },
         "support_envelope_operator_verification_map": {
@@ -1691,6 +2037,9 @@ fn main() {
             "wire_critical_alerts": "alert_rules_json",
             "inspect_error_diagnostics": "diagnostic_json_lines",
             "resolve_critical_optimization_hints": "optimization_prometheus",
+            "inspect_runtime_pressure_bottleneck_warning": "runbook_prometheus",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "provisioning_runbook_prometheus",
+            "refresh_baseline_raft_benchmark_evidence": "benchmark_prometheus",
             "refresh_debug_snapshot": "validation_prometheus",
         },
         "support_envelope_operator_dashboard_map": {
@@ -1698,6 +2047,9 @@ fn main() {
             "wire_critical_alerts": "Support Envelope Severity",
             "inspect_error_diagnostics": "Support Envelope First Issue",
             "resolve_critical_optimization_hints": "Triage Top Optimization Hint",
+            "inspect_runtime_pressure_bottleneck_warning": "Runtime Pressure Bottlenecks",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "Production Runtime Pressure Bottlenecks",
+            "refresh_baseline_raft_benchmark_evidence": "Benchmark Freshness",
             "refresh_debug_snapshot": "Support Envelope Freshness Status",
         },
         "support_envelope_operator_runbook_map": {
@@ -1705,6 +2057,9 @@ fn main() {
             "wire_critical_alerts": "wire_critical_alerts",
             "inspect_error_diagnostics": "inspect_error_diagnostics",
             "resolve_critical_optimization_hints": "resolve_critical_optimization_hints",
+            "inspect_runtime_pressure_bottleneck_warning": "inspect_runtime_pressure_bottleneck_warning",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "resolve_production_readiness_runtime_pressure_bottleneck",
+            "refresh_baseline_raft_benchmark_evidence": "refresh_baseline_raft_benchmark_evidence",
             "refresh_debug_snapshot": "refresh_debug_snapshot",
         },
         "support_envelope_operator_collection_map": {
@@ -1712,6 +2067,9 @@ fn main() {
             "wire_critical_alerts": "cargo run --example debug_artifacts --quiet | rg RustRaftSupportEnvelopeCritical",
             "inspect_error_diagnostics": "cargo run --example debug_artifacts --quiet | rg rustraft_diagnostic_log_total",
             "resolve_critical_optimization_hints": "cargo run --example debug_artifacts --quiet | rg rustraft_optimization_critical_total",
+            "inspect_runtime_pressure_bottleneck_warning": "cargo run --example debug_artifacts --quiet | rg rustraft_runtime_pressure_bottleneck_score_percent",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "cargo run --example debug_artifacts --quiet | rg rustraft_production_readiness_runtime_pressure_bottleneck_score_percent",
+            "refresh_baseline_raft_benchmark_evidence": "cargo run --example debug_artifacts --quiet | rg rustraft_baseline_raft_benchmark_fresh",
             "refresh_debug_snapshot": "cargo run --example debug_artifacts --quiet | rg rustraft_debug_snapshot_fresh",
         },
         "support_envelope_operator_execution_map": {
@@ -1719,6 +2077,9 @@ fn main() {
             "wire_critical_alerts": "confirm critical alert routing evidence",
             "inspect_error_diagnostics": "inspect diagnostic log error totals",
             "resolve_critical_optimization_hints": "triage critical optimization hint totals",
+            "inspect_runtime_pressure_bottleneck_warning": "inspect runtime pressure bottleneck warning totals",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "resolve production-readiness runtime pressure bottleneck totals",
+            "refresh_baseline_raft_benchmark_evidence": "confirm benchmark freshness evidence",
             "refresh_debug_snapshot": "confirm debug snapshot freshness evidence",
         },
         "support_envelope_operator_acceptance_map": {
@@ -1726,6 +2087,9 @@ fn main() {
             "wire_critical_alerts": "critical alert is present and routed",
             "inspect_error_diagnostics": "diagnostic error totals are inspectable",
             "resolve_critical_optimization_hints": "critical optimization total is visible",
+            "inspect_runtime_pressure_bottleneck_warning": "runtime pressure bottleneck warning is visible",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "production-readiness runtime pressure bottleneck is visible",
+            "refresh_baseline_raft_benchmark_evidence": "benchmark freshness signal is present",
             "refresh_debug_snapshot": "fresh debug snapshot signal is present",
         },
         "support_envelope_operator_escalation_map": {
@@ -1733,6 +2097,9 @@ fn main() {
             "wire_critical_alerts": "escalate missing critical alert route to raft-runtime-incident-commander",
             "inspect_error_diagnostics": "escalate diagnostic error spikes to raft-observability-oncall",
             "resolve_critical_optimization_hints": "escalate critical optimization totals to raft-runtime-incident-commander",
+            "inspect_runtime_pressure_bottleneck_warning": "escalate bottleneck pressure to raft-runtime-incident-commander before parity signoff",
+            "resolve_production_readiness_runtime_pressure_bottleneck": "escalate production-readiness pressure to raft-production-readiness-owner before release signoff",
+            "refresh_baseline_raft_benchmark_evidence": "escalate stale benchmark evidence to raft-performance-owner before parity signoff",
             "refresh_debug_snapshot": "escalate stale debug snapshots to raft-observability-oncall",
         },
         "support_envelope_operator_notification_map": {
@@ -1740,6 +2107,8 @@ fn main() {
             "wire_critical_alerts": "notify raft-runtime-incident-commander with alert route evidence",
             "inspect_error_diagnostics": "notify raft-observability-oncall with diagnostic error totals",
             "resolve_critical_optimization_hints": "notify raft-runtime-incident-commander with optimization totals",
+            "inspect_runtime_pressure_bottleneck_warning": "notify raft-runtime-incident-commander with bottleneck pressure evidence",
+            "refresh_baseline_raft_benchmark_evidence": "notify raft-performance-owner with benchmark freshness evidence",
             "refresh_debug_snapshot": "notify raft-observability-oncall with snapshot freshness evidence",
         },
         "support_envelope_operator_acknowledgement_map": {
@@ -1747,6 +2116,8 @@ fn main() {
             "wire_critical_alerts": "raft-runtime-incident-commander acknowledges alert route evidence",
             "inspect_error_diagnostics": "raft-observability-oncall acknowledges diagnostic error totals",
             "resolve_critical_optimization_hints": "raft-runtime-incident-commander acknowledges optimization totals",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-incident-commander acknowledges bottleneck pressure evidence",
+            "refresh_baseline_raft_benchmark_evidence": "raft-performance-owner acknowledges benchmark freshness evidence",
             "refresh_debug_snapshot": "raft-observability-oncall acknowledges snapshot freshness evidence",
         },
         "support_envelope_operator_closure_map": {
@@ -1754,6 +2125,8 @@ fn main() {
             "wire_critical_alerts": "close alert route handoff with critical alert evidence attached",
             "inspect_error_diagnostics": "close diagnostic handoff with error totals attached",
             "resolve_critical_optimization_hints": "close optimization handoff with critical totals attached",
+            "inspect_runtime_pressure_bottleneck_warning": "close bottleneck warning handoff with runtime pressure evidence attached",
+            "refresh_baseline_raft_benchmark_evidence": "close benchmark freshness handoff with refreshed parity evidence attached",
             "refresh_debug_snapshot": "close snapshot handoff with freshness evidence attached",
         },
         "support_envelope_operator_archive_map": {
@@ -1761,6 +2134,7 @@ fn main() {
             "wire_critical_alerts": "archive alert route handoff as raft-critical-alert-route-evidence",
             "inspect_error_diagnostics": "archive diagnostic handoff as raft-error-diagnostic-totals",
             "resolve_critical_optimization_hints": "archive optimization handoff as raft-critical-optimization-totals",
+            "inspect_runtime_pressure_bottleneck_warning": "archive runtime pressure bottleneck warning handoff as raft-runtime-pressure-bottleneck-warning",
             "refresh_debug_snapshot": "archive snapshot handoff as raft-debug-snapshot-freshness-evidence",
         },
         "support_envelope_operator_retention_map": {
@@ -1768,6 +2142,7 @@ fn main() {
             "wire_critical_alerts": "retain raft-critical-alert-route-evidence for 30d",
             "inspect_error_diagnostics": "retain raft-error-diagnostic-totals for 14d",
             "resolve_critical_optimization_hints": "retain raft-critical-optimization-totals for 14d",
+            "inspect_runtime_pressure_bottleneck_warning": "retain raft-runtime-pressure-bottleneck-warning for 14d",
             "refresh_debug_snapshot": "retain raft-debug-snapshot-freshness-evidence for 7d",
         },
         "support_envelope_operator_cleanup_guard_map": {
@@ -1775,6 +2150,7 @@ fn main() {
             "wire_critical_alerts": "block cleanup until raft alert route evidence retention proof exists",
             "inspect_error_diagnostics": "block cleanup until raft diagnostic totals retention proof exists",
             "resolve_critical_optimization_hints": "block cleanup until raft optimization totals retention proof exists",
+            "inspect_runtime_pressure_bottleneck_warning": "block cleanup until raft runtime pressure bottleneck warnings retention proof exists",
             "refresh_debug_snapshot": "block cleanup until raft snapshot freshness retention proof exists",
         },
         "support_envelope_operator_cleanup_evidence_map": {
@@ -1782,6 +2158,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-retention-proof",
             "inspect_error_diagnostics": "raft-diagnostic-totals-retention-proof",
             "resolve_critical_optimization_hints": "raft-optimization-totals-retention-proof",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-retention-proof",
             "refresh_debug_snapshot": "raft-snapshot-freshness-retention-proof",
         },
         "support_envelope_operator_cleanup_approval_map": {
@@ -1789,6 +2166,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-approved",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-approved",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-approved",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-approved",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-approved",
         },
         "support_envelope_operator_cleanup_execution_map": {
@@ -1796,6 +2174,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-executed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-executed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-executed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-executed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-executed",
         },
         "support_envelope_operator_cleanup_verification_map": {
@@ -1803,6 +2182,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-verified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-verified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-verified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-verified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-verified",
         },
         "support_envelope_operator_cleanup_notification_map": {
@@ -1810,6 +2190,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-notified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-notified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-notified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-notified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-notified",
         },
         "support_envelope_operator_cleanup_acknowledgement_map": {
@@ -1817,6 +2198,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-acknowledged",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-acknowledged",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-acknowledged",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-acknowledged",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-acknowledged",
         },
         "support_envelope_operator_cleanup_closure_map": {
@@ -1824,6 +2206,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-closed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-closed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-closed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-closed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-closed",
         },
         "support_envelope_operator_cleanup_summary_map": {
@@ -1831,6 +2214,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-summary",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-summary",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-summary",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-summary",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-summary",
         },
         "support_envelope_operator_cleanup_archive_map": {
@@ -1838,6 +2222,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-archived",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-archived",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-archived",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-archived",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-archived",
         },
         "support_envelope_operator_cleanup_retention_map": {
@@ -1845,6 +2230,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retained",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retained",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retained",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retained",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retained",
         },
         "support_envelope_operator_cleanup_retention_review_map": {
@@ -1852,6 +2238,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-reviewed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-reviewed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-reviewed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-reviewed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-reviewed",
         },
         "support_envelope_operator_cleanup_retention_approval_map": {
@@ -1859,6 +2246,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-approved",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-approved",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-approved",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-approved",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-approved",
         },
         "support_envelope_operator_cleanup_retention_execution_map": {
@@ -1866,6 +2254,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-executed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-executed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-executed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-executed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-executed",
         },
         "support_envelope_operator_cleanup_retention_verification_map": {
@@ -1873,6 +2262,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-verified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-verified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-verified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-verified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-verified",
         },
         "support_envelope_operator_cleanup_retention_notification_map": {
@@ -1880,6 +2270,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-notified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-notified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-notified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-notified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-notified",
         },
         "support_envelope_operator_cleanup_retention_acknowledgement_map": {
@@ -1887,6 +2278,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-acknowledged",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-acknowledged",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-acknowledged",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-acknowledged",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-acknowledged",
         },
         "support_envelope_operator_cleanup_retention_closure_map": {
@@ -1894,6 +2286,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-closed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-closed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-closed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-closed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-closed",
         },
         "support_envelope_operator_cleanup_retention_summary_map": {
@@ -1901,6 +2294,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-summarized",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-summarized",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-summarized",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-summarized",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-summarized",
         },
         "support_envelope_operator_cleanup_retention_archive_map": {
@@ -1908,6 +2302,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-archived",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-archived",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-archived",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-archived",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-archived",
         },
         "support_envelope_operator_cleanup_retention_retention_map": {
@@ -1915,6 +2310,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained",
         },
         "support_envelope_operator_cleanup_retention_retention_review_map": {
@@ -1922,6 +2318,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-reviewed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-reviewed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-reviewed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-reviewed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-reviewed",
         },
         "support_envelope_operator_cleanup_retention_retention_approval_map": {
@@ -1929,6 +2326,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-approved",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-approved",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-approved",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-approved",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-approved",
         },
         "support_envelope_operator_cleanup_retention_retention_execution_map": {
@@ -1936,6 +2334,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-executed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-executed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-executed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-executed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-executed",
         },
         "support_envelope_operator_cleanup_retention_retention_verification_map": {
@@ -1943,6 +2342,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-verified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-verified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-verified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-verified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-verified",
         },
         "support_envelope_operator_cleanup_retention_retention_notification_map": {
@@ -1950,6 +2350,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-notified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-notified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-notified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-notified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-notified",
         },
         "support_envelope_operator_cleanup_retention_retention_acknowledgement_map": {
@@ -1957,6 +2358,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-acknowledged",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-acknowledged",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-acknowledged",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-acknowledged",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-acknowledged",
         },
         "support_envelope_operator_cleanup_retention_retention_closure_map": {
@@ -1964,6 +2366,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-closed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-closed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-closed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-closed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-closed",
         },
         "support_envelope_operator_cleanup_retention_retention_summary_map": {
@@ -1971,6 +2374,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-summarized",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-summarized",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-summarized",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-summarized",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-summarized",
         },
         "support_envelope_operator_cleanup_retention_retention_archive_map": {
@@ -1978,6 +2382,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-archived",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-archived",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-archived",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-archived",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-archived",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_map": {
@@ -1985,6 +2390,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_review_map": {
@@ -1992,6 +2398,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-reviewed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-reviewed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-reviewed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-reviewed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-reviewed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_approval_map": {
@@ -1999,6 +2406,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-approved",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-approved",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-approved",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-approved",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-approved",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_execution_map": {
@@ -2006,6 +2414,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-executed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-executed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-executed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-executed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-executed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_verification_map": {
@@ -2013,6 +2422,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-verified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-verified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-verified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-verified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-verified",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_notification_map": {
@@ -2020,6 +2430,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-notified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-notified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-notified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-notified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-notified",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_handoff_map": {
@@ -2027,6 +2438,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-handed-off",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-handed-off",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-handed-off",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-handed-off",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-handed-off",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_readiness_map": {
@@ -2034,6 +2446,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-ready",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-ready",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-ready",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-ready",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-ready",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_route_map": {
@@ -2041,6 +2454,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-routed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-routed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-routed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-routed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-routed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_ack_map": {
@@ -2048,6 +2462,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-acknowledged",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-acknowledged",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-acknowledged",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-acknowledged",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-acknowledged",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_delivery_map": {
@@ -2055,6 +2470,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-delivered",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-delivered",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-delivered",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-delivered",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-delivered",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_confirmation_map": {
@@ -2062,6 +2478,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-confirmed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-confirmed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-confirmed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-confirmed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-confirmed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_closeout_map": {
@@ -2069,6 +2486,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-closed-out",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-closed-out",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-closed-out",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-closed-out",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-closed-out",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_archive_map": {
@@ -2076,6 +2494,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-archived",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-archived",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-archived",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-archived",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-archived",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_retention_map": {
@@ -2083,6 +2502,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-retained",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-retained",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-retained",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-retained",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-retained",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_audit_map": {
@@ -2090,6 +2510,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-audited",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-audited",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-audited",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-audited",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-audited",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_signoff_map": {
@@ -2097,6 +2518,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-signed-off",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-signed-off",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-signed-off",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-signed-off",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-signed-off",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_publication_map": {
@@ -2104,6 +2526,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-published",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-published",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-published",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-published",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-published",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_distribution_map": {
@@ -2111,6 +2534,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-distributed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-distributed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-distributed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-distributed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-distributed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_ingestion_map": {
@@ -2118,6 +2542,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-ingested",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-ingested",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-ingested",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-ingested",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-ingested",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_indexing_map": {
@@ -2125,6 +2550,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-indexed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-indexed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-indexed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-indexed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-indexed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_querying_map": {
@@ -2132,6 +2558,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-queried",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-queried",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-queried",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-queried",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-queried",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_fetching_map": {
@@ -2139,6 +2566,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-fetched",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-fetched",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-fetched",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-fetched",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-fetched",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_materialization_map": {
@@ -2146,6 +2574,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-materialized",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-materialized",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-materialized",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-materialized",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-materialized",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_correlation_map": {
@@ -2153,6 +2582,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-correlated",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-correlated",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-correlated",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-correlated",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-correlated",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_aggregation_map": {
@@ -2160,6 +2590,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-aggregated",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-aggregated",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-aggregated",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-aggregated",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-aggregated",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_summarization_map": {
@@ -2167,6 +2598,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-summarized",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-summarized",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-summarized",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-summarized",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-summarized",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_normalization_map": {
@@ -2174,6 +2606,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-normalized",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-normalized",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-normalized",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-normalized",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-normalized",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_validation_state_map": {
@@ -2181,6 +2614,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-validated",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-validated",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-validated",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-validated",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-validated",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_certification_map": {
@@ -2188,6 +2622,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-certified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-certified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-certified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-certified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-certified",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_attestation_map": {
@@ -2195,6 +2630,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-attested",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-attested",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-attested",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-attested",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-attested",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_sealing_map": {
@@ -2202,6 +2638,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-sealed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-sealed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-sealed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-sealed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-sealed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_map": {
@@ -2209,6 +2646,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-released",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-released",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-released",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-released",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-released",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_distribution_map": {
@@ -2216,6 +2654,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-distributed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-distributed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-distributed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-distributed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-distributed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_ingestion_map": {
@@ -2223,6 +2662,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-ingested",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-ingested",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-ingested",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-ingested",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-ingested",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_indexing_map": {
@@ -2230,6 +2670,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-indexed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-indexed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-indexed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-indexed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-indexed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_query_map": {
@@ -2237,6 +2678,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-queried",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-queried",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-queried",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-queried",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-queried",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_retrieval_map": {
@@ -2244,6 +2686,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-retrieved",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-retrieved",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-retrieved",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-retrieved",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-retrieved",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_consumption_map": {
@@ -2251,6 +2694,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-consumed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-consumed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-consumed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-consumed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-consumed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_application_map": {
@@ -2258,6 +2702,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-applied",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-applied",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-applied",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-applied",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-applied",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_activation_map": {
@@ -2265,6 +2710,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-activated",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-activated",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-activated",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-activated",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-activated",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_operationalization_map": {
@@ -2272,6 +2718,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-operationalized",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-operationalized",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-operationalized",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-operationalized",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-operationalized",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_readiness_map": {
@@ -2279,6 +2726,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-ready",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-ready",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-ready",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-ready",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-ready",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_acceptance_map": {
@@ -2286,6 +2734,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-accepted",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-accepted",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-accepted",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-accepted",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-accepted",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_attestation_map": {
@@ -2293,6 +2742,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-attested",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-attested",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-attested",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-attested",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-attested",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_certification_map": {
@@ -2300,6 +2750,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-certified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-certified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-certified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-certified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-certified",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_publication_map": {
@@ -2307,6 +2758,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-published",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-published",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-published",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-published",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-published",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_map": {
@@ -2314,6 +2766,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handed-off",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handed-off",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handed-off",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handed-off",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handed-off",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_ack_map": {
@@ -2321,6 +2774,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-acknowledged",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-acknowledged",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-acknowledged",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-acknowledged",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-acknowledged",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_closure_map": {
@@ -2328,6 +2782,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-closed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-closed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-closed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-closed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-closed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_archive_map": {
@@ -2335,6 +2790,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-archived",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-archived",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-archived",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-archived",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-archived",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_map": {
@@ -2342,6 +2798,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retained",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retained",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retained",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retained",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retained",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_review_map": {
@@ -2349,6 +2806,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-reviewed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-reviewed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-reviewed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-reviewed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-reviewed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_approval_map": {
@@ -2356,6 +2814,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-approved",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-approved",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-approved",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-approved",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-approved",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_execution_map": {
@@ -2363,6 +2822,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-executed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-executed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-executed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-executed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-executed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_verification_map": {
@@ -2370,6 +2830,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-verified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-verified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-verified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-verified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-verified",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_notification_map": {
@@ -2377,6 +2838,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-notified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-notified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-notified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-notified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-notified",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_acknowledgement_map": {
@@ -2384,6 +2846,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-acknowledged",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-acknowledged",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-acknowledged",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-acknowledged",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-acknowledged",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_closure_map": {
@@ -2391,6 +2854,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-closed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-closed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-closed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-closed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-closed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_summary_map": {
@@ -2398,6 +2862,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-summarized",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-summarized",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-summarized",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-summarized",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-summarized",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_archive_map": {
@@ -2405,6 +2870,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-archived",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-archived",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-archived",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-archived",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-archived",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_map": {
@@ -2412,6 +2878,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retained",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retained",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retained",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retained",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retained",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_review_map": {
@@ -2419,6 +2886,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-reviewed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-reviewed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-reviewed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-reviewed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-reviewed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_approval_map": {
@@ -2426,6 +2894,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-approved",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-approved",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-approved",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-approved",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-approved",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_ownership_map": {
@@ -2433,6 +2902,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-owned",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-owned",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-owned",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-owned",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-owned",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_acknowledgement_map": {
@@ -2440,6 +2910,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-acknowledged",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-acknowledged",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-acknowledged",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-acknowledged",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-acknowledged",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_ready_map": {
@@ -2447,6 +2918,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-ready",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-ready",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-ready",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-ready",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-ready",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_executed_map": {
@@ -2454,6 +2926,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-executed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-executed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-executed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-executed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-executed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_verified_map": {
@@ -2461,6 +2934,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-verified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-verified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-verified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-verified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-verified",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_retained_map": {
@@ -2468,6 +2942,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-retained",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-retained",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-retained",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-retained",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-retained",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_reviewed_map": {
@@ -2475,6 +2950,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-reviewed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-reviewed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-reviewed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-reviewed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-reviewed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_approval_map": {
@@ -2482,6 +2958,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-approved",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-approved",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-approved",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-approved",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-approved",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_publication_map": {
@@ -2489,6 +2966,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-published",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-published",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-published",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-published",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-published",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_distribution_map": {
@@ -2496,6 +2974,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-distributed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-distributed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-distributed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-distributed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-distributed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_acknowledgment_map": {
@@ -2503,6 +2982,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-acknowledged",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-acknowledged",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-acknowledged",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-acknowledged",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-acknowledged",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_acceptance_map": {
@@ -2510,6 +2990,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-accepted",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-accepted",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-accepted",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-accepted",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-accepted",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_readiness_map": {
@@ -2517,6 +2998,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-ready",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-ready",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-ready",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-ready",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-ready",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_activation_map": {
@@ -2524,6 +3006,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-active",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-active",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-active",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-active",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-active",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_execution_map": {
@@ -2531,6 +3014,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-executing",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-executing",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-executing",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-executing",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-executing",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_completion_map": {
@@ -2538,6 +3022,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-completed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-completed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-completed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-completed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-completed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_verification_map": {
@@ -2545,6 +3030,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-verified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-verified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-verified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-verified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-verified",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_closure_map": {
@@ -2552,6 +3038,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-closed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-closed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-closed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-closed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-closed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_archive_map": {
@@ -2559,6 +3046,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-archived",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-archived",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-archived",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-archived",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-archived",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_retention_map": {
@@ -2566,6 +3054,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-retention",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-retention",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-retention",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-retention",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-retention",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_preservation_map": {
@@ -2573,6 +3062,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-preserved",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-preserved",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-preserved",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-preserved",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-preserved",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_restoration_map": {
@@ -2580,6 +3070,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-restored",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-restored",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-restored",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-restored",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-restored",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_reconciliation_map": {
@@ -2587,6 +3078,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-reconciled",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-reconciled",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-reconciled",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-reconciled",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-reconciled",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_finalization_map": {
@@ -2594,6 +3086,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalized",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalized",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalized",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalized",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalized",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_certification_map": {
@@ -2601,6 +3094,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-certified",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-certified",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-certified",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-certified",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-certified",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_attestation_map": {
@@ -2608,6 +3102,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-attested",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-attested",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-attested",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-attested",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-attested",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_authorization_map": {
@@ -2615,6 +3110,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-authorized",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-authorized",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-authorized",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-authorized",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-authorized",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_release_map": {
@@ -2622,6 +3118,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-released",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-released",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-released",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-released",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-released",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_dispatch_map": {
@@ -2629,6 +3126,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-dispatched",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-dispatched",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-dispatched",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-dispatched",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-dispatched",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_delivery_map": {
@@ -2636,6 +3134,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-delivered",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-delivered",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-delivered",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-delivered",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-delivered",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_receipt_map": {
@@ -2643,6 +3142,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-received",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-received",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-received",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-received",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-received",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_confirmation_map": {
@@ -2650,6 +3150,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-confirmed",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-confirmed",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-confirmed",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-confirmed",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-confirmed",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_completion_ready_map": {
@@ -2657,6 +3158,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-completion-ready",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-completion-ready",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-completion-ready",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-completion-ready",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-completion-ready",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_finalization_ready_map": {
@@ -2664,6 +3166,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalization-ready",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalization-ready",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalization-ready",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalization-ready",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalization-ready",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_finalization_complete_map": {
@@ -2671,6 +3174,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalization-complete",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalization-complete",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalization-complete",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalization-complete",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-finalization-complete",
         },
         "support_envelope_operator_cleanup_retention_retention_retention_escalation_release_handoff_retention_retention_critical_alert_handoff_archival_ready_map": {
@@ -2678,6 +3182,7 @@ fn main() {
             "wire_critical_alerts": "raft-alert-route-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-archival-ready",
             "inspect_error_diagnostics": "raft-diagnostic-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-archival-ready",
             "resolve_critical_optimization_hints": "raft-optimization-totals-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-archival-ready",
+            "inspect_runtime_pressure_bottleneck_warning": "raft-runtime-pressure-bottleneck-warning-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-archival-ready",
             "refresh_debug_snapshot": "raft-snapshot-freshness-cleanup-retention-retained-retained-escalation-release-handoff-retention-retention-critical-alert-handoff-archival-ready",
         },
         "critical_alert_handoff": {
@@ -2810,15 +3315,25 @@ fn main() {
         &support_envelope_report,
         &support_envelope_labels,
     );
-
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
             "debug_snapshot": snapshot,
+            "benchmark_runtime_pressure_snapshot": benchmark_runtime_pressure_snapshot,
+            "benchmark_runtime_pressure_validation": benchmark_runtime_pressure_validation,
+            "benchmark_full_pressure_snapshot": benchmark_full_pressure_snapshot,
+            "benchmark_full_pressure_validation": benchmark_full_pressure_validation,
             "debug_snapshot_json": snapshot_json,
             "debug_snapshot_metadata_prometheus": snapshot_metadata_prometheus,
             "diagnostic_json_lines": diagnostic_json_lines,
+            "local_status_diagnostic_json_lines": local_status_diagnostic_json_lines,
             "diagnostic_prometheus": snapshot.diagnostic_prometheus,
+            "peer_pipeline_prometheus": peer_pipeline_prometheus,
+            "latency_prometheus": snapshot.latency_prometheus,
+            "memory_prometheus": snapshot.memory_prometheus,
+            "scale_prometheus": snapshot.scale_prometheus,
+            "scale_target_prometheus": snapshot.scale_target_prometheus,
+            "benchmark_prometheus": snapshot.benchmark_prometheus,
             "optimization_prometheus": snapshot.optimization_prometheus,
             "triage_prometheus": triage_prometheus,
             "runbook_prometheus": snapshot.runbook_prometheus,

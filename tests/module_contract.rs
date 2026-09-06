@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
+use std::collections::BTreeSet;
+
 use matrixraft::{
     cluster::{Consensus, RaftCluster, ReadIndexRequest},
     config::Config,
@@ -10,14 +12,17 @@ use matrixraft::{
     metrics::matrixraft_metric_names,
     node::{NodeOptions, NodeRuntime},
     readiness::{
-        matrixraft_open_source_surface, matrixraft_parity_report, matrixraft_public_api_contract,
-        matrixraft_standalone_readiness_report, matrixraft_temporalstore_adapter_shape,
+        matrixraft_api_name_mappings, matrixraft_core_interface_names,
+        matrixraft_evidence_interface_names, matrixraft_open_source_surface,
+        matrixraft_parity_report, matrixraft_public_api_contract,
+        matrixraft_reference_mapped_interface_names, matrixraft_standalone_readiness_report,
+        matrixraft_temporalstore_adapter_shape, matrixraft_validate_public_api_contract,
         ReadinessSnapshot,
     },
     snapshot::{
         ApplySnapshotFence, PersistentRaftSnapshotStoreOptions, RaftSnapshot, SnapshotMetadata,
     },
-    status::{matrixraft_cluster_status_report, HealthStatus},
+    status::{matrixraft_cluster_status_report, HealthStatus, RuntimeTimerStatus},
     // `ReadIndexRequest` is imported above from `cluster`; dropping the
     // `RustRaft` prefix made the two module paths name the same item.
     transport::{AppendEntriesRequest, Transport, VoteRequest},
@@ -45,6 +50,45 @@ fn module_cluster() -> RaftCluster {
         ],
     )
     .expect("module cluster")
+}
+
+#[test]
+fn debug_artifacts_support_envelope_operator_maps_keep_runtime_pressure_lane() {
+    let source = include_str!("../examples/debug_artifacts.rs");
+    let mut missing_maps = Vec::new();
+    let mut current_map: Option<String> = None;
+    let mut has_runtime_pressure_lane = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("\"support_envelope_operator_") && trimmed.ends_with("{") {
+            current_map = trimmed
+                .split_once('"')
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(name, _)| name.to_string());
+            has_runtime_pressure_lane = false;
+            continue;
+        }
+
+        if current_map.is_some()
+            && trimmed.contains("\"inspect_runtime_pressure_bottleneck_warning\"")
+        {
+            has_runtime_pressure_lane = true;
+        }
+
+        if trimmed == "}," {
+            if let Some(map_name) = current_map.take() {
+                if !has_runtime_pressure_lane {
+                    missing_maps.push(map_name);
+                }
+            }
+        }
+    }
+
+    assert!(
+        missing_maps.is_empty(),
+        "support envelope operator maps missing runtime pressure lane: {missing_maps:?}"
+    );
 }
 
 #[test]
@@ -221,6 +265,7 @@ fn standalone_readiness_report_covers_non_temporalstore_embedding_status() {
 fn public_modules_export_runtime_storage_wal_snapshot_and_transport_types() {
     let _node_options = std::mem::size_of::<NodeOptions>();
     let _node_runtime = std::mem::size_of::<NodeRuntime>();
+    let _runtime_timer_status = std::mem::size_of::<RuntimeTimerStatus>();
     let _config = Config::default();
     let _joint = std::mem::size_of::<JointConsensusMembership>();
 
@@ -243,6 +288,857 @@ fn public_modules_export_runtime_storage_wal_snapshot_and_transport_types() {
 #[test]
 fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     let api = matrixraft_public_api_contract();
+    assert_eq!(api.api_name_mappings, matrixraft_api_name_mappings());
+    assert_eq!(api.core_interfaces, matrixraft_core_interface_names());
+    let validation = matrixraft_validate_public_api_contract(&api);
+    assert!(
+        validation.ready,
+        "public API contract drift must fail closed: {:#?}",
+        validation.blockers
+    );
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"AppendEntriesRequest".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"RuntimePressureAdmission".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"LatencyPressureDetail".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"NodeRuntimeTimerPressureDetail".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"NodeRuntimeTimerThresholds".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"SnapshotLifecycleEvidence".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"NodeRuntime".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"RuntimeTimerStatus".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_runtime_pressure_admission_with_scale_targets".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_runtime_pressure_admission_with_pipeline_pressure".to_string()));
+    assert!(validation.mapped_canonical_names.contains(
+        &"matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure".to_string()
+    ));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_runtime_pressure_bottleneck_summary".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_runtime_pressure_freshness_report".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_runtime_pressure_freshness_prometheus".to_string()));
+    assert!(validation
+        .unmapped_advertised_names
+        .contains(&"matrixraft_public_api_contract".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_runtime_local_status_report".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_runtime_admin_report".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_admin_diagnostic_json_lines".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_diagnostic_log_prometheus".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_observability_provisioning_runbook_steps".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_operator_runbook_steps_with_diagnostics".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_operator_runbook_prometheus".to_string()));
+    assert!(
+        validation.unmapped_reference_required_names.is_empty(),
+        "healthy public API contract must map every fail-closed reference-required name"
+    );
+    assert!(!validation
+        .unmapped_advertised_names
+        .contains(&"matrixraft_runtime_admin_report".to_string()));
+    assert!(!validation
+        .unmapped_advertised_names
+        .contains(&"matrixraft_grafana_dashboard_json".to_string()));
+    assert!(
+        validation.api_mapping_coverage_percent > 0
+            && validation.api_mapping_coverage_percent < 100
+    );
+    assert_eq!(validation.mapping_coverage_by_category.len(), 12);
+    assert!(validation
+        .mapping_coverage_by_category
+        .iter()
+        .any(|coverage| coverage.category == "embedding_examples"
+            && coverage.advertised_name_count == api.embedding_examples.len()));
+    assert!(validation
+        .mapping_coverage_by_category
+        .iter()
+        .any(|coverage| coverage.category == "evidence_interfaces"
+            && coverage.advertised_name_count == api.evidence_interfaces.len()
+            && coverage.mapped_name_count == api.evidence_interfaces.len()));
+    let mapped_by_category = validation
+        .mapping_coverage_by_category
+        .iter()
+        .map(|coverage| coverage.mapped_name_count)
+        .sum::<usize>();
+    assert!(mapped_by_category >= validation.mapped_canonical_names.len());
+    let unique_mapped_by_category = validation
+        .mapping_coverage_by_category
+        .iter()
+        .flat_map(|coverage| coverage.mapped_names.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let unique_advertised_by_category = validation
+        .mapping_coverage_by_category
+        .iter()
+        .flat_map(|coverage| {
+            coverage
+                .mapped_names
+                .iter()
+                .chain(coverage.unmapped_names.iter())
+                .cloned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        unique_mapped_by_category.len(),
+        validation.mapped_canonical_names.len()
+    );
+    assert_eq!(
+        unique_mapped_by_category,
+        validation
+            .mapped_canonical_names
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        validation.api_mapping_coverage_percent,
+        unique_mapped_by_category.len() * 100 / unique_advertised_by_category.len()
+    );
+    let compatibility_coverage = validation
+        .mapping_coverage_by_category
+        .iter()
+        .find(|coverage| coverage.category == "compatibility_reports")
+        .expect("compatibility coverage must be reported");
+    assert!(compatibility_coverage
+        .unmapped_names
+        .contains(&"matrixraft_public_api_contract".to_string()));
+    assert!(!compatibility_coverage
+        .unmapped_names
+        .contains(&"matrixraft_runtime_admin_report".to_string()));
+    let diagnostic_coverage = validation
+        .mapping_coverage_by_category
+        .iter()
+        .find(|coverage| coverage.category == "diagnostic_interfaces")
+        .expect("diagnostic coverage must be reported");
+    assert!(diagnostic_coverage.mapped_name_count >= 7);
+    assert!(diagnostic_coverage.coverage_percent > 0);
+    assert!(!diagnostic_coverage
+        .unmapped_names
+        .contains(&"matrixraft_diagnostic_log_prometheus".to_string()));
+    assert_eq!(
+        validation.reference_required_names,
+        matrixraft_reference_mapped_interface_names()
+    );
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_runtime_pressure_admission_with_scale_targets".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_runtime_pressure_admission_with_pipeline_pressure".to_string()));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure".to_string()
+    ));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_runtime_pressure_bottleneck_summary".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_runtime_pressure_freshness_report".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_runtime_pressure_freshness_prometheus".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_release_benchmark_runtime_timer_status".to_string()));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_input_with_runtime_pressure_evidence".to_string()
+    ));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_benchmark_runtime_pressure_readiness_artifact".to_string()));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog".to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact".to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+            .to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+            .to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_validate_benchmark_runtime_pressure_readiness_artifact".to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+            .to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact".to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+            .to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+            .to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_input_with_benchmark_runtime_pressure_artifacts"
+            .to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_artifacts"
+            .to_string()
+    ));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_production_readiness_input_with_benchmark_artifacts".to_string()));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_input_with_asserted_benchmark_artifacts".to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_report_with_benchmark_runtime_pressure_artifacts"
+            .to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_artifacts"
+            .to_string()
+    ));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_production_readiness_report_with_benchmark_artifacts".to_string()));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_report_with_asserted_benchmark_artifacts".to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_debug_snapshot_with_runtime_pressure_evidence".to_string()));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence".to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts".to_string()
+    ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(validation
+        .reference_required_names
+        .contains(&"BenchmarkRunner".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_grafana_dashboard".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_grafana_dashboard_json".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_alert_rules".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_alert_rules_json".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_observability_provisioning".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_observability_provisioning_json".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_observability_required_metric_names".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_validate_required_metric_scrape_texts".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_validate_observability_provisioning".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_validate_observability_provisioning_json".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_observability_provisioning_validation_prometheus".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_operator_runbook_steps".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_operator_runbook_steps_with_diagnostics".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_operator_runbook_prometheus".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_observability_provisioning_runbook_steps".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_runtime_local_status_report".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_runtime_admin_report".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_production_readiness_report".to_string()));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_report_with_runtime_pressure_policy".to_string()
+    ));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_admin_diagnostic_log_entries".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_admin_diagnostic_json_lines".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_local_status_diagnostic_log_entries".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_local_status_diagnostic_json_lines".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_node_runtime_status_diagnostic_log_entries".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_node_runtime_status_diagnostic_json_lines".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"matrixraft_diagnostic_log_prometheus".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"SnapshotLifecycleEvidence".to_string()));
+    assert!(validation
+        .reference_required_names
+        .contains(&"PipelineEvidence".to_string()));
+    assert!(validation.reference_required_names.contains(
+        &"PipelineEvidence::packet_loss_reorder_all_faulted_peers_recovered".to_string()
+    ));
+    assert_eq!(
+        validation.interface_name_count,
+        api.public_modules.len()
+            + api.core_interfaces.len()
+            + api.rpc_messages.len()
+            + api.safety_helpers.len()
+            + api.embedding_examples.len()
+            + api.parity_reports.len()
+            + api.benchmark_interfaces.len()
+            + api.observability_interfaces.len()
+            + api.diagnostic_interfaces.len()
+            + api.evidence_interfaces.len()
+            + api.compatibility_reports.len()
+    );
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "Storage"
+            && mapping.matrixraft_facade == "MatrixRaftStorage"
+            && mapping.raft_rs_or_tikv_reference == "raft::Storage"
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "ReadIndexRequest"
+            && mapping.raft_rs_or_tikv_reference.contains("MsgReadIndex")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("lease_read")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_read_safety_decision"
+            && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
+            && mapping.byteraft_or_baseline_reference.contains("safe read")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_append_safety_decision"
+            && mapping.raft_rs_or_tikv_reference.contains("append")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("AppendEntries")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_learner_promotion_decision"
+            && mapping.raft_rs_or_tikv_reference.contains("learner")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("auto-promote")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_parity_report"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("BaselineRaft")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_baseline_raft_parity_matrix"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("feature parity matrix")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("parity matrix")
+    }));
+    assert!(validation
+        .mapping_coverage_by_category
+        .iter()
+        .all(|coverage| { coverage.advertised_name_count == 0 || coverage.mapped_name_count > 0 }));
+    assert_eq!(
+        api.evidence_interfaces,
+        matrixraft_evidence_interface_names()
+    );
+    assert!(api
+        .evidence_interfaces
+        .contains(&"PipelineEvidence".to_string()));
+    assert!(api.evidence_interfaces.contains(
+        &"PipelineEvidence::packet_loss_reorder_all_faulted_peers_recovered".to_string()
+    ));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "PeerProgress"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("ProgressTracker")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("replication pipeline")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "PipelineEvidence"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("replication pipeline readiness")
+            && mapping.note.contains("per-peer fault recovery")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "PipelineEvidence::packet_loss_reorder_all_faulted_peers_recovered"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("all-peer Progress")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("all faulted peers recovered")
+            && mapping.note.contains("fail-closed production signal")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "NodeRuntime"
+            && mapping.raft_rs_or_tikv_reference.contains("RaftRouter")
+            && mapping.note.contains("timer backpressure")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "RuntimeTimerStatus"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("scheduler delay")
+            && mapping.note.contains("rejected tick")
+            && mapping.note.contains("latency/QPS")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_runtime_local_status_report"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("ProgressTracker")
+            && mapping.note.contains("bounded-stale read")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_runtime_admin_report"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("GetInfo/admin")
+            && mapping.note.contains("QPS/latency")
+            && mapping.note.contains("peer-pipeline lag")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_production_readiness_report"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("ByteRaft release gate")
+            && mapping.note.contains("QPS/latency/memory parity")
+            && mapping.note.contains("ranked runtime-pressure bottlenecks")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_production_readiness_report_with_runtime_pressure_policy"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("fail-closed runtime-pressure deployment gate")
+            && mapping
+                .note
+                .contains("configured fail-closed admission policy")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_admin_diagnostic_json_lines"
+            && mapping.raft_rs_or_tikv_reference.contains("JSON")
+            && mapping.note.contains("Grafana")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_local_status_diagnostic_json_lines"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("local replica")
+            && mapping.note.contains("random-replica read lag")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_node_runtime_status_diagnostic_json_lines"
+            && mapping.raft_rs_or_tikv_reference.contains("scheduler JSON")
+            && mapping.note.contains("timer backlog")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_diagnostic_log_prometheus"
+            && mapping.raft_rs_or_tikv_reference.contains("Prometheus")
+            && mapping.note.contains("peer-pipeline")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_runtime_pressure_bottleneck_summary"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("QPS/latency bottleneck")
+            && mapping.note.contains("excess or deficit percent")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_runtime_pressure_freshness_report"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("QPS/latency/memory evidence freshness gate")
+            && mapping.note.contains("stale")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_runtime_pressure_freshness_prometheus"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("Prometheus freshness scrape")
+            && mapping.note.contains("Grafana")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "InstallSnapshotResponse"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("install_snapshot_response")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "SnapshotLifecycleEvidence"
+            && mapping.raft_rs_or_tikv_reference.contains("raftstore")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("sender/downloader lifecycle")
+            && mapping.note.contains("coherent transfer completion")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "BenchmarkRunner"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("QPS/latency parity")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_release_benchmark_runtime_timer_status"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("scheduler/timer pressure")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("no-pressure timer evidence")
+            && mapping.note.contains("producer and consumer")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_benchmark_runtime_pressure_readiness_artifact"
+            && mapping.raft_rs_or_tikv_reference.contains("Prometheus")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("diagnostic logs")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+            && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("read backlog metrics")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+            && mapping.raft_rs_or_tikv_reference.contains("scheduler pressure")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("timer metrics")
+            && mapping.note.contains("node-runtime timer pressure")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact"
+            && mapping.raft_rs_or_tikv_reference.contains("Prometheus")
+            && mapping.byteraft_or_baseline_reference.contains("schema")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+            && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("read backlog pressure evidence")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+            && mapping.raft_rs_or_tikv_reference.contains("scheduler pressure")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("timer pressure evidence")
+            && mapping.note.contains("drop node-runtime timer pressure")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_artifacts"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("BaselineRaft release-scale benchmark artifacts")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_artifacts"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("production-clean benchmark artifacts")
+            && mapping.note.contains("deriving QPS scale targets")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_production_readiness_input_with_benchmark_artifacts"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("diagnostic benchmark artifacts")
+            && mapping.note.contains("failed QPS")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_input_with_asserted_benchmark_artifacts"
+            && mapping.raft_rs_or_tikv_reference.contains("fail-closed")
+            && mapping.note.contains("matched-but-failing")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("read backlog admission")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
+            && mapping.note.contains("pending-read backlog evidence")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts"
+            && mapping.raft_rs_or_tikv_reference.contains("scheduler")
+            && mapping.note.contains("node-runtime timer evidence")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_artifacts"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("BaselineRaft release-scale benchmark artifacts")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_artifacts"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("runtime-pressure gated readiness report")
+            && mapping.note.contains("latency")
+            && mapping.note.contains("scale-target admission")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_production_readiness_report_with_benchmark_artifacts"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("readiness report")
+            && mapping.note.contains("operator triage")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_report_with_asserted_benchmark_artifacts"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("production-clean")
+            && mapping.note.contains("QPS")
+            && mapping.note.contains("memory parity")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("read backlog gated")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
+            && mapping.note.contains("hard-gate semantics")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts"
+            && mapping.raft_rs_or_tikv_reference.contains("scheduler")
+            && mapping.note.contains("hard-gate semantics")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_grafana_dashboard"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("Grafana raftstore dashboard")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_grafana_dashboard_json"
+            && mapping.raft_rs_or_tikv_reference.contains("JSON")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("dashboard JSON")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_alert_rules_json"
+            && mapping.raft_rs_or_tikv_reference.contains("alertmanager")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("alert rule JSON")
+            && mapping.note.contains("QPS")
+            && mapping.note.contains("latency")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_observability_provisioning"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("observability bundle")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("production observability bundle")
+            && mapping.note.contains("runbook")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_observability_required_metric_names"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("required metric catalog")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("production benchmark")
+            && mapping.note.contains("QPS")
+            && mapping.note.contains("memory")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_validate_required_metric_scrape_texts"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("Prometheus scrape")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("scrape completeness")
+            && mapping.note.contains("latency")
+            && mapping.note.contains("benchmark")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_validate_observability_provisioning"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("provisioning drift validation")
+            && mapping.note.contains("fails closed")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_observability_provisioning_validation_prometheus"
+            && mapping.raft_rs_or_tikv_reference.contains("Prometheus")
+            && mapping.note.contains("provisioning drift")
+            && mapping.note.contains("QPS")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("read backlog admission")
+            && mapping.note.contains("fail-closed production decision")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("read backlog pressure")
+            && mapping.note.contains("ReadIndex")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("read backlog pressure")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "LatencyPressureDetail"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("p95/p99 latency")
+            && mapping.note.contains("sample count")
+            && mapping.note.contains("production gates")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_validate_runtime_pressure_admission_evidence"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("runtime-pressure evidence validation")
+            && mapping.note.contains("memory")
+            && mapping.note.contains("scale")
+            && mapping.note.contains("production gates")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_validate_runtime_pressure_admission_evidence_with_policy"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("fail-closed runtime-pressure rejection validation")
+            && mapping
+                .note
+                .contains("configured fail-closed pressure priority")
+            && mapping.note.contains("production gates")
+    }));
     for module in [
         "node",
         "cluster",
@@ -262,12 +1158,253 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(api
         .embedding_examples
         .contains(&"examples/open_source_surface.rs".to_string()));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "examples/debug_artifacts.rs"
+            && mapping.raft_rs_or_tikv_reference.contains("Prometheus")
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("support bundle")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "examples/baseline_raft_parity_benchmark.rs"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("BaselineRaft-vs-RustRaft")
+            && mapping.note.contains("QPS")
+            && mapping.note.contains("memory")
+    }));
     assert!(api
         .benchmark_interfaces
         .contains(&"BenchmarkRunner".to_string()));
     assert!(api
+        .benchmark_interfaces
+        .contains(&"matrixraft_scale_optimization_inputs_from_benchmark_report".to_string()));
+    assert!(api
+        .benchmark_interfaces
+        .contains(&"matrixraft_validate_benchmark_scale_optimization_inputs".to_string()));
+    assert!(api
+        .benchmark_interfaces
+        .contains(&"matrixraft_release_benchmark_runtime_timer_status".to_string()));
+    assert!(api
+        .benchmark_interfaces
+        .contains(&"matrixraft_baseline_raft_benchmark_summary_prometheus".to_string()));
+    assert!(api
+        .benchmark_interfaces
+        .contains(&"matrixraft_baseline_raft_benchmark_metric_names".to_string()));
+    assert!(api
+        .benchmark_interfaces
+        .contains(&"matrixraft_baseline_raft_benchmark_grafana_panels".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_observability_required_metric_names".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_validate_required_metric_scrape_texts".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_debug_snapshot_with_benchmark_summary".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_debug_snapshot_with_benchmark_artifacts".to_string()));
+    assert!(api.observability_interfaces.contains(
+        &"matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts".to_string()
+    ));
+    assert!(api.observability_interfaces.contains(
+        &"matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(api
+        .benchmark_interfaces
+        .contains(&"matrixraft_benchmark_runtime_pressure_readiness_artifact".to_string()));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog".to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer".to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact".to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_validate_benchmark_runtime_pressure_readiness_artifact".to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact".to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts".to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_input_with_benchmark_runtime_pressure_artifacts"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_artifacts"
+            .to_string()
+    ));
+    assert!(api
+        .benchmark_interfaces
+        .contains(&"matrixraft_production_readiness_input_with_benchmark_artifacts".to_string()));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_input_with_asserted_benchmark_artifacts".to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_report_with_benchmark_runtime_pressure_artifacts"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_artifacts"
+            .to_string()
+    ));
+    assert!(api
+        .benchmark_interfaces
+        .contains(&"matrixraft_production_readiness_report_with_benchmark_artifacts".to_string()));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_report_with_asserted_benchmark_artifacts".to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts"
+            .to_string()
+    ));
+    assert!(api.benchmark_interfaces.contains(
+        &"matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts"
+            .to_string()
+    ));
+    assert!(api
+        .benchmark_interfaces
+        .contains(&"matrixraft_benchmark_runbook_steps".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_scale_target_metrics_prometheus".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_production_readiness_metric_names".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_production_readiness_grafana_panels".to_string()));
+    assert!(api.observability_interfaces.contains(
+        &"matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure"
+            .to_string()
+    ));
+    assert!(api.observability_interfaces.contains(
+        &"matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence".to_string()
+    ));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_runtime_pressure_freshness_report".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_runtime_pressure_freshness_prometheus".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"LatencyPressureDetail".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_validate_runtime_pressure_admission_evidence".to_string()));
+    assert!(api.observability_interfaces.contains(
+        &"matrixraft_validate_runtime_pressure_admission_evidence_with_policy".to_string()
+    ));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_snapshot_lifecycle_evidence_prometheus".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_snapshot_lifecycle_grafana_panels".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_wal_lifecycle_evidence_prometheus".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_wal_lifecycle_grafana_panels".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_membership_readiness_metric_names".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_membership_readiness_prometheus".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_membership_readiness_grafana_panels".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_observability_provisioning".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_observability_provisioning_runbook_steps".to_string()));
+    assert!(api
+        .diagnostic_interfaces
+        .contains(&"matrixraft_optimization_diagnostic_json_lines".to_string()));
+    assert!(api
+        .diagnostic_interfaces
+        .contains(&"matrixraft_membership_readiness_diagnostic_log_entries".to_string()));
+    assert!(api
+        .diagnostic_interfaces
+        .contains(&"matrixraft_membership_readiness_diagnostic_json_lines".to_string()));
+    assert!(api
+        .diagnostic_interfaces
+        .contains(&"matrixraft_production_readiness_diagnostic_json_lines".to_string()));
+    assert!(api
+        .diagnostic_interfaces
+        .contains(&"matrixraft_operator_runbook_steps_with_diagnostics".to_string()));
+    assert!(api
+        .diagnostic_interfaces
+        .contains(&"matrixraft_operator_runbook_prometheus".to_string()));
+    assert!(api
+        .diagnostic_interfaces
+        .contains(&"matrixraft_validate_debug_snapshot".to_string()));
+    assert!(api
         .compatibility_reports
         .contains(&"matrixraft_production_readiness_report".to_string()));
+    assert!(api
+        .compatibility_reports
+        .contains(&"matrixraft_api_name_mappings".to_string()));
+    assert!(api
+        .compatibility_reports
+        .contains(&"matrixraft_validate_public_api_contract".to_string()));
 
     let surface = matrixraft_open_source_surface();
     assert_eq!(surface.crate_name, "rustraft");
@@ -295,6 +1432,137 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
 }
 
 #[test]
+fn public_api_contract_validation_rejects_duplicate_and_unmapped_names() {
+    let mut api = matrixraft_public_api_contract();
+    api.storage_trait = "MatrixRaftStorage".to_string();
+    api.transport_trait = "MatrixRaftTransport".to_string();
+    api.benchmark_interfaces.push("BenchmarkRunner".to_string());
+    api.core_interfaces
+        .retain(|name| name != "AdminCommand::ReleaseMemory");
+    api.api_name_mappings.retain(|mapping| {
+        mapping.canonical != "ReadIndexRequest" && mapping.canonical != "BenchmarkRunner"
+    });
+    api.api_name_mappings[0].raft_rs_or_tikv_reference.clear();
+
+    let validation = matrixraft_validate_public_api_contract(&api);
+    assert!(!validation.ready);
+    assert!(validation
+        .blockers
+        .contains(&"storage_trait:non_canonical:MatrixRaftStorage:expected:Storage".to_string()));
+    assert!(validation.blockers.contains(
+        &"transport_trait:non_canonical:MatrixRaftTransport:expected:Transport".to_string()
+    ));
+    assert!(validation
+        .blockers
+        .contains(&"benchmark_interfaces:duplicate_name:BenchmarkRunner".to_string()));
+    assert!(validation
+        .blockers
+        .contains(&"api_mapping:missing_required_canonical:ReadIndexRequest".to_string()));
+    assert!(validation
+        .blockers
+        .contains(&"api_mapping:missing_required_canonical:BenchmarkRunner".to_string()));
+    assert_eq!(
+        validation.unmapped_reference_required_names,
+        vec![
+            "ReadIndexRequest".to_string(),
+            "BenchmarkRunner".to_string()
+        ]
+    );
+    assert!(validation
+        .blockers
+        .iter()
+        .any(|blocker| { blocker == "api_mapping:Storage:missing_raft_rs_or_tikv_reference" }));
+    assert!(validation.blockers.iter().any(|blocker| {
+        blocker == "api_mapping:unadvertised_canonical:AdminCommand::ReleaseMemory"
+    }));
+    assert!(validation
+        .unmapped_advertised_names
+        .contains(&"BenchmarkRunner".to_string()));
+    assert!(validation
+        .unmapped_advertised_names
+        .contains(&"ReadIndexRequest".to_string()));
+    assert!(!validation
+        .unmapped_advertised_names
+        .contains(&"Storage".to_string()));
+    assert!(validation.api_mapping_coverage_percent < 100);
+}
+
+#[test]
+fn public_api_contract_validation_rejects_unmapped_public_categories() {
+    let mut api = matrixraft_public_api_contract();
+    let diagnostic_names = api
+        .diagnostic_interfaces
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    api.api_name_mappings
+        .retain(|mapping| !diagnostic_names.contains(mapping.canonical.as_str()));
+
+    let validation = matrixraft_validate_public_api_contract(&api);
+    assert!(!validation.ready);
+    assert!(validation.blockers.contains(
+        &"api_mapping:category_without_reference_mapping:diagnostic_interfaces".to_string()
+    ));
+    assert!(validation
+        .mapping_coverage_by_category
+        .iter()
+        .any(|coverage| {
+            coverage.category == "diagnostic_interfaces"
+                && coverage.advertised_name_count == api.diagnostic_interfaces.len()
+                && coverage.mapped_name_count == 0
+                && coverage.coverage_percent == 0
+        }));
+
+    let mut api = matrixraft_public_api_contract();
+    let example_names = api
+        .embedding_examples
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    api.api_name_mappings
+        .retain(|mapping| !example_names.contains(mapping.canonical.as_str()));
+
+    let validation = matrixraft_validate_public_api_contract(&api);
+    assert!(!validation.ready);
+    assert!(validation.blockers.contains(
+        &"api_mapping:category_without_reference_mapping:embedding_examples".to_string()
+    ));
+    assert!(validation
+        .mapping_coverage_by_category
+        .iter()
+        .any(|coverage| {
+            coverage.category == "embedding_examples"
+                && coverage.advertised_name_count == api.embedding_examples.len()
+                && coverage.mapped_name_count == 0
+                && coverage.coverage_percent == 0
+        }));
+
+    let mut api = matrixraft_public_api_contract();
+    let evidence_names = api
+        .evidence_interfaces
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    api.api_name_mappings
+        .retain(|mapping| !evidence_names.contains(mapping.canonical.as_str()));
+
+    let validation = matrixraft_validate_public_api_contract(&api);
+    assert!(!validation.ready);
+    assert!(validation.blockers.contains(
+        &"api_mapping:category_without_reference_mapping:evidence_interfaces".to_string()
+    ));
+    assert!(validation
+        .mapping_coverage_by_category
+        .iter()
+        .any(|coverage| {
+            coverage.category == "evidence_interfaces"
+                && coverage.advertised_name_count == api.evidence_interfaces.len()
+                && coverage.mapped_name_count == 0
+                && coverage.coverage_percent == 0
+        }));
+}
+
+#[test]
 fn debug_artifacts_example_exports_complete_support_envelope() {
     let example = include_str!("../examples/debug_artifacts.rs");
     for required in [
@@ -302,7 +1570,10 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"debug_snapshot_json\"",
         "\"debug_snapshot_metadata_prometheus\"",
         "\"diagnostic_json_lines\"",
+        "\"local_status_diagnostic_json_lines\"",
         "\"diagnostic_prometheus\"",
+        "\"peer_pipeline_prometheus\"",
+        "\"benchmark_prometheus\"",
         "\"optimization_prometheus\"",
         "\"triage_prometheus\"",
         "\"runbook_prometheus\"",
@@ -325,7 +1596,16 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     }
     assert!(example.contains("serde_json::to_string_pretty(&snapshot)"));
     assert!(example.contains(".diagnostics"));
+    assert!(example.contains("matrixraft_local_status_diagnostic_json_lines"));
+    assert!(example.contains("matrixraft_peer_pipeline_metrics_prometheus"));
     assert!(example.contains("snapshot.diagnostic_prometheus"));
+    assert!(example.contains("matrixraft_baseline_raft_benchmark_failure_summary"));
+    assert!(example.contains("matrixraft_debug_snapshot_with_benchmark_artifacts"));
+    assert!(example.contains("matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts"));
+    assert!(example.contains(
+        "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+    ));
+    assert!(example.contains("benchmark_prometheus"));
     assert!(example.contains("snapshot.optimization_prometheus"));
     assert!(example.contains("snapshot.runbook_prometheus"));
     assert!(example.contains("matrixraft_operator_runbook_prometheus(&provisioning.runbook_steps"));
@@ -415,6 +1695,24 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"RustRaftOptimizationCriticalHints\": \"resolve_critical_optimization_hints\""
     ));
+    assert!(example.contains(
+        "\"RustRaftRuntimePressureBottleneckActive\": \"inspect_runtime_pressure_bottleneck_warning\""
+    ));
+    assert!(example.contains(
+        "\"RustRaftProductionReadinessRuntimePressureBottleneck\": \"resolve_production_readiness_runtime_pressure_bottleneck\""
+    ));
+    assert!(example.contains(
+        "\"RustRaftRuntimePressureFreshnessLow\": \"refresh_runtime_pressure_evidence\""
+    ));
+    assert!(example.contains(
+        "\"RustRaftRuntimePressureFreshnessLost\": \"refresh_runtime_pressure_evidence\""
+    ));
+    assert!(example.contains(
+        "\"RustRaftRuntimePressureFreshnessInvalid\": \"refresh_runtime_pressure_evidence\""
+    ));
+    assert!(example.contains(
+        "\"RustRaftBaselineRaftBenchmarkFreshnessLost\": \"refresh_baseline_raft_benchmark_evidence\""
+    ));
     assert!(example.contains("\"RustRaftDebugSnapshotFreshnessLost\": \"refresh_debug_snapshot\""));
     assert!(example.contains("\"runbook_evidence_map\""));
     assert!(example.contains("\"validate_support_envelope\""));
@@ -426,6 +1724,19 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("diagnostic_json_lines"));
     assert!(example.contains("\"resolve_critical_optimization_hints\""));
     assert!(example.contains("rustraft_optimization_critical_total"));
+    assert!(example.contains("\"inspect_runtime_pressure_bottleneck_warning\""));
+    assert!(example.contains("rustraft_runtime_pressure_bottleneck_score_percent"));
+    assert!(example.contains("\"resolve_production_readiness_runtime_pressure_bottleneck\""));
+    assert!(
+        example.contains("rustraft_production_readiness_runtime_pressure_bottleneck_score_percent")
+    );
+    assert!(example.contains("rustraft_production_readiness_blocker_total"));
+    assert!(example.contains("\"refresh_runtime_pressure_evidence\""));
+    assert!(example.contains("rustraft_runtime_pressure_freshness_fresh"));
+    assert!(example.contains("rustraft_runtime_pressure_freshness_issue_total"));
+    assert!(example.contains("\"refresh_baseline_raft_benchmark_evidence\""));
+    assert!(example.contains("rustraft_baseline_raft_benchmark_fresh"));
+    assert!(example.contains("rustraft_baseline_raft_benchmark_freshness_status"));
     assert!(example.contains("\"refresh_debug_snapshot\""));
     assert!(example.contains("rustraft_debug_snapshot_fresh"));
     assert!(example.contains("\"operator_handoff_sequence\""));
@@ -436,7 +1747,19 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"inspect_error_diagnostics\",\n            \"resolve_critical_optimization_hints\""
     ));
     assert!(example.contains(
-        "\"resolve_critical_optimization_hints\",\n            \"refresh_debug_snapshot\""
+        "\"resolve_critical_optimization_hints\",\n            \"inspect_runtime_pressure_bottleneck_warning\""
+    ));
+    assert!(example.contains(
+        "\"inspect_runtime_pressure_bottleneck_warning\",\n            \"resolve_production_readiness_runtime_pressure_bottleneck\""
+    ));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\",\n            \"refresh_runtime_pressure_evidence\""
+    ));
+    assert!(example.contains(
+        "\"refresh_runtime_pressure_evidence\",\n            \"refresh_baseline_raft_benchmark_evidence\""
+    ));
+    assert!(example.contains(
+        "\"refresh_baseline_raft_benchmark_evidence\",\n            \"refresh_debug_snapshot\""
     ));
     assert!(example.contains("\"handoff_command_map\""));
     assert!(example.contains(
@@ -450,6 +1773,18 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     ));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"cargo run --example debug_artifacts --quiet | rg rustraft_optimization_critical_total\""
+    ));
+    assert!(example.contains(
+        "\"inspect_runtime_pressure_bottleneck_warning\": \"cargo run --example debug_artifacts --quiet | rg rustraft_runtime_pressure_bottleneck_score_percent\""
+    ));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"cargo run --example debug_artifacts --quiet | rg rustraft_production_readiness_runtime_pressure_bottleneck_score_percent\""
+    ));
+    assert!(example.contains(
+        "\"refresh_runtime_pressure_evidence\": \"cargo run --example debug_artifacts --quiet | rg rustraft_runtime_pressure_freshness_fresh\""
+    ));
+    assert!(example.contains(
+        "\"refresh_baseline_raft_benchmark_evidence\": \"cargo run --example debug_artifacts --quiet | rg rustraft_baseline_raft_benchmark_fresh\""
     ));
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"cargo run --example debug_artifacts --quiet | rg rustraft_debug_snapshot_fresh\""
@@ -468,6 +1803,18 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"resolve_critical_optimization_hints\": \"critical optimization total is zero after applying the top hint\""
     ));
     assert!(example.contains(
+        "\"inspect_runtime_pressure_bottleneck_warning\": \"runtime pressure bottleneck score is visible and can be cleared before parity claims\""
+    ));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"production-readiness runtime pressure bottleneck score is visible and cleared before release claims\""
+    ));
+    assert!(example.contains(
+        "\"refresh_runtime_pressure_evidence\": \"runtime-pressure freshness metric is one, issue total is zero, and status is fresh\""
+    ));
+    assert!(example.contains(
+        "\"refresh_baseline_raft_benchmark_evidence\": \"benchmark freshness metric is one and status is fresh before QPS, latency, CPU, or memory claims\""
+    ));
+    assert!(example.contains(
         "\"refresh_debug_snapshot\": \"debug snapshot freshness metric is one and freshness status is fresh\""
     ));
     assert!(example.contains("\"handoff_dashboard_map\""));
@@ -482,6 +1829,12 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"Diagnostic Log Rate\""));
     assert!(example.contains("\"Optimization Critical Hints\""));
     assert!(example.contains("\"Triage Top Optimization Hint\""));
+    assert!(example.contains("\"Production Runtime Pressure Bottlenecks\""));
+    assert!(example.contains("\"Production Readiness Blockers\""));
+    assert!(example.contains("\"Runtime Pressure Freshness\""));
+    assert!(example.contains("\"Runtime Pressure Freshness Issues\""));
+    assert!(example.contains("\"Benchmark Freshness\""));
+    assert!(example.contains("\"Benchmark Freshness Remaining\""));
     assert!(example.contains("\"Support Envelope Freshness Status\""));
     assert!(example.contains("\"Debug Snapshot Fresh\""));
     assert!(example.contains("\"handoff_log_stream_map\""));
@@ -494,24 +1847,40 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     ));
     assert!(example.contains("\"diagnostic_log_prometheus\""));
     assert!(example.contains("\"triage_prometheus\""));
+    assert!(example.contains("\"provisioning_runbook_prometheus\""));
     assert!(example.contains("\"validation_prometheus\""));
     assert!(example.contains("\"handoff_owner_map\""));
     assert!(example.contains("\"validate_support_envelope\": \"raft-observability-oncall\""));
     assert!(example.contains("\"wire_critical_alerts\": \"raft-runtime-incident-commander\""));
     assert!(example.contains("\"inspect_error_diagnostics\": \"raft-diagnostics-owner\""));
     assert!(example.contains("\"resolve_critical_optimization_hints\": \"raft-performance-owner\""));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"raft-production-readiness-owner\""
+    ));
+    assert!(example.contains("\"refresh_runtime_pressure_evidence\": \"raft-performance-owner\""));
+    assert!(example
+        .contains("\"refresh_baseline_raft_benchmark_evidence\": \"raft-performance-owner\""));
     assert!(example.contains("\"refresh_debug_snapshot\": \"raft-runtime-owner\""));
     assert!(example.contains("\"handoff_priority_map\""));
     assert!(example.contains("\"validate_support_envelope\": \"P0\""));
     assert!(example.contains("\"wire_critical_alerts\": \"P0\""));
     assert!(example.contains("\"inspect_error_diagnostics\": \"P1\""));
     assert!(example.contains("\"resolve_critical_optimization_hints\": \"P1\""));
+    assert!(
+        example.contains("\"resolve_production_readiness_runtime_pressure_bottleneck\": \"P0\"")
+    );
+    assert!(example.contains("\"refresh_runtime_pressure_evidence\": \"P1\""));
+    assert!(example.contains("\"refresh_baseline_raft_benchmark_evidence\": \"P1\""));
     assert!(example.contains("\"refresh_debug_snapshot\": \"P2\""));
     assert!(example.contains("\"handoff_response_time_map\""));
     assert!(example.contains("\"validate_support_envelope\": \"immediate\""));
     assert!(example.contains("\"wire_critical_alerts\": \"immediate\""));
     assert!(example.contains("\"inspect_error_diagnostics\": \"within 5 minutes\""));
     assert!(example.contains("\"resolve_critical_optimization_hints\": \"within 15 minutes\""));
+    assert!(example
+        .contains("\"resolve_production_readiness_runtime_pressure_bottleneck\": \"immediate\""));
+    assert!(example.contains("\"refresh_runtime_pressure_evidence\": \"within 15 minutes\""));
+    assert!(example.contains("\"refresh_baseline_raft_benchmark_evidence\": \"within 15 minutes\""));
     assert!(example.contains("\"refresh_debug_snapshot\": \"within 30 minutes\""));
     assert!(example.contains("\"handoff_escalation_trigger_map\""));
     assert!(example.contains(
@@ -525,6 +1894,15 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     ));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"critical optimization total remains nonzero after mitigation\""
+    ));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"production-readiness runtime pressure bottleneck score remains nonzero\""
+    ));
+    assert!(example.contains(
+        "\"refresh_runtime_pressure_evidence\": \"runtime-pressure freshness metric remains zero or issue total remains nonzero\""
+    ));
+    assert!(example.contains(
+        "\"refresh_baseline_raft_benchmark_evidence\": \"benchmark freshness metric remains zero or status is not fresh\""
     ));
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"debug snapshot freshness metric remains zero after refresh\""
@@ -543,6 +1921,15 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"resolve_critical_optimization_hints\": \"apply the top optimization hint and recheck critical total\""
     ));
     assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"inspect production-readiness pressure sources and reduce every blocking runtime pressure score\""
+    ));
+    assert!(example.contains(
+        "\"refresh_runtime_pressure_evidence\": \"rerun release-scale runtime-pressure capture and recheck freshness Prometheus\""
+    ));
+    assert!(example.contains(
+        "\"refresh_baseline_raft_benchmark_evidence\": \"rerun release-mode BaselineRaft parity benchmarks and recheck benchmark freshness Prometheus\""
+    ));
+    assert!(example.contains(
         "\"refresh_debug_snapshot\": \"regenerate debug snapshot artifacts and rerun validation Prometheus checks\""
     ));
     assert!(example.contains("\"handoff_closure_check_map\""));
@@ -559,7 +1946,13 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"resolve_critical_optimization_hints\": \"rustraft_optimization_critical_total is zero\""
     ));
     assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"rustraft_production_readiness_runtime_pressure_bottleneck_score_percent is zero\""
+    ));
+    assert!(example.contains(
         "\"refresh_debug_snapshot\": \"rustraft_debug_snapshot_fresh is one and validation Prometheus is present\""
+    ));
+    assert!(example.contains(
+        "\"refresh_baseline_raft_benchmark_evidence\": \"rustraft_baseline_raft_benchmark_fresh is one and freshness status is fresh\""
     ));
     assert!(example.contains("\"handoff_retained_artifact_map\""));
     assert!(example.contains("\"validate_support_envelope\": \"support_envelope_validation\""));
@@ -3312,6 +4705,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"wire_critical_alerts\": \"critical_alert_handoff\""));
     assert!(example.contains("\"inspect_error_diagnostics\": \"diagnostic_log_prometheus\""));
     assert!(example.contains("\"resolve_critical_optimization_hints\": \"optimization_handoff\""));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"production_readiness_runtime_pressure_handoff\""
+    ));
     assert!(example.contains("\"refresh_debug_snapshot\": \"debug_snapshot_json\""));
     assert!(example.contains("\"support_envelope_operator_verification_map\""));
     assert!(example
@@ -3321,6 +4717,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(
         example.contains("\"resolve_critical_optimization_hints\": \"optimization_prometheus\"")
     );
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"provisioning_runbook_prometheus\""
+    ));
     assert!(example.contains("\"refresh_debug_snapshot\": \"validation_prometheus\""));
     assert!(example.contains("\"support_envelope_operator_dashboard_map\""));
     assert!(
@@ -3330,6 +4729,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"inspect_error_diagnostics\": \"Support Envelope First Issue\""));
     assert!(example
         .contains("\"resolve_critical_optimization_hints\": \"Triage Top Optimization Hint\""));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"Production Runtime Pressure Bottlenecks\""
+    ));
     assert!(example.contains("\"refresh_debug_snapshot\": \"Support Envelope Freshness Status\""));
     assert!(example.contains("\"support_envelope_operator_runbook_map\""));
     assert!(example.contains("\"validate_support_envelope\": \"validate_support_envelope\""));
@@ -3337,6 +4739,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("\"inspect_error_diagnostics\": \"inspect_error_diagnostics\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"resolve_critical_optimization_hints\""
+    ));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"resolve_production_readiness_runtime_pressure_bottleneck\""
     ));
     assert!(example.contains("\"refresh_debug_snapshot\": \"refresh_debug_snapshot\""));
     assert!(example.contains("\"support_envelope_operator_collection_map\""));
@@ -3353,6 +4758,12 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         "\"resolve_critical_optimization_hints\": \"cargo run --example debug_artifacts --quiet | rg rustraft_optimization_critical_total\""
     ));
     assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"cargo run --example debug_artifacts --quiet | rg rustraft_production_readiness_runtime_pressure_bottleneck_score_percent\""
+    ));
+    assert!(example.contains(
+        "\"inspect_runtime_pressure_bottleneck_warning\": \"cargo run --example debug_artifacts --quiet | rg rustraft_runtime_pressure_bottleneck_score_percent\""
+    ));
+    assert!(example.contains(
         "\"refresh_debug_snapshot\": \"cargo run --example debug_artifacts --quiet | rg rustraft_debug_snapshot_fresh\""
     ));
     assert!(example.contains("\"support_envelope_operator_execution_map\""));
@@ -3367,6 +4778,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"triage critical optimization hint totals\""
     ));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"resolve production-readiness runtime pressure bottleneck totals\""
+    ));
     assert!(example
         .contains("\"refresh_debug_snapshot\": \"confirm debug snapshot freshness evidence\""));
     assert!(example.contains("\"support_envelope_operator_acceptance_map\""));
@@ -3377,6 +4791,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
         .contains("\"inspect_error_diagnostics\": \"diagnostic error totals are inspectable\""));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"critical optimization total is visible\""
+    ));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"production-readiness runtime pressure bottleneck is visible\""
     ));
     assert!(
         example.contains("\"refresh_debug_snapshot\": \"fresh debug snapshot signal is present\"")
@@ -3393,6 +4810,9 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     ));
     assert!(example.contains(
         "\"resolve_critical_optimization_hints\": \"escalate critical optimization totals to raft-runtime-incident-commander\""
+    ));
+    assert!(example.contains(
+        "\"resolve_production_readiness_runtime_pressure_bottleneck\": \"escalate production-readiness pressure to raft-production-readiness-owner before release signoff\""
     ));
     assert!(example.contains(
         "\"refresh_debug_snapshot\": \"escalate stale debug snapshots to raft-observability-oncall\""
@@ -5756,6 +7176,8 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("missing_prometheus_artifacts is empty"));
     assert!(example.contains("extra_debug_artifacts is empty"));
     assert!(example.contains("extra_prometheus_artifacts is empty"));
+    assert!(example.contains("\"local_status_diagnostic_json_lines\""));
+    assert!(example.contains("\"peer_pipeline_prometheus\""));
     assert!(example.contains("\"issue_remediation_map\""));
     assert!(example.contains("\"debug_snapshot_validation_failed\""));
     assert!(example.contains("\"observability_provisioning_validation_failed\""));
