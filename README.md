@@ -553,9 +553,10 @@ Runtime queue surfaces are advertised in the same contract: `MailBox`,
 `MailChannel`, `ChannelSelector`, and their checked send/fetch/select methods
 map to TiKV raftstore-style mailboxes and BaselineRaft per-replica queues, so
 production embedders can handle queue pressure and runtime lock failures without
-turning them into process aborts. `MailChannel::try_send_many_checked` also
-rejects oversized bursts before queueing them, which keeps per-peer fanout
-memory bounded under release-scale workloads; use
+turning them into process aborts. `MailBox::try_send_many_checked` and
+`MailChannel::try_send_many_checked` also reject oversized bursts before queueing
+them, which keeps scheduler and per-peer fanout memory bounded under
+release-scale workloads; use
 `ChannelSelector::try_send_many_to_channel_checked` when the caller needs the
 same bounded batch enqueue plus selector wakeup as one checked operation.
 `matrixraft_reference_mapped_interface_names` is the fail-closed subset of that

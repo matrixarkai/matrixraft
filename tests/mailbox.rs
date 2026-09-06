@@ -55,6 +55,36 @@ fn mailbox_checked_api_preserves_backpressure_and_fetch_order() {
 }
 
 #[test]
+fn mailbox_checked_batch_send_rejects_oversized_bursts_before_queueing() {
+    let mailbox = MailBox::new(2);
+
+    assert!(mailbox
+        .try_send_many_checked(MailPriority::Normal, vec!["one", "two", "three"])
+        .expect("checked oversized batch")
+        .is_err());
+    assert_eq!(mailbox.total_len_checked().expect("checked total len"), 0);
+
+    assert!(mailbox
+        .try_send_many_checked(MailPriority::Normal, vec!["one", "two"])
+        .expect("checked batch")
+        .is_ok());
+    assert!(mailbox
+        .try_send_many_checked(MailPriority::Normal, vec!["three"])
+        .expect("checked full mailbox")
+        .is_err());
+    assert_eq!(
+        mailbox
+            .fetch_checked(MailBoxFetchPolicy {
+                limit: 2,
+                timeout_ms: 0,
+                include_until: MailPriority::Urgent,
+            })
+            .expect("checked fetch"),
+        vec!["one", "two"]
+    );
+}
+
+#[test]
 fn mailbox_fetch_prioritizes_urgent_and_limits_included_lanes() {
     let mailbox = MailBox::new(8);
     mailbox.send(MailPriority::Slowly, "slow-1");

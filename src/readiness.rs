@@ -1260,6 +1260,7 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
         "MailBox",
         "MailBox::try_send_checked",
+        "MailBox::try_send_many_checked",
         "MailBox::fetch_checked",
         "MailChannel",
         "MailChannel::try_send_checked",
@@ -1489,6 +1490,15 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 "TiKV raftstore non-blocking mailbox send with backpressure".to_string(),
             byteraft_or_baseline_reference: "BaselineRaft checked event enqueue".to_string(),
             note: "The checked send path returns queue saturation and lock failures as values so production runtimes can shed or retry work without process aborts."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailBox::try_send_many_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailBox::TrySendManyChecked".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore bounded mailbox batch enqueue".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked event batch enqueue"
+                .to_string(),
+            note: "The checked mailbox batch path rejects oversized scheduler bursts before queueing them, keeping local work-queue memory bounded under high QPS."
                 .to_string(),
         },
         ApiNameMapping {
@@ -2801,6 +2811,7 @@ pub fn matrixraft_core_interface_names() -> Vec<String> {
         "AdminCommand::ReleaseMemory",
         "MailBox",
         "MailBox::try_send_checked",
+        "MailBox::try_send_many_checked",
         "MailBox::fetch_checked",
         "MailChannel",
         "MailChannel::try_send_checked",
