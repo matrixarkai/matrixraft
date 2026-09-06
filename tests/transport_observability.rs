@@ -260,6 +260,9 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     assert!(api
         .core_interfaces
         .contains(&"MailChannel::try_send_checked".to_string()));
+    assert!(api
+        .core_interfaces
+        .contains(&"MailChannel::try_send_many_checked".to_string()));
     assert!(api.core_interfaces.contains(&"ChannelSelector".to_string()));
     assert!(api
         .core_interfaces
@@ -354,6 +357,13 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
         mapping.canonical == "MailBox::try_send_checked"
             && mapping.raft_rs_or_tikv_reference.contains("backpressure")
             && mapping.note.contains("without process aborts")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "MailChannel::try_send_many_checked"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("bounded per-peer batch enqueue")
+            && mapping.note.contains("memory pressure bounded")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "ChannelSelector::select_checked"

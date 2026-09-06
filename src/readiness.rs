@@ -1263,6 +1263,7 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "MailBox::fetch_checked",
         "MailChannel",
         "MailChannel::try_send_checked",
+        "MailChannel::try_send_many_checked",
         "ChannelSelector",
         "ChannelSelector::select_checked",
         "matrixraft_public_api_contract_validation_prometheus",
@@ -1512,6 +1513,15 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 "TiKV raftstore per-peer enqueue with flow-control feedback".to_string(),
             byteraft_or_baseline_reference: "BaselineRaft checked per-peer enqueue".to_string(),
             note: "The checked channel send keeps overflow as a recoverable result that returns the caller's mail while reporting runtime failures as RaftError."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailChannel::try_send_many_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailChannel::TrySendManyChecked".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore bounded per-peer batch enqueue".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked batch enqueue".to_string(),
+            note: "The checked batch path rejects oversized bursts before queueing them, keeping memory pressure bounded under release-scale fanout."
                 .to_string(),
         },
         ApiNameMapping {
@@ -2782,6 +2792,7 @@ pub fn matrixraft_core_interface_names() -> Vec<String> {
         "MailBox::fetch_checked",
         "MailChannel",
         "MailChannel::try_send_checked",
+        "MailChannel::try_send_many_checked",
         "ChannelSelector",
         "ChannelSelector::select_checked",
         "PersistentRaftWal",
