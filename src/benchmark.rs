@@ -3,15 +3,35 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::metrics::{
+    matrixraft_benchmark_runbook_steps_for_state,
+    matrixraft_prometheus_sample_lines_are_well_formed,
+    matrixraft_prometheus_text_has_metric_sample, matrixraft_runtime_pressure_metric_names,
+};
+use crate::pipeline::PeerProgress;
 use crate::{
-    matrixraft_production_readiness_report, ApplySnapshotFence, Config, HardState, LogEntry, LogId,
-    Membership, Peer, PersistentRaftWal, PersistentRaftWalOptions, ProductionReadinessInput,
-    ProductionReadinessReport, RaftCluster, RaftError, ReplicaRole, SnapshotMetadata, WalRecord,
+    matrixraft_debug_snapshot_with_performance_targets,
+    matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence,
+    matrixraft_debug_snapshot_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence,
+    matrixraft_operator_runbook_prometheus, matrixraft_production_readiness_diagnostic_json_lines,
+    matrixraft_production_readiness_report, matrixraft_production_readiness_report_prometheus,
+    matrixraft_runtime_pressure_admission_prometheus,
+    matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure,
+    matrixraft_runtime_pressure_admission_with_scale_pipeline_read_backlog_and_node_runtime_timer_pressure,
+    matrixraft_scale_optimization_hints, AdminStatusSurfaceInput, ApplySnapshotFence, Config,
+    DebugSnapshot, GrafanaPanel, HardState, LatencyMetrics, LatencyOptimizationThresholds,
+    LogEntry, LogId, Membership, MemoryMetrics, MemoryOptimizationThresholds,
+    NodeRuntimeTimerThresholds, OperatorRunbookStep, OptimizationHint, Peer, PersistentRaftWal,
+    PersistentRaftWalOptions, ProductionReadinessInput, ProductionReadinessReport,
+    PrometheusMetricSet, RaftCluster, RaftError, ReadBacklogMetrics, ReadBacklogThresholds,
+    ReplicaRole, RuntimeAdminReport, RuntimePressureAdmissionPolicy, RuntimeTimerStatus,
+    ScaleMetrics, ScaleOptimizationTargets, ScaleRateMetrics, SnapshotMetadata, WalRecord,
 };
 
 const MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
@@ -23,8 +43,182 @@ pub const MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES: usize = 4096;
 pub const MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT: f64 = 10.0;
 pub const MATRIXRAFT_BENCHMARK_REPORT_SCHEMA: &str = "rustraft.baseline_raft_benchmark_report.v1";
 pub const MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA: &str = "rustraft.baseline_raft_benchmark_summary.v1";
+pub const MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA: &str =
+    "rustraft.benchmark_runtime_pressure_readiness_artifact.v1";
 
 static MATRIXRAFT_BENCHMARK_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static MATRIXRAFT_BENCHMARK_ARTIFACT_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleasePressureSnapshot {
+    #[serde(default)]
+    pub memory_metrics: Option<MemoryMetrics>,
+    #[serde(default)]
+    pub memory_thresholds: Option<MemoryOptimizationThresholds>,
+    #[serde(default)]
+    pub latency_metrics: Option<LatencyMetrics>,
+    #[serde(default)]
+    pub latency_thresholds: Option<LatencyOptimizationThresholds>,
+    #[serde(default)]
+    pub read_backlog_metrics: Option<ReadBacklogMetrics>,
+    #[serde(default)]
+    pub read_backlog_thresholds: Option<ReadBacklogThresholds>,
+    #[serde(default)]
+    pub timer_status: Option<RuntimeTimerStatus>,
+    #[serde(default)]
+    pub timer_thresholds: Option<NodeRuntimeTimerThresholds>,
+}
+
+impl ReleasePressureSnapshot {
+    pub fn complete(
+        memory_metrics: MemoryMetrics,
+        memory_thresholds: MemoryOptimizationThresholds,
+        latency_metrics: LatencyMetrics,
+        latency_thresholds: LatencyOptimizationThresholds,
+        read_backlog_metrics: ReadBacklogMetrics,
+        read_backlog_thresholds: ReadBacklogThresholds,
+        timer_status: RuntimeTimerStatus,
+        timer_thresholds: NodeRuntimeTimerThresholds,
+    ) -> Self {
+        Self {
+            memory_metrics: Some(memory_metrics),
+            memory_thresholds: Some(memory_thresholds),
+            latency_metrics: Some(latency_metrics),
+            latency_thresholds: Some(latency_thresholds),
+            read_backlog_metrics: Some(read_backlog_metrics),
+            read_backlog_thresholds: Some(read_backlog_thresholds),
+            timer_status: Some(timer_status),
+            timer_thresholds: Some(timer_thresholds),
+        }
+    }
+}
+
+pub fn matrixraft_release_pressure_snapshot_json(snapshot: &ReleasePressureSnapshot) -> String {
+    serde_json::to_string_pretty(snapshot)
+        .expect("RustRaft release pressure snapshot must serialize")
+}
+
+pub fn matrixraft_release_pressure_snapshot_from_json(
+    json: &str,
+) -> Result<ReleasePressureSnapshot, String> {
+    serde_json::from_str(json)
+        .map_err(|error| format!("benchmark:invalid_release_pressure_snapshot_json:{error}"))
+}
+
+pub fn matrixraft_release_pressure_snapshot_from_json_bytes(
+    bytes: &[u8],
+) -> Result<ReleasePressureSnapshot, String> {
+    serde_json::from_slice(bytes)
+        .map_err(|error| format!("benchmark:invalid_release_pressure_snapshot_json:{error}"))
+}
+
+pub fn matrixraft_validate_release_pressure_snapshot(
+    snapshot: &ReleasePressureSnapshot,
+) -> Result<(), String> {
+    if snapshot.memory_metrics.is_none()
+        && snapshot.memory_thresholds.is_none()
+        && snapshot.latency_metrics.is_none()
+        && snapshot.latency_thresholds.is_none()
+        && snapshot.read_backlog_metrics.is_none()
+        && snapshot.read_backlog_thresholds.is_none()
+        && snapshot.timer_status.is_none()
+        && snapshot.timer_thresholds.is_none()
+    {
+        return Err("benchmark:release_pressure_snapshot_empty".to_string());
+    }
+    Ok(())
+}
+
+pub fn matrixraft_read_release_pressure_snapshot(
+    path: &Path,
+) -> Result<ReleasePressureSnapshot, String> {
+    let bytes = fs::read(path).map_err(|error| {
+        format!(
+            "benchmark:release_pressure_snapshot_read_failed:{}:{error}",
+            path.display()
+        )
+    })?;
+    let snapshot = matrixraft_release_pressure_snapshot_from_json_bytes(&bytes)?;
+    matrixraft_validate_release_pressure_snapshot(&snapshot)?;
+    Ok(snapshot)
+}
+
+pub fn matrixraft_write_release_pressure_snapshot_atomic(
+    path: &Path,
+    snapshot: &ReleasePressureSnapshot,
+) -> Result<(), String> {
+    matrixraft_validate_release_pressure_snapshot(snapshot)?;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "benchmark:release_pressure_snapshot_parent_create_failed:{}:{error}",
+                parent.display()
+            )
+        })?;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("pressure-snapshot.json");
+    let write_id = MATRIXRAFT_BENCHMARK_ARTIFACT_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = parent.join(format!(".{file_name}.{}.{write_id}.tmp", process::id()));
+    let mut tmp_file = fs::File::create(&tmp_path).map_err(|error| {
+        format!(
+            "benchmark:release_pressure_snapshot_temp_create_failed:{}:{error}",
+            tmp_path.display()
+        )
+    })?;
+    tmp_file
+        .write_all(matrixraft_release_pressure_snapshot_json(snapshot).as_bytes())
+        .map_err(|error| {
+            format!(
+                "benchmark:release_pressure_snapshot_temp_write_failed:{}:{error}",
+                tmp_path.display()
+            )
+        })?;
+    tmp_file.sync_all().map_err(|error| {
+        format!(
+            "benchmark:release_pressure_snapshot_temp_sync_failed:{}:{error}",
+            tmp_path.display()
+        )
+    })?;
+    drop(tmp_file);
+    if let Err(error) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!(
+            "benchmark:release_pressure_snapshot_rename_failed:{}:{}:{error}",
+            tmp_path.display(),
+            path.display()
+        ));
+    }
+    matrixraft_sync_release_pressure_snapshot_parent_dir(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn matrixraft_sync_release_pressure_snapshot_parent_dir(parent: &Path) -> Result<(), String> {
+    let dir = fs::File::open(parent).map_err(|error| {
+        format!(
+            "benchmark:release_pressure_snapshot_parent_open_failed:{}:{error}",
+            parent.display()
+        )
+    })?;
+    dir.sync_all().map_err(|error| {
+        format!(
+            "benchmark:release_pressure_snapshot_parent_sync_failed:{}:{error}",
+            parent.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn matrixraft_sync_release_pressure_snapshot_parent_dir(_parent: &Path) -> Result<(), String> {
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BaselineRaftBenchmarkEvidence {
@@ -36,6 +230,8 @@ pub struct BaselineRaftBenchmarkEvidence {
     pub matrixraft_rust_candidate: bool,
     pub correctness_passed: bool,
     pub performance_within_threshold: bool,
+    #[serde(default)]
+    pub resource_within_threshold: bool,
     pub workloads: Vec<String>,
     pub blockers: Vec<String>,
     #[serde(default)]
@@ -175,6 +371,16 @@ pub fn matrixraft_production_readiness_input_with_benchmark_artifacts(
     Ok(input)
 }
 
+pub fn matrixraft_production_readiness_input_with_asserted_benchmark_artifacts(
+    mut input: ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+) -> Result<ProductionReadinessInput, String> {
+    matrixraft_assert_production_baseline_raft_artifacts(report, summary)?;
+    input.baseline_raft_benchmark = Some(matrixraft_baseline_raft_benchmark_evidence(report));
+    Ok(input)
+}
+
 pub fn matrixraft_production_readiness_input_with_benchmark_summary(
     mut input: ProductionReadinessInput,
     summary: &BenchmarkFailureSummary,
@@ -183,6 +389,296 @@ pub fn matrixraft_production_readiness_input_with_benchmark_summary(
         summary,
     ));
     input
+}
+
+pub fn matrixraft_production_readiness_input_with_runtime_pressure_evidence(
+    input: ProductionReadinessInput,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    scale_rates: &ScaleRateMetrics,
+    scale_targets: &ScaleOptimizationTargets,
+    peer_pipeline: &[PeerProgress],
+    policy: &RuntimePressureAdmissionPolicy,
+) -> ProductionReadinessInput {
+    matrixraft_production_readiness_input_with_runtime_pressure_and_read_backlog_evidence(
+        input,
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        scale_rates,
+        scale_targets,
+        peer_pipeline,
+        &ReadBacklogMetrics::zero(),
+        &ReadBacklogThresholds::default(),
+        policy,
+    )
+}
+
+pub fn matrixraft_production_readiness_input_with_runtime_pressure_and_read_backlog_evidence(
+    mut input: ProductionReadinessInput,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    scale_rates: &ScaleRateMetrics,
+    scale_targets: &ScaleOptimizationTargets,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> ProductionReadinessInput {
+    input.runtime_pressure_admission = Some(
+        matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure(
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            scale_rates,
+            scale_targets,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            policy,
+        ),
+    );
+    input
+}
+
+pub fn matrixraft_production_readiness_input_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence(
+    mut input: ProductionReadinessInput,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    scale_rates: &ScaleRateMetrics,
+    scale_targets: &ScaleOptimizationTargets,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    timer_status: &RuntimeTimerStatus,
+    timer_thresholds: &NodeRuntimeTimerThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> ProductionReadinessInput {
+    input.runtime_pressure_admission = Some(
+        matrixraft_runtime_pressure_admission_with_scale_pipeline_read_backlog_and_node_runtime_timer_pressure(
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            scale_rates,
+            scale_targets,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            timer_status,
+            timer_thresholds,
+            policy,
+        ),
+    );
+    input
+}
+
+pub fn matrixraft_production_readiness_input_with_benchmark_runtime_pressure_artifacts(
+    input: ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessInput, String> {
+    matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
+        input,
+        report,
+        summary,
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        peer_pipeline,
+        &ReadBacklogMetrics::zero(),
+        &ReadBacklogThresholds::default(),
+        policy,
+    )
+}
+
+pub fn matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_artifacts(
+    input: ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessInput, String> {
+    let input = matrixraft_production_readiness_input_with_asserted_benchmark_artifacts(
+        input, report, summary,
+    )?;
+    let scale_inputs = matrixraft_scale_optimization_inputs_from_benchmark_report(report);
+    Ok(
+        matrixraft_production_readiness_input_with_runtime_pressure_and_read_backlog_evidence(
+            input,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            &scale_inputs.scale_rates,
+            &scale_inputs.scale_targets,
+            peer_pipeline,
+            &ReadBacklogMetrics::zero(),
+            &ReadBacklogThresholds::default(),
+            policy,
+        ),
+    )
+}
+
+pub fn matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
+    input: ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessInput, String> {
+    let input =
+        matrixraft_production_readiness_input_with_benchmark_artifacts(input, report, summary)?;
+    let scale_inputs = matrixraft_scale_optimization_inputs_from_benchmark_report(report);
+    Ok(
+        matrixraft_production_readiness_input_with_runtime_pressure_and_read_backlog_evidence(
+            input,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            &scale_inputs.scale_rates,
+            &scale_inputs.scale_targets,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            policy,
+        ),
+    )
+}
+
+pub fn matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts(
+    input: ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessInput, String> {
+    let input = matrixraft_production_readiness_input_with_asserted_benchmark_artifacts(
+        input, report, summary,
+    )?;
+    let scale_inputs = matrixraft_scale_optimization_inputs_from_benchmark_report(report);
+    Ok(
+        matrixraft_production_readiness_input_with_runtime_pressure_and_read_backlog_evidence(
+            input,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            &scale_inputs.scale_rates,
+            &scale_inputs.scale_targets,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            policy,
+        ),
+    )
+}
+
+pub fn matrixraft_production_readiness_input_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+    input: ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    timer_status: &RuntimeTimerStatus,
+    timer_thresholds: &NodeRuntimeTimerThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessInput, String> {
+    let input =
+        matrixraft_production_readiness_input_with_benchmark_artifacts(input, report, summary)?;
+    let scale_inputs = matrixraft_scale_optimization_inputs_from_benchmark_report(report);
+    Ok(
+        matrixraft_production_readiness_input_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence(
+            input,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            &scale_inputs.scale_rates,
+            &scale_inputs.scale_targets,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            timer_status,
+            timer_thresholds,
+            policy,
+        ),
+    )
+}
+
+pub fn matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+    input: ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    timer_status: &RuntimeTimerStatus,
+    timer_thresholds: &NodeRuntimeTimerThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessInput, String> {
+    let input = matrixraft_production_readiness_input_with_asserted_benchmark_artifacts(
+        input, report, summary,
+    )?;
+    let scale_inputs = matrixraft_scale_optimization_inputs_from_benchmark_report(report);
+    Ok(
+        matrixraft_production_readiness_input_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence(
+            input,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            &scale_inputs.scale_rates,
+            &scale_inputs.scale_targets,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            timer_status,
+            timer_thresholds,
+            policy,
+        ),
+    )
 }
 
 pub fn matrixraft_production_readiness_report_with_benchmark_artifacts(
@@ -196,6 +692,1005 @@ pub fn matrixraft_production_readiness_report_with_benchmark_artifacts(
         summary,
     )?;
     Ok(matrixraft_production_readiness_report(&input))
+}
+
+pub fn matrixraft_production_readiness_report_with_asserted_benchmark_artifacts(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+) -> Result<ProductionReadinessReport, String> {
+    let input = matrixraft_production_readiness_input_with_asserted_benchmark_artifacts(
+        input.clone(),
+        report,
+        summary,
+    )?;
+    Ok(matrixraft_production_readiness_report(&input))
+}
+
+pub fn matrixraft_production_readiness_report_with_benchmark_runtime_pressure_artifacts(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessReport, String> {
+    matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
+        input,
+        report,
+        summary,
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        peer_pipeline,
+        &ReadBacklogMetrics::zero(),
+        &ReadBacklogThresholds::default(),
+        policy,
+    )
+}
+
+pub fn matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_artifacts(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessReport, String> {
+    let input =
+        matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_artifacts(
+            input.clone(),
+            report,
+            summary,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            peer_pipeline,
+            policy,
+        )?;
+    Ok(matrixraft_production_readiness_report(&input))
+}
+
+pub fn matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessReport, String> {
+    let input =
+        matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
+        input.clone(),
+        report,
+        summary,
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        peer_pipeline,
+        read_backlog_metrics,
+        read_backlog_thresholds,
+        policy,
+    )?;
+    Ok(matrixraft_production_readiness_report(&input))
+}
+
+pub fn matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessReport, String> {
+    let input =
+        matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts(
+            input.clone(),
+            report,
+            summary,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            policy,
+        )?;
+    Ok(matrixraft_production_readiness_report(&input))
+}
+
+pub fn matrixraft_production_readiness_report_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    timer_status: &RuntimeTimerStatus,
+    timer_thresholds: &NodeRuntimeTimerThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessReport, String> {
+    let input =
+        matrixraft_production_readiness_input_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+        input.clone(),
+        report,
+        summary,
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        peer_pipeline,
+        read_backlog_metrics,
+        read_backlog_thresholds,
+        timer_status,
+        timer_thresholds,
+        policy,
+    )?;
+    Ok(matrixraft_production_readiness_report(&input))
+}
+
+pub fn matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    timer_status: &RuntimeTimerStatus,
+    timer_thresholds: &NodeRuntimeTimerThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+) -> Result<ProductionReadinessReport, String> {
+    let input =
+        matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+            input.clone(),
+            report,
+            summary,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            timer_status,
+            timer_thresholds,
+            policy,
+        )?;
+    Ok(matrixraft_production_readiness_report(&input))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BenchmarkRuntimePressureReadinessArtifact {
+    pub schema: String,
+    pub generated_at_unix_ms: u64,
+    pub labels: Vec<(String, String)>,
+    pub report: ProductionReadinessReport,
+    pub prometheus: PrometheusMetricSet,
+    #[serde(default)]
+    pub runtime_pressure_prometheus: PrometheusMetricSet,
+    pub diagnostic_json_lines: String,
+}
+
+pub fn matrixraft_release_benchmark_runtime_timer_status() -> RuntimeTimerStatus {
+    RuntimeTimerStatus {
+        heartbeat_interval_ms: 100,
+        election_timeout_ms: 1_000,
+        leader_lease_timeout_ms: 500,
+        leader_lease_elapsed_ms: 0,
+        leader_lease_valid: true,
+        heartbeat_ticks: 1,
+        election_ticks: 0,
+        pending_ticks: 0,
+        max_pending_ticks: 1_024,
+        accepted_ticks: 1,
+        rejected_ticks: 0,
+        completed_ticks: 1,
+        pre_vote_executions: 0,
+        campaign_executions: 0,
+        leader_transfer_executions: 0,
+        last_tick_reason: "benchmark_release_probe".to_string(),
+        last_tick_admission_reason: "tick_admitted".to_string(),
+    }
+}
+
+pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<BenchmarkRuntimePressureReadinessArtifact, String> {
+    matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+        input,
+        report,
+        summary,
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        peer_pipeline,
+        &ReadBacklogMetrics::zero(),
+        &ReadBacklogThresholds::default(),
+        policy,
+        labels,
+    )
+}
+
+pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<BenchmarkRuntimePressureReadinessArtifact, String> {
+    matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+        input,
+        report,
+        summary,
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        peer_pipeline,
+        &ReadBacklogMetrics::zero(),
+        &ReadBacklogThresholds::default(),
+        policy,
+        labels,
+    )
+}
+
+pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<BenchmarkRuntimePressureReadinessArtifact, String> {
+    let readiness_input =
+        matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
+            input.clone(),
+            report,
+            summary,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            policy,
+        )?;
+    let runtime_pressure_prometheus = readiness_input
+        .runtime_pressure_admission
+        .as_ref()
+        .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
+        .unwrap_or_default();
+    let report = matrixraft_production_readiness_report(&readiness_input);
+    let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
+    let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
+    Ok(BenchmarkRuntimePressureReadinessArtifact {
+        schema: MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA.to_string(),
+        generated_at_unix_ms: benchmark_now_unix_ms(),
+        labels: labels
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect(),
+        report,
+        prometheus,
+        runtime_pressure_prometheus,
+        diagnostic_json_lines,
+    })
+}
+
+pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<BenchmarkRuntimePressureReadinessArtifact, String> {
+    let readiness_input =
+        matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts(
+            input.clone(),
+            report,
+            summary,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            policy,
+        )?;
+    let runtime_pressure_prometheus = readiness_input
+        .runtime_pressure_admission
+        .as_ref()
+        .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
+        .unwrap_or_default();
+    let report = matrixraft_production_readiness_report(&readiness_input);
+    let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
+    let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
+    Ok(BenchmarkRuntimePressureReadinessArtifact {
+        schema: MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA.to_string(),
+        generated_at_unix_ms: benchmark_now_unix_ms(),
+        labels: labels
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect(),
+        report,
+        prometheus,
+        runtime_pressure_prometheus,
+        diagnostic_json_lines,
+    })
+}
+
+pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    timer_status: &RuntimeTimerStatus,
+    timer_thresholds: &NodeRuntimeTimerThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<BenchmarkRuntimePressureReadinessArtifact, String> {
+    let readiness_input =
+        matrixraft_production_readiness_input_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+            input.clone(),
+            report,
+            summary,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            timer_status,
+            timer_thresholds,
+            policy,
+        )?;
+    let runtime_pressure_prometheus = readiness_input
+        .runtime_pressure_admission
+        .as_ref()
+        .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
+        .unwrap_or_default();
+    let report = matrixraft_production_readiness_report(&readiness_input);
+    let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
+    let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
+    Ok(BenchmarkRuntimePressureReadinessArtifact {
+        schema: MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA.to_string(),
+        generated_at_unix_ms: benchmark_now_unix_ms(),
+        labels: labels
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect(),
+        report,
+        prometheus,
+        runtime_pressure_prometheus,
+        diagnostic_json_lines,
+    })
+}
+
+pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer(
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    timer_status: &RuntimeTimerStatus,
+    timer_thresholds: &NodeRuntimeTimerThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<BenchmarkRuntimePressureReadinessArtifact, String> {
+    let readiness_input =
+        matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+            input.clone(),
+            report,
+            summary,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            timer_status,
+            timer_thresholds,
+            policy,
+        )?;
+    let runtime_pressure_prometheus = readiness_input
+        .runtime_pressure_admission
+        .as_ref()
+        .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
+        .unwrap_or_default();
+    let report = matrixraft_production_readiness_report(&readiness_input);
+    let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
+    let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
+    Ok(BenchmarkRuntimePressureReadinessArtifact {
+        schema: MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA.to_string(),
+        generated_at_unix_ms: benchmark_now_unix_ms(),
+        labels: labels
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect(),
+        report,
+        prometheus,
+        runtime_pressure_prometheus,
+        diagnostic_json_lines,
+    })
+}
+
+pub fn matrixraft_validate_benchmark_runtime_pressure_readiness_artifact(
+    artifact: &BenchmarkRuntimePressureReadinessArtifact,
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<(), String> {
+    matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+        artifact,
+        input,
+        report,
+        summary,
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        peer_pipeline,
+        &ReadBacklogMetrics::zero(),
+        &ReadBacklogThresholds::default(),
+        policy,
+        labels,
+    )
+}
+
+pub fn matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact(
+    artifact: &BenchmarkRuntimePressureReadinessArtifact,
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<(), String> {
+    matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+        artifact,
+        input,
+        report,
+        summary,
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        peer_pipeline,
+        &ReadBacklogMetrics::zero(),
+        &ReadBacklogThresholds::default(),
+        policy,
+        labels,
+    )
+}
+
+fn benchmark_runtime_pressure_prometheus_blockers(
+    artifact: &BenchmarkRuntimePressureReadinessArtifact,
+) -> Vec<String> {
+    benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(artifact, &[])
+}
+
+fn benchmark_runtime_pressure_required_metric_names() -> Vec<String> {
+    let metrics = matrixraft_runtime_pressure_metric_names();
+    vec![
+        metrics.admission_accepted,
+        metrics.admission_rejected,
+        metrics.bottleneck_score_percent,
+        metrics.memory_pressure,
+        metrics.memory_pressure_observed_value,
+        metrics.memory_pressure_threshold_value,
+        metrics.memory_pressure_excess,
+        metrics.latency_pressure,
+        metrics.latency_pressure_sample_count,
+        metrics.latency_pressure_observed_p95_ms,
+        metrics.latency_pressure_observed_p99_ms,
+        metrics.latency_pressure_threshold_p99_ms,
+        metrics.latency_pressure_excess_ms,
+        metrics.scale_pressure,
+        metrics.scale_pressure_observed_value,
+        metrics.scale_pressure_target_value,
+        metrics.scale_pressure_deficit,
+        metrics.scale_pressure_target_percent,
+        metrics.pipeline_pressure,
+        metrics.pipeline_pressure_observed_value,
+        metrics.pipeline_pressure_threshold_value,
+        metrics.pipeline_pressure_excess,
+        metrics.read_backlog_pressure,
+        metrics.read_backlog_pressure_observed_value,
+        metrics.read_backlog_pressure_threshold_value,
+        metrics.read_backlog_pressure_excess,
+        metrics.node_runtime_timer_pressure,
+        metrics.node_runtime_timer_pressure_observed_percent,
+        metrics.node_runtime_timer_pressure_threshold_percent,
+        metrics.node_runtime_timer_pressure_excess_percent,
+        metrics.action_total,
+        metrics.action_source_total,
+    ]
+}
+
+fn benchmark_runtime_pressure_metric_names_from_text(text: &str) -> Vec<String> {
+    let mut names = text
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let end = trimmed
+                .find('{')
+                .or_else(|| trimmed.find(char::is_whitespace))?;
+            Some(trimmed[..end].to_string())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(
+    artifact: &BenchmarkRuntimePressureReadinessArtifact,
+    required_metrics: &[String],
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    let metrics = &artifact.runtime_pressure_prometheus;
+    if metrics.format != "prometheus_text_v0.0.4" {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_runtime_prometheus_format_mismatch".to_string(),
+        );
+    }
+    if metrics.text.is_empty() {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_runtime_prometheus_metrics_missing".to_string(),
+        );
+    }
+    if metrics.metric_count != metrics.text.lines().count() as u64 {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_runtime_prometheus_metric_count_mismatch"
+                .to_string(),
+        );
+    }
+    if !matrixraft_prometheus_sample_lines_are_well_formed(&metrics.text) {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_runtime_prometheus_malformed_sample".to_string(),
+        );
+    }
+    if !matrixraft_prometheus_text_has_metric_sample(
+        &metrics.text,
+        "rustraft_runtime_pressure_admission_accepted",
+    ) || !matrixraft_prometheus_text_has_metric_sample(
+        &metrics.text,
+        "rustraft_runtime_pressure_admission_rejected",
+    ) {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_runtime_prometheus_metric_contract_missing"
+                .to_string(),
+        );
+    }
+    let mut required_metric_names = benchmark_runtime_pressure_required_metric_names();
+    required_metric_names.extend(required_metrics.iter().cloned());
+    required_metric_names.sort();
+    required_metric_names.dedup();
+    for required_metric in required_metric_names {
+        if !matrixraft_prometheus_text_has_metric_sample(&metrics.text, &required_metric) {
+            blockers.push(format!(
+                "benchmark:runtime_pressure_readiness_runtime_prometheus_metric_missing:{}",
+                required_metric
+            ));
+        }
+    }
+    blockers
+}
+
+pub fn matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+    artifact: &BenchmarkRuntimePressureReadinessArtifact,
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut blockers = Vec::new();
+    if artifact.schema != MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA {
+        blockers.push(format!(
+            "benchmark:runtime_pressure_readiness_artifact_schema_mismatch:{}:{}",
+            artifact.schema, MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA
+        ));
+    }
+    blockers.extend(benchmark_artifact_timestamp_blockers(
+        "runtime_pressure_readiness_artifact",
+        artifact.generated_at_unix_ms,
+    ));
+    blockers.extend(benchmark_runtime_pressure_prometheus_blockers(artifact));
+
+    let expected = matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+        input,
+        report,
+        summary,
+        memory_metrics,
+        memory_thresholds,
+        latency_metrics,
+        latency_thresholds,
+        peer_pipeline,
+        read_backlog_metrics,
+        read_backlog_thresholds,
+        policy,
+        labels,
+    )?;
+    if artifact.report != expected.report {
+        blockers.push("benchmark:runtime_pressure_readiness_report_mismatch".to_string());
+    }
+    if artifact.prometheus != expected.prometheus {
+        blockers.push("benchmark:runtime_pressure_readiness_prometheus_mismatch".to_string());
+    }
+    if artifact.runtime_pressure_prometheus != expected.runtime_pressure_prometheus {
+        blockers
+            .push("benchmark:runtime_pressure_readiness_runtime_prometheus_mismatch".to_string());
+    }
+    let expected_runtime_pressure_metrics = benchmark_runtime_pressure_metric_names_from_text(
+        &expected.runtime_pressure_prometheus.text,
+    );
+    blockers.extend(
+        benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(
+            artifact,
+            &expected_runtime_pressure_metrics,
+        ),
+    );
+    if artifact.labels != expected.labels {
+        blockers.push("benchmark:runtime_pressure_readiness_labels_mismatch".to_string());
+    }
+    if artifact.diagnostic_json_lines != expected.diagnostic_json_lines {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_diagnostic_json_lines_mismatch".to_string(),
+        );
+    }
+
+    blockers.sort();
+    blockers.dedup();
+    if blockers.is_empty() {
+        Ok(())
+    } else {
+        Err(blockers.join("; "))
+    }
+}
+
+pub fn matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+    artifact: &BenchmarkRuntimePressureReadinessArtifact,
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut blockers = Vec::new();
+    if artifact.schema != MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA {
+        blockers.push(format!(
+            "benchmark:runtime_pressure_readiness_artifact_schema_mismatch:{}:{}",
+            artifact.schema, MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA
+        ));
+    }
+    blockers.extend(benchmark_artifact_timestamp_blockers(
+        "runtime_pressure_readiness_artifact",
+        artifact.generated_at_unix_ms,
+    ));
+    blockers.extend(benchmark_runtime_pressure_prometheus_blockers(artifact));
+
+    let expected =
+        matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog(
+            input,
+            report,
+            summary,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            policy,
+            labels,
+        )?;
+    if artifact.report != expected.report {
+        blockers.push("benchmark:runtime_pressure_readiness_report_mismatch".to_string());
+    }
+    if artifact.prometheus != expected.prometheus {
+        blockers.push("benchmark:runtime_pressure_readiness_prometheus_mismatch".to_string());
+    }
+    if artifact.runtime_pressure_prometheus != expected.runtime_pressure_prometheus {
+        blockers
+            .push("benchmark:runtime_pressure_readiness_runtime_prometheus_mismatch".to_string());
+    }
+    let expected_runtime_pressure_metrics = benchmark_runtime_pressure_metric_names_from_text(
+        &expected.runtime_pressure_prometheus.text,
+    );
+    blockers.extend(
+        benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(
+            artifact,
+            &expected_runtime_pressure_metrics,
+        ),
+    );
+    if artifact.labels != expected.labels {
+        blockers.push("benchmark:runtime_pressure_readiness_labels_mismatch".to_string());
+    }
+    if artifact.diagnostic_json_lines != expected.diagnostic_json_lines {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_diagnostic_json_lines_mismatch".to_string(),
+        );
+    }
+
+    blockers.sort();
+    blockers.dedup();
+    if blockers.is_empty() {
+        Ok(())
+    } else {
+        Err(blockers.join("; "))
+    }
+}
+
+pub fn matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer(
+    artifact: &BenchmarkRuntimePressureReadinessArtifact,
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    timer_status: &RuntimeTimerStatus,
+    timer_thresholds: &NodeRuntimeTimerThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut blockers = Vec::new();
+    if artifact.schema != MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA {
+        blockers.push(format!(
+            "benchmark:runtime_pressure_readiness_artifact_schema_mismatch:{}:{}",
+            artifact.schema, MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA
+        ));
+    }
+    blockers.extend(benchmark_artifact_timestamp_blockers(
+        "runtime_pressure_readiness_artifact",
+        artifact.generated_at_unix_ms,
+    ));
+    blockers.extend(
+        benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(artifact, &[]),
+    );
+
+    let expected =
+        matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer(
+            input,
+            report,
+            summary,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            timer_status,
+            timer_thresholds,
+            policy,
+            labels,
+        )?;
+    if artifact.report != expected.report {
+        blockers.push("benchmark:runtime_pressure_readiness_report_mismatch".to_string());
+    }
+    if artifact.prometheus != expected.prometheus {
+        blockers.push("benchmark:runtime_pressure_readiness_prometheus_mismatch".to_string());
+    }
+    if artifact.runtime_pressure_prometheus != expected.runtime_pressure_prometheus {
+        blockers
+            .push("benchmark:runtime_pressure_readiness_runtime_prometheus_mismatch".to_string());
+    }
+    let expected_runtime_pressure_metrics = benchmark_runtime_pressure_metric_names_from_text(
+        &expected.runtime_pressure_prometheus.text,
+    );
+    blockers.extend(
+        benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(
+            artifact,
+            &expected_runtime_pressure_metrics,
+        ),
+    );
+    if artifact.labels != expected.labels {
+        blockers.push("benchmark:runtime_pressure_readiness_labels_mismatch".to_string());
+    }
+    if artifact.diagnostic_json_lines != expected.diagnostic_json_lines {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_diagnostic_json_lines_mismatch".to_string(),
+        );
+    }
+
+    blockers.sort();
+    blockers.dedup();
+    if blockers.is_empty() {
+        Ok(())
+    } else {
+        Err(blockers.join("; "))
+    }
+}
+
+pub fn matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer(
+    artifact: &BenchmarkRuntimePressureReadinessArtifact,
+    input: &ProductionReadinessInput,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    timer_status: &RuntimeTimerStatus,
+    timer_thresholds: &NodeRuntimeTimerThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut blockers = Vec::new();
+    if artifact.schema != MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA {
+        blockers.push(format!(
+            "benchmark:runtime_pressure_readiness_artifact_schema_mismatch:{}:{}",
+            artifact.schema, MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA
+        ));
+    }
+    blockers.extend(benchmark_artifact_timestamp_blockers(
+        "runtime_pressure_readiness_artifact",
+        artifact.generated_at_unix_ms,
+    ));
+    blockers.extend(
+        benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(artifact, &[]),
+    );
+
+    let expected =
+        matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer(
+            input,
+            report,
+            summary,
+            memory_metrics,
+            memory_thresholds,
+            latency_metrics,
+            latency_thresholds,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            timer_status,
+            timer_thresholds,
+            policy,
+            labels,
+        )?;
+    if artifact.report != expected.report {
+        blockers.push("benchmark:runtime_pressure_readiness_report_mismatch".to_string());
+    }
+    if artifact.prometheus != expected.prometheus {
+        blockers.push("benchmark:runtime_pressure_readiness_prometheus_mismatch".to_string());
+    }
+    if artifact.runtime_pressure_prometheus != expected.runtime_pressure_prometheus {
+        blockers
+            .push("benchmark:runtime_pressure_readiness_runtime_prometheus_mismatch".to_string());
+    }
+    let expected_runtime_pressure_metrics = benchmark_runtime_pressure_metric_names_from_text(
+        &expected.runtime_pressure_prometheus.text,
+    );
+    blockers.extend(
+        benchmark_runtime_pressure_prometheus_blockers_with_required_metrics(
+            artifact,
+            &expected_runtime_pressure_metrics,
+        ),
+    );
+    if artifact.labels != expected.labels {
+        blockers.push("benchmark:runtime_pressure_readiness_labels_mismatch".to_string());
+    }
+    if artifact.diagnostic_json_lines != expected.diagnostic_json_lines {
+        blockers.push(
+            "benchmark:runtime_pressure_readiness_diagnostic_json_lines_mismatch".to_string(),
+        );
+    }
+
+    blockers.sort();
+    blockers.dedup();
+    if blockers.is_empty() {
+        Ok(())
+    } else {
+        Err(blockers.join("; "))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -253,6 +1748,10 @@ pub struct BenchmarkSample {
     pub p50_latency_micros: u64,
     pub p99_latency_micros: u64,
     pub throughput_ops_per_sec: f64,
+    #[serde(default)]
+    pub cpu_utilization_percent: f64,
+    #[serde(default)]
+    pub peak_resident_memory_bytes: u64,
     pub correctness_passed: bool,
     #[serde(default)]
     pub blockers: Vec<String>,
@@ -266,6 +1765,10 @@ pub struct BenchmarkComparison {
     pub p50_ratio: f64,
     pub p99_ratio: f64,
     pub throughput_ratio: f64,
+    #[serde(default)]
+    pub cpu_ratio: f64,
+    #[serde(default)]
+    pub peak_resident_memory_ratio: f64,
     pub passed: bool,
     pub blockers: Vec<String>,
 }
@@ -316,7 +1819,44 @@ pub struct BenchmarkFailureSummary {
     pub worst_p50_ratio: f64,
     pub worst_p99_ratio: f64,
     pub worst_throughput_ratio: f64,
+    #[serde(default)]
+    pub worst_cpu_ratio: f64,
+    #[serde(default)]
+    pub worst_peak_resident_memory_ratio: f64,
     pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BaselineRaftBenchmarkMetricNames {
+    pub passed: String,
+    pub production_evidence_ready: String,
+    pub generated_at_unix_ms: String,
+    pub age_ms: String,
+    pub max_age_ms: String,
+    pub stale_after_unix_ms: String,
+    pub remaining_fresh_ms: String,
+    pub fresh: String,
+    pub freshness_status: String,
+    pub failed_workload_total: String,
+    pub blocker_total: String,
+    pub worst_p50_ratio: String,
+    pub worst_p99_ratio: String,
+    pub worst_throughput_ratio: String,
+    pub worst_cpu_ratio: String,
+    pub worst_peak_resident_memory_ratio: String,
+    pub workload_passed: String,
+    pub workload_p50_ratio: String,
+    pub workload_p99_ratio: String,
+    pub workload_throughput_ratio: String,
+    pub workload_cpu_ratio: String,
+    pub workload_peak_resident_memory_ratio: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BenchmarkScaleOptimizationInputs {
+    pub scale_rates: ScaleRateMetrics,
+    pub scale_targets: ScaleOptimizationTargets,
+    pub hints: Vec<OptimizationHint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -388,9 +1928,21 @@ pub struct BenchmarkWorkloadSummary {
     pub baseline_raft_throughput_ops_per_sec: f64,
     #[serde(default)]
     pub matrixraft_throughput_ops_per_sec: f64,
+    #[serde(default)]
+    pub baseline_raft_cpu_utilization_percent: f64,
+    #[serde(default)]
+    pub matrixraft_cpu_utilization_percent: f64,
+    #[serde(default)]
+    pub baseline_raft_peak_resident_memory_bytes: u64,
+    #[serde(default)]
+    pub matrixraft_peak_resident_memory_bytes: u64,
     pub p50_ratio: f64,
     pub p99_ratio: f64,
     pub throughput_ratio: f64,
+    #[serde(default)]
+    pub cpu_ratio: f64,
+    #[serde(default)]
+    pub peak_resident_memory_ratio: f64,
     pub blockers: Vec<String>,
 }
 
@@ -950,6 +2502,8 @@ fn failed_real_baseline_raft_sample(
         p50_latency_micros: 1_000_000_000,
         p99_latency_micros: 1_000_000_000,
         throughput_ops_per_sec: 1.0,
+        cpu_utilization_percent: 0.0,
+        peak_resident_memory_bytes: 0,
         correctness_passed: false,
         blockers: vec![blocker],
     }
@@ -1540,6 +3094,16 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
     } else {
         0.0
     };
+    let expected_worst_cpu_ratio = summary
+        .workloads
+        .iter()
+        .map(|workload| workload.cpu_ratio)
+        .fold(0.0, f64::max);
+    let expected_worst_peak_resident_memory_ratio = summary
+        .workloads
+        .iter()
+        .map(|workload| workload.peak_resident_memory_ratio)
+        .fold(0.0, f64::max);
     push_summary_ratio_finite_blocker(
         &mut blockers,
         "worst_p50",
@@ -1558,6 +3122,18 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
         summary.worst_throughput_ratio,
         expected_worst_throughput_ratio,
     );
+    push_summary_ratio_finite_blocker(
+        &mut blockers,
+        "worst_cpu",
+        summary.worst_cpu_ratio,
+        expected_worst_cpu_ratio,
+    );
+    push_summary_ratio_finite_blocker(
+        &mut blockers,
+        "worst_peak_resident_memory",
+        summary.worst_peak_resident_memory_ratio,
+        expected_worst_peak_resident_memory_ratio,
+    );
     push_summary_ratio_mismatch(
         &mut blockers,
         "worst_p50",
@@ -1575,16 +3151,41 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
         "worst_throughput",
         summary.worst_throughput_ratio,
         expected_worst_throughput_ratio,
+    );
+    push_summary_ratio_mismatch(
+        &mut blockers,
+        "worst_cpu",
+        summary.worst_cpu_ratio,
+        expected_worst_cpu_ratio,
+    );
+    push_summary_ratio_mismatch(
+        &mut blockers,
+        "worst_peak_resident_memory",
+        summary.worst_peak_resident_memory_ratio,
+        expected_worst_peak_resident_memory_ratio,
     );
     for workload in &summary.workloads {
         let max_latency_ratio = 1.0 + summary.options.pass_tolerance_percent / 100.0;
         let min_throughput_ratio = 1.0 - summary.options.pass_tolerance_percent / 100.0;
+        let cpu_resource_reported = resource_pair_reported(
+            workload.baseline_raft_cpu_utilization_percent,
+            workload.matrixraft_cpu_utilization_percent,
+        );
+        let memory_resource_reported = resource_pair_reported(
+            workload.baseline_raft_peak_resident_memory_bytes as f64,
+            workload.matrixraft_peak_resident_memory_bytes as f64,
+        );
         let workload_performance_passed = workload.p50_ratio.is_finite()
             && workload.p99_ratio.is_finite()
             && workload.throughput_ratio.is_finite()
             && workload.p50_ratio <= max_latency_ratio
             && workload.p99_ratio <= max_latency_ratio
-            && workload.throughput_ratio >= min_throughput_ratio;
+            && workload.throughput_ratio >= min_throughput_ratio
+            && (!cpu_resource_reported
+                || (workload.cpu_ratio.is_finite() && workload.cpu_ratio <= max_latency_ratio))
+            && (!memory_resource_reported
+                || (workload.peak_resident_memory_ratio.is_finite()
+                    && workload.peak_resident_memory_ratio <= max_latency_ratio));
         let workload_correctness_passed =
             workload.baseline_raft_correctness_passed && workload.matrixraft_correctness_passed;
         if workload.passed && !workload.blockers.is_empty() {
@@ -1975,6 +3576,36 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
                 workload.baseline_raft_throughput_ops_per_sec,
             ),
         );
+        if resource_pair_reported(
+            workload.baseline_raft_cpu_utilization_percent,
+            workload.matrixraft_cpu_utilization_percent,
+        ) {
+            push_workload_summary_ratio_finite_blocker(
+                &mut blockers,
+                workload.workload,
+                "cpu",
+                workload.cpu_ratio,
+                optional_resource_ratio(
+                    workload.matrixraft_cpu_utilization_percent,
+                    workload.baseline_raft_cpu_utilization_percent,
+                ),
+            );
+        }
+        if resource_pair_reported(
+            workload.baseline_raft_peak_resident_memory_bytes as f64,
+            workload.matrixraft_peak_resident_memory_bytes as f64,
+        ) {
+            push_workload_summary_ratio_finite_blocker(
+                &mut blockers,
+                workload.workload,
+                "peak_resident_memory",
+                workload.peak_resident_memory_ratio,
+                optional_resource_ratio(
+                    workload.matrixraft_peak_resident_memory_bytes as f64,
+                    workload.baseline_raft_peak_resident_memory_bytes as f64,
+                ),
+            );
+        }
         push_workload_summary_ratio_mismatch(
             &mut blockers,
             workload.workload,
@@ -2005,6 +3636,36 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
                 workload.baseline_raft_throughput_ops_per_sec,
             ),
         );
+        if resource_pair_reported(
+            workload.baseline_raft_cpu_utilization_percent,
+            workload.matrixraft_cpu_utilization_percent,
+        ) {
+            push_workload_summary_ratio_mismatch(
+                &mut blockers,
+                workload.workload,
+                "cpu",
+                workload.cpu_ratio,
+                optional_resource_ratio(
+                    workload.matrixraft_cpu_utilization_percent,
+                    workload.baseline_raft_cpu_utilization_percent,
+                ),
+            );
+        }
+        if resource_pair_reported(
+            workload.baseline_raft_peak_resident_memory_bytes as f64,
+            workload.matrixraft_peak_resident_memory_bytes as f64,
+        ) {
+            push_workload_summary_ratio_mismatch(
+                &mut blockers,
+                workload.workload,
+                "peak_resident_memory",
+                workload.peak_resident_memory_ratio,
+                optional_resource_ratio(
+                    workload.matrixraft_peak_resident_memory_bytes as f64,
+                    workload.baseline_raft_peak_resident_memory_bytes as f64,
+                ),
+            );
+        }
         if !workload.p50_ratio.is_finite() || workload.p50_ratio > max_latency_ratio {
             blockers.push(format!(
                 "benchmark:summary_p50_regression:{}:{:.6}:{:.6}",
@@ -2029,6 +3690,27 @@ pub fn matrixraft_assert_production_baseline_raft_summary(
                 workload.workload.id(),
                 workload.throughput_ratio,
                 min_throughput_ratio
+            ));
+        }
+        if cpu_resource_reported
+            && (!workload.cpu_ratio.is_finite() || workload.cpu_ratio > max_latency_ratio)
+        {
+            blockers.push(format!(
+                "benchmark:summary_cpu_regression:{}:{:.6}:{:.6}",
+                workload.workload.id(),
+                workload.cpu_ratio,
+                max_latency_ratio
+            ));
+        }
+        if memory_resource_reported
+            && (!workload.peak_resident_memory_ratio.is_finite()
+                || workload.peak_resident_memory_ratio > max_latency_ratio)
+        {
+            blockers.push(format!(
+                "benchmark:summary_peak_resident_memory_regression:{}:{:.6}:{:.6}",
+                workload.workload.id(),
+                workload.peak_resident_memory_ratio,
+                max_latency_ratio
             ));
         }
         blockers.extend(
@@ -2063,6 +3745,8 @@ pub fn matrixraft_baseline_raft_benchmark_evidence_from_summary(
     summary: &BenchmarkFailureSummary,
 ) -> BaselineRaftBenchmarkEvidence {
     let has_required_workloads = benchmark_summary_has_required_workload_set(summary);
+    let performance_blockers =
+        summary_blockers_with_prefix(summary, "benchmark:summary_performance");
     BaselineRaftBenchmarkEvidence {
         real_baseline_raft: has_required_workloads
             && summary.workloads.iter().all(|workload| {
@@ -2088,6 +3772,8 @@ pub fn matrixraft_baseline_raft_benchmark_evidence_from_summary(
         performance_within_threshold: has_required_workloads
             && summary.performance_blocker_count == 0
             && summary.workloads.iter().all(|workload| workload.passed),
+        resource_within_threshold: has_required_workloads
+            && !summary_has_resource_parity_regression(summary),
         workloads: summary
             .workloads
             .iter()
@@ -2106,10 +3792,7 @@ pub fn matrixraft_baseline_raft_benchmark_evidence_from_summary(
             summary,
             "benchmark:summary_correctness",
         ),
-        performance_blockers: summary_blockers_with_prefix(
-            summary,
-            "benchmark:summary_performance",
-        ),
+        performance_blockers,
     }
 }
 
@@ -2167,6 +3850,16 @@ pub fn matrixraft_baseline_raft_benchmark_failure_summary(
     } else {
         0.0
     };
+    let worst_cpu_ratio = report
+        .comparisons
+        .iter()
+        .map(|comparison| comparison.cpu_ratio)
+        .fold(0.0, f64::max);
+    let worst_peak_resident_memory_ratio = report
+        .comparisons
+        .iter()
+        .map(|comparison| comparison.peak_resident_memory_ratio)
+        .fold(0.0, f64::max);
     BenchmarkFailureSummary {
         schema: MATRIXRAFT_BENCHMARK_SUMMARY_SCHEMA.to_string(),
         generated_at_unix_ms: report.generated_at_unix_ms,
@@ -2201,7 +3894,853 @@ pub fn matrixraft_baseline_raft_benchmark_failure_summary(
         worst_p50_ratio,
         worst_p99_ratio,
         worst_throughput_ratio,
+        worst_cpu_ratio,
+        worst_peak_resident_memory_ratio,
         blockers: evidence.blockers,
+    }
+}
+
+pub fn matrixraft_baseline_raft_benchmark_metric_names() -> BaselineRaftBenchmarkMetricNames {
+    BaselineRaftBenchmarkMetricNames {
+        passed: "rustraft_baseline_raft_benchmark_passed".to_string(),
+        production_evidence_ready: "rustraft_baseline_raft_benchmark_production_evidence_ready"
+            .to_string(),
+        generated_at_unix_ms: "rustraft_baseline_raft_benchmark_generated_at_unix_ms".to_string(),
+        age_ms: "rustraft_baseline_raft_benchmark_age_ms".to_string(),
+        max_age_ms: "rustraft_baseline_raft_benchmark_max_age_ms".to_string(),
+        stale_after_unix_ms: "rustraft_baseline_raft_benchmark_stale_after_unix_ms".to_string(),
+        remaining_fresh_ms: "rustraft_baseline_raft_benchmark_remaining_fresh_ms".to_string(),
+        fresh: "rustraft_baseline_raft_benchmark_fresh".to_string(),
+        freshness_status: "rustraft_baseline_raft_benchmark_freshness_status".to_string(),
+        failed_workload_total: "rustraft_baseline_raft_benchmark_failed_workload_total".to_string(),
+        blocker_total: "rustraft_baseline_raft_benchmark_blocker_total".to_string(),
+        worst_p50_ratio: "rustraft_baseline_raft_benchmark_worst_p50_ratio".to_string(),
+        worst_p99_ratio: "rustraft_baseline_raft_benchmark_worst_p99_ratio".to_string(),
+        worst_throughput_ratio: "rustraft_baseline_raft_benchmark_worst_throughput_ratio"
+            .to_string(),
+        worst_cpu_ratio: "rustraft_baseline_raft_benchmark_worst_cpu_ratio".to_string(),
+        worst_peak_resident_memory_ratio:
+            "rustraft_baseline_raft_benchmark_worst_peak_resident_memory_ratio".to_string(),
+        workload_passed: "rustraft_baseline_raft_benchmark_workload_passed".to_string(),
+        workload_p50_ratio: "rustraft_baseline_raft_benchmark_workload_p50_ratio".to_string(),
+        workload_p99_ratio: "rustraft_baseline_raft_benchmark_workload_p99_ratio".to_string(),
+        workload_throughput_ratio: "rustraft_baseline_raft_benchmark_workload_throughput_ratio"
+            .to_string(),
+        workload_cpu_ratio: "rustraft_baseline_raft_benchmark_workload_cpu_ratio".to_string(),
+        workload_peak_resident_memory_ratio:
+            "rustraft_baseline_raft_benchmark_workload_peak_resident_memory_ratio".to_string(),
+    }
+}
+
+pub fn matrixraft_baseline_raft_benchmark_summary_prometheus(
+    summary: &BenchmarkFailureSummary,
+    labels: &[(&str, &str)],
+) -> PrometheusMetricSet {
+    let names = matrixraft_baseline_raft_benchmark_metric_names();
+    let mut text = String::new();
+    let freshness = matrixraft_baseline_raft_benchmark_freshness(summary.generated_at_unix_ms);
+    let mut freshness_labels = labels.to_vec();
+    freshness_labels.push(("freshness_status", freshness.status));
+    push_benchmark_metric(
+        &mut text,
+        &names.passed,
+        labels,
+        bool_benchmark_metric(summary.passed),
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.production_evidence_ready,
+        labels,
+        bool_benchmark_metric(summary.production_evidence_ready),
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.generated_at_unix_ms,
+        labels,
+        summary.generated_at_unix_ms,
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.age_ms,
+        &freshness_labels,
+        freshness.age_ms,
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.max_age_ms,
+        labels,
+        MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS,
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.stale_after_unix_ms,
+        labels,
+        freshness.stale_after_unix_ms,
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.remaining_fresh_ms,
+        &freshness_labels,
+        freshness.remaining_fresh_ms,
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.fresh,
+        &freshness_labels,
+        bool_benchmark_metric(freshness.fresh),
+    );
+    push_benchmark_metric(&mut text, &names.freshness_status, &freshness_labels, 1);
+    push_benchmark_metric(
+        &mut text,
+        &names.failed_workload_total,
+        labels,
+        summary.failed_workload_count,
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.blocker_total,
+        labels,
+        summary.blockers.len(),
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.worst_p50_ratio,
+        labels,
+        summary.worst_p50_ratio,
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.worst_p99_ratio,
+        labels,
+        summary.worst_p99_ratio,
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.worst_throughput_ratio,
+        labels,
+        summary.worst_throughput_ratio,
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.worst_cpu_ratio,
+        labels,
+        summary.worst_cpu_ratio,
+    );
+    push_benchmark_metric(
+        &mut text,
+        &names.worst_peak_resident_memory_ratio,
+        labels,
+        summary.worst_peak_resident_memory_ratio,
+    );
+
+    for workload in &summary.workloads {
+        let mut workload_labels = labels.to_vec();
+        workload_labels.push(("workload", workload.workload.id()));
+        push_benchmark_metric(
+            &mut text,
+            &names.workload_passed,
+            &workload_labels,
+            bool_benchmark_metric(workload.passed),
+        );
+        push_benchmark_metric(
+            &mut text,
+            &names.workload_p50_ratio,
+            &workload_labels,
+            workload.p50_ratio,
+        );
+        push_benchmark_metric(
+            &mut text,
+            &names.workload_p99_ratio,
+            &workload_labels,
+            workload.p99_ratio,
+        );
+        push_benchmark_metric(
+            &mut text,
+            &names.workload_throughput_ratio,
+            &workload_labels,
+            workload.throughput_ratio,
+        );
+        push_benchmark_metric(
+            &mut text,
+            &names.workload_cpu_ratio,
+            &workload_labels,
+            workload.cpu_ratio,
+        );
+        push_benchmark_metric(
+            &mut text,
+            &names.workload_peak_resident_memory_ratio,
+            &workload_labels,
+            workload.peak_resident_memory_ratio,
+        );
+    }
+
+    PrometheusMetricSet {
+        format: "prometheus_text_v0.0.4".to_string(),
+        metric_count: 16 + (summary.workloads.len() as u64 * 6),
+        text,
+    }
+}
+
+struct BaselineRaftBenchmarkFreshness {
+    age_ms: u64,
+    stale_after_unix_ms: u64,
+    remaining_fresh_ms: u64,
+    fresh: bool,
+    status: &'static str,
+}
+
+fn matrixraft_baseline_raft_benchmark_freshness(
+    generated_at_unix_ms: u64,
+) -> BaselineRaftBenchmarkFreshness {
+    let now = benchmark_now_unix_ms();
+    let stale_after_unix_ms =
+        generated_at_unix_ms.saturating_add(MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS);
+    let future_skew =
+        generated_at_unix_ms > now.saturating_add(MATRIXRAFT_BENCHMARK_MAX_FUTURE_SKEW_MS);
+    let missing = generated_at_unix_ms == 0;
+    let age_ms = if future_skew {
+        0
+    } else {
+        now.saturating_sub(generated_at_unix_ms)
+    };
+    let remaining_fresh_ms = MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS.saturating_sub(age_ms);
+    let stale = age_ms > MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS;
+    let fresh = !missing && !future_skew && !stale;
+    let status = if missing {
+        "missing"
+    } else if future_skew {
+        "future"
+    } else if stale {
+        "stale"
+    } else {
+        "fresh"
+    };
+    BaselineRaftBenchmarkFreshness {
+        age_ms,
+        stale_after_unix_ms,
+        remaining_fresh_ms,
+        fresh,
+        status,
+    }
+}
+
+fn bool_benchmark_metric(value: bool) -> u64 {
+    u64::from(value)
+}
+
+fn push_benchmark_metric<T: std::fmt::Display>(
+    out: &mut String,
+    name: &str,
+    labels: &[(&str, &str)],
+    value: T,
+) {
+    out.push_str(name);
+    if !labels.is_empty() {
+        out.push('{');
+        for (idx, (label_name, label_value)) in labels.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            out.push_str(label_name);
+            out.push_str("=\"");
+            out.push_str(&escape_benchmark_label_value(label_value));
+            out.push('"');
+        }
+        out.push('}');
+    }
+    out.push(' ');
+    out.push_str(&value.to_string());
+    out.push('\n');
+}
+
+fn escape_benchmark_label_value(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+pub fn matrixraft_baseline_raft_benchmark_grafana_panels() -> Vec<GrafanaPanel> {
+    let metrics = matrixraft_baseline_raft_benchmark_metric_names();
+    vec![
+        GrafanaPanel {
+            id: 1025,
+            title: "BaselineRaft Benchmark Passed".to_string(),
+            panel_type: "stat".to_string(),
+            expr: metrics.passed,
+            unit: "bool".to_string(),
+            description: "Release BaselineRaft-vs-RustRaft benchmark pass gate.".to_string(),
+        },
+        GrafanaPanel {
+            id: 1026,
+            title: "Benchmark Production Evidence Ready".to_string(),
+            panel_type: "stat".to_string(),
+            expr: metrics.production_evidence_ready,
+            unit: "bool".to_string(),
+            description: "Production evidence readiness for real reference and Rust runtime benchmark artifacts."
+                .to_string(),
+        },
+        GrafanaPanel {
+            id: 1027,
+            title: "Benchmark Freshness".to_string(),
+            panel_type: "stat".to_string(),
+            expr: format!(
+                "max by (service, group, freshness_status) ({})",
+                metrics.freshness_status
+            ),
+            unit: "short".to_string(),
+            description:
+                "Freshness status for the release BaselineRaft-vs-RustRaft parity benchmark artifact."
+                    .to_string(),
+        },
+        GrafanaPanel {
+            id: 1028,
+            title: "Benchmark Age".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!(
+                "max by (service, group, freshness_status) ({})",
+                metrics.age_ms
+            ),
+            unit: "ms".to_string(),
+            description:
+                "Age of the benchmark artifact that backs release QPS, latency, throughput, CPU, and memory parity."
+                    .to_string(),
+        },
+        GrafanaPanel {
+            id: 1029,
+            title: "Benchmark Generated At".to_string(),
+            panel_type: "stat".to_string(),
+            expr: metrics.generated_at_unix_ms.clone(),
+            unit: "short".to_string(),
+            description: "Unix millisecond timestamp for the benchmark artifact generation time."
+                .to_string(),
+        },
+        GrafanaPanel {
+            id: 1030,
+            title: "Benchmark Fresh".to_string(),
+            panel_type: "stat".to_string(),
+            expr: format!(
+                "max by (service, group, freshness_status) ({})",
+                metrics.fresh
+            ),
+            unit: "bool".to_string(),
+            description: "1 means the benchmark artifact is inside the release freshness window."
+                .to_string(),
+        },
+        GrafanaPanel {
+            id: 1031,
+            title: "Benchmark Max Age".to_string(),
+            panel_type: "stat".to_string(),
+            expr: metrics.max_age_ms.clone(),
+            unit: "ms".to_string(),
+            description: "Configured freshness window for release benchmark artifacts.".to_string(),
+        },
+        GrafanaPanel {
+            id: 1032,
+            title: "Benchmark Stale After".to_string(),
+            panel_type: "stat".to_string(),
+            expr: metrics.stale_after_unix_ms.clone(),
+            unit: "short".to_string(),
+            description: "Unix millisecond timestamp after which the benchmark artifact is stale."
+                .to_string(),
+        },
+        GrafanaPanel {
+            id: 1033,
+            title: "Benchmark Freshness Remaining".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!(
+                "max by (service, group, freshness_status) ({})",
+                metrics.remaining_fresh_ms
+            ),
+            unit: "ms".to_string(),
+            description:
+                "Milliseconds remaining before the benchmark artifact exceeds the release freshness window."
+                    .to_string(),
+        },
+        GrafanaPanel {
+            id: 1053,
+            title: "Benchmark Failed Workloads".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: metrics.failed_workload_total,
+            unit: "short".to_string(),
+            description: "Failed release parity benchmark workload count.".to_string(),
+        },
+        GrafanaPanel {
+            id: 1054,
+            title: "Benchmark Blockers".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: metrics.blocker_total,
+            unit: "short".to_string(),
+            description: "Benchmark blocker count from the verified summary artifact.".to_string(),
+        },
+        GrafanaPanel {
+            id: 1055,
+            title: "Benchmark Worst P50 Ratio".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: metrics.worst_p50_ratio,
+            unit: "short".to_string(),
+            description: "Worst RustRaft/BaselineRaft p50 latency ratio across benchmark workloads."
+                .to_string(),
+        },
+        GrafanaPanel {
+            id: 1056,
+            title: "Benchmark Worst P99 Ratio".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: metrics.worst_p99_ratio,
+            unit: "short".to_string(),
+            description: "Worst RustRaft/BaselineRaft p99 latency ratio across benchmark workloads."
+                .to_string(),
+        },
+        GrafanaPanel {
+            id: 1057,
+            title: "Benchmark Worst Throughput Ratio".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: metrics.worst_throughput_ratio,
+            unit: "short".to_string(),
+            description: "Worst RustRaft/BaselineRaft throughput ratio across benchmark workloads."
+                .to_string(),
+        },
+        GrafanaPanel {
+            id: 1058,
+            title: "Benchmark Worst CPU Ratio".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: metrics.worst_cpu_ratio,
+            unit: "short".to_string(),
+            description: "Worst RustRaft/BaselineRaft CPU utilization ratio across benchmark workloads."
+                .to_string(),
+        },
+        GrafanaPanel {
+            id: 1059,
+            title: "Benchmark Worst Memory Ratio".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: metrics.worst_peak_resident_memory_ratio,
+            unit: "short".to_string(),
+            description:
+                "Worst RustRaft/BaselineRaft peak resident memory ratio across benchmark workloads."
+                    .to_string(),
+        },
+        GrafanaPanel {
+            id: 1060,
+            title: "Benchmark Workload Passed".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!("sum by (workload) ({})", metrics.workload_passed),
+            unit: "bool".to_string(),
+            description: "Per-workload release parity benchmark pass gate.".to_string(),
+        },
+        GrafanaPanel {
+            id: 1061,
+            title: "Benchmark Workload P50 Ratio".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!("sum by (workload) ({})", metrics.workload_p50_ratio),
+            unit: "short".to_string(),
+            description: "Per-workload RustRaft/BaselineRaft p50 latency ratio.".to_string(),
+        },
+        GrafanaPanel {
+            id: 1062,
+            title: "Benchmark Workload P99 Ratio".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!("sum by (workload) ({})", metrics.workload_p99_ratio),
+            unit: "short".to_string(),
+            description: "Per-workload RustRaft/BaselineRaft p99 latency ratio.".to_string(),
+        },
+        GrafanaPanel {
+            id: 1063,
+            title: "Benchmark Workload Throughput Ratio".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!("sum by (workload) ({})", metrics.workload_throughput_ratio),
+            unit: "short".to_string(),
+            description: "Per-workload RustRaft/BaselineRaft throughput ratio.".to_string(),
+        },
+        GrafanaPanel {
+            id: 1064,
+            title: "Benchmark Workload CPU Ratio".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!("sum by (workload) ({})", metrics.workload_cpu_ratio),
+            unit: "short".to_string(),
+            description: "Per-workload RustRaft/BaselineRaft CPU utilization ratio.".to_string(),
+        },
+        GrafanaPanel {
+            id: 1065,
+            title: "Benchmark Workload Memory Ratio".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!(
+                "sum by (workload) ({})",
+                metrics.workload_peak_resident_memory_ratio
+            ),
+            unit: "short".to_string(),
+            description: "Per-workload RustRaft/BaselineRaft peak resident memory ratio."
+                .to_string(),
+        },
+    ]
+}
+
+pub fn matrixraft_scale_rate_metrics_from_benchmark_report(
+    report: &BenchmarkReport,
+) -> ScaleRateMetrics {
+    let mut rates = ScaleRateMetrics::zero();
+    for comparison in &report.comparisons {
+        apply_benchmark_sample_to_scale_rates(&comparison.rustraft, &mut rates);
+    }
+    rates
+}
+
+pub fn matrixraft_scale_optimization_targets_from_baseline_raft_report(
+    report: &BenchmarkReport,
+) -> ScaleOptimizationTargets {
+    let mut targets = ScaleOptimizationTargets::default();
+    let tolerance_factor = if report.pass_tolerance_percent.is_finite() {
+        (1.0 - report.pass_tolerance_percent / 100.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    for comparison in &report.comparisons {
+        apply_benchmark_sample_to_scale_targets(
+            &comparison.baseline_raft,
+            tolerance_factor,
+            &mut targets,
+        );
+    }
+    targets
+}
+
+pub fn matrixraft_scale_optimization_inputs_from_benchmark_report(
+    report: &BenchmarkReport,
+) -> BenchmarkScaleOptimizationInputs {
+    let scale_rates = matrixraft_scale_rate_metrics_from_benchmark_report(report);
+    let scale_targets = matrixraft_scale_optimization_targets_from_baseline_raft_report(report);
+    let hints = matrixraft_scale_optimization_hints(&scale_rates, &scale_targets);
+    BenchmarkScaleOptimizationInputs {
+        scale_rates,
+        scale_targets,
+        hints,
+    }
+}
+
+pub fn matrixraft_validate_benchmark_scale_optimization_inputs(
+    scale_inputs: &BenchmarkScaleOptimizationInputs,
+    report: &BenchmarkReport,
+) -> Result<(), String> {
+    let expected = matrixraft_scale_optimization_inputs_from_benchmark_report(report);
+    let mut blockers = Vec::new();
+    if scale_inputs.scale_rates != expected.scale_rates {
+        blockers.push("benchmark:scale_optimization_rates_mismatch");
+    }
+    if scale_inputs.scale_targets != expected.scale_targets {
+        blockers.push("benchmark:scale_optimization_targets_mismatch");
+    }
+    if scale_inputs.hints != expected.hints {
+        blockers.push("benchmark:scale_optimization_hints_mismatch");
+    }
+    if blockers.is_empty() {
+        Ok(())
+    } else {
+        Err(blockers.join("; "))
+    }
+}
+
+pub fn matrixraft_debug_snapshot_with_benchmark_scale_inputs(
+    admin_report: &RuntimeAdminReport,
+    status_surface: &AdminStatusSurfaceInput,
+    latency_metrics: &LatencyMetrics,
+    memory_metrics: &MemoryMetrics,
+    scale_metrics: &ScaleMetrics,
+    scale_inputs: &BenchmarkScaleOptimizationInputs,
+    labels: &[(&str, &str)],
+) -> DebugSnapshot {
+    matrixraft_debug_snapshot_with_performance_targets(
+        admin_report,
+        status_surface,
+        latency_metrics,
+        memory_metrics,
+        scale_metrics,
+        &scale_inputs.scale_rates,
+        &scale_inputs.scale_targets,
+        labels,
+    )
+}
+
+pub fn matrixraft_debug_snapshot_with_benchmark_summary(
+    admin_report: &RuntimeAdminReport,
+    status_surface: &AdminStatusSurfaceInput,
+    latency_metrics: &LatencyMetrics,
+    memory_metrics: &MemoryMetrics,
+    scale_metrics: &ScaleMetrics,
+    summary: &BenchmarkFailureSummary,
+    labels: &[(&str, &str)],
+) -> DebugSnapshot {
+    let scale_inputs = BenchmarkScaleOptimizationInputs {
+        scale_rates: ScaleRateMetrics::zero(),
+        scale_targets: ScaleOptimizationTargets::default(),
+        hints: Vec::new(),
+    };
+    let mut snapshot = matrixraft_debug_snapshot_with_benchmark_scale_inputs(
+        admin_report,
+        status_surface,
+        latency_metrics,
+        memory_metrics,
+        scale_metrics,
+        &scale_inputs,
+        labels,
+    );
+    snapshot.benchmark_prometheus =
+        matrixraft_baseline_raft_benchmark_summary_prometheus(summary, labels);
+    matrixraft_attach_benchmark_runbook_steps(&mut snapshot, summary, labels);
+    snapshot
+}
+
+pub fn matrixraft_debug_snapshot_with_benchmark_artifacts(
+    admin_report: &RuntimeAdminReport,
+    status_surface: &AdminStatusSurfaceInput,
+    latency_metrics: &LatencyMetrics,
+    memory_metrics: &MemoryMetrics,
+    scale_metrics: &ScaleMetrics,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    labels: &[(&str, &str)],
+) -> DebugSnapshot {
+    let scale_inputs = matrixraft_scale_optimization_inputs_from_benchmark_report(report);
+    let mut snapshot = matrixraft_debug_snapshot_with_benchmark_scale_inputs(
+        admin_report,
+        status_surface,
+        latency_metrics,
+        memory_metrics,
+        scale_metrics,
+        &scale_inputs,
+        labels,
+    );
+    snapshot.benchmark_prometheus =
+        matrixraft_baseline_raft_benchmark_summary_prometheus(summary, labels);
+    matrixraft_attach_benchmark_runbook_steps(&mut snapshot, summary, labels);
+    snapshot
+}
+
+pub fn matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts(
+    admin_report: &RuntimeAdminReport,
+    status_surface: &AdminStatusSurfaceInput,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    scale_metrics: &ScaleMetrics,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    peer_pipeline: &[PeerProgress],
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> DebugSnapshot {
+    matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
+        admin_report,
+        status_surface,
+        latency_metrics,
+        latency_thresholds,
+        memory_metrics,
+        memory_thresholds,
+        scale_metrics,
+        report,
+        summary,
+        peer_pipeline,
+        &ReadBacklogMetrics::zero(),
+        &ReadBacklogThresholds::default(),
+        policy,
+        labels,
+    )
+}
+
+pub fn matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
+    admin_report: &RuntimeAdminReport,
+    status_surface: &AdminStatusSurfaceInput,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    scale_metrics: &ScaleMetrics,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> DebugSnapshot {
+    let scale_inputs = matrixraft_scale_optimization_inputs_from_benchmark_report(report);
+    let mut snapshot = matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence(
+        admin_report,
+        status_surface,
+        latency_metrics,
+        latency_thresholds,
+        memory_metrics,
+        memory_thresholds,
+        scale_metrics,
+        &scale_inputs.scale_rates,
+        &scale_inputs.scale_targets,
+        peer_pipeline,
+        read_backlog_metrics,
+        read_backlog_thresholds,
+        policy,
+        labels,
+    );
+    snapshot.benchmark_prometheus =
+        matrixraft_baseline_raft_benchmark_summary_prometheus(summary, labels);
+    matrixraft_attach_benchmark_runbook_steps(&mut snapshot, summary, labels);
+    snapshot
+}
+
+pub fn matrixraft_debug_snapshot_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts(
+    admin_report: &RuntimeAdminReport,
+    status_surface: &AdminStatusSurfaceInput,
+    latency_metrics: &LatencyMetrics,
+    latency_thresholds: &LatencyOptimizationThresholds,
+    memory_metrics: &MemoryMetrics,
+    memory_thresholds: &MemoryOptimizationThresholds,
+    scale_metrics: &ScaleMetrics,
+    report: &BenchmarkReport,
+    summary: &BenchmarkFailureSummary,
+    peer_pipeline: &[PeerProgress],
+    read_backlog_metrics: &ReadBacklogMetrics,
+    read_backlog_thresholds: &ReadBacklogThresholds,
+    timer_status: &RuntimeTimerStatus,
+    timer_thresholds: &NodeRuntimeTimerThresholds,
+    policy: &RuntimePressureAdmissionPolicy,
+    labels: &[(&str, &str)],
+) -> DebugSnapshot {
+    let scale_inputs = matrixraft_scale_optimization_inputs_from_benchmark_report(report);
+    let mut snapshot =
+        matrixraft_debug_snapshot_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence(
+            admin_report,
+            status_surface,
+            latency_metrics,
+            latency_thresholds,
+            memory_metrics,
+            memory_thresholds,
+            scale_metrics,
+            &scale_inputs.scale_rates,
+            &scale_inputs.scale_targets,
+            peer_pipeline,
+            read_backlog_metrics,
+            read_backlog_thresholds,
+            timer_status,
+            timer_thresholds,
+            policy,
+            labels,
+        );
+    snapshot.benchmark_prometheus =
+        matrixraft_baseline_raft_benchmark_summary_prometheus(summary, labels);
+    matrixraft_attach_benchmark_runbook_steps(&mut snapshot, summary, labels);
+    snapshot
+}
+
+fn matrixraft_attach_benchmark_runbook_steps(
+    snapshot: &mut DebugSnapshot,
+    summary: &BenchmarkFailureSummary,
+    labels: &[(&str, &str)],
+) {
+    let benchmark_steps = matrixraft_benchmark_runbook_steps(summary);
+    if benchmark_steps.is_empty() {
+        return;
+    }
+    snapshot
+        .runbook_steps
+        .retain(|step| step.id != "continue_normal_observation");
+    for step in benchmark_steps {
+        if !snapshot
+            .runbook_steps
+            .iter()
+            .any(|existing| existing.id == step.id)
+        {
+            snapshot.runbook_steps.push(step);
+        }
+    }
+    snapshot.runbook_prometheus =
+        matrixraft_operator_runbook_prometheus(&snapshot.runbook_steps, labels);
+}
+
+pub fn matrixraft_benchmark_runbook_steps(
+    summary: &BenchmarkFailureSummary,
+) -> Vec<OperatorRunbookStep> {
+    matrixraft_benchmark_runbook_steps_for_state(
+        !summary.passed || summary.failed_workload_count > 0 || !summary.blockers.is_empty(),
+        summary.worst_p50_ratio > 1.1
+            || summary.worst_p99_ratio > 1.1
+            || summary.worst_throughput_ratio < 0.9,
+        !matrixraft_baseline_raft_benchmark_freshness(summary.generated_at_unix_ms).fresh,
+    )
+}
+
+fn apply_benchmark_sample_to_scale_rates(sample: &BenchmarkSample, rates: &mut ScaleRateMetrics) {
+    let qps = scale_rate_u64(sample.throughput_ops_per_sec);
+    let mib_per_sec = scale_rate_u64(
+        sample.throughput_ops_per_sec * sample.payload_size_bytes as f64 / 1_048_576.0,
+    );
+    match sample.workload {
+        BenchmarkWorkload::SingleKeyWrites | BenchmarkWorkload::BatchedWrites => {
+            rates.proposal_qps = rates.proposal_qps.max(qps);
+            rates.apply_entries_qps = rates.apply_entries_qps.max(qps);
+            rates.apply_mib_per_sec = rates.apply_mib_per_sec.max(mib_per_sec);
+        }
+        BenchmarkWorkload::ReplicationBatching => {
+            rates.append_entries_qps = rates.append_entries_qps.max(qps);
+            rates.replication_mib_per_sec = rates.replication_mib_per_sec.max(mib_per_sec);
+        }
+        BenchmarkWorkload::ReadIndexReads | BenchmarkWorkload::LeaseReads => {
+            rates.read_index_qps = rates.read_index_qps.max(qps);
+        }
+        BenchmarkWorkload::WalFsync
+        | BenchmarkWorkload::SnapshotInstallCatchup
+        | BenchmarkWorkload::SnapshotStreaming
+        | BenchmarkWorkload::LeaderTransferUnderLoad => {}
+    }
+}
+
+fn apply_benchmark_sample_to_scale_targets(
+    sample: &BenchmarkSample,
+    tolerance_factor: f64,
+    targets: &mut ScaleOptimizationTargets,
+) {
+    let qps = scale_target_u64(sample.throughput_ops_per_sec, tolerance_factor);
+    let mib_per_sec = scale_target_u64(
+        sample.throughput_ops_per_sec * sample.payload_size_bytes as f64 / 1_048_576.0,
+        tolerance_factor,
+    );
+    match sample.workload {
+        BenchmarkWorkload::SingleKeyWrites | BenchmarkWorkload::BatchedWrites => {
+            targets.min_proposal_qps = targets.min_proposal_qps.max(qps);
+            targets.min_apply_entries_qps = targets.min_apply_entries_qps.max(qps);
+            targets.min_apply_mib_per_sec = targets.min_apply_mib_per_sec.max(mib_per_sec);
+        }
+        BenchmarkWorkload::ReplicationBatching => {
+            targets.min_append_entries_qps = targets.min_append_entries_qps.max(qps);
+            targets.min_replication_mib_per_sec =
+                targets.min_replication_mib_per_sec.max(mib_per_sec);
+        }
+        BenchmarkWorkload::ReadIndexReads | BenchmarkWorkload::LeaseReads => {
+            targets.min_read_index_qps = targets.min_read_index_qps.max(qps);
+        }
+        BenchmarkWorkload::WalFsync
+        | BenchmarkWorkload::SnapshotInstallCatchup
+        | BenchmarkWorkload::SnapshotStreaming
+        | BenchmarkWorkload::LeaderTransferUnderLoad => {}
+    }
+}
+
+fn scale_rate_u64(value: f64) -> u64 {
+    if value.is_finite() && value > 0.0 {
+        value.round() as u64
+    } else {
+        0
+    }
+}
+
+fn scale_target_u64(value: f64, tolerance_factor: f64) -> u64 {
+    if value.is_finite() && value > 0.0 && tolerance_factor.is_finite() {
+        (value * tolerance_factor).ceil() as u64
+    } else {
+        0
     }
 }
 
@@ -2254,9 +4793,17 @@ fn matrixraft_baseline_raft_workload_summary(
         matrixraft_p99_latency_micros: comparison.rustraft.p99_latency_micros,
         baseline_raft_throughput_ops_per_sec: comparison.baseline_raft.throughput_ops_per_sec,
         matrixraft_throughput_ops_per_sec: comparison.rustraft.throughput_ops_per_sec,
+        baseline_raft_cpu_utilization_percent: comparison.baseline_raft.cpu_utilization_percent,
+        matrixraft_cpu_utilization_percent: comparison.rustraft.cpu_utilization_percent,
+        baseline_raft_peak_resident_memory_bytes: comparison
+            .baseline_raft
+            .peak_resident_memory_bytes,
+        matrixraft_peak_resident_memory_bytes: comparison.rustraft.peak_resident_memory_bytes,
         p50_ratio: comparison.p50_ratio,
         p99_ratio: comparison.p99_ratio,
         throughput_ratio: comparison.throughput_ratio,
+        cpu_ratio: comparison.cpu_ratio,
+        peak_resident_memory_ratio: comparison.peak_resident_memory_ratio,
         blockers: comparison
             .blockers
             .iter()
@@ -2302,6 +4849,10 @@ pub fn matrixraft_baseline_raft_benchmark_evidence(
             .comparisons
             .iter()
             .all(|comparison| comparison.passed);
+    let resource_within_threshold = has_required_workloads
+        && report.comparisons.iter().all(|comparison| {
+            !comparison_has_resource_parity_regression(comparison, report.pass_tolerance_percent)
+        });
     for blocker in option_blockers {
         classify_benchmark_blocker(
             &blocker,
@@ -2471,6 +5022,7 @@ pub fn matrixraft_baseline_raft_benchmark_evidence(
         matrixraft_rust_candidate,
         correctness_passed,
         performance_within_threshold,
+        resource_within_threshold,
         workloads,
         blockers,
         missing_baseline_raft_binaries,
@@ -2478,6 +5030,71 @@ pub fn matrixraft_baseline_raft_benchmark_evidence(
         correctness_blockers,
         performance_blockers,
     }
+}
+
+fn summary_has_resource_parity_regression(summary: &BenchmarkFailureSummary) -> bool {
+    let max_resource_ratio = 1.0 + summary.options.pass_tolerance_percent / 100.0;
+    if !max_resource_ratio.is_finite() {
+        return true;
+    }
+    if summary.workloads.iter().any(|workload| {
+        resource_pair_reported(
+            workload.baseline_raft_cpu_utilization_percent,
+            workload.matrixraft_cpu_utilization_percent,
+        ) && (!workload.cpu_ratio.is_finite() || workload.cpu_ratio > max_resource_ratio)
+            || resource_pair_reported(
+                workload.baseline_raft_peak_resident_memory_bytes as f64,
+                workload.matrixraft_peak_resident_memory_bytes as f64,
+            ) && (!workload.peak_resident_memory_ratio.is_finite()
+                || workload.peak_resident_memory_ratio > max_resource_ratio)
+    }) {
+        return true;
+    }
+    matrixraft_baseline_raft_summary_blockers(summary)
+        .iter()
+        .any(|blocker| benchmark_blocker_is_resource_parity(blocker))
+}
+
+fn comparison_has_resource_parity_regression(
+    comparison: &BenchmarkComparison,
+    tolerance_percent: f64,
+) -> bool {
+    let max_resource_ratio = 1.0 + tolerance_percent / 100.0;
+    if !max_resource_ratio.is_finite() {
+        return true;
+    }
+    if resource_pair_reported(
+        comparison.baseline_raft.cpu_utilization_percent,
+        comparison.rustraft.cpu_utilization_percent,
+    ) && (!comparison.cpu_ratio.is_finite() || comparison.cpu_ratio > max_resource_ratio)
+    {
+        return true;
+    }
+    if resource_pair_reported(
+        comparison.baseline_raft.peak_resident_memory_bytes as f64,
+        comparison.rustraft.peak_resident_memory_bytes as f64,
+    ) && (!comparison.peak_resident_memory_ratio.is_finite()
+        || comparison.peak_resident_memory_ratio > max_resource_ratio)
+    {
+        return true;
+    }
+    comparison
+        .blockers
+        .iter()
+        .any(|blocker| benchmark_blocker_is_resource_parity(blocker))
+}
+
+fn benchmark_blocker_is_resource_parity(blocker: &str) -> bool {
+    blocker.contains("cpu_ratio")
+        || blocker.contains("peak_resident_memory_ratio")
+        || blocker.contains("benchmark:cpu_regression")
+        || blocker.contains("benchmark:peak_resident_memory_regression")
+        || blocker.contains("benchmark:summary_cpu_ratio_not_finite")
+        || blocker.contains("benchmark:summary_peak_resident_memory_ratio_not_finite")
+        || blocker.contains("benchmark:summary_cpu_regression")
+        || blocker.contains("benchmark:summary_peak_resident_memory_regression")
+        || blocker.contains("benchmark:comparison_missing_cpu_regression_blocker")
+        || blocker.contains("benchmark:comparison_missing_peak_resident_memory_regression_blocker")
 }
 
 fn benchmark_report_has_required_workload_set(report: &BenchmarkReport) -> bool {
@@ -2845,6 +5462,22 @@ fn benchmark_comparison_integrity_blockers(
         comparison.rustraft.throughput_ops_per_sec,
         comparison.baseline_raft.throughput_ops_per_sec,
     );
+    let cpu_resource_reported = resource_pair_reported(
+        comparison.baseline_raft.cpu_utilization_percent,
+        comparison.rustraft.cpu_utilization_percent,
+    );
+    let memory_resource_reported = resource_pair_reported(
+        comparison.baseline_raft.peak_resident_memory_bytes as f64,
+        comparison.rustraft.peak_resident_memory_bytes as f64,
+    );
+    let expected_cpu = optional_resource_ratio(
+        comparison.rustraft.cpu_utilization_percent,
+        comparison.baseline_raft.cpu_utilization_percent,
+    );
+    let expected_peak_resident_memory = optional_resource_ratio(
+        comparison.rustraft.peak_resident_memory_bytes as f64,
+        comparison.baseline_raft.peak_resident_memory_bytes as f64,
+    );
     push_ratio_finite_blocker(&mut blockers, "p50", comparison.p50_ratio, expected_p50);
     push_ratio_finite_blocker(&mut blockers, "p99", comparison.p99_ratio, expected_p99);
     push_ratio_finite_blocker(
@@ -2853,6 +5486,17 @@ fn benchmark_comparison_integrity_blockers(
         comparison.throughput_ratio,
         expected_throughput,
     );
+    if cpu_resource_reported {
+        push_ratio_finite_blocker(&mut blockers, "cpu", comparison.cpu_ratio, expected_cpu);
+    }
+    if memory_resource_reported {
+        push_ratio_finite_blocker(
+            &mut blockers,
+            "peak_resident_memory",
+            comparison.peak_resident_memory_ratio,
+            expected_peak_resident_memory,
+        );
+    }
     push_ratio_mismatch(&mut blockers, "p50", comparison.p50_ratio, expected_p50);
     push_ratio_mismatch(&mut blockers, "p99", comparison.p99_ratio, expected_p99);
     push_ratio_mismatch(
@@ -2861,6 +5505,17 @@ fn benchmark_comparison_integrity_blockers(
         comparison.throughput_ratio,
         expected_throughput,
     );
+    if cpu_resource_reported {
+        push_ratio_mismatch(&mut blockers, "cpu", comparison.cpu_ratio, expected_cpu);
+    }
+    if memory_resource_reported {
+        push_ratio_mismatch(
+            &mut blockers,
+            "peak_resident_memory",
+            comparison.peak_resident_memory_ratio,
+            expected_peak_resident_memory,
+        );
+    }
 
     let max_latency_ratio = 1.0 + options.pass_tolerance_percent / 100.0;
     let min_throughput_ratio = 1.0 - options.pass_tolerance_percent / 100.0;
@@ -2869,7 +5524,12 @@ fn benchmark_comparison_integrity_blockers(
         && expected_throughput.is_finite()
         && expected_p50 <= max_latency_ratio
         && expected_p99 <= max_latency_ratio
-        && expected_throughput >= min_throughput_ratio;
+        && expected_throughput >= min_throughput_ratio
+        && (!cpu_resource_reported
+            || (expected_cpu.is_finite() && expected_cpu <= max_latency_ratio))
+        && (!memory_resource_reported
+            || (expected_peak_resident_memory.is_finite()
+                && expected_peak_resident_memory <= max_latency_ratio));
     if expected_p50 > max_latency_ratio
         && !comparison
             .blockers
@@ -2898,6 +5558,28 @@ fn benchmark_comparison_integrity_blockers(
     {
         blockers.push(format!(
             "benchmark:comparison_missing_throughput_regression_blocker:{expected_throughput:.6}:{min_throughput_ratio:.6}"
+        ));
+    }
+    if cpu_resource_reported
+        && expected_cpu > max_latency_ratio
+        && !comparison
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("cpu_ratio"))
+    {
+        blockers.push(format!(
+            "benchmark:comparison_missing_cpu_regression_blocker:{expected_cpu:.6}:{max_latency_ratio:.6}"
+        ));
+    }
+    if memory_resource_reported
+        && expected_peak_resident_memory > max_latency_ratio
+        && !comparison
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("peak_resident_memory_ratio"))
+    {
+        blockers.push(format!(
+            "benchmark:comparison_missing_peak_resident_memory_regression_blocker:{expected_peak_resident_memory:.6}:{max_latency_ratio:.6}"
         ));
     }
     if comparison.passed && !comparison.blockers.is_empty() {
@@ -3538,20 +6220,32 @@ fn classify_benchmark_blocker(
     if blocker.contains("benchmark:p50_regression")
         || blocker.contains("benchmark:p99_regression")
         || blocker.contains("benchmark:throughput_regression")
+        || blocker.contains("benchmark:cpu_regression")
+        || blocker.contains("benchmark:peak_resident_memory_regression")
         || blocker.contains("benchmark:summary_p50_ratio_not_finite")
         || blocker.contains("benchmark:summary_p99_ratio_not_finite")
         || blocker.contains("benchmark:summary_throughput_ratio_not_finite")
+        || blocker.contains("benchmark:summary_cpu_ratio_not_finite")
+        || blocker.contains("benchmark:summary_peak_resident_memory_ratio_not_finite")
         || blocker.contains("benchmark:summary_p50_regression")
         || blocker.contains("benchmark:summary_p99_regression")
         || blocker.contains("benchmark:summary_throughput_regression")
+        || blocker.contains("benchmark:summary_cpu_regression")
+        || blocker.contains("benchmark:summary_peak_resident_memory_regression")
         || blocker.contains("benchmark:summary_workload_p50_ratio_mismatch")
         || blocker.contains("benchmark:summary_workload_p99_ratio_mismatch")
         || blocker.contains("benchmark:summary_workload_throughput_ratio_mismatch")
+        || blocker.contains("benchmark:summary_workload_cpu_ratio_mismatch")
+        || blocker.contains("benchmark:summary_workload_peak_resident_memory_ratio_mismatch")
         || blocker.contains("benchmark:summary_workload_passed_despite_regression")
         || blocker.contains("benchmark:comparison_missing_p50_regression_blocker")
         || blocker.contains("benchmark:comparison_missing_p99_regression_blocker")
         || blocker.contains("benchmark:comparison_missing_throughput_regression_blocker")
+        || blocker.contains("benchmark:comparison_missing_cpu_regression_blocker")
+        || blocker.contains("benchmark:comparison_missing_peak_resident_memory_regression_blocker")
         || blocker.contains("benchmark:comparison_passed_despite_regression")
+        || blocker.contains("cpu_ratio")
+        || blocker.contains("peak_resident_memory_ratio")
     {
         performance_blockers.push(blocker.to_string());
     }
@@ -3579,6 +6273,14 @@ fn compare_samples(
         rustraft.throughput_ops_per_sec,
         baseline_raft.throughput_ops_per_sec,
     );
+    let cpu_ratio = optional_resource_ratio(
+        rustraft.cpu_utilization_percent,
+        baseline_raft.cpu_utilization_percent,
+    );
+    let peak_resident_memory_ratio = optional_resource_ratio(
+        rustraft.peak_resident_memory_bytes as f64,
+        baseline_raft.peak_resident_memory_bytes as f64,
+    );
     let mut blockers = Vec::new();
 
     blockers.extend(baseline_raft.blockers.iter().cloned());
@@ -3591,6 +6293,20 @@ fn compare_samples(
     }
     if !throughput_ratio.is_finite() {
         blockers.push("benchmark:comparison_throughput_ratio_not_finite".to_string());
+    }
+    if resource_pair_reported(
+        baseline_raft.cpu_utilization_percent,
+        rustraft.cpu_utilization_percent,
+    ) && !cpu_ratio.is_finite()
+    {
+        blockers.push("benchmark:comparison_cpu_ratio_not_finite".to_string());
+    }
+    if resource_pair_reported(
+        baseline_raft.peak_resident_memory_bytes as f64,
+        rustraft.peak_resident_memory_bytes as f64,
+    ) && !peak_resident_memory_ratio.is_finite()
+    {
+        blockers.push("benchmark:comparison_peak_resident_memory_ratio_not_finite".to_string());
     }
     if !baseline_raft.correctness_passed {
         blockers.push("baseline_raft_correctness_failed".to_string());
@@ -3672,6 +6388,24 @@ fn compare_samples(
             "throughput_ratio_{throughput_ratio:.3}_below_{min_throughput_ratio:.3}"
         ));
     }
+    if resource_pair_reported(
+        baseline_raft.cpu_utilization_percent,
+        rustraft.cpu_utilization_percent,
+    ) && cpu_ratio > max_latency_ratio
+    {
+        blockers.push(format!(
+            "cpu_ratio_{cpu_ratio:.3}_exceeds_{max_latency_ratio:.3}"
+        ));
+    }
+    if resource_pair_reported(
+        baseline_raft.peak_resident_memory_bytes as f64,
+        rustraft.peak_resident_memory_bytes as f64,
+    ) && peak_resident_memory_ratio > max_latency_ratio
+    {
+        blockers.push(format!(
+            "peak_resident_memory_ratio_{peak_resident_memory_ratio:.3}_exceeds_{max_latency_ratio:.3}"
+        ));
+    }
 
     BenchmarkComparison {
         workload: baseline_raft.workload,
@@ -3680,6 +6414,8 @@ fn compare_samples(
         p50_ratio,
         p99_ratio,
         throughput_ratio,
+        cpu_ratio,
+        peak_resident_memory_ratio,
         passed: blockers.is_empty(),
         blockers,
     }
@@ -3690,6 +6426,17 @@ fn ratio(numerator: f64, denominator: f64) -> f64 {
         return f64::INFINITY;
     }
     numerator / denominator
+}
+
+fn optional_resource_ratio(numerator: f64, denominator: f64) -> f64 {
+    if denominator == 0.0 {
+        return 0.0;
+    }
+    ratio(numerator, denominator)
+}
+
+fn resource_pair_reported(baseline: f64, rustraft: f64) -> bool {
+    baseline > 0.0 && rustraft > 0.0
 }
 
 fn run_same_machine_model_workload(
@@ -3730,6 +6477,8 @@ fn run_same_machine_model_workload(
         p50_latency_micros,
         p99_latency_micros,
         throughput_ops_per_sec,
+        cpu_utilization_percent: synthetic_cpu_utilization_percent(engine, workload, options),
+        peak_resident_memory_bytes: synthetic_peak_resident_memory_bytes(engine, workload, options),
         correctness_passed: same_machine_correctness_passes(workload, options),
         blockers: Vec::new(),
     }
@@ -3870,6 +6619,8 @@ fn run_rustraft_runtime_workload(
         p50_latency_micros: percentile(&latencies, 50.0),
         p99_latency_micros: percentile(&latencies, 99.0),
         throughput_ops_per_sec,
+        cpu_utilization_percent: runtime_cpu_utilization_percent(workload, options, total_micros),
+        peak_resident_memory_bytes: runtime_peak_resident_memory_bytes(workload, options),
         correctness_passed,
         blockers: Vec::new(),
     }
@@ -4020,6 +6771,77 @@ fn synthetic_latency_series(
             (base + jitter) * engine_multiplier / 100
         })
         .collect()
+}
+
+fn synthetic_cpu_utilization_percent(
+    engine: BenchmarkEngine,
+    workload: BenchmarkWorkload,
+    options: &BenchmarkOptions,
+) -> f64 {
+    let base = match workload {
+        BenchmarkWorkload::SingleKeyWrites => 42.0,
+        BenchmarkWorkload::BatchedWrites => 58.0,
+        BenchmarkWorkload::ReplicationBatching => 64.0,
+        BenchmarkWorkload::WalFsync => 36.0,
+        BenchmarkWorkload::ReadIndexReads => 28.0,
+        BenchmarkWorkload::LeaseReads => 18.0,
+        BenchmarkWorkload::SnapshotInstallCatchup => 52.0,
+        BenchmarkWorkload::SnapshotStreaming => 56.0,
+        BenchmarkWorkload::LeaderTransferUnderLoad => 48.0,
+    };
+    let scale =
+        options.node_count.max(1) as f64 / MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT as f64;
+    let engine_multiplier = match engine {
+        BenchmarkEngine::BaselineRaft => 1.0,
+        BenchmarkEngine::RustRaft => 1.04,
+    };
+    (base * scale * engine_multiplier).min(100.0)
+}
+
+fn synthetic_peak_resident_memory_bytes(
+    engine: BenchmarkEngine,
+    workload: BenchmarkWorkload,
+    options: &BenchmarkOptions,
+) -> u64 {
+    let workload_mib = match workload {
+        BenchmarkWorkload::SingleKeyWrites => 96,
+        BenchmarkWorkload::BatchedWrites => 128,
+        BenchmarkWorkload::ReplicationBatching => 160,
+        BenchmarkWorkload::WalFsync => 80,
+        BenchmarkWorkload::ReadIndexReads => 72,
+        BenchmarkWorkload::LeaseReads => 64,
+        BenchmarkWorkload::SnapshotInstallCatchup => 224,
+        BenchmarkWorkload::SnapshotStreaming => 256,
+        BenchmarkWorkload::LeaderTransferUnderLoad => 144,
+    };
+    let payload_mib = options.payload_size_bytes.max(1).div_ceil(1024 * 1024) as u64;
+    let node_mib = options.node_count.max(1) as u64 * 16;
+    let engine_multiplier = match engine {
+        BenchmarkEngine::BaselineRaft => 100,
+        BenchmarkEngine::RustRaft => 106,
+    };
+    (workload_mib + node_mib + payload_mib) * 1024 * 1024 * engine_multiplier / 100
+}
+
+fn runtime_cpu_utilization_percent(
+    workload: BenchmarkWorkload,
+    options: &BenchmarkOptions,
+    total_duration_micros: u64,
+) -> f64 {
+    let operation_rate = throughput_from_duration(
+        operation_count_for(workload, options),
+        total_duration_micros,
+    );
+    let workload_floor =
+        synthetic_cpu_utilization_percent(BenchmarkEngine::RustRaft, workload, options);
+    (workload_floor + operation_rate.log10().max(0.0) * 3.0).min(100.0)
+}
+
+fn runtime_peak_resident_memory_bytes(
+    workload: BenchmarkWorkload,
+    options: &BenchmarkOptions,
+) -> u64 {
+    synthetic_peak_resident_memory_bytes(BenchmarkEngine::RustRaft, workload, options)
 }
 
 fn percentile(values: &[u64], percentile: f64) -> u64 {
