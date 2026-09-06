@@ -429,6 +429,10 @@ The default policy is observe-only for dashboards and release dry runs;
 `RuntimePressureAdmissionPolicy::fail_closed()` lets production services reject
 new work when memory, p99 latency, scale target, peer pipeline, read-backlog, or
 node-runtime timer pressure crosses configured thresholds.
+Malformed latency histograms, such as non-monotonic bucket counts, invalid
+bucket bounds, or missing/mismatched `+Inf` buckets, are treated as latency
+pressure for the affected component so fail-closed admission does not silently
+trust incomplete release evidence.
 `matrixraft_runtime_pressure_admission_prometheus` and
 `matrixraft_runtime_pressure_grafana_panels` expose those decisions as
 canonical `rustraft_runtime_pressure_*` accepted/rejected, memory-pressure,

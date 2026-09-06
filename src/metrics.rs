@@ -1897,8 +1897,32 @@ fn push_latency_pressure_signal(
     histogram: &LatencyHistogram,
     threshold: u64,
 ) {
+    if threshold == 0 {
+        return;
+    }
+    if !matrixraft_latency_histogram_validation_issues(histogram).is_empty() {
+        let observed_p99_ms = threshold.saturating_add(1);
+        signals.push(RuntimePressureSignal {
+            component,
+            action,
+            memory_detail: None,
+            latency_detail: Some(LatencyPressureDetail {
+                component: component.to_string(),
+                sample_count: histogram.count.max(1),
+                observed_p95_ms: observed_p99_ms,
+                observed_p99_ms,
+                threshold_p99_ms: threshold,
+                excess_ms: observed_p99_ms.saturating_sub(threshold),
+            }),
+            scale_detail: None,
+            pipeline_detail: None,
+            read_backlog_detail: None,
+            node_runtime_timer_detail: None,
+        });
+        return;
+    }
     if let Some(observed_p99_ms) = matrixraft_latency_histogram_p99_ms(histogram) {
-        if threshold == 0 || observed_p99_ms <= threshold {
+        if observed_p99_ms <= threshold {
             return;
         }
         let observed_p95_ms = matrixraft_latency_histogram_p95_ms(histogram).unwrap_or(0);
@@ -1920,6 +1944,60 @@ fn push_latency_pressure_signal(
             node_runtime_timer_detail: None,
         });
     }
+}
+
+fn matrixraft_latency_histogram_validation_issues(
+    histogram: &LatencyHistogram,
+) -> Vec<&'static str> {
+    let mut issues = Vec::new();
+    if histogram.buckets.is_empty() {
+        if histogram.count > 0 || histogram.sum_ms > 0 {
+            issues.push("latency_histogram_buckets_empty");
+        }
+        return issues;
+    }
+
+    let mut previous_count = 0_u64;
+    let mut previous_finite_le_ms = None;
+    let mut saw_positive_inf = false;
+    for bucket in &histogram.buckets {
+        if saw_positive_inf {
+            issues.push("latency_histogram_bucket_after_positive_inf");
+            break;
+        }
+        if bucket.count < previous_count {
+            issues.push("latency_histogram_bucket_count_not_monotonic");
+        }
+        if bucket.count > histogram.count {
+            issues.push("latency_histogram_bucket_count_exceeds_total");
+        }
+        previous_count = bucket.count;
+
+        if bucket.le_ms == "+Inf" {
+            saw_positive_inf = true;
+            if bucket.count != histogram.count {
+                issues.push("latency_histogram_positive_inf_count_mismatch");
+            }
+            continue;
+        }
+
+        match bucket.le_ms.parse::<u64>() {
+            Ok(le_ms) => {
+                if previous_finite_le_ms.is_some_and(|previous| le_ms <= previous) {
+                    issues.push("latency_histogram_bucket_bound_not_increasing");
+                }
+                previous_finite_le_ms = Some(le_ms);
+            }
+            Err(_) => issues.push("latency_histogram_bucket_bound_invalid"),
+        }
+    }
+
+    if histogram.count > 0 && !saw_positive_inf {
+        issues.push("latency_histogram_positive_inf_missing");
+    }
+    issues.sort_unstable();
+    issues.dedup();
+    issues
 }
 
 fn push_pressure_signal(

@@ -1859,6 +1859,69 @@ fn runtime_pressure_admission_can_fail_closed_on_latency_only_pressure() {
 }
 
 #[test]
+fn runtime_pressure_admission_treats_malformed_latency_histograms_as_pressure() {
+    let latency_metrics = LatencyMetrics {
+        append_latency_ms: malformed_latency_histogram(),
+        vote_latency_ms: LatencyHistogram::zero(&["1", "+Inf"]),
+        pre_vote_latency_ms: LatencyHistogram::zero(&["1", "+Inf"]),
+        read_index_latency_ms: LatencyHistogram::zero(&["1", "+Inf"]),
+        snapshot_install_latency_ms: LatencyHistogram::zero(&["1", "+Inf"]),
+    };
+    let latency_thresholds = LatencyOptimizationThresholds {
+        append_p99_warning_ms: 100,
+        vote_p99_warning_ms: 100,
+        pre_vote_p99_warning_ms: 100,
+        read_index_p99_warning_ms: 50,
+        snapshot_install_p99_warning_ms: 5_000,
+    };
+
+    let observe_only_decision = matrixraft_runtime_pressure_admission(
+        &MemoryMetrics::zero(),
+        &MemoryOptimizationThresholds::default(),
+        &latency_metrics,
+        &latency_thresholds,
+        &RuntimePressureAdmissionPolicy::observe_only(),
+    );
+
+    assert!(observe_only_decision.accepted);
+    assert!(observe_only_decision.latency_pressure);
+    assert_eq!(observe_only_decision.latency_pressure_details.len(), 1);
+    let detail = observe_only_decision
+        .latency_pressure_details
+        .first()
+        .expect("malformed histogram should produce latency pressure detail");
+    assert_eq!(detail.component, "latency.append");
+    assert_eq!(detail.sample_count, 10);
+    assert_eq!(detail.threshold_p99_ms, 100);
+    assert_eq!(detail.observed_p99_ms, 101);
+    assert_eq!(detail.excess_ms, 1);
+    assert!(observe_only_decision
+        .actions
+        .contains(&"reduce_append_batch_or_raise_replication_parallelism".to_string()));
+    assert!(
+        matrixraft::metrics::matrixraft_validate_runtime_pressure_admission_evidence(
+            &observe_only_decision
+        )
+        .is_ok()
+    );
+
+    let fail_closed_decision = matrixraft_runtime_pressure_admission(
+        &MemoryMetrics::zero(),
+        &MemoryOptimizationThresholds::default(),
+        &latency_metrics,
+        &latency_thresholds,
+        &RuntimePressureAdmissionPolicy::fail_closed(),
+    );
+
+    assert!(!fail_closed_decision.accepted);
+    assert!(fail_closed_decision.latency_pressure);
+    assert_eq!(
+        fail_closed_decision.rejected_component,
+        Some("latency.append".to_string())
+    );
+}
+
+#[test]
 fn runtime_pressure_admission_can_fail_closed_on_scale_target_pressure() {
     let decision = matrixraft_runtime_pressure_admission_with_scale_targets(
         &MemoryMetrics::zero(),
@@ -2512,5 +2575,26 @@ fn p99_latency_histogram(p99_ms: u64) -> LatencyHistogram {
         ],
         sum_ms: p99_ms * 99,
         count: 100,
+    }
+}
+
+fn malformed_latency_histogram() -> LatencyHistogram {
+    LatencyHistogram {
+        buckets: vec![
+            LatencyBucket {
+                le_ms: "10".to_string(),
+                count: 8,
+            },
+            LatencyBucket {
+                le_ms: "5".to_string(),
+                count: 7,
+            },
+            LatencyBucket {
+                le_ms: "+Inf".to_string(),
+                count: 9,
+            },
+        ],
+        sum_ms: 64,
+        count: 10,
     }
 }
