@@ -19,8 +19,9 @@ use matrixraft::{
         matrixraft_memory_grafana_panels, matrixraft_memory_metric_names,
         matrixraft_memory_metrics_prometheus, matrixraft_memory_optimization_hints,
         matrixraft_observability_provisioning, matrixraft_production_readiness_grafana_panels,
-        matrixraft_production_readiness_metric_names, matrixraft_runtime_pressure_admission,
-        matrixraft_runtime_pressure_admission_prometheus,
+        matrixraft_production_readiness_metric_names, matrixraft_queue_pressure_grafana_panels,
+        matrixraft_queue_pressure_metric_names, matrixraft_queue_pressure_prometheus,
+        matrixraft_runtime_pressure_admission, matrixraft_runtime_pressure_admission_prometheus,
         matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure,
         matrixraft_runtime_pressure_admission_with_pipeline_pressure,
         matrixraft_runtime_pressure_admission_with_read_backlog_pressure,
@@ -44,8 +45,8 @@ use matrixraft::{
         NodeRuntimeTimerThresholds, ReadBacklogMetrics, ReadBacklogThresholds,
         RuntimePressureAdmissionPolicy, ScaleMetrics, ScaleOptimizationTargets, ScaleRateMetrics,
     },
-    PeerProgress, PipelineLimits, RuntimeTimerStatus, SnapshotLifecycleEvidence,
-    WalLifecycleEvidence,
+    MailBoxPressureStats, MailChannelPressureStats, PeerProgress, PipelineLimits,
+    RuntimeTimerStatus, SnapshotLifecycleEvidence, WalLifecycleEvidence,
 };
 
 #[test]
@@ -1481,6 +1482,101 @@ fn memory_observability_exports_prometheus_gauge_payload() {
     assert!(metrics.text.contains(
         "rustraft_replication_buffer_bytes{service=\"raft\\\"a\",group=\"g1\",workload=\"scale\"} 16384"
     ));
+}
+
+#[test]
+fn queue_pressure_observability_exports_prometheus_and_grafana_payload() {
+    let names = matrixraft_queue_pressure_metric_names();
+    assert_eq!(names.mailbox_total_len, "rustraft_mailbox_total_len");
+    assert_eq!(
+        names.mailbox_rejected_send_total,
+        "rustraft_mailbox_rejected_send_total"
+    );
+    assert_eq!(
+        names.mail_channel_queued_len,
+        "rustraft_mail_channel_queued_len"
+    );
+    assert_eq!(
+        names.mail_channel_rejected_send_total,
+        "rustraft_mail_channel_rejected_send_total"
+    );
+
+    let metrics = matrixraft_queue_pressure_prometheus(
+        &[(
+            "scheduler\"urgent",
+            MailBoxPressureStats {
+                high_watermark: 128,
+                total_len: 64,
+                max_channel_depth: 96,
+                rejected_send_count: 7,
+            },
+        )],
+        &[MailChannelPressureStats {
+            replica_id: 42,
+            num_mail_limit: 256,
+            queued_len: 144,
+            selector_total_mail_count: 512,
+            max_depth: 192,
+            rejected_send_count: 9,
+        }],
+        &[
+            ("service", "raft\"a"),
+            ("group", "g1"),
+            ("workload", "scale"),
+        ],
+    );
+
+    assert_eq!(metrics.format, "prometheus_text_v0.0.4");
+    assert_eq!(metrics.metric_count, 8);
+    assert!(metrics.text.contains(
+        "rustraft_mailbox_total_len{service=\"raft\\\"a\",group=\"g1\",workload=\"scale\",mailbox=\"scheduler\\\"urgent\"} 64"
+    ));
+    assert!(metrics.text.contains(
+        "rustraft_mailbox_high_watermark{service=\"raft\\\"a\",group=\"g1\",workload=\"scale\",mailbox=\"scheduler\\\"urgent\"} 128"
+    ));
+    assert!(metrics.text.contains(
+        "rustraft_mailbox_max_channel_depth{service=\"raft\\\"a\",group=\"g1\",workload=\"scale\",mailbox=\"scheduler\\\"urgent\"} 96"
+    ));
+    assert!(metrics.text.contains(
+        "rustraft_mailbox_rejected_send_total{service=\"raft\\\"a\",group=\"g1\",workload=\"scale\",mailbox=\"scheduler\\\"urgent\"} 7"
+    ));
+    assert!(metrics.text.contains(
+        "rustraft_mail_channel_queued_len{service=\"raft\\\"a\",group=\"g1\",workload=\"scale\",replica_id=\"42\"} 144"
+    ));
+    assert!(metrics.text.contains(
+        "rustraft_mail_channel_limit{service=\"raft\\\"a\",group=\"g1\",workload=\"scale\",replica_id=\"42\"} 256"
+    ));
+    assert!(metrics.text.contains(
+        "rustraft_mail_channel_max_depth{service=\"raft\\\"a\",group=\"g1\",workload=\"scale\",replica_id=\"42\"} 192"
+    ));
+    assert!(metrics.text.contains(
+        "rustraft_mail_channel_rejected_send_total{service=\"raft\\\"a\",group=\"g1\",workload=\"scale\",replica_id=\"42\"} 9"
+    ));
+
+    let panels = matrixraft_queue_pressure_grafana_panels();
+    assert_eq!(panels.len(), 4);
+    assert!(panels
+        .iter()
+        .any(|panel| panel.title == "Queue Pressure Depth"
+            && panel.expr.contains("rustraft_mailbox_total_len")
+            && panel.expr.contains("rustraft_mail_channel_queued_len")));
+    assert!(panels
+        .iter()
+        .any(|panel| panel.title == "Queue Pressure Rejections"
+            && panel.expr.contains("rustraft_mailbox_rejected_send_total")
+            && panel
+                .expr
+                .contains("rustraft_mail_channel_rejected_send_total")));
+    assert!(panels
+        .iter()
+        .any(|panel| panel.title == "Queue Pressure Limits"
+            && panel.expr.contains("rustraft_mailbox_high_watermark")
+            && panel.expr.contains("rustraft_mail_channel_limit")));
+    assert!(panels
+        .iter()
+        .any(|panel| panel.title == "Queue Pressure Max Depth"
+            && panel.expr.contains("rustraft_mailbox_max_channel_depth")
+            && panel.expr.contains("rustraft_mail_channel_max_depth")));
 }
 
 #[test]

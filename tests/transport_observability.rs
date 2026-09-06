@@ -15,8 +15,9 @@ use matrixraft::{
         matrixraft_operator_runbook_steps, matrixraft_operator_runbook_steps_with_diagnostics,
         matrixraft_operator_triage_prometheus, matrixraft_operator_triage_summary,
         matrixraft_optimization_report_prometheus, matrixraft_production_readiness_metric_names,
-        matrixraft_runtime_pressure_metric_names, matrixraft_scale_metric_names,
-        matrixraft_scale_target_metric_names, matrixraft_validate_observability_provisioning,
+        matrixraft_queue_pressure_metric_names, matrixraft_runtime_pressure_metric_names,
+        matrixraft_scale_metric_names, matrixraft_scale_target_metric_names,
+        matrixraft_validate_observability_provisioning,
         matrixraft_validate_observability_provisioning_json,
         matrixraft_validate_required_metric_scrape_texts, matrixraft_wal_lifecycle_metric_names,
     },
@@ -296,6 +297,18 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
         .contains(&"matrixraft_grafana_dashboard_json".to_string()));
     assert!(api
         .observability_interfaces
+        .contains(&"matrixraft_queue_pressure_metric_names".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_queue_pressure_prometheus".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"matrixraft_queue_pressure_grafana_panels".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"QueuePressureMetricNames".to_string()));
+    assert!(api
+        .observability_interfaces
         .contains(&"matrixraft_node_runtime_status_prometheus".to_string()));
     assert!(api
         .observability_interfaces
@@ -370,6 +383,27 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
         mapping.canonical == "RuntimePressureAdmission"
             && mapping.raft_rs_or_tikv_reference.contains("backpressure")
             && mapping.note.contains("peer pipeline telemetry")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "QueuePressureMetricNames"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("scheduler queue pressure metrics")
+            && mapping.note.contains("QPS and memory-pressure dashboards")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_queue_pressure_prometheus"
+            && mapping
+                .raft_rs_or_tikv_reference
+                .contains("mailbox and peer queue scrape")
+            && mapping.note.contains("rejected enqueue counters")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_queue_pressure_grafana_panels"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("queue pressure dashboard panels")
+            && mapping.note.contains("release-scale tuning")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "MailBox::try_send_checked"
@@ -530,6 +564,7 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     let metrics = matrixraft_metric_names();
     let benchmark_metrics = matrixraft_baseline_raft_benchmark_metric_names();
     let runtime_pressure_metrics = matrixraft_runtime_pressure_metric_names();
+    let queue_pressure_metrics = matrixraft_queue_pressure_metric_names();
     let membership_readiness_metrics = matrixraft_membership_readiness_metric_names();
     let production_readiness_metrics = matrixraft_production_readiness_metric_names();
     let dashboard = matrixraft_grafana_dashboard();
@@ -559,9 +594,10 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     // peer-count scale panels joined, 174 -> 176 when WAL slow-fsync
     // compaction count panels joined, 176 -> 187 when runtime-pressure
     // freshness panels joined, 187 -> 194 when benchmark artifact freshness
-    // panels joined, and 194 -> 202 when public API validation panels joined;
+    // panels joined, 194 -> 202 when public API validation panels joined, and
+    // 202 -> 206 when queue-pressure panels joined;
     // naming them keeps the number from being a figure nobody can check.
-    assert_eq!(dashboard.panels.len(), 202);
+    assert_eq!(dashboard.panels.len(), 206);
     let panel_ids = dashboard
         .panels
         .iter()
@@ -586,6 +622,10 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
         "Log Cache Memory",
         "Snapshot Buffer Memory",
         "Replication Buffer Memory",
+        "Queue Pressure Depth",
+        "Queue Pressure Rejections",
+        "Queue Pressure Limits",
+        "Queue Pressure Max Depth",
         "Runtime Admission Accepted",
         "Runtime Admission Rejected",
         "Runtime Memory Pressure",
@@ -752,6 +792,10 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
         runtime_pressure_metrics.action_total,
         runtime_pressure_metrics.action_source_total,
         runtime_pressure_metrics.bottleneck_score_percent,
+        queue_pressure_metrics.mailbox_total_len,
+        queue_pressure_metrics.mailbox_rejected_send_total,
+        queue_pressure_metrics.mail_channel_queued_len,
+        queue_pressure_metrics.mail_channel_rejected_send_total,
         membership_readiness_metrics.ready,
         membership_readiness_metrics.satisfied_total,
         membership_readiness_metrics.missing_total,
@@ -818,8 +862,9 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     assert_eq!(parsed["title"], "RustRaft Runtime Overview");
     // Same pin, checked through the serialized JSON: the struct and the exported document
     // must agree on how many panels there are.
-    // 194 -> 202 when public API validation panels joined.
-    assert_eq!(parsed["panels"].as_array().expect("panels").len(), 202);
+    // 194 -> 202 when public API validation panels joined, 202 -> 206 when
+    // queue-pressure panels joined.
+    assert_eq!(parsed["panels"].as_array().expect("panels").len(), 206);
     assert!(json.contains("histogram_quantile(0.99"));
     assert!(json.contains("rustraft_blocker_total"));
     assert!(json.contains("rustraft_fatal_total"));
@@ -827,6 +872,8 @@ fn grafana_dashboard_exports_runtime_metric_panels() {
     assert!(json.contains("rustraft_diagnostic_log_entry_total"));
     assert!(json.contains("rustraft_process_resident_memory_bytes"));
     assert!(json.contains("rustraft_replication_buffer_bytes"));
+    assert!(json.contains("rustraft_mailbox_total_len"));
+    assert!(json.contains("rustraft_mail_channel_rejected_send_total"));
     assert!(json.contains("rustraft_runtime_pressure_admission_rejected"));
     assert!(json.contains("rustraft_runtime_pressure_bottleneck_score_percent"));
     assert!(json.contains("Runtime Pressure Freshness"));
@@ -1543,6 +1590,7 @@ fn observability_required_metric_names_flatten_release_scale_catalog() {
     );
 
     let benchmark_metrics = matrixraft_baseline_raft_benchmark_metric_names();
+    let queue_pressure_metrics = matrixraft_queue_pressure_metric_names();
     for metric_name in [
         benchmark_metrics.passed,
         benchmark_metrics.production_evidence_ready,
@@ -1570,6 +1618,10 @@ fn observability_required_metric_names_flatten_release_scale_catalog() {
         "rustraft_scale_target_min_proposal_qps",
         "rustraft_runtime_pressure_latency_observed_p99_ms",
         "rustraft_process_resident_memory_bytes",
+        "rustraft_mailbox_total_len",
+        "rustraft_mailbox_rejected_send_total",
+        "rustraft_mail_channel_queued_len",
+        "rustraft_mail_channel_rejected_send_total",
         "rustraft_wal_lifecycle_compaction_after_slow_fsync_observed",
         "rustraft_production_readiness_runtime_pressure_bottleneck_score_percent",
         "rustraft_public_api_contract_ready",
@@ -1579,6 +1631,22 @@ fn observability_required_metric_names_flatten_release_scale_catalog() {
         assert!(
             required.iter().any(|required| required == metric_name),
             "flattened catalog missing production metric {metric_name}"
+        );
+    }
+
+    for metric_name in [
+        queue_pressure_metrics.mailbox_total_len,
+        queue_pressure_metrics.mailbox_high_watermark,
+        queue_pressure_metrics.mailbox_max_channel_depth,
+        queue_pressure_metrics.mailbox_rejected_send_total,
+        queue_pressure_metrics.mail_channel_queued_len,
+        queue_pressure_metrics.mail_channel_limit,
+        queue_pressure_metrics.mail_channel_max_depth,
+        queue_pressure_metrics.mail_channel_rejected_send_total,
+    ] {
+        assert!(
+            required.contains(&metric_name),
+            "flattened catalog missing queue pressure metric {metric_name}"
         );
     }
 }
