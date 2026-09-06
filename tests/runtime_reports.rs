@@ -3604,6 +3604,16 @@ fn admin_report_genericizes_baseline_raft_parity_evidence_for_rustraft() {
         .issues
         .contains(&"grafana_panel_contract_mismatch".to_string()));
 
+    let mut duplicate_grafana_panel_snapshot = snapshot.clone();
+    duplicate_grafana_panel_snapshot.grafana.panels[1].id =
+        duplicate_grafana_panel_snapshot.grafana.panels[0].id;
+    let duplicate_grafana_panel_validation =
+        matrixraft_validate_debug_snapshot(&duplicate_grafana_panel_snapshot);
+    assert!(!duplicate_grafana_panel_validation.ready);
+    assert!(duplicate_grafana_panel_validation
+        .issues
+        .contains(&"grafana_panel_id_duplicate".to_string()));
+
     let mut missing_grafana_panel_snapshot = snapshot.clone();
     missing_grafana_panel_snapshot
         .grafana
