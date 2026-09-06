@@ -7,6 +7,7 @@ use matrixraft::{
         matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog,
         matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer,
         matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts,
+        matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts,
         matrixraft_release_benchmark_runtime_timer_status,
         matrixraft_validate_benchmark_runtime_pressure_readiness_artifact,
         matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog,
@@ -1561,6 +1562,22 @@ fn benchmark_readiness_artifact_validator_accepts_matching_read_backlog_evidence
         artifact.diagnostic_json_lines,
         matrixraft::matrixraft_production_readiness_diagnostic_json_lines(&expected_policy_report)
     );
+    let one_call_report =
+        matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts(
+            &input,
+            &benchmark_report,
+            &benchmark_summary,
+            &MemoryMetrics::zero(),
+            &MemoryOptimizationThresholds::default(),
+            &LatencyMetrics::zero(),
+            &LatencyOptimizationThresholds::default(),
+            &[peer.clone()],
+            &read_backlog_metrics,
+            &read_backlog_thresholds,
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+        )
+        .expect("one-call read backlog report");
+    assert_eq!(one_call_report, expected_policy_report);
     let old_validator_error = matrixraft_validate_benchmark_runtime_pressure_readiness_artifact(
         &artifact,
         &input,
