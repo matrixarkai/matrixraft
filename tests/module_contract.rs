@@ -345,6 +345,15 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         .mapped_canonical_names
         .contains(&"matrixraft_runtime_pressure_freshness_diagnostic_json_lines".to_string()));
     assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_snapshot_lifecycle_evidence_prometheus".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_wal_lifecycle_evidence_prometheus".to_string()));
+    assert!(validation
+        .mapped_canonical_names
+        .contains(&"matrixraft_membership_readiness_prometheus".to_string()));
+    assert!(validation
         .unmapped_advertised_names
         .contains(&"matrixraft_public_api_contract".to_string()));
     assert!(validation
@@ -378,6 +387,15 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(!validation
         .unmapped_advertised_names
         .contains(&"matrixraft_grafana_dashboard_json".to_string()));
+    assert!(!validation
+        .unmapped_advertised_names
+        .contains(&"matrixraft_snapshot_lifecycle_evidence_prometheus".to_string()));
+    assert!(!validation
+        .unmapped_advertised_names
+        .contains(&"matrixraft_wal_lifecycle_evidence_prometheus".to_string()));
+    assert!(!validation
+        .unmapped_advertised_names
+        .contains(&"matrixraft_membership_readiness_prometheus".to_string()));
     assert!(
         validation.api_mapping_coverage_percent > 0
             && validation.api_mapping_coverage_percent < 100
@@ -453,6 +471,30 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(!diagnostic_coverage
         .unmapped_names
         .contains(&"matrixraft_diagnostic_log_prometheus".to_string()));
+    let observability_coverage = validation
+        .mapping_coverage_by_category
+        .iter()
+        .find(|coverage| coverage.category == "observability_interfaces")
+        .expect("observability coverage must be reported");
+    assert!(!observability_coverage
+        .unmapped_names
+        .contains(&"matrixraft_snapshot_lifecycle_evidence_prometheus".to_string()));
+    assert!(!observability_coverage
+        .unmapped_names
+        .contains(&"matrixraft_wal_lifecycle_evidence_prometheus".to_string()));
+    assert!(!observability_coverage
+        .unmapped_names
+        .contains(&"matrixraft_membership_readiness_prometheus".to_string()));
+    for required in [
+        "matrixraft_snapshot_lifecycle_evidence_prometheus",
+        "matrixraft_wal_lifecycle_evidence_prometheus",
+        "matrixraft_membership_readiness_prometheus",
+    ] {
+        assert!(
+            matrixraft_reference_mapped_interface_names().contains(&required.to_string()),
+            "{required} must stay in the fail-closed reference-mapped API subset"
+        );
+    }
     assert_eq!(
         validation.reference_required_names,
         matrixraft_reference_mapped_interface_names()

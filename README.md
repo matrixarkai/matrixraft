@@ -538,10 +538,11 @@ the supported API list.
 `matrixraft_reference_mapped_interface_names` is the fail-closed subset of that
 surface: election RPCs, append/read/snapshot RPCs, storage/transport, WAL,
 peer progress, runtime pressure, runtime-pressure freshness, scale-target
-admission, peer-pipeline admission, benchmark runner, Grafana dashboard, alert
-rules, operator runbook names, diagnostic-aware runbooks, runbook Prometheus,
-and provisioning runbook helpers must all have reference mappings before the
-public API contract is considered ready.
+admission, peer-pipeline admission, benchmark runner, snapshot lifecycle
+Prometheus, WAL lifecycle Prometheus, membership readiness Prometheus, Grafana
+dashboard, alert rules, operator runbook names, diagnostic-aware runbooks,
+runbook Prometheus, and provisioning runbook helpers must all have reference
+mappings before the public API contract is considered ready.
 `PublicApiContractValidationReport::unmapped_reference_required_names` exposes
 the exact missing names from that fail-closed subset so release gates can report
 API mapping drift without parsing blocker strings.

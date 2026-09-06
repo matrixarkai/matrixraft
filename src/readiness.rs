@@ -1139,6 +1139,9 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "matrixraft_runtime_pressure_freshness_prometheus",
         "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
         "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
+        "matrixraft_snapshot_lifecycle_evidence_prometheus",
+        "matrixraft_wal_lifecycle_evidence_prometheus",
+        "matrixraft_membership_readiness_prometheus",
         "matrixraft_release_benchmark_runtime_timer_status",
         "matrixraft_benchmark_runtime_pressure_readiness_artifact",
         "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog",
@@ -1787,6 +1790,38 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             byteraft_or_baseline_reference:
                 "ByteRaft release-scale freshness diagnostic JSON lines".to_string(),
             note: "Runtime-pressure freshness JSON lines preserve generated time, age, stale boundary, remaining freshness, status, and issue fields for release automation and centralized log queries."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_snapshot_lifecycle_evidence_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftSnapshotLifecyclePrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore snapshot send/apply progress Prometheus scrape".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft snapshot sender/downloader lifecycle Prometheus evidence"
+                    .to_string(),
+            note: "Snapshot lifecycle Prometheus turns sender, downloader, retry, timeout, rate-limit, install, rollback, and compacted-log rejoin proof into release-dashboard metrics."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_wal_lifecycle_evidence_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftWalLifecyclePrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV RaftEngine/WAL segment lifecycle Prometheus scrape".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft WAL segment compaction and slow-fsync Prometheus evidence".to_string(),
+            note: "WAL lifecycle Prometheus exposes retained ranges, log-index ranges, released segments, slow fsync, and compaction-after-pressure proof before durability or QPS parity is accepted."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_membership_readiness_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftMembershipReadinessPrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore joint-consensus and learner/witness readiness scrape"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft membership transition readiness Prometheus evidence".to_string(),
+            note: "Membership readiness Prometheus keeps failover, scale-up, scale-down, joint quorum, learner catch-up, witness, and scheduler-generation gaps visible in release dashboards."
                 .to_string(),
         },
         ApiNameMapping {
