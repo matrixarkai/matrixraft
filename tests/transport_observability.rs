@@ -306,7 +306,16 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
         .contains(&"matrixraft_queue_pressure_grafana_panels".to_string()));
     assert!(api
         .observability_interfaces
+        .contains(&"matrixraft_runtime_pressure_admission_with_queue_pressure".to_string()));
+    assert!(api
+        .observability_interfaces
         .contains(&"QueuePressureMetricNames".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"QueuePressureThresholds".to_string()));
+    assert!(api
+        .observability_interfaces
+        .contains(&"QueuePressureDetail".to_string()));
     assert!(api
         .observability_interfaces
         .contains(&"matrixraft_node_runtime_status_prometheus".to_string()));
@@ -404,6 +413,25 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
                 .byteraft_or_baseline_reference
                 .contains("queue pressure dashboard panels")
             && mapping.note.contains("release-scale tuning")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "QueuePressureThresholds"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("queue saturation")
+            && mapping.note.contains("queue-aware runtime admission")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "QueuePressureDetail"
+            && mapping.note.contains("bottleneck ranking")
+            && mapping.note.contains("diagnostic logs")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical == "matrixraft_runtime_pressure_admission_with_queue_pressure"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("queue-aware admission gate")
+            && mapping.note.contains("fail closed")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "MailBox::try_send_checked"
