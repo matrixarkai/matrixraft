@@ -215,9 +215,10 @@ License: Apache-2.0.
 
 Run `cargo run --example debug_artifacts` to print a complete sample support
 artifact with the debug snapshot, admin and local-status JSON log lines,
-diagnostic, peer-pipeline, and optimization Prometheus text, runbook Prometheus
-text, Grafana dashboard JSON, alert-rule JSON, validation report, and validation
-Prometheus series in one envelope.
+runtime-pressure freshness JSON log lines, diagnostic, peer-pipeline,
+runtime-pressure freshness, and optimization Prometheus text, runbook
+Prometheus text, Grafana dashboard JSON, alert-rule JSON, validation report, and
+validation Prometheus series in one envelope.
 
 The crate is OpenRaft-free and independent of OpenRaft types. TemporalStore
 converts its internal readiness evidence into `ReadinessSnapshot` or
