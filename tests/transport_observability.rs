@@ -1018,9 +1018,10 @@ fn alert_rules_export_operator_contract_for_readiness_and_blockers() {
     // admission alerting, 32 -> 33 with runtime pressure bottleneck
     // alerting before hard admission rejection, 33 -> 34 with
     // production-readiness runtime-pressure bottleneck alerting, 34 -> 37
-    // with runtime-pressure freshness alerting for release-scale evidence, and
-    // 37 -> 38 with benchmark artifact freshness alerting.
-    assert_eq!(rules.len(), 38);
+    // with runtime-pressure freshness alerting for release-scale evidence,
+    // 37 -> 38 with benchmark artifact freshness alerting, and 38 -> 39
+    // with runtime queue-pressure alerting.
+    assert_eq!(rules.len(), 39);
     assert!(
         rules
             .iter()
@@ -1193,6 +1194,51 @@ fn alert_rules_export_operator_contract_for_readiness_and_blockers() {
     assert!(runtime_scale_pressure
         .summary
         .contains("Runtime Scale Pressure"));
+
+    let runtime_pipeline_pressure = rules
+        .iter()
+        .find(|rule| rule.alert == "RustRaftRuntimePipelinePressure")
+        .expect("runtime pipeline pressure alert");
+    assert_eq!(
+        runtime_pipeline_pressure.expr,
+        "rustraft_runtime_pressure_pipeline > 0"
+    );
+    assert_eq!(runtime_pipeline_pressure.duration, "1m");
+    assert_eq!(runtime_pipeline_pressure.severity, "warning");
+    assert!(runtime_pipeline_pressure
+        .summary
+        .contains("Runtime Pipeline Pressure"));
+
+    let runtime_read_backlog_pressure = rules
+        .iter()
+        .find(|rule| rule.alert == "RustRaftRuntimeReadBacklogPressure")
+        .expect("runtime read backlog pressure alert");
+    assert_eq!(
+        runtime_read_backlog_pressure.expr,
+        "rustraft_runtime_pressure_read_backlog > 0"
+    );
+    assert_eq!(runtime_read_backlog_pressure.duration, "1m");
+    assert_eq!(runtime_read_backlog_pressure.severity, "warning");
+    assert!(runtime_read_backlog_pressure
+        .summary
+        .contains("Runtime Read Backlog"));
+
+    let runtime_queue_pressure = rules
+        .iter()
+        .find(|rule| rule.alert == "RustRaftRuntimeQueuePressure")
+        .expect("runtime queue pressure alert");
+    assert_eq!(
+        runtime_queue_pressure.expr,
+        "rustraft_runtime_pressure_queue > 0"
+    );
+    assert_eq!(runtime_queue_pressure.duration, "1m");
+    assert_eq!(runtime_queue_pressure.severity, "warning");
+    assert!(runtime_queue_pressure
+        .summary
+        .contains("Runtime Queue Pressure"));
+    assert!(runtime_queue_pressure
+        .summary
+        .contains("Runtime Pressure Action Sources"));
 
     let node_runtime_timer_backpressure = rules
         .iter()
@@ -1517,7 +1563,7 @@ fn alert_rules_export_operator_contract_for_readiness_and_blockers() {
 
     let json = matrixraft_alert_rules_json();
     let parsed: Value = serde_json::from_str(&json).expect("alert rule json");
-    assert_eq!(parsed.as_array().expect("alert rules").len(), 38);
+    assert_eq!(parsed.as_array().expect("alert rules").len(), 39);
     assert!(json.contains("RustRaftOptimizationWarningHints"));
     assert!(json.contains("rustraft_optimization_warning_total > 0"));
     assert!(json.contains("RustRaftMemoryPressure"));
@@ -1546,6 +1592,8 @@ fn alert_rules_export_operator_contract_for_readiness_and_blockers() {
     assert!(json.contains("rustraft_runtime_pressure_pipeline > 0"));
     assert!(json.contains("RustRaftRuntimeReadBacklogPressure"));
     assert!(json.contains("rustraft_runtime_pressure_read_backlog > 0"));
+    assert!(json.contains("RustRaftRuntimeQueuePressure"));
+    assert!(json.contains("rustraft_runtime_pressure_queue > 0"));
     assert!(json.contains("rustraft_runtime_pressure_admission_rejected > 0"));
     assert!(json.contains("RustRaftNodeRuntimeTimerBackpressure"));
     assert!(json.contains(
@@ -2830,6 +2878,18 @@ fn optimization_report_prometheus_exports_hint_metrics() {
     assert!(production_bottleneck_step
         .validation
         .contains("rustraft_production_readiness_runtime_pressure_bottleneck_score_percent"));
+    let queue_pressure_step = runbook
+        .iter()
+        .find(|step| step.id == "resolve_runtime_queue_pressure")
+        .expect("runtime queue pressure step");
+    assert_eq!(queue_pressure_step.severity, "warning");
+    assert_eq!(queue_pressure_step.target, "runtime_queue");
+    assert!(queue_pressure_step
+        .action
+        .contains("Runtime Queue Pressure Detail"));
+    assert!(queue_pressure_step
+        .validation
+        .contains("rustraft_runtime_pressure_queue_excess"));
     let runbook_metrics =
         matrixraft_operator_runbook_prometheus(&runbook, &[("service", "raft\"a")]);
     assert_eq!(runbook_metrics.format, "prometheus_text_v0.0.4");
@@ -2847,6 +2907,9 @@ fn optimization_report_prometheus_exports_hint_metrics() {
     ));
     assert!(runbook_metrics.text.contains(
         "rustraft_operator_runbook_step_present{service=\"raft\\\"a\",step=\"inspect_runtime_pressure_bottleneck_warning\",severity=\"warning\",target=\"runtime_pressure\"} 1"
+    ));
+    assert!(runbook_metrics.text.contains(
+        "rustraft_operator_runbook_step_present{service=\"raft\\\"a\",step=\"resolve_runtime_queue_pressure\",severity=\"warning\",target=\"runtime_queue\"} 1"
     ));
     assert!(runbook_metrics.text.contains(
         "rustraft_operator_runbook_first_step{service=\"raft\\\"a\",step=\"resolve_critical_optimization_hints\",severity=\"critical\",target=\"optimization\"} 1"
