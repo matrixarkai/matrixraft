@@ -97,7 +97,7 @@ impl<Mail> MailChannel<Mail> {
         mails: Vec<Mail>,
     ) -> Result<Result<(), Vec<Mail>>, RaftError> {
         let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
-        if self.overflow(&inner) {
+        if self.overflow(&inner) || inner.size.saturating_add(mails.len()) > self.num_mail_limit {
             return Ok(Err(mails));
         }
         inner.size += mails.len();

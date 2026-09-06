@@ -146,6 +146,48 @@ fn channel_selector_checked_api_preserves_overflow_and_selection_contract() {
         1
     );
 
+    channel
+        .send_checked(MailPriority::Normal, "two")
+        .expect("checked unbounded send two");
+    channel
+        .send_checked(MailPriority::Normal, "three")
+        .expect("checked unbounded send three");
+    assert!(selector
+        .fire_checked(Arc::clone(&channel))
+        .expect("checked fire"));
+    let selection = selector
+        .select_checked(
+            ChannelSelectorPolicy {
+                limit: 1,
+                timeout_ms: 0,
+            },
+            &[],
+        )
+        .expect("checked select two");
+    assert_eq!(
+        selection.channels[0]
+            .fetch_checked(&selector)
+            .expect("checked fetch two and three"),
+        vec!["two", "three"]
+    );
+    assert!(selector
+        .try_send_to_channel_checked(Arc::clone(&channel), MailPriority::Normal, "four")
+        .expect("checked overflow")
+        .is_err());
+    assert_eq!(channel.queued_len_checked().expect("checked queued len"), 0);
+}
+
+#[test]
+fn mail_channel_checked_batch_send_rejects_oversized_bursts_before_queueing() {
+    let selector = ChannelSelector::new();
+    let channel = MailChannel::new(8, 2);
+
+    assert!(channel
+        .try_send_many_checked(MailPriority::Normal, vec!["one", "two", "three"])
+        .expect("checked oversized burst")
+        .is_err());
+    assert_eq!(channel.queued_len_checked().expect("checked queued len"), 0);
+
     assert!(channel
         .try_send_many_checked(MailPriority::Normal, vec!["two", "three"])
         .expect("checked burst send")
@@ -168,9 +210,5 @@ fn channel_selector_checked_api_preserves_overflow_and_selection_contract() {
             .expect("checked fetch burst"),
         vec!["two", "three"]
     );
-    assert!(selector
-        .try_send_to_channel_checked(Arc::clone(&channel), MailPriority::Normal, "four")
-        .expect("checked overflow")
-        .is_err());
     assert_eq!(channel.queued_len_checked().expect("checked queued len"), 0);
 }
