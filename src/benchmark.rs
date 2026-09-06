@@ -22,17 +22,19 @@ use crate::{
     matrixraft_operator_runbook_prometheus, matrixraft_production_readiness_diagnostic_json_lines,
     matrixraft_production_readiness_report, matrixraft_production_readiness_report_prometheus,
     matrixraft_production_readiness_report_with_runtime_pressure_policy,
+    matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness,
     matrixraft_runtime_pressure_admission_prometheus,
     matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure,
     matrixraft_runtime_pressure_admission_with_scale_pipeline_read_backlog_and_node_runtime_timer_pressure,
-    matrixraft_scale_optimization_hints, AdminStatusSurfaceInput, ApplySnapshotFence, Config,
-    DebugSnapshot, GrafanaPanel, HardState, LatencyMetrics, LatencyOptimizationThresholds,
-    LogEntry, LogId, Membership, MemoryMetrics, MemoryOptimizationThresholds,
-    NodeRuntimeTimerThresholds, OperatorRunbookStep, OptimizationHint, Peer, PersistentRaftWal,
-    PersistentRaftWalOptions, ProductionReadinessInput, ProductionReadinessReport,
-    PrometheusMetricSet, RaftCluster, RaftError, ReadBacklogMetrics, ReadBacklogThresholds,
-    ReplicaRole, RuntimeAdminReport, RuntimePressureAdmissionPolicy, RuntimeTimerStatus,
-    ScaleMetrics, ScaleOptimizationTargets, ScaleRateMetrics, SnapshotMetadata, WalRecord,
+    matrixraft_runtime_pressure_freshness_report, matrixraft_scale_optimization_hints,
+    AdminStatusSurfaceInput, ApplySnapshotFence, Config, DebugSnapshot, GrafanaPanel, HardState,
+    LatencyMetrics, LatencyOptimizationThresholds, LogEntry, LogId, Membership, MemoryMetrics,
+    MemoryOptimizationThresholds, NodeRuntimeTimerThresholds, OperatorRunbookStep,
+    OptimizationHint, Peer, PersistentRaftWal, PersistentRaftWalOptions, ProductionReadinessInput,
+    ProductionReadinessReport, PrometheusMetricSet, RaftCluster, RaftError, ReadBacklogMetrics,
+    ReadBacklogThresholds, ReplicaRole, RuntimeAdminReport, RuntimePressureAdmissionPolicy,
+    RuntimePressureFreshnessReport, RuntimeTimerStatus, ScaleMetrics, ScaleOptimizationTargets,
+    ScaleRateMetrics, SnapshotMetadata, WalRecord,
 };
 
 const MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS: u64 = 24 * 60 * 60 * 1000;
@@ -922,6 +924,17 @@ pub fn matrixraft_release_benchmark_runtime_timer_status() -> RuntimeTimerStatus
     }
 }
 
+fn benchmark_runtime_pressure_freshness_report(
+    generated_at_unix_ms: u64,
+) -> RuntimePressureFreshnessReport {
+    matrixraft_runtime_pressure_freshness_report(
+        generated_at_unix_ms,
+        generated_at_unix_ms,
+        MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS,
+        MATRIXRAFT_BENCHMARK_MAX_ARTIFACT_AGE_MS / 10,
+    )
+}
+
 pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact(
     input: &ProductionReadinessInput,
     report: &BenchmarkReport,
@@ -1011,15 +1024,18 @@ pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlo
         .as_ref()
         .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
         .unwrap_or_default();
-    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy(
+    let generated_at_unix_ms = benchmark_now_unix_ms();
+    let freshness = benchmark_runtime_pressure_freshness_report(generated_at_unix_ms);
+    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
         &readiness_input,
         policy,
+        &freshness,
     );
     let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
     let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
     Ok(BenchmarkRuntimePressureReadinessArtifact {
         schema: MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA.to_string(),
-        generated_at_unix_ms: benchmark_now_unix_ms(),
+        generated_at_unix_ms,
         labels: labels
             .iter()
             .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
@@ -1064,15 +1080,18 @@ pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_re
         .as_ref()
         .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
         .unwrap_or_default();
-    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy(
+    let generated_at_unix_ms = benchmark_now_unix_ms();
+    let freshness = benchmark_runtime_pressure_freshness_report(generated_at_unix_ms);
+    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
         &readiness_input,
         policy,
+        &freshness,
     );
     let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
     let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
     Ok(BenchmarkRuntimePressureReadinessArtifact {
         schema: MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA.to_string(),
-        generated_at_unix_ms: benchmark_now_unix_ms(),
+        generated_at_unix_ms,
         labels: labels
             .iter()
             .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
@@ -1121,15 +1140,18 @@ pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlo
         .as_ref()
         .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
         .unwrap_or_default();
-    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy(
+    let generated_at_unix_ms = benchmark_now_unix_ms();
+    let freshness = benchmark_runtime_pressure_freshness_report(generated_at_unix_ms);
+    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
         &readiness_input,
         policy,
+        &freshness,
     );
     let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
     let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
     Ok(BenchmarkRuntimePressureReadinessArtifact {
         schema: MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA.to_string(),
-        generated_at_unix_ms: benchmark_now_unix_ms(),
+        generated_at_unix_ms,
         labels: labels
             .iter()
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
@@ -1178,15 +1200,18 @@ pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_re
         .as_ref()
         .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
         .unwrap_or_default();
-    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy(
+    let generated_at_unix_ms = benchmark_now_unix_ms();
+    let freshness = benchmark_runtime_pressure_freshness_report(generated_at_unix_ms);
+    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
         &readiness_input,
         policy,
+        &freshness,
     );
     let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
     let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
     Ok(BenchmarkRuntimePressureReadinessArtifact {
         schema: MATRIXRAFT_BENCHMARK_RUNTIME_PRESSURE_READINESS_ARTIFACT_SCHEMA.to_string(),
-        generated_at_unix_ms: benchmark_now_unix_ms(),
+        generated_at_unix_ms,
         labels: labels
             .iter()
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
