@@ -44,6 +44,8 @@ use matrixraft::{
     matrixraft_runtime_pressure_bottleneck_summary,
     matrixraft_runtime_pressure_diagnostic_json_lines,
     matrixraft_runtime_pressure_diagnostic_log_entries,
+    matrixraft_runtime_pressure_freshness_diagnostic_json_lines,
+    matrixraft_runtime_pressure_freshness_diagnostic_log_entries,
     matrixraft_runtime_pressure_freshness_report, matrixraft_validate_debug_snapshot,
     matrixraft_validate_debug_snapshot_json,
     matrixraft_validate_runtime_pressure_admission_evidence,
@@ -830,6 +832,72 @@ fn runtime_pressure_freshness_report_classifies_release_evidence_age() {
     assert!(invalid
         .issues
         .contains(&"runtime_pressure_low_fresh_exceeds_max_age".to_string()));
+
+    let fresh_entries = matrixraft_runtime_pressure_freshness_diagnostic_log_entries(&fresh);
+    assert_eq!(fresh_entries.len(), 1);
+    assert_eq!(
+        fresh_entries[0].target,
+        "rustraft.runtime_pressure.freshness"
+    );
+    assert_eq!(fresh_entries[0].severity, DiagnosticSeverity::Info);
+    assert_eq!(fresh_entries[0].message, "runtime_pressure_freshness_fresh");
+    assert!(fresh_entries[0]
+        .fields
+        .contains(&("freshness_status".to_string(), "fresh".to_string())));
+    assert!(fresh_entries[0]
+        .fields
+        .contains(&("age_ms".to_string(), "200".to_string())));
+    assert!(fresh_entries[0]
+        .fields
+        .contains(&("issues".to_string(), "none".to_string())));
+
+    let low_fresh_entries =
+        matrixraft_runtime_pressure_freshness_diagnostic_log_entries(&low_fresh);
+    assert_eq!(low_fresh_entries[0].severity, DiagnosticSeverity::Warn);
+    assert_eq!(
+        low_fresh_entries[0].message,
+        "runtime_pressure_freshness_low"
+    );
+    assert!(low_fresh_entries[0]
+        .fields
+        .contains(&("remaining_fresh_ms".to_string(), "200".to_string())));
+
+    let stale_entries = matrixraft_runtime_pressure_freshness_diagnostic_log_entries(&stale);
+    assert_eq!(stale_entries.len(), 2);
+    assert_eq!(stale_entries[0].severity, DiagnosticSeverity::Error);
+    assert_eq!(stale_entries[0].message, "runtime_pressure_freshness_stale");
+    assert!(stale_entries[0].fields.contains(&(
+        "issues".to_string(),
+        "runtime_pressure_generated_at_stale".to_string()
+    )));
+    assert!(stale_entries.iter().any(|entry| {
+        entry.target == "rustraft.runtime_pressure.freshness.issue"
+            && entry.severity == DiagnosticSeverity::Error
+            && entry.message == "runtime_pressure_generated_at_stale"
+    }));
+
+    let invalid_json_lines = matrixraft_runtime_pressure_freshness_diagnostic_json_lines(&invalid);
+    assert_eq!(invalid_json_lines.lines().count(), invalid.issues.len() + 1);
+    let parsed: Value = serde_json::from_str(
+        invalid_json_lines
+            .lines()
+            .next()
+            .expect("freshness summary line"),
+    )
+    .expect("runtime pressure freshness diagnostic json line");
+    assert_eq!(parsed["target"], "rustraft.runtime_pressure.freshness");
+    assert_eq!(parsed["severity"], "error");
+    assert_eq!(parsed["message"], "runtime_pressure_freshness_invalid");
+    assert!(parsed["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .any(|field| field[0] == "freshness_status" && field[1] == "invalid"));
+    assert!(parsed["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .any(|field| field[0] == "issue_count" && field[1] == "3"));
 }
 
 #[test]

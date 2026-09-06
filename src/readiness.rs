@@ -1137,6 +1137,8 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "matrixraft_runtime_pressure_bottleneck_summary",
         "matrixraft_runtime_pressure_freshness_report",
         "matrixraft_runtime_pressure_freshness_prometheus",
+        "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
+        "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
         "matrixraft_release_benchmark_runtime_timer_status",
         "matrixraft_benchmark_runtime_pressure_readiness_artifact",
         "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog",
@@ -1764,6 +1766,27 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             byteraft_or_baseline_reference:
                 "ByteRaft release-scale QPS/latency/memory freshness telemetry".to_string(),
             note: "Runtime-pressure freshness Prometheus exports generated time, age, stale boundary, remaining freshness, status, and issue counters so Grafana can reject stale QPS, latency, or memory evidence before parity is claimed."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_freshness_diagnostic_log_entries".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePressureFreshnessDiagnosticLogEntries"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore structured telemetry freshness diagnostics".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft release-scale QPS/latency/memory freshness logs".to_string(),
+            note: "Runtime-pressure freshness diagnostic entries make stale, low-fresh, invalid, and future-dated benchmark evidence visible to log-only release gates without parsing Prometheus text."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_freshness_diagnostic_json_lines".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePressureFreshnessDiagnosticJsonLines".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore JSON log freshness diagnostics".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft release-scale freshness diagnostic JSON lines".to_string(),
+            note: "Runtime-pressure freshness JSON lines preserve generated time, age, stale boundary, remaining freshness, status, and issue fields for release automation and centralized log queries."
                 .to_string(),
         },
         ApiNameMapping {
@@ -2673,6 +2696,8 @@ pub fn matrixraft_observability_interface_names() -> Vec<String> {
         "matrixraft_runtime_pressure_bottleneck_summary",
         "matrixraft_runtime_pressure_freshness_report",
         "matrixraft_runtime_pressure_freshness_prometheus",
+        "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
+        "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
         "matrixraft_runtime_pressure_admission_prometheus",
         "matrixraft_validate_runtime_pressure_admission_evidence",
         "matrixraft_validate_runtime_pressure_admission_evidence_with_policy",
@@ -2743,6 +2768,8 @@ pub fn matrixraft_diagnostic_interface_names() -> Vec<String> {
         "matrixraft_optimization_diagnostic_json_lines",
         "matrixraft_runtime_pressure_diagnostic_log_entries",
         "matrixraft_runtime_pressure_diagnostic_json_lines",
+        "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
+        "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
         "matrixraft_membership_readiness_diagnostic_log_entries",
         "matrixraft_membership_readiness_diagnostic_json_lines",
         "matrixraft_production_readiness_diagnostic_log_entries",

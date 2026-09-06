@@ -4096,6 +4096,90 @@ pub fn matrixraft_runtime_pressure_diagnostic_json_lines(
         .join("\n")
 }
 
+pub fn matrixraft_runtime_pressure_freshness_diagnostic_log_entries(
+    report: &RuntimePressureFreshnessReport,
+) -> Vec<DiagnosticLogEntry> {
+    let severity = if !report.fresh || !report.issues.is_empty() {
+        DiagnosticSeverity::Error
+    } else if !report.low_fresh {
+        DiagnosticSeverity::Warn
+    } else {
+        DiagnosticSeverity::Info
+    };
+    let message = match report.freshness_status.as_str() {
+        "fresh" => "runtime_pressure_freshness_fresh",
+        "low_fresh" => "runtime_pressure_freshness_low",
+        "stale" => "runtime_pressure_freshness_stale",
+        "invalid" => "runtime_pressure_freshness_invalid",
+        _ => "runtime_pressure_freshness_unknown",
+    };
+    let issue_summary = if report.issues.is_empty() {
+        "none".to_string()
+    } else {
+        report.issues.join(",")
+    };
+    let mut entries = Vec::with_capacity(1 + report.issues.len());
+    entries.push(DiagnosticLogEntry {
+        target: "rustraft.runtime_pressure.freshness".to_string(),
+        severity,
+        message: message.to_string(),
+        fields: vec![
+            (
+                "generated_at_unix_ms".to_string(),
+                report.generated_at_unix_ms.to_string(),
+            ),
+            ("now_unix_ms".to_string(), report.now_unix_ms.to_string()),
+            ("max_age_ms".to_string(), report.max_age_ms.to_string()),
+            ("low_fresh_ms".to_string(), report.low_fresh_ms.to_string()),
+            ("age_ms".to_string(), report.age_ms.to_string()),
+            (
+                "stale_after_unix_ms".to_string(),
+                report.stale_after_unix_ms.to_string(),
+            ),
+            (
+                "remaining_fresh_ms".to_string(),
+                report.remaining_fresh_ms.to_string(),
+            ),
+            ("fresh".to_string(), report.fresh.to_string()),
+            ("low_fresh".to_string(), report.low_fresh.to_string()),
+            (
+                "freshness_status".to_string(),
+                report.freshness_status.clone(),
+            ),
+            ("issue_count".to_string(), report.issues.len().to_string()),
+            ("issues".to_string(), issue_summary),
+        ],
+    });
+    entries.extend(report.issues.iter().map(|issue| DiagnosticLogEntry {
+        target: "rustraft.runtime_pressure.freshness.issue".to_string(),
+        severity: DiagnosticSeverity::Error,
+        message: issue.clone(),
+        fields: vec![
+            (
+                "freshness_status".to_string(),
+                report.freshness_status.clone(),
+            ),
+            ("fresh".to_string(), report.fresh.to_string()),
+            ("age_ms".to_string(), report.age_ms.to_string()),
+            ("max_age_ms".to_string(), report.max_age_ms.to_string()),
+        ],
+    }));
+    entries
+}
+
+pub fn matrixraft_runtime_pressure_freshness_diagnostic_json_lines(
+    report: &RuntimePressureFreshnessReport,
+) -> String {
+    matrixraft_runtime_pressure_freshness_diagnostic_log_entries(report)
+        .into_iter()
+        .map(|entry| {
+            serde_json::to_string(&entry)
+                .expect("RustRaft runtime pressure freshness diagnostic entry must serialize")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn matrixraft_scale_optimization_hints(
     metrics: &ScaleRateMetrics,
     targets: &ScaleOptimizationTargets,
