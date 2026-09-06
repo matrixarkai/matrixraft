@@ -18,9 +18,10 @@ use matrixraft::{
     matrixraft_named_readiness_blockers, matrixraft_process_readiness_blocker,
     matrixraft_production_readiness_report,
     matrixraft_production_readiness_report_with_runtime_pressure_policy,
+    matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness,
     matrixraft_read_safety_evidence_artifact, matrixraft_replication_pipeline_evidence_artifact,
     matrixraft_require_production_ready, matrixraft_runtime_capability_report_from_evidence,
-    matrixraft_snapshot_lifecycle_evidence_artifact,
+    matrixraft_runtime_pressure_freshness_report, matrixraft_snapshot_lifecycle_evidence_artifact,
     matrixraft_validate_baseline_raft_operational_evidence_bundle,
     matrixraft_validate_cross_plane_process_evidence_artifact, matrixraft_validate_deployment_mode,
     matrixraft_validate_deployment_readiness,
@@ -616,6 +617,43 @@ fn production_readiness_report_with_runtime_pressure_policy_rejects_priority_dri
         &"runtime_pressure:policy_evidence_invalid:runtime_pressure:policy_rejected_component_mismatch:memory.process_resident:latency.append"
             .to_string()
     ));
+}
+
+#[test]
+fn production_readiness_report_with_runtime_pressure_freshness_blocks_stale_evidence() {
+    let input = ready_input();
+    let stale_freshness = matrixraft_runtime_pressure_freshness_report(1_000, 2_050, 1_000, 300);
+    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
+        &input,
+        &matrixraft::RuntimePressureAdmissionPolicy::fail_closed(),
+        &stale_freshness,
+    );
+
+    assert!(!report.ready);
+    assert!(report
+        .missing
+        .contains(&"runtime_pressure:freshness_evidence_fresh".to_string()));
+    assert!(report.production_blockers.contains(
+        &"runtime_pressure:freshness_invalid:runtime_pressure_generated_at_stale".to_string()
+    ));
+    assert!(report.recommended_next_actions.iter().any(|action| action
+        .contains("refresh runtime-pressure evidence before claiming QPS, latency, or memory")));
+
+    let low_fresh = matrixraft_runtime_pressure_freshness_report(1_000, 1_800, 1_000, 300);
+    let low_fresh_report =
+        matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness(
+            &input,
+            &matrixraft::RuntimePressureAdmissionPolicy::fail_closed(),
+            &low_fresh,
+        );
+    assert!(low_fresh_report.ready, "{low_fresh_report:#?}");
+    assert!(low_fresh_report
+        .satisfied
+        .contains(&"runtime_pressure:freshness_evidence_fresh".to_string()));
+    assert!(low_fresh_report
+        .recommended_next_actions
+        .iter()
+        .any(|action| action.contains("refresh runtime-pressure evidence soon")));
 }
 
 #[test]

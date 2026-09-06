@@ -69,6 +69,7 @@ License: Apache-2.0.
 - `matrixraft_parity_report`
 - `matrixraft_production_readiness_report`
 - `matrixraft_production_readiness_report_with_runtime_pressure_policy`
+- `matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness`
 - `matrixraft_production_readiness_report_prometheus`
 - `matrixraft_production_readiness_metric_names`
 - `matrixraft_production_readiness_grafana_panels`
@@ -404,6 +405,10 @@ fail-closed decision.
 `matrixraft_runtime_pressure_freshness_report` classifies runtime-pressure
 evidence as fresh, low-fresh, stale, or invalid before release automation trusts
 memory, latency, and QPS samples for production-readiness decisions.
+`matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness`
+turns that freshness state into the production-readiness gate, blocking stale,
+invalid, or future-dated QPS/latency/memory pressure evidence before a release
+claim can pass.
 `matrixraft_runtime_pressure_freshness_prometheus` exports that evidence age,
 stale boundary, remaining freshness, status, and issue count so Grafana can
 guard release dashboards against stale runtime-pressure samples.

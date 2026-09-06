@@ -627,6 +627,10 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(validation.reference_required_names.contains(
         &"matrixraft_production_readiness_report_with_runtime_pressure_policy".to_string()
     ));
+    assert!(validation.reference_required_names.contains(
+        &"matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness"
+            .to_string()
+    ));
     assert!(validation
         .reference_required_names
         .contains(&"matrixraft_admin_diagnostic_log_entries".to_string()));
@@ -801,6 +805,16 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
             && mapping
                 .note
                 .contains("configured fail-closed admission policy")
+    }));
+    assert!(api.api_name_mappings.iter().any(|mapping| {
+        mapping.canonical
+            == "matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness"
+            && mapping
+                .byteraft_or_baseline_reference
+                .contains("runtime-pressure freshness deployment gate")
+            && mapping
+                .note
+                .contains("future-dated runtime-pressure evidence")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_admin_diagnostic_json_lines"
