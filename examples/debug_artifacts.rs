@@ -22,15 +22,20 @@ use matrixraft::{
     },
     matrixraft_capability_evidence, matrixraft_debug_bundle_validation_prometheus,
     matrixraft_debug_snapshot_metadata_prometheus, matrixraft_local_status_diagnostic_json_lines,
-    matrixraft_observability_provisioning,
+    matrixraft_membership_readiness_prometheus, matrixraft_observability_provisioning,
     matrixraft_observability_provisioning_validation_prometheus,
     matrixraft_operator_runbook_prometheus, matrixraft_operator_triage_prometheus,
     matrixraft_peer_pipeline_metrics_prometheus, matrixraft_runtime_admin_report,
-    matrixraft_runtime_local_status_report, matrixraft_validate_debug_snapshot,
-    matrixraft_validate_observability_provisioning, DebugBundleValidationReport, LatencyMetrics,
-    LatencyOptimizationThresholds, MemoryMetrics, MemoryOptimizationThresholds, Peer, PeerProgress,
+    matrixraft_runtime_local_status_report,
+    matrixraft_runtime_pressure_freshness_diagnostic_json_lines,
+    matrixraft_snapshot_lifecycle_evidence_prometheus, matrixraft_validate_debug_snapshot,
+    matrixraft_validate_observability_provisioning, matrixraft_wal_lifecycle_evidence_prometheus,
+    DebugBundleValidationReport, LatencyMetrics, LatencyOptimizationThresholds,
+    MembershipReadinessReport, MembershipScope, MembershipTransitionDecision,
+    MembershipTransitionKind, MemoryMetrics, MemoryOptimizationThresholds, Peer, PeerProgress,
     ProgressState, RaftCluster, ReadBacklogMetrics, ReadBacklogThresholds, ReadinessSnapshot,
-    ReplicaRole, RuntimePressureAdmissionPolicy, ScaleMetrics,
+    ReplicaRole, RuntimePressureAdmissionPolicy, ScaleMetrics, SnapshotLifecycleEvidence,
+    WalLifecycleEvidence,
 };
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -368,6 +373,15 @@ fn main() {
         );
     let benchmark_full_pressure_validation =
         matrixraft_validate_debug_snapshot(&benchmark_full_pressure_snapshot);
+    let runtime_pressure_freshness = benchmark_full_pressure_snapshot
+        .runtime_pressure_freshness
+        .as_ref()
+        .expect("full pressure snapshot carries runtime pressure freshness");
+    let runtime_pressure_freshness_diagnostic_json_lines =
+        matrixraft_runtime_pressure_freshness_diagnostic_json_lines(runtime_pressure_freshness);
+    let runtime_pressure_freshness_prometheus = benchmark_full_pressure_snapshot
+        .runtime_pressure_freshness_prometheus
+        .clone();
     let diagnostic_json_lines = snapshot
         .diagnostics
         .iter()
@@ -390,6 +404,97 @@ fn main() {
         matrixraft_local_status_diagnostic_json_lines(&local_status);
     let peer_pipeline_prometheus =
         matrixraft_peer_pipeline_metrics_prometheus(&local_status, &labels);
+    let snapshot_lifecycle_prometheus = matrixraft_snapshot_lifecycle_evidence_prometheus(
+        &SnapshotLifecycleEvidence {
+            sender_lifecycle_present: true,
+            downloader_lifecycle_present: true,
+            retry_backpressure_present: false,
+            chunk_retry_present: true,
+            send_timeout_present: false,
+            rate_limit_present: true,
+            sustained_sender_load_present: true,
+            sustained_downloader_load_present: true,
+            sustained_sender_completion_present: true,
+            sustained_downloader_completion_present: true,
+            sustained_transfer_completion_present: true,
+            snapshot_peer_count: 3,
+            sustained_transfer_completed_peer_count: 3,
+            install_progress_present: true,
+            install_rollback_present: false,
+            membership_change_present: true,
+            rejoin_after_compacted_log_present: true,
+        },
+        &labels,
+    );
+    let wal_lifecycle_prometheus = matrixraft_wal_lifecycle_evidence_prometheus(
+        &WalLifecycleEvidence {
+            segment_lifecycle_present: true,
+            retained_range_present: true,
+            sequence_range_present: true,
+            log_index_range_present: true,
+            compaction_observed: true,
+            slow_fsync_backpressure_observed: false,
+            compaction_after_slow_fsync_observed: true,
+            released_segment_count: 4,
+            compacted_after_slow_fsync_count: 1,
+            slow_fsync_segment_count: 0,
+            compacted_slow_fsync_segment_count: 0,
+        },
+        &labels,
+    );
+    let membership_readiness_prometheus = matrixraft_membership_readiness_prometheus(
+        &MembershipReadinessReport {
+            ready: true,
+            satisfied: vec![
+                "metaserver:failover".to_string(),
+                "metaserver:scale_up".to_string(),
+                "metaserver:scale_down".to_string(),
+                "data_node:failover".to_string(),
+                "data_node:scale_up".to_string(),
+                "data_node:scale_down".to_string(),
+            ],
+            missing: Vec::new(),
+            decisions: vec![
+                MembershipTransitionDecision {
+                    scope: MembershipScope::Metaserver,
+                    transition: MembershipTransitionKind::Failover,
+                    ready: true,
+                    missing: Vec::new(),
+                },
+                MembershipTransitionDecision {
+                    scope: MembershipScope::Metaserver,
+                    transition: MembershipTransitionKind::ScaleUp,
+                    ready: true,
+                    missing: Vec::new(),
+                },
+                MembershipTransitionDecision {
+                    scope: MembershipScope::Metaserver,
+                    transition: MembershipTransitionKind::ScaleDown,
+                    ready: true,
+                    missing: Vec::new(),
+                },
+                MembershipTransitionDecision {
+                    scope: MembershipScope::DataNode,
+                    transition: MembershipTransitionKind::Failover,
+                    ready: true,
+                    missing: Vec::new(),
+                },
+                MembershipTransitionDecision {
+                    scope: MembershipScope::DataNode,
+                    transition: MembershipTransitionKind::ScaleUp,
+                    ready: true,
+                    missing: Vec::new(),
+                },
+                MembershipTransitionDecision {
+                    scope: MembershipScope::DataNode,
+                    transition: MembershipTransitionKind::ScaleDown,
+                    ready: true,
+                    missing: Vec::new(),
+                },
+            ],
+        },
+        &labels,
+    );
     let validation = matrixraft_validate_debug_snapshot(&snapshot);
     let validation_prometheus = matrixraft_debug_bundle_validation_prometheus(&validation, &labels);
     let triage_prometheus = matrixraft_operator_triage_prometheus(&snapshot.triage, &labels);
@@ -414,12 +519,17 @@ fn main() {
         "debug_snapshot_metadata_prometheus",
         "diagnostic_json_lines",
         "local_status_diagnostic_json_lines",
+        "runtime_pressure_freshness_diagnostic_json_lines",
         "diagnostic_prometheus",
         "peer_pipeline_prometheus",
         "latency_prometheus",
         "memory_prometheus",
         "scale_prometheus",
         "scale_target_prometheus",
+        "runtime_pressure_freshness_prometheus",
+        "snapshot_lifecycle_prometheus",
+        "wal_lifecycle_prometheus",
+        "membership_readiness_prometheus",
         "benchmark_prometheus",
         "optimization_prometheus",
         "triage_prometheus",
@@ -3327,12 +3437,17 @@ fn main() {
             "debug_snapshot_metadata_prometheus": snapshot_metadata_prometheus,
             "diagnostic_json_lines": diagnostic_json_lines,
             "local_status_diagnostic_json_lines": local_status_diagnostic_json_lines,
+            "runtime_pressure_freshness_diagnostic_json_lines": runtime_pressure_freshness_diagnostic_json_lines,
             "diagnostic_prometheus": snapshot.diagnostic_prometheus,
             "peer_pipeline_prometheus": peer_pipeline_prometheus,
             "latency_prometheus": snapshot.latency_prometheus,
             "memory_prometheus": snapshot.memory_prometheus,
             "scale_prometheus": snapshot.scale_prometheus,
             "scale_target_prometheus": snapshot.scale_target_prometheus,
+            "runtime_pressure_freshness_prometheus": runtime_pressure_freshness_prometheus,
+            "snapshot_lifecycle_prometheus": snapshot_lifecycle_prometheus,
+            "wal_lifecycle_prometheus": wal_lifecycle_prometheus,
+            "membership_readiness_prometheus": membership_readiness_prometheus,
             "benchmark_prometheus": snapshot.benchmark_prometheus,
             "optimization_prometheus": snapshot.optimization_prometheus,
             "triage_prometheus": triage_prometheus,
