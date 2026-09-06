@@ -242,6 +242,10 @@ production status:
 Reports include `production_blockers` such as
 `durability:storage_apply_fence`, making missing production evidence easy to
 surface in TemporalStore readiness gates and CI.
+Production readiness now also runs `matrixraft_validate_public_api_contract` on
+the embedded public API contract, so required TiKV/ByteRaft reference mappings
+show up as `public_api:*` missing evidence and blockers before RustRaft can be
+called production ready.
 Production readiness also requires an accepted runtime-pressure admission sample
 with no memory, p99 latency, scale-target, peer-pipeline, read-backlog,
 node-runtime timer, or pending-action pressure, so QPS/latency parity cannot

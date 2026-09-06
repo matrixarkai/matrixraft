@@ -8,6 +8,8 @@ pub fn matrixraft_production_readiness_report(
     input: &ProductionReadinessInput,
 ) -> ProductionReadinessReport {
     let parity = matrixraft_parity_report(&input.readiness);
+    let public_api = matrixraft_public_api_contract();
+    let public_api_validation = matrixraft_validate_public_api_contract(&public_api);
     let mut satisfied = parity
         .satisfied
         .iter()
@@ -28,6 +30,13 @@ pub fn matrixraft_production_readiness_report(
             "fix RustRaft semantic contract/readiness gaps before production rollout".to_string(),
         );
     }
+    require_public_api_contract_validation(
+        &public_api_validation,
+        &mut satisfied,
+        &mut missing,
+        &mut production_blockers,
+        &mut recommended_next_actions,
+    );
 
     require_option(
         "pipeline:evidence_present",
@@ -335,7 +344,7 @@ pub fn matrixraft_production_readiness_report(
     let ready = missing.is_empty() && production_blockers.is_empty();
     ProductionReadinessReport {
         parity,
-        public_api: matrixraft_public_api_contract(),
+        public_api,
         ready,
         production_status: if ready {
             ProductionStatus::ProductionReady
@@ -432,6 +441,32 @@ pub fn matrixraft_production_readiness_report_with_runtime_pressure_policy_and_f
         ProductionStatus::Blocked
     };
     report
+}
+
+fn require_public_api_contract_validation(
+    validation: &PublicApiContractValidationReport,
+    satisfied: &mut Vec<String>,
+    missing: &mut Vec<String>,
+    blockers: &mut Vec<String>,
+    actions: &mut Vec<String>,
+) {
+    if validation.ready {
+        satisfied.push("public_api:contract_valid".to_string());
+        satisfied.push("public_api:required_reference_mappings_present".to_string());
+        return;
+    }
+
+    missing.push("public_api:contract_valid".to_string());
+    if !validation.unmapped_reference_required_names.is_empty() {
+        missing.push("public_api:required_reference_mappings_present".to_string());
+    }
+    for blocker in &validation.blockers {
+        blockers.push(format!("public_api:{blocker}"));
+    }
+    actions.push(
+        "fix RustRaft public API canonical names and TiKV/ByteRaft mappings before production rollout"
+            .to_string(),
+    );
 }
 
 fn add_unique(values: &mut Vec<String>, value: impl Into<String>) {
