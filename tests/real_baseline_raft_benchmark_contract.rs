@@ -2103,6 +2103,8 @@ cat <<JSON
   "p50_latency_micros": 1000000,
   "p99_latency_micros": 1000000,
   "throughput_ops_per_sec": 1.0,
+  "cpu_utilization_percent": 95.0,
+  "peak_resident_memory_bytes": 1073741824,
   "correctness_passed": true
 }
 JSON
@@ -3481,6 +3483,70 @@ fn production_benchmark_reports_missing_resource_regression_blockers() {
             .performance_blockers
             .iter()
             .any(|blocker| blocker.contains("benchmark:comparison_missing_cpu_regression_blocker")),
+        "{:#?}",
+        evidence.performance_blockers
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn production_benchmark_rejects_incomplete_resource_evidence() {
+    let root = temp_dir("incomplete-resource-evidence");
+    make_fake_baseline_raft_harness(&root);
+    make_fake_git_checkout(&root);
+
+    let options = BenchmarkOptions {
+        iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
+        batch_size: 2,
+        payload_size_bytes: 4096,
+        ..Default::default()
+    };
+    let mut baseline_raft =
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
+    let mut report =
+        matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
+    report.environment_fingerprint =
+        "os=linux;arch=x86_64;target=x86_64-unknown-linux-gnu;debug_assertions=false".to_string();
+
+    let comparison = &mut report.comparisons[0];
+    comparison.baseline_raft.cpu_utilization_percent = 0.0;
+    comparison.baseline_raft.peak_resident_memory_bytes = 0;
+
+    let error = matrixraft_assert_production_baseline_raft_parity(&report)
+        .expect_err("one-sided resource evidence must not satisfy production parity");
+    assert!(
+        error.contains("benchmark:comparison_cpu_resource_missing_baseline_raft"),
+        "{error}"
+    );
+    assert!(
+        error.contains("benchmark:comparison_peak_resident_memory_resource_missing_baseline_raft"),
+        "{error}"
+    );
+
+    let summary = matrixraft_baseline_raft_benchmark_failure_summary(&report);
+    let summary_error = matrixraft_assert_production_baseline_raft_summary(&summary)
+        .expect_err("summary must also reject one-sided resource evidence");
+    assert!(
+        summary_error
+            .contains("benchmark:summary_cpu_resource:single_key_writes_missing_baseline_raft"),
+        "{summary_error}"
+    );
+    assert!(
+        summary_error.contains(
+            "benchmark:summary_peak_resident_memory_resource:single_key_writes_missing_baseline_raft"
+        ),
+        "{summary_error}"
+    );
+
+    let evidence = matrixraft_baseline_raft_benchmark_evidence(&report);
+    assert!(!evidence.resource_within_threshold);
+    assert!(
+        evidence.performance_blockers.iter().any(|blocker| {
+            blocker.contains("benchmark:comparison_cpu_resource_missing_baseline_raft")
+        }),
         "{:#?}",
         evidence.performance_blockers
     );

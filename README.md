@@ -631,6 +631,9 @@ diagnostic behavior for release triage, while
 the fail-closed release-gate helper for callers that require the matched report
 and summary to prove clean QPS, latency, throughput, correctness, CPU, and
 memory parity before a readiness report is built.
+CPU and peak resident-memory parity require complete baseline/RustRaft sample
+pairs; one-sided resource evidence is rejected instead of being treated as an
+absent optional metric.
 `matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts` extends
 that release bundle with runtime-pressure admission, Prometheus, and diagnostic
 log evidence derived from the same BaselineRaft-backed scale targets.
