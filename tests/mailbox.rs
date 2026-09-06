@@ -21,6 +21,40 @@ fn mailbox_try_send_applies_per_priority_high_watermark() {
 }
 
 #[test]
+fn mailbox_checked_api_preserves_backpressure_and_fetch_order() {
+    let mailbox = MailBox::new(1);
+
+    assert!(mailbox
+        .try_send_checked(MailPriority::Normal, "normal")
+        .expect("checked send"));
+    assert!(!mailbox
+        .try_send_checked(MailPriority::Normal, "overflow")
+        .expect("checked overflow"));
+    mailbox
+        .send_checked(MailPriority::Urgent, "urgent")
+        .expect("checked urgent send");
+
+    assert_eq!(
+        mailbox
+            .len_checked(MailPriority::Normal)
+            .expect("checked len"),
+        1
+    );
+    assert_eq!(mailbox.total_len_checked().expect("checked total len"), 2);
+    assert_eq!(
+        mailbox
+            .fetch_checked(MailBoxFetchPolicy {
+                limit: 2,
+                timeout_ms: 0,
+                include_until: MailPriority::Urgent,
+            })
+            .expect("checked fetch"),
+        vec!["urgent", "normal"]
+    );
+    assert!(mailbox.is_empty_checked().expect("checked empty"));
+}
+
+#[test]
 fn mailbox_fetch_prioritizes_urgent_and_limits_included_lanes() {
     let mailbox = MailBox::new(8);
     mailbox.send(MailPriority::Slowly, "slow-1");
