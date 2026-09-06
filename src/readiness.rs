@@ -2869,6 +2869,7 @@ pub fn matrixraft_observability_interface_names() -> Vec<String> {
         "matrixraft_validate_runtime_pressure_admission_evidence_with_policy",
         "matrixraft_runtime_pressure_metric_names",
         "matrixraft_runtime_pressure_grafana_panels",
+        "matrixraft_public_api_contract_validation_grafana_panels",
         "matrixraft_debug_snapshot_with_runtime_pressure_evidence",
         "matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence",
         "matrixraft_debug_snapshot_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence",

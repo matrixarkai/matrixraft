@@ -25,17 +25,18 @@ use matrixraft::{
     matrixraft_membership_readiness_prometheus, matrixraft_observability_provisioning,
     matrixraft_observability_provisioning_validation_prometheus,
     matrixraft_operator_runbook_prometheus, matrixraft_operator_triage_prometheus,
-    matrixraft_peer_pipeline_metrics_prometheus, matrixraft_runtime_admin_report,
+    matrixraft_peer_pipeline_metrics_prometheus, matrixraft_public_api_contract,
+    matrixraft_public_api_contract_validation_prometheus, matrixraft_runtime_admin_report,
     matrixraft_runtime_local_status_report,
     matrixraft_runtime_pressure_freshness_diagnostic_json_lines,
     matrixraft_snapshot_lifecycle_evidence_prometheus, matrixraft_validate_debug_snapshot,
-    matrixraft_validate_observability_provisioning, matrixraft_wal_lifecycle_evidence_prometheus,
-    DebugBundleValidationReport, LatencyMetrics, LatencyOptimizationThresholds,
-    MembershipReadinessReport, MembershipScope, MembershipTransitionDecision,
-    MembershipTransitionKind, MemoryMetrics, MemoryOptimizationThresholds, Peer, PeerProgress,
-    ProgressState, RaftCluster, ReadBacklogMetrics, ReadBacklogThresholds, ReadinessSnapshot,
-    ReplicaRole, RuntimePressureAdmissionPolicy, ScaleMetrics, SnapshotLifecycleEvidence,
-    WalLifecycleEvidence,
+    matrixraft_validate_observability_provisioning, matrixraft_validate_public_api_contract,
+    matrixraft_wal_lifecycle_evidence_prometheus, DebugBundleValidationReport, LatencyMetrics,
+    LatencyOptimizationThresholds, MembershipReadinessReport, MembershipScope,
+    MembershipTransitionDecision, MembershipTransitionKind, MemoryMetrics,
+    MemoryOptimizationThresholds, Peer, PeerProgress, ProgressState, RaftCluster,
+    ReadBacklogMetrics, ReadBacklogThresholds, ReadinessSnapshot, ReplicaRole,
+    RuntimePressureAdmissionPolicy, ScaleMetrics, SnapshotLifecycleEvidence, WalLifecycleEvidence,
 };
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -495,6 +496,14 @@ fn main() {
         },
         &labels,
     );
+    let public_api_contract = matrixraft_public_api_contract();
+    let public_api_contract_validation =
+        matrixraft_validate_public_api_contract(&public_api_contract);
+    let public_api_contract_validation_prometheus =
+        matrixraft_public_api_contract_validation_prometheus(
+            &public_api_contract_validation,
+            &labels,
+        );
     let validation = matrixraft_validate_debug_snapshot(&snapshot);
     let validation_prometheus = matrixraft_debug_bundle_validation_prometheus(&validation, &labels);
     let triage_prometheus = matrixraft_operator_triage_prometheus(&snapshot.triage, &labels);
@@ -540,6 +549,8 @@ fn main() {
         "observability_provisioning",
         "validation",
         "validation_prometheus",
+        "public_api_contract_validation",
+        "public_api_contract_validation_prometheus",
         "provisioning_validation",
         "provisioning_validation_prometheus",
         "provisioning_runbook_prometheus",
@@ -3448,6 +3459,8 @@ fn main() {
             "snapshot_lifecycle_prometheus": snapshot_lifecycle_prometheus,
             "wal_lifecycle_prometheus": wal_lifecycle_prometheus,
             "membership_readiness_prometheus": membership_readiness_prometheus,
+            "public_api_contract_validation": public_api_contract_validation,
+            "public_api_contract_validation_prometheus": public_api_contract_validation_prometheus,
             "benchmark_prometheus": snapshot.benchmark_prometheus,
             "optimization_prometheus": snapshot.optimization_prometheus,
             "triage_prometheus": triage_prometheus,

@@ -215,6 +215,7 @@ pub use metrics::{
     matrixraft_operator_triage_prometheus, matrixraft_operator_triage_summary,
     matrixraft_optimization_report_prometheus, matrixraft_peer_pipeline_metrics_prometheus,
     matrixraft_production_readiness_grafana_panels, matrixraft_production_readiness_metric_names,
+    matrixraft_public_api_contract_validation_grafana_panels,
     matrixraft_runtime_pressure_admission, matrixraft_runtime_pressure_admission_prometheus,
     matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure,
     matrixraft_runtime_pressure_admission_with_pipeline_pressure,
