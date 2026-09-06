@@ -21,6 +21,7 @@ use crate::{
     matrixraft_debug_snapshot_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence,
     matrixraft_operator_runbook_prometheus, matrixraft_production_readiness_diagnostic_json_lines,
     matrixraft_production_readiness_report, matrixraft_production_readiness_report_prometheus,
+    matrixraft_production_readiness_report_with_runtime_pressure_policy,
     matrixraft_runtime_pressure_admission_prometheus,
     matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure,
     matrixraft_runtime_pressure_admission_with_scale_pipeline_read_backlog_and_node_runtime_timer_pressure,
@@ -1010,7 +1011,10 @@ pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlo
         .as_ref()
         .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
         .unwrap_or_default();
-    let report = matrixraft_production_readiness_report(&readiness_input);
+    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy(
+        &readiness_input,
+        policy,
+    );
     let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
     let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
     Ok(BenchmarkRuntimePressureReadinessArtifact {
@@ -1060,7 +1064,10 @@ pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_re
         .as_ref()
         .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
         .unwrap_or_default();
-    let report = matrixraft_production_readiness_report(&readiness_input);
+    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy(
+        &readiness_input,
+        policy,
+    );
     let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
     let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
     Ok(BenchmarkRuntimePressureReadinessArtifact {
@@ -1114,7 +1121,10 @@ pub fn matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlo
         .as_ref()
         .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
         .unwrap_or_default();
-    let report = matrixraft_production_readiness_report(&readiness_input);
+    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy(
+        &readiness_input,
+        policy,
+    );
     let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
     let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
     Ok(BenchmarkRuntimePressureReadinessArtifact {
@@ -1168,7 +1178,10 @@ pub fn matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_re
         .as_ref()
         .map(|admission| matrixraft_runtime_pressure_admission_prometheus(admission, labels))
         .unwrap_or_default();
-    let report = matrixraft_production_readiness_report(&readiness_input);
+    let report = matrixraft_production_readiness_report_with_runtime_pressure_policy(
+        &readiness_input,
+        policy,
+    );
     let prometheus = matrixraft_production_readiness_report_prometheus(&report, labels);
     let diagnostic_json_lines = matrixraft_production_readiness_diagnostic_json_lines(&report);
     Ok(BenchmarkRuntimePressureReadinessArtifact {

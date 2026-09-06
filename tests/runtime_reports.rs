@@ -32,6 +32,7 @@ use matrixraft::{
     matrixraft_operator_runbook_prometheus, matrixraft_optimization_diagnostic_json_lines,
     matrixraft_optimization_diagnostic_log_entries, matrixraft_optimization_report,
     matrixraft_optimization_report_prometheus, matrixraft_peer_pipeline_metrics_prometheus,
+    matrixraft_production_readiness_report_with_runtime_pressure_policy,
     matrixraft_runtime_admin_report, matrixraft_runtime_local_status_report,
     matrixraft_runtime_pressure_admission,
     matrixraft_runtime_pressure_admission_with_pipeline_pressure,
@@ -1550,6 +1551,16 @@ fn benchmark_readiness_artifact_validator_accepts_matching_read_backlog_evidence
         &labels,
     )
     .expect("read backlog artifact");
+    let expected_policy_report =
+        matrixraft_production_readiness_report_with_runtime_pressure_policy(
+            &readiness_input,
+            &RuntimePressureAdmissionPolicy::fail_closed(),
+        );
+    assert_eq!(artifact.report, expected_policy_report);
+    assert_eq!(
+        artifact.diagnostic_json_lines,
+        matrixraft::matrixraft_production_readiness_diagnostic_json_lines(&expected_policy_report)
+    );
     let old_validator_error = matrixraft_validate_benchmark_runtime_pressure_readiness_artifact(
         &artifact,
         &input,
