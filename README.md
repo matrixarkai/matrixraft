@@ -112,6 +112,7 @@ License: Apache-2.0.
 - `matrixraft_scale_rate_metrics_from_benchmark_report`
 - `matrixraft_scale_optimization_targets_from_baseline_raft_report`
 - `matrixraft_public_api_contract`
+- `matrixraft_public_api_contract_validation_prometheus`
 - `matrixraft_api_name_mappings`
 - `matrixraft_core_interface_names`
 - `matrixraft_evidence_interface_names`
@@ -526,6 +527,10 @@ and dashboards.
 `matrixraft_api_name_mappings` gives those reviews a deterministic name map from
 canonical RustRaft API names to MatrixRaft facade names, TiKV/raft-rs concepts,
 and ByteRaft/BaselineRaft reference vocabulary.
+`matrixraft_public_api_contract_validation_prometheus` exports that validator as
+release-dashboard metrics, including mapping readiness, coverage, unmapped
+reference-required names, unmapped advertised names, per-category coverage, and
+blockers.
 Embedding examples are part of the same advertised contract: shipped examples
 must also carry TiKV/raft-rs and ByteRaft/BaselineRaft mappings before the
 public API validator accepts the surface.
@@ -538,11 +543,12 @@ the supported API list.
 `matrixraft_reference_mapped_interface_names` is the fail-closed subset of that
 surface: election RPCs, append/read/snapshot RPCs, storage/transport, WAL,
 peer progress, runtime pressure, runtime-pressure freshness, scale-target
-admission, peer-pipeline admission, benchmark runner, snapshot lifecycle
-Prometheus, WAL lifecycle Prometheus, membership readiness Prometheus, Grafana
-dashboard, alert rules, operator runbook names, diagnostic-aware runbooks,
-runbook Prometheus, and provisioning runbook helpers must all have reference
-mappings before the public API contract is considered ready.
+admission, peer-pipeline admission, benchmark runner, public API validation
+Prometheus, snapshot lifecycle Prometheus, WAL lifecycle Prometheus, membership
+readiness Prometheus, Grafana dashboard, alert rules, operator runbook names,
+diagnostic-aware runbooks, runbook Prometheus, and provisioning runbook helpers
+must all have reference mappings before the public API contract is considered
+ready.
 `PublicApiContractValidationReport::unmapped_reference_required_names` exposes
 the exact missing names from that fail-closed subset so release gates can report
 API mapping drift without parsing blocker strings.
