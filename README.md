@@ -135,6 +135,7 @@ License: Apache-2.0.
 - `matrixraft_runtime_pressure_admission_with_scale_and_pipeline_pressure`
 - `matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure`
 - `matrixraft_runtime_pressure_admission_with_scale_pipeline_read_backlog_and_node_runtime_timer_pressure`
+- `matrixraft_runtime_pressure_admission_with_queue_pressure`
 - `matrixraft_runtime_pressure_freshness_report`
 - `matrixraft_runtime_pressure_freshness_prometheus`
 - `matrixraft_runtime_pressure_admission_prometheus`
@@ -407,6 +408,10 @@ read-index QPS and tail-latency claims.
 pending tick queue utilization into the same decision, so scheduler saturation
 blocks production-readiness and QPS/latency parity claims before ticks are
 rejected or delayed.
+`matrixraft_runtime_pressure_admission_with_queue_pressure` folds mailbox and
+channel queue depth/rejection pressure into the same decision and exports the
+same Prometheus/Grafana admission signal shape as memory, latency, read-backlog,
+timer, scale, and per-peer pipeline pressure.
 `matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure`
 is the full production admission helper for release-scale readers: it combines
 scale targets, per-peer pipeline pressure, and pending read backlog in one
