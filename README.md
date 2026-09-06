@@ -562,6 +562,9 @@ same bounded batch enqueue plus selector wakeup as one checked operation.
 `MailBoxPressureStats` and `MailChannelPressureStats` expose high watermark or
 limit, current depth, max observed depth, and rejected enqueue counters so
 operators can tune QPS and memory pressure before release-scale queues saturate.
+Use `matrixraft_queue_pressure_prometheus` and
+`matrixraft_queue_pressure_grafana_panels` to publish those counters in the
+standard RustRaft scrape and dashboard contract.
 `matrixraft_reference_mapped_interface_names` is the fail-closed subset of that
 surface: election RPCs, append/read/snapshot RPCs, storage/transport, WAL,
 peer progress, runtime pressure, runtime-pressure freshness, scale-target

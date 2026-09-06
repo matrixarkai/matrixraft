@@ -1258,12 +1258,16 @@ pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
         "matrixraft_runtime_pressure_freshness_prometheus",
         "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
         "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
+        "matrixraft_queue_pressure_metric_names",
+        "matrixraft_queue_pressure_prometheus",
+        "matrixraft_queue_pressure_grafana_panels",
         "MailBox",
         "MailBoxPressureStats",
         "MailBox::try_send_checked",
         "MailBox::try_send_many_checked",
         "MailBox::pressure_stats_checked",
         "MailBox::fetch_checked",
+        "QueuePressureMetricNames",
         "MailChannel",
         "MailChannelPressureStats",
         "MailChannel::try_send_checked",
@@ -1885,6 +1889,39 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference: "raftstore flow control / backpressure".to_string(),
             byteraft_or_baseline_reference: "admission and throttle decision".to_string(),
             note: "RuntimePressureAdmission connects memory, latency, scale, and peer pipeline telemetry to observe-only or fail-closed admission decisions."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "QueuePressureMetricNames".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressureMetricNames".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore queue pressure metric names".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft scheduler queue pressure metrics"
+                .to_string(),
+            note: "QueuePressureMetricNames pins mailbox and per-replica queue depth and rejection metric names for QPS and memory-pressure dashboards."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_queue_pressure_metric_names".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressureMetricNamesFactory".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore queue metric-name contract".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue metric-name contract".to_string(),
+            note: "The queue-pressure metric-name helper keeps scrape names stable as embedders wire mailbox and per-peer channel pressure into Prometheus."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_queue_pressure_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressurePrometheus".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore mailbox and peer queue scrape".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue pressure scrape".to_string(),
+            note: "The queue-pressure Prometheus helper exports mailbox and per-replica channel depth, limits, max depth, and rejected enqueue counters for operator triage."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_queue_pressure_grafana_panels".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressureGrafanaPanels".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore queue pressure dashboards".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue pressure dashboard panels".to_string(),
+            note: "Queue-pressure Grafana panels surface queue depth and rejection rate beside memory and runtime-pressure panels for release-scale tuning."
                 .to_string(),
         },
         ApiNameMapping {
@@ -2999,6 +3036,9 @@ pub fn matrixraft_observability_interface_names() -> Vec<String> {
         "matrixraft_memory_metric_names",
         "matrixraft_memory_metrics_prometheus",
         "matrixraft_memory_grafana_panels",
+        "matrixraft_queue_pressure_metric_names",
+        "matrixraft_queue_pressure_prometheus",
+        "matrixraft_queue_pressure_grafana_panels",
         "matrixraft_latency_metrics_prometheus",
         "matrixraft_runtime_pressure_admission",
         "matrixraft_runtime_pressure_admission_with_scale_targets",
@@ -3030,6 +3070,7 @@ pub fn matrixraft_observability_interface_names() -> Vec<String> {
         "NodeRuntimeTimerThresholds",
         "RuntimePressureAdmissionPolicy",
         "RuntimePressureMetricNames",
+        "QueuePressureMetricNames",
         "SnapshotLifecycleEvidence",
         "matrixraft_snapshot_lifecycle_metric_names",
         "matrixraft_snapshot_lifecycle_evidence_prometheus",

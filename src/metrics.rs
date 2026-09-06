@@ -12,6 +12,8 @@ use crate::benchmark::{
     matrixraft_baseline_raft_benchmark_grafana_panels,
     matrixraft_baseline_raft_benchmark_metric_names,
 };
+use crate::channel_selector::MailChannelPressureStats;
+use crate::mailbox::MailBoxPressureStats;
 pub use crate::matrixraft_baseline_raft_runtime_capability_prometheus;
 use crate::membership::{MembershipReadinessReport, MembershipScope, MembershipTransitionKind};
 use crate::pipeline::PeerProgress;
@@ -110,6 +112,18 @@ pub struct MemoryMetricNames {
     pub log_cache_bytes: String,
     pub snapshot_buffer_bytes: String,
     pub replication_buffer_bytes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuePressureMetricNames {
+    pub mailbox_total_len: String,
+    pub mailbox_high_watermark: String,
+    pub mailbox_max_channel_depth: String,
+    pub mailbox_rejected_send_total: String,
+    pub mail_channel_queued_len: String,
+    pub mail_channel_limit: String,
+    pub mail_channel_max_depth: String,
+    pub mail_channel_rejected_send_total: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2560,6 +2574,19 @@ pub fn matrixraft_memory_metric_names() -> MemoryMetricNames {
     }
 }
 
+pub fn matrixraft_queue_pressure_metric_names() -> QueuePressureMetricNames {
+    QueuePressureMetricNames {
+        mailbox_total_len: "rustraft_mailbox_total_len".to_string(),
+        mailbox_high_watermark: "rustraft_mailbox_high_watermark".to_string(),
+        mailbox_max_channel_depth: "rustraft_mailbox_max_channel_depth".to_string(),
+        mailbox_rejected_send_total: "rustraft_mailbox_rejected_send_total".to_string(),
+        mail_channel_queued_len: "rustraft_mail_channel_queued_len".to_string(),
+        mail_channel_limit: "rustraft_mail_channel_limit".to_string(),
+        mail_channel_max_depth: "rustraft_mail_channel_max_depth".to_string(),
+        mail_channel_rejected_send_total: "rustraft_mail_channel_rejected_send_total".to_string(),
+    }
+}
+
 pub fn matrixraft_runtime_pressure_metric_names() -> RuntimePressureMetricNames {
     RuntimePressureMetricNames {
         admission_accepted: "rustraft_runtime_pressure_admission_accepted".to_string(),
@@ -2879,6 +2906,80 @@ pub fn matrixraft_memory_metrics_prometheus(
     PrometheusMetricSet {
         format: "prometheus_text_v0.0.4".to_string(),
         metric_count: 5,
+        text,
+    }
+}
+
+pub fn matrixraft_queue_pressure_prometheus(
+    mailboxes: &[(&str, MailBoxPressureStats)],
+    mail_channels: &[MailChannelPressureStats],
+    labels: &[(&str, &str)],
+) -> PrometheusMetricSet {
+    let names = matrixraft_queue_pressure_metric_names();
+    let mut text = String::new();
+
+    for (mailbox, stats) in mailboxes {
+        let mut metric_labels = labels.to_vec();
+        metric_labels.push(("mailbox", mailbox));
+        push_metric(
+            &mut text,
+            &names.mailbox_total_len,
+            &metric_labels,
+            stats.total_len as u64,
+        );
+        push_metric(
+            &mut text,
+            &names.mailbox_high_watermark,
+            &metric_labels,
+            stats.high_watermark as u64,
+        );
+        push_metric(
+            &mut text,
+            &names.mailbox_max_channel_depth,
+            &metric_labels,
+            stats.max_channel_depth as u64,
+        );
+        push_metric(
+            &mut text,
+            &names.mailbox_rejected_send_total,
+            &metric_labels,
+            stats.rejected_send_count,
+        );
+    }
+
+    for stats in mail_channels {
+        let replica_id = stats.replica_id.to_string();
+        let mut metric_labels = labels.to_vec();
+        metric_labels.push(("replica_id", replica_id.as_str()));
+        push_metric(
+            &mut text,
+            &names.mail_channel_queued_len,
+            &metric_labels,
+            stats.queued_len as u64,
+        );
+        push_metric(
+            &mut text,
+            &names.mail_channel_limit,
+            &metric_labels,
+            stats.num_mail_limit as u64,
+        );
+        push_metric(
+            &mut text,
+            &names.mail_channel_max_depth,
+            &metric_labels,
+            stats.max_depth as u64,
+        );
+        push_metric(
+            &mut text,
+            &names.mail_channel_rejected_send_total,
+            &metric_labels,
+            stats.rejected_send_count,
+        );
+    }
+
+    PrometheusMetricSet {
+        format: "prometheus_text_v0.0.4".to_string(),
+        metric_count: text.lines().count() as u64,
         text,
     }
 }
@@ -5148,6 +5249,64 @@ pub fn matrixraft_memory_grafana_panels() -> Vec<GrafanaPanel> {
     ]
 }
 
+pub fn matrixraft_queue_pressure_grafana_panels() -> Vec<GrafanaPanel> {
+    let metrics = matrixraft_queue_pressure_metric_names();
+    vec![
+        GrafanaPanel {
+            id: 1200,
+            title: "Queue Pressure Depth".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!(
+                "max by (service, group, workload, mailbox, replica_id) ({}) or max by (service, group, workload, mailbox, replica_id) ({})",
+                metrics.mailbox_total_len, metrics.mail_channel_queued_len
+            ),
+            unit: "short".to_string(),
+            description:
+                "Current MatrixRaft mailbox and per-replica channel queue depths for QPS and memory pressure triage."
+                    .to_string(),
+        },
+        GrafanaPanel {
+            id: 1201,
+            title: "Queue Pressure Rejections".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!(
+                "sum by (service, group, workload, mailbox, replica_id) (rate({}[1m])) or sum by (service, group, workload, mailbox, replica_id) (rate({}[1m]))",
+                metrics.mailbox_rejected_send_total, metrics.mail_channel_rejected_send_total
+            ),
+            unit: "ops".to_string(),
+            description:
+                "Rejected MatrixRaft queue sends per second; non-zero values mean producers are hitting bounded queue pressure."
+                    .to_string(),
+        },
+        GrafanaPanel {
+            id: 1202,
+            title: "Queue Pressure Limits".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!(
+                "max by (service, group, workload, mailbox, replica_id) ({}) or max by (service, group, workload, mailbox, replica_id) ({})",
+                metrics.mailbox_high_watermark, metrics.mail_channel_limit
+            ),
+            unit: "short".to_string(),
+            description:
+                "Configured MatrixRaft mailbox high-watermarks and per-replica channel queue limits."
+                    .to_string(),
+        },
+        GrafanaPanel {
+            id: 1203,
+            title: "Queue Pressure Max Depth".to_string(),
+            panel_type: "timeseries".to_string(),
+            expr: format!(
+                "max by (service, group, workload, mailbox, replica_id) ({}) or max by (service, group, workload, mailbox, replica_id) ({})",
+                metrics.mailbox_max_channel_depth, metrics.mail_channel_max_depth
+            ),
+            unit: "short".to_string(),
+            description:
+                "Maximum observed MatrixRaft mailbox lane and per-replica channel queue depths for burst sizing."
+                    .to_string(),
+        },
+    ]
+}
+
 pub fn matrixraft_runtime_pressure_grafana_panels() -> Vec<GrafanaPanel> {
     let metrics = matrixraft_runtime_pressure_metric_names();
     vec![
@@ -6239,6 +6398,7 @@ pub fn matrixraft_observability_provisioning() -> ObservabilityProvisioning {
     let scale_metrics = matrixraft_scale_metric_names();
     let scale_target_metrics = matrixraft_scale_target_metric_names();
     let memory_metrics = matrixraft_memory_metric_names();
+    let queue_pressure_metrics = matrixraft_queue_pressure_metric_names();
     let runtime_pressure_metrics = matrixraft_runtime_pressure_metric_names();
     let snapshot_lifecycle_metrics = matrixraft_snapshot_lifecycle_metric_names();
     let wal_lifecycle_metrics = matrixraft_wal_lifecycle_metric_names();
@@ -6305,6 +6465,14 @@ pub fn matrixraft_observability_provisioning() -> ObservabilityProvisioning {
             memory_metrics.log_cache_bytes,
             memory_metrics.snapshot_buffer_bytes,
             memory_metrics.replication_buffer_bytes,
+            queue_pressure_metrics.mailbox_total_len,
+            queue_pressure_metrics.mailbox_high_watermark,
+            queue_pressure_metrics.mailbox_max_channel_depth,
+            queue_pressure_metrics.mailbox_rejected_send_total,
+            queue_pressure_metrics.mail_channel_queued_len,
+            queue_pressure_metrics.mail_channel_limit,
+            queue_pressure_metrics.mail_channel_max_depth,
+            queue_pressure_metrics.mail_channel_rejected_send_total,
             runtime_pressure_metrics.admission_accepted,
             runtime_pressure_metrics.admission_rejected,
             runtime_pressure_metrics.memory_pressure,
@@ -9526,6 +9694,7 @@ pub fn matrixraft_grafana_dashboard() -> GrafanaDashboard {
             panels.extend(matrixraft_scale_grafana_panels());
             panels.extend(matrixraft_scale_target_grafana_panels());
             panels.extend(matrixraft_memory_grafana_panels());
+            panels.extend(matrixraft_queue_pressure_grafana_panels());
             panels.extend(matrixraft_runtime_pressure_grafana_panels());
             panels.extend(matrixraft_node_runtime_grafana_panels());
             panels.extend(matrixraft_snapshot_lifecycle_grafana_panels());
