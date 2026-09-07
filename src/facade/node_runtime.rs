@@ -200,11 +200,11 @@ pub fn matrixraft_node_runtime_status_prometheus(
 }
 
 fn matrixraft_runtime_timer_utilization_percent(timer: &RuntimeTimerStatus) -> u64 {
-    if timer.max_pending_ticks == 0 {
-        0
-    } else {
-        timer.pending_ticks.saturating_mul(100) / timer.max_pending_ticks
-    }
+    timer
+        .pending_ticks
+        .saturating_mul(100)
+        .checked_div(timer.max_pending_ticks)
+        .unwrap_or(0)
 }
 
 enum NodeRuntimeOp {

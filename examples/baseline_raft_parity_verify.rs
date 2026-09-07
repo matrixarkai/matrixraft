@@ -17,7 +17,7 @@ use matrixraft::{
 };
 use std::{
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
@@ -371,7 +371,7 @@ fn usage() {
     );
 }
 
-fn artifact_path_collision(label: &str, path: &PathBuf) -> ! {
+fn artifact_path_collision(label: &str, path: &Path) -> ! {
     eprintln!(
         "benchmark:artifact_path_collision:{label}:{}",
         path.display()
