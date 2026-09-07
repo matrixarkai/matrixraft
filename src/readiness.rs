@@ -3,14 +3,17 @@
 
 //! BaselineRaft parity, public API, and production readiness reporting API.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::matrixraft_metric_names;
+use crate::metrics::PrometheusMetricSet;
 use crate::{
     fault, AdminStatusSurfaceEvidence, BaselineRaftBenchmarkEvidence, DataNodeProcessRolloutReport,
     MembershipTransitionEvidence, MetaProcessRolloutReport, MetricNames, PipelineEvidence,
-    SnapshotLifecycleEvidence, WalLifecycleEvidence,
+    RuntimePressureAdmission, SnapshotLifecycleEvidence, WalLifecycleEvidence,
 };
 
 pub use crate::{
@@ -116,6 +119,8 @@ pub struct ProductionReadinessInput {
     #[serde(default)]
     pub peer_pipeline: Option<PipelineEvidence>,
     #[serde(default)]
+    pub runtime_pressure_admission: Option<RuntimePressureAdmission>,
+    #[serde(default)]
     pub snapshot_lifecycle: Option<SnapshotLifecycleEvidence>,
     #[serde(default)]
     pub wal_lifecycle: Option<WalLifecycleEvidence>,
@@ -183,14 +188,53 @@ pub struct ReadinessSnapshot {
 pub struct PublicApiContract {
     pub storage_trait: String,
     pub transport_trait: String,
+    #[serde(default)]
+    pub core_interfaces: Vec<String>,
+    pub api_name_mappings: Vec<ApiNameMapping>,
     pub public_modules: Vec<String>,
     pub rpc_messages: Vec<String>,
     pub safety_helpers: Vec<String>,
     pub embedding_examples: Vec<String>,
     pub parity_reports: Vec<String>,
     pub benchmark_interfaces: Vec<String>,
+    pub observability_interfaces: Vec<String>,
+    pub diagnostic_interfaces: Vec<String>,
+    #[serde(default)]
+    pub evidence_interfaces: Vec<String>,
     pub compatibility_reports: Vec<String>,
     pub metrics: MetricNames,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicApiContractValidationReport {
+    pub ready: bool,
+    pub mapped_canonical_names: Vec<String>,
+    pub unmapped_advertised_names: Vec<String>,
+    pub unmapped_reference_required_names: Vec<String>,
+    pub api_mapping_coverage_percent: usize,
+    pub mapping_coverage_by_category: Vec<PublicApiMappingCoverage>,
+    pub reference_required_names: Vec<String>,
+    pub interface_name_count: usize,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PublicApiMappingCoverage {
+    pub category: String,
+    pub advertised_name_count: usize,
+    pub mapped_name_count: usize,
+    pub coverage_percent: usize,
+    pub mapped_names: Vec<String>,
+    pub unmapped_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiNameMapping {
+    pub canonical: String,
+    pub matrixraft_facade: String,
+    pub raft_rs_or_tikv_reference: String,
+    pub byteraft_or_baseline_reference: String,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -713,6 +757,8 @@ pub fn matrixraft_public_api_contract() -> PublicApiContract {
     PublicApiContract {
         storage_trait: "Storage".to_string(),
         transport_trait: "Transport".to_string(),
+        core_interfaces: matrixraft_core_interface_names(),
+        api_name_mappings: matrixraft_api_name_mappings(),
         public_modules: matrixraft_public_module_names(),
         rpc_messages: vec![
             "AppendEntriesRequest".to_string(),
@@ -740,9 +786,2150 @@ pub fn matrixraft_public_api_contract() -> PublicApiContract {
         embedding_examples: matrixraft_embedding_examples(),
         parity_reports: matrixraft_parity_report_names(),
         benchmark_interfaces: matrixraft_benchmark_interface_names(),
+        observability_interfaces: matrixraft_observability_interface_names(),
+        diagnostic_interfaces: matrixraft_diagnostic_interface_names(),
+        evidence_interfaces: matrixraft_evidence_interface_names(),
         compatibility_reports: matrixraft_compatibility_report_names(),
         metrics: matrixraft_metric_names(),
     }
+}
+
+pub fn matrixraft_validate_public_api_contract(
+    contract: &PublicApiContract,
+) -> PublicApiContractValidationReport {
+    let mut blockers = Vec::new();
+    if contract.storage_trait != "Storage" {
+        blockers.push(format!(
+            "storage_trait:non_canonical:{}:expected:Storage",
+            contract.storage_trait
+        ));
+    }
+    if contract.transport_trait != "Transport" {
+        blockers.push(format!(
+            "transport_trait:non_canonical:{}:expected:Transport",
+            contract.transport_trait
+        ));
+    }
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "core_interfaces",
+        contract.core_interfaces.iter().map(String::as_str),
+    );
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "public_modules",
+        contract.public_modules.iter().map(String::as_str),
+    );
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "rpc_messages",
+        contract.rpc_messages.iter().map(String::as_str),
+    );
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "safety_helpers",
+        contract.safety_helpers.iter().map(String::as_str),
+    );
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "embedding_examples",
+        contract.embedding_examples.iter().map(String::as_str),
+    );
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "parity_reports",
+        contract.parity_reports.iter().map(String::as_str),
+    );
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "benchmark_interfaces",
+        contract.benchmark_interfaces.iter().map(String::as_str),
+    );
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "observability_interfaces",
+        contract.observability_interfaces.iter().map(String::as_str),
+    );
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "diagnostic_interfaces",
+        contract.diagnostic_interfaces.iter().map(String::as_str),
+    );
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "evidence_interfaces",
+        contract.evidence_interfaces.iter().map(String::as_str),
+    );
+    push_duplicate_name_blockers(
+        &mut blockers,
+        "compatibility_reports",
+        contract.compatibility_reports.iter().map(String::as_str),
+    );
+
+    let mut canonical_names = BTreeSet::new();
+    let mut facade_names = BTreeSet::new();
+    let advertised_names = matrixraft_advertised_public_api_names(contract);
+    for mapping in &contract.api_name_mappings {
+        if mapping.canonical.trim().is_empty() {
+            blockers.push("api_mapping:empty_canonical".to_string());
+        } else if !canonical_names.insert(mapping.canonical.as_str()) {
+            blockers.push(format!(
+                "api_mapping:duplicate_canonical:{}",
+                mapping.canonical
+            ));
+        } else if !advertised_names.contains(mapping.canonical.as_str()) {
+            blockers.push(format!(
+                "api_mapping:unadvertised_canonical:{}",
+                mapping.canonical
+            ));
+        }
+        if mapping.matrixraft_facade.trim().is_empty() {
+            blockers.push(format!(
+                "api_mapping:{}:empty_matrixraft_facade",
+                mapping.canonical
+            ));
+        } else if !facade_names.insert(mapping.matrixraft_facade.as_str()) {
+            blockers.push(format!(
+                "api_mapping:duplicate_matrixraft_facade:{}",
+                mapping.matrixraft_facade
+            ));
+        }
+        if mapping.raft_rs_or_tikv_reference.trim().is_empty() {
+            blockers.push(format!(
+                "api_mapping:{}:missing_raft_rs_or_tikv_reference",
+                mapping.canonical
+            ));
+        }
+        if mapping.byteraft_or_baseline_reference.trim().is_empty() {
+            blockers.push(format!(
+                "api_mapping:{}:missing_byteraft_or_baseline_reference",
+                mapping.canonical
+            ));
+        }
+        if mapping.note.trim().is_empty() {
+            blockers.push(format!("api_mapping:{}:missing_note", mapping.canonical));
+        }
+    }
+
+    let reference_required_names = matrixraft_reference_mapped_interface_names();
+    let mut unmapped_reference_required_names = Vec::new();
+    for required in &reference_required_names {
+        if !canonical_names.contains(required.as_str()) {
+            unmapped_reference_required_names.push(required.clone());
+            blockers.push(format!("api_mapping:missing_required_canonical:{required}"));
+        }
+    }
+
+    let interface_name_count = contract.public_modules.len()
+        + contract.core_interfaces.len()
+        + contract.rpc_messages.len()
+        + contract.safety_helpers.len()
+        + contract.embedding_examples.len()
+        + contract.parity_reports.len()
+        + contract.benchmark_interfaces.len()
+        + contract.observability_interfaces.len()
+        + contract.diagnostic_interfaces.len()
+        + contract.evidence_interfaces.len()
+        + contract.compatibility_reports.len();
+    let mapped_advertised_name_count = advertised_names
+        .iter()
+        .filter(|name| canonical_names.contains(**name))
+        .count();
+    let api_mapping_coverage_percent = if advertised_names.is_empty() {
+        100
+    } else {
+        mapped_advertised_name_count * 100 / advertised_names.len()
+    };
+    let unmapped_advertised_names = advertised_names
+        .iter()
+        .filter(|name| !canonical_names.contains(**name))
+        .map(|name| (*name).to_string())
+        .collect();
+    let mapping_coverage_by_category =
+        matrixraft_api_mapping_coverage_by_category(contract, &canonical_names);
+    for coverage in &mapping_coverage_by_category {
+        if coverage.advertised_name_count > 0 && coverage.mapped_name_count == 0 {
+            blockers.push(format!(
+                "api_mapping:category_without_reference_mapping:{}",
+                coverage.category
+            ));
+        }
+    }
+    let mapped_canonical_names = canonical_names.into_iter().map(str::to_string).collect();
+
+    PublicApiContractValidationReport {
+        ready: blockers.is_empty(),
+        mapped_canonical_names,
+        unmapped_advertised_names,
+        unmapped_reference_required_names,
+        api_mapping_coverage_percent,
+        mapping_coverage_by_category,
+        reference_required_names,
+        interface_name_count,
+        blockers,
+    }
+}
+
+pub fn matrixraft_public_api_contract_validation_prometheus(
+    report: &PublicApiContractValidationReport,
+    labels: &[(&str, &str)],
+) -> PrometheusMetricSet {
+    let mut text = String::new();
+    let mut metric_count = 0_u64;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_contract_ready",
+        labels,
+        u64::from(report.ready),
+    );
+    metric_count += 1;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_mapping_coverage_percent",
+        labels,
+        report.api_mapping_coverage_percent as u64,
+    );
+    metric_count += 1;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_interface_name_total",
+        labels,
+        report.interface_name_count as u64,
+    );
+    metric_count += 1;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_reference_required_total",
+        labels,
+        report.reference_required_names.len() as u64,
+    );
+    metric_count += 1;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_unmapped_reference_required_total",
+        labels,
+        report.unmapped_reference_required_names.len() as u64,
+    );
+    metric_count += 1;
+    matrixraft_push_public_api_metric(
+        &mut text,
+        "rustraft_public_api_unmapped_advertised_total",
+        labels,
+        report.unmapped_advertised_names.len() as u64,
+    );
+    metric_count += 1;
+
+    for coverage in &report.mapping_coverage_by_category {
+        let mut category_labels = labels.to_vec();
+        category_labels.push(("category", coverage.category.as_str()));
+        matrixraft_push_public_api_metric(
+            &mut text,
+            "rustraft_public_api_mapping_category_coverage_percent",
+            &category_labels,
+            coverage.coverage_percent as u64,
+        );
+        matrixraft_push_public_api_metric(
+            &mut text,
+            "rustraft_public_api_mapping_category_unmapped_total",
+            &category_labels,
+            coverage.unmapped_names.len() as u64,
+        );
+        metric_count += 2;
+    }
+
+    for blocker in &report.blockers {
+        let mut blocker_labels = labels.to_vec();
+        blocker_labels.push(("blocker", blocker.as_str()));
+        matrixraft_push_public_api_metric(
+            &mut text,
+            "rustraft_public_api_blocker_present",
+            &blocker_labels,
+            1,
+        );
+        metric_count += 1;
+    }
+
+    PrometheusMetricSet {
+        format: "prometheus_text_v0.0.4".to_string(),
+        metric_count,
+        text,
+    }
+}
+
+fn matrixraft_push_public_api_metric(
+    out: &mut String,
+    name: &str,
+    labels: &[(&str, &str)],
+    value: u64,
+) {
+    out.push_str(name);
+    if !labels.is_empty() {
+        out.push('{');
+        for (idx, (label_name, label_value)) in labels.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            out.push_str(label_name);
+            out.push_str("=\"");
+            out.push_str(&matrixraft_escape_public_api_prometheus_label(label_value));
+            out.push('"');
+        }
+        out.push('}');
+    }
+    out.push(' ');
+    out.push_str(&value.to_string());
+    out.push('\n');
+}
+
+fn matrixraft_escape_public_api_prometheus_label(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('\n', r"\n")
+        .replace('"', r#"\""#)
+}
+
+fn matrixraft_api_mapping_coverage_by_category(
+    contract: &PublicApiContract,
+    canonical_names: &BTreeSet<&str>,
+) -> Vec<PublicApiMappingCoverage> {
+    let categories = [
+        ("storage_trait", vec![contract.storage_trait.as_str()]),
+        ("transport_trait", vec![contract.transport_trait.as_str()]),
+        (
+            "core_interfaces",
+            contract
+                .core_interfaces
+                .iter()
+                .map(String::as_str)
+                .collect(),
+        ),
+        (
+            "rpc_messages",
+            contract.rpc_messages.iter().map(String::as_str).collect(),
+        ),
+        (
+            "safety_helpers",
+            contract.safety_helpers.iter().map(String::as_str).collect(),
+        ),
+        (
+            "embedding_examples",
+            contract
+                .embedding_examples
+                .iter()
+                .map(String::as_str)
+                .collect(),
+        ),
+        (
+            "parity_reports",
+            contract.parity_reports.iter().map(String::as_str).collect(),
+        ),
+        (
+            "benchmark_interfaces",
+            contract
+                .benchmark_interfaces
+                .iter()
+                .map(String::as_str)
+                .collect(),
+        ),
+        (
+            "observability_interfaces",
+            contract
+                .observability_interfaces
+                .iter()
+                .map(String::as_str)
+                .collect(),
+        ),
+        (
+            "diagnostic_interfaces",
+            contract
+                .diagnostic_interfaces
+                .iter()
+                .map(String::as_str)
+                .collect(),
+        ),
+        (
+            "evidence_interfaces",
+            contract
+                .evidence_interfaces
+                .iter()
+                .map(String::as_str)
+                .collect(),
+        ),
+        (
+            "compatibility_reports",
+            contract
+                .compatibility_reports
+                .iter()
+                .map(String::as_str)
+                .collect(),
+        ),
+    ];
+
+    categories
+        .into_iter()
+        .map(|(category, names)| {
+            let advertised_names = names.into_iter().collect::<BTreeSet<_>>();
+            let advertised_name_count = advertised_names.len();
+            let mapped_name_count = advertised_names
+                .iter()
+                .filter(|name| canonical_names.contains(**name))
+                .count();
+            let mapped_names = advertised_names
+                .iter()
+                .filter(|name| canonical_names.contains(**name))
+                .map(|name| (*name).to_string())
+                .collect();
+            // No advertised names is full coverage, not zero -- there is nothing left uncovered.
+            let coverage_percent = (mapped_name_count * 100)
+                .checked_div(advertised_name_count)
+                .unwrap_or(100);
+            let unmapped_names = advertised_names
+                .iter()
+                .filter(|name| !canonical_names.contains(**name))
+                .map(|name| (*name).to_string())
+                .collect();
+
+            PublicApiMappingCoverage {
+                category: category.to_string(),
+                advertised_name_count,
+                mapped_name_count,
+                coverage_percent,
+                mapped_names,
+                unmapped_names,
+            }
+        })
+        .collect()
+}
+
+pub fn matrixraft_reference_mapped_interface_names() -> Vec<String> {
+    [
+        "Storage",
+        "Transport",
+        "Config",
+        "AppendEntriesRequest",
+        "AppendEntriesResponse",
+        "VoteRequest",
+        "VoteResponse",
+        "PreVoteRequest",
+        "PreVoteResponse",
+        "InstallSnapshotRequest",
+        "InstallSnapshotResponse",
+        "ReadIndexRequest",
+        "ReadIndexResponse",
+        "SnapshotMetadata",
+        "SnapshotLifecycleEvidence",
+        "PipelineEvidence",
+        "PipelineEvidence::packet_loss_reorder_faulted_peer_count",
+        "PipelineEvidence::packet_loss_reorder_recovered_peer_count",
+        "PipelineEvidence::packet_loss_reorder_all_faulted_peers_recovered",
+        "PeerProgress",
+        "NodeRuntime",
+        "RuntimeTimerStatus",
+        "RuntimeAdminReport",
+        "matrixraft_production_readiness_report",
+        "matrixraft_production_readiness_report_with_runtime_pressure_policy",
+        "matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness",
+        "matrixraft_runtime_local_status_report",
+        "matrixraft_runtime_admin_report",
+        "AdminCommand::ReleaseMemory",
+        "PersistentRaftWal",
+        "DebugSnapshot",
+        "DiagnosticLogEntry",
+        "matrixraft_admin_diagnostic_log_entries",
+        "matrixraft_admin_diagnostic_json_lines",
+        "matrixraft_local_status_diagnostic_log_entries",
+        "matrixraft_local_status_diagnostic_json_lines",
+        "matrixraft_node_runtime_status_diagnostic_log_entries",
+        "matrixraft_node_runtime_status_diagnostic_json_lines",
+        "matrixraft_diagnostic_log_prometheus",
+        "RuntimePressureAdmission",
+        "LatencyPressureDetail",
+        "NodeRuntimeTimerPressureDetail",
+        "NodeRuntimeTimerThresholds",
+        "matrixraft_validate_runtime_pressure_admission_evidence",
+        "matrixraft_validate_runtime_pressure_admission_evidence_with_policy",
+        "matrixraft_runtime_pressure_admission_with_scale_targets",
+        "matrixraft_runtime_pressure_admission_with_pipeline_pressure",
+        "matrixraft_runtime_pressure_admission_with_queue_pressure",
+        "matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure",
+        "matrixraft_runtime_pressure_admission_with_scale_pipeline_read_backlog_and_node_runtime_timer_pressure",
+        "matrixraft_runtime_pressure_bottleneck_summary",
+        "matrixraft_runtime_pressure_freshness_report",
+        "matrixraft_runtime_pressure_freshness_prometheus",
+        "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
+        "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
+        "matrixraft_queue_pressure_metric_names",
+        "matrixraft_queue_pressure_prometheus",
+        "matrixraft_queue_pressure_grafana_panels",
+        "MailBox",
+        "MailBoxPressureStats",
+        "MailBox::try_send_checked",
+        "MailBox::try_send_many_checked",
+        "MailBox::pressure_stats_checked",
+        "MailBox::fetch_checked",
+        "QueuePressureMetricNames",
+        "QueuePressureThresholds",
+        "QueuePressureDetail",
+        "MailChannel",
+        "MailChannelPressureStats",
+        "MailChannel::try_send_checked",
+        "MailChannel::try_send_many_checked",
+        "MailChannel::pressure_stats_checked",
+        "ChannelSelector",
+        "ChannelSelector::try_send_many_to_channel_checked",
+        "ChannelSelector::select_checked",
+        "matrixraft_public_api_contract_validation_prometheus",
+        "matrixraft_snapshot_lifecycle_evidence_prometheus",
+        "matrixraft_wal_lifecycle_evidence_prometheus",
+        "matrixraft_membership_readiness_prometheus",
+        "matrixraft_release_benchmark_runtime_timer_status",
+        "matrixraft_benchmark_runtime_pressure_readiness_artifact",
+        "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog",
+        "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer",
+        "matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact",
+        "matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog",
+        "matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer",
+        "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact",
+        "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog",
+        "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer",
+        "matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact",
+        "matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog",
+        "matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer",
+        "matrixraft_production_readiness_input_with_benchmark_artifacts",
+        "matrixraft_production_readiness_input_with_asserted_benchmark_artifacts",
+        "matrixraft_production_readiness_report_with_benchmark_artifacts",
+        "matrixraft_production_readiness_report_with_asserted_benchmark_artifacts",
+        "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_artifacts",
+        "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_artifacts",
+        "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_artifacts",
+        "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_artifacts",
+        "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "matrixraft_production_readiness_input_with_runtime_pressure_evidence",
+        "matrixraft_production_readiness_input_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence",
+        "matrixraft_debug_snapshot_with_runtime_pressure_evidence",
+        "matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence",
+        "matrixraft_debug_snapshot_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence",
+        "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts",
+        "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "RuntimePressureAdmissionPolicy",
+        "BenchmarkRunner",
+        "matrixraft_grafana_dashboard",
+        "matrixraft_grafana_dashboard_json",
+        "matrixraft_alert_rules",
+        "matrixraft_alert_rules_json",
+        "matrixraft_observability_provisioning",
+        "matrixraft_observability_provisioning_runbook_steps",
+        "matrixraft_operator_runbook_steps_with_diagnostics",
+        "matrixraft_operator_runbook_prometheus",
+        "matrixraft_observability_provisioning_json",
+        "matrixraft_observability_required_metric_names",
+        "matrixraft_validate_required_metric_scrape_texts",
+        "matrixraft_validate_observability_provisioning",
+        "matrixraft_validate_observability_provisioning_json",
+        "matrixraft_observability_provisioning_validation_prometheus",
+        "matrixraft_operator_runbook_steps",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn push_duplicate_name_blockers<'a>(
+    blockers: &mut Vec<String>,
+    scope: &str,
+    names: impl Iterator<Item = &'a str>,
+) {
+    let mut seen = BTreeSet::new();
+    for name in names {
+        if name.trim().is_empty() {
+            blockers.push(format!("{scope}:empty_name"));
+        } else if !seen.insert(name) {
+            blockers.push(format!("{scope}:duplicate_name:{name}"));
+        }
+    }
+}
+
+fn matrixraft_advertised_public_api_names(contract: &PublicApiContract) -> BTreeSet<&str> {
+    let mut names = BTreeSet::new();
+    names.insert(contract.storage_trait.as_str());
+    names.insert(contract.transport_trait.as_str());
+    names.extend(contract.core_interfaces.iter().map(String::as_str));
+    names.extend(contract.rpc_messages.iter().map(String::as_str));
+    names.extend(contract.safety_helpers.iter().map(String::as_str));
+    names.extend(contract.embedding_examples.iter().map(String::as_str));
+    names.extend(contract.parity_reports.iter().map(String::as_str));
+    names.extend(contract.benchmark_interfaces.iter().map(String::as_str));
+    names.extend(contract.observability_interfaces.iter().map(String::as_str));
+    names.extend(contract.diagnostic_interfaces.iter().map(String::as_str));
+    names.extend(contract.evidence_interfaces.iter().map(String::as_str));
+    names.extend(contract.compatibility_reports.iter().map(String::as_str));
+    names
+}
+
+pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
+    vec![
+        ApiNameMapping {
+            canonical: "Storage".to_string(),
+            matrixraft_facade: "MatrixRaftStorage".to_string(),
+            raft_rs_or_tikv_reference: "raft::Storage".to_string(),
+            byteraft_or_baseline_reference: "Raft log/snapshot storage".to_string(),
+            note: "Use the unprefixed trait in native Rust; the facade name is reserved for compatibility adapters."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "Transport".to_string(),
+            matrixraft_facade: "MatrixRaftTransport".to_string(),
+            raft_rs_or_tikv_reference: "Raft message router / RaftStore transport".to_string(),
+            byteraft_or_baseline_reference: "AppendEntries/Vote/Snapshot RPC transport"
+                .to_string(),
+            note: "Transport owns RPC dispatch; production services provide the network implementation."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "Config".to_string(),
+            matrixraft_facade: "MatrixRaftOptions".to_string(),
+            raft_rs_or_tikv_reference: "raft::Config / TiKV raftstore tuning".to_string(),
+            byteraft_or_baseline_reference: "raft group options".to_string(),
+            note: "Config owns timing, payload, log-buffer, and election-safety limits; facade options adapt product-level defaults into the canonical runtime."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "AppendEntriesRequest".to_string(),
+            matrixraft_facade: "MatrixRaftAppendEntriesRequest".to_string(),
+            raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgAppend".to_string(),
+            byteraft_or_baseline_reference: "append_entries".to_string(),
+            note: "Canonical RustRaft request fields stay typed; facade messages preserve MatrixRaft wire-shape naming."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "AppendEntriesResponse".to_string(),
+            matrixraft_facade: "MatrixRaftAppendEntriesResponse".to_string(),
+            raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgAppendResponse".to_string(),
+            byteraft_or_baseline_reference: "append_entries_response".to_string(),
+            note: "Rejected index, rejection hint, and snapshot-required state map to replication pipeline backoff."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "VoteRequest".to_string(),
+            matrixraft_facade: "MatrixRaftVoteRequest".to_string(),
+            raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgRequestVote".to_string(),
+            byteraft_or_baseline_reference: "request_vote".to_string(),
+            note: "VoteRequest is the canonical election request; facade naming keeps MatrixRaft wire compatibility."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "VoteResponse".to_string(),
+            matrixraft_facade: "MatrixRaftVoteResponse".to_string(),
+            raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgRequestVoteResponse"
+                .to_string(),
+            byteraft_or_baseline_reference: "request_vote_response".to_string(),
+            note: "VoteResponse carries election grant/reject evidence for parity checks and operator diagnostics."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "PreVoteRequest".to_string(),
+            matrixraft_facade: "MatrixRaftPreVoteRequest".to_string(),
+            raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgRequestPreVote".to_string(),
+            byteraft_or_baseline_reference: "pre_vote".to_string(),
+            note: "PreVoteRequest keeps disruptive election prevention explicit for TiKV-style raftstore readiness."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "PreVoteResponse".to_string(),
+            matrixraft_facade: "MatrixRaftPreVoteResponse".to_string(),
+            raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgRequestPreVoteResponse"
+                .to_string(),
+            byteraft_or_baseline_reference: "pre_vote_response".to_string(),
+            note: "PreVoteResponse exposes pre-election quorum evidence without overloading the regular vote path."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "InstallSnapshotRequest".to_string(),
+            matrixraft_facade: "MatrixRaftInstallSnapshotRequest".to_string(),
+            raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgSnapshot".to_string(),
+            byteraft_or_baseline_reference: "install_snapshot".to_string(),
+            note: "InstallSnapshotRequest is the canonical sender boundary for compacted-log recovery."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "InstallSnapshotResponse".to_string(),
+            matrixraft_facade: "MatrixRaftInstallSnapshotResponse".to_string(),
+            raft_rs_or_tikv_reference: "snapshot apply response / raftstore snapshot status"
+                .to_string(),
+            byteraft_or_baseline_reference: "install_snapshot_response".to_string(),
+            note: "InstallSnapshotResponse gives snapshot sender/downloader lifecycle tests a stable completion vocabulary."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "ReadIndexRequest".to_string(),
+            matrixraft_facade: "MatrixRaftReadIndexOptions".to_string(),
+            raft_rs_or_tikv_reference: "ReadIndex / MsgReadIndex".to_string(),
+            byteraft_or_baseline_reference: "read_index / lease_read".to_string(),
+            note: "Lease reads and quorum reads are explicit options so followers can fail closed or serve bounded stale reads."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "ReadIndexResponse".to_string(),
+            matrixraft_facade: "MatrixRaftReadIndexStatus".to_string(),
+            raft_rs_or_tikv_reference: "ReadState / MsgReadIndexResp".to_string(),
+            byteraft_or_baseline_reference: "read_index_response / lease_read_result"
+                .to_string(),
+            note: "ReadIndexResponse separates safe-read proof, lease-read eligibility, and bounded-stale fallback status."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailBox".to_string(),
+            matrixraft_facade: "MatrixRaftMailBox".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore scheduler mailbox".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft event queue".to_string(),
+            note: "MailBox is the priority queue boundary for scheduler and transport work that embedders can monitor for pressure."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailBox::try_send_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailBox::TrySendChecked".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore non-blocking mailbox send with backpressure".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked event enqueue".to_string(),
+            note: "The checked send path returns queue saturation and lock failures as values so production runtimes can shed or retry work without process aborts."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailBox::try_send_many_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailBox::TrySendManyChecked".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore bounded mailbox batch enqueue".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked event batch enqueue"
+                .to_string(),
+            note: "The checked mailbox batch path rejects oversized scheduler bursts before queueing them, keeping local work-queue memory bounded under high QPS."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailBoxPressureStats".to_string(),
+            matrixraft_facade: "MatrixRaftMailBoxPressureStats".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore mailbox pressure counters".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue pressure snapshot".to_string(),
+            note: "MailBoxPressureStats exposes high watermark, current depth, max observed depth, and rejected enqueue count for memory and QPS tuning."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailBox::pressure_stats_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailBox::PressureStatsChecked".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore checked mailbox pressure read".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked queue pressure read".to_string(),
+            note: "The checked mailbox pressure read returns runtime queue telemetry without hiding lock failures behind panics."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailBox::fetch_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailBox::FetchChecked".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore bounded mailbox drain".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked event dequeue".to_string(),
+            note: "The checked fetch path preserves priority ordering and deadline behavior while surfacing queue runtime failures as RaftError."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailChannel".to_string(),
+            matrixraft_facade: "MatrixRaftMailChannel".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore per-peer ready queue".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft per-replica event lane".to_string(),
+            note: "MailChannel names the per-replica queue used by the selector to track burst pressure and preserve per-peer scheduling."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailChannel::try_send_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailChannel::TrySendChecked".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore per-peer enqueue with flow-control feedback".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked per-peer enqueue".to_string(),
+            note: "The checked channel send keeps overflow as a recoverable result that returns the caller's mail while reporting runtime failures as RaftError."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailChannel::try_send_many_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailChannel::TrySendManyChecked".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore bounded per-peer batch enqueue".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked batch enqueue".to_string(),
+            note: "The checked batch path rejects oversized bursts before queueing them, keeping memory pressure bounded under release-scale fanout."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailChannelPressureStats".to_string(),
+            matrixraft_facade: "MatrixRaftMailChannelPressureStats".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore per-peer ready-queue pressure counters".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft per-replica queue pressure snapshot".to_string(),
+            note: "MailChannelPressureStats exposes the replica id, queue limit, queued depth, selector-visible total, max depth, and rejected enqueue count."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "MailChannel::pressure_stats_checked".to_string(),
+            matrixraft_facade: "MatrixRaftMailChannel::PressureStatsChecked".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore checked per-peer pressure read".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked replica queue pressure read".to_string(),
+            note: "The checked per-channel pressure read lets production callers observe per-peer burst pressure while preserving recoverable error handling."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "ChannelSelector".to_string(),
+            matrixraft_facade: "MatrixRaftChannelSelector".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore ready peer selector".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft replica scheduler selector".to_string(),
+            note: "ChannelSelector is the fairness and fanout boundary for selecting active peer queues under release-scale workloads."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "ChannelSelector::try_send_many_to_channel_checked".to_string(),
+            matrixraft_facade: "MatrixRaftChannelSelector::TrySendManyToChannelChecked"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore bounded batch send and ready-peer notification".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft checked batch enqueue and selector wake".to_string(),
+            note: "The selector-level checked batch API keeps bounded fanout enqueue and selector wakeup in one recoverable operation for production callers."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "ChannelSelector::select_checked".to_string(),
+            matrixraft_facade: "MatrixRaftChannelSelector::SelectChecked".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore bounded ready-poll loop".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft checked ready-queue selector".to_string(),
+            note: "The checked selector keeps deadline-bound polling and global-mail draining available without converting poisoned queue state into a process panic."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_read_safety_decision".to_string(),
+            matrixraft_facade: "MatrixRaftReadSafetyDecision".to_string(),
+            raft_rs_or_tikv_reference: "TiKV ReadIndex and lease-read safety check"
+                .to_string(),
+            byteraft_or_baseline_reference: "ByteRaft safe read / lease read gate".to_string(),
+            note: "The helper maps live leader, quorum, applied-index, and bounded-stale evidence into a fail-closed read decision."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_append_safety_decision".to_string(),
+            matrixraft_facade: "MatrixRaftAppendSafetyDecision".to_string(),
+            raft_rs_or_tikv_reference: "raft-rs append log matching and rejection hint"
+                .to_string(),
+            byteraft_or_baseline_reference: "AppendEntries safety and backoff gate".to_string(),
+            note: "The helper names the append acceptance contract that protects log matching, compacted-entry rejection, and pipeline retry behavior."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_learner_promotion_decision".to_string(),
+            matrixraft_facade: "MatrixRaftLearnerPromotionDecision".to_string(),
+            raft_rs_or_tikv_reference: "TiKV learner catch-up and promote-peer workflow"
+                .to_string(),
+            byteraft_or_baseline_reference: "learner catch-up / auto-promote gate".to_string(),
+            note: "The helper keeps learner promotion tied to observed match index, lag, and membership readiness rather than a caller-only flag."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "SnapshotMetadata".to_string(),
+            matrixraft_facade: "MatrixRaftSnapshotDesc".to_string(),
+            raft_rs_or_tikv_reference: "Snapshot metadata".to_string(),
+            byteraft_or_baseline_reference: "snapshot descriptor".to_string(),
+            note: "The canonical type carries snapshot id, last log id, and membership; facade conversion keeps MatrixRaft field names."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "SnapshotLifecycleEvidence".to_string(),
+            matrixraft_facade: "MatrixRaftSnapshotLifecycleEvidence".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore snapshot send/apply progress and lifecycle metrics".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft snapshot sender/downloader lifecycle evidence".to_string(),
+            note: "SnapshotLifecycleEvidence is the canonical production gate for retry, timeout, rate-limit, sustained load, coherent transfer completion, rollback, membership-change, and compacted-log rejoin proof."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "PeerProgress".to_string(),
+            matrixraft_facade: "MatrixRaftAsyncStatus".to_string(),
+            raft_rs_or_tikv_reference: "Progress / ProgressTracker".to_string(),
+            byteraft_or_baseline_reference: "per-peer replication pipeline status".to_string(),
+            note: "Use PeerProgress for QPS, lag, inflight bytes, snapshot transfer, and packet-loss/reorder evidence."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "PipelineEvidence".to_string(),
+            matrixraft_facade: "MatrixRaftPipelineEvidence".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore ProgressTracker and transport fault evidence".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft replication pipeline readiness evidence".to_string(),
+            note: "PipelineEvidence is the production gate for append/apply backpressure, memory limits, stale terms, packet-loss probes, reorder convergence, and per-peer fault recovery."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "PipelineEvidence::packet_loss_reorder_faulted_peer_count".to_string(),
+            matrixraft_facade: "MatrixRaftPipelineEvidence.packetLossReorderFaultedPeerCount"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV per-peer ProgressTracker transport fault coverage".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft packet-loss/reorder faulted peer count".to_string(),
+            note: "Counts every peer that observed both packet loss and reordered append evidence so production parity cannot rely on a single sampled peer."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "PipelineEvidence::packet_loss_reorder_recovered_peer_count".to_string(),
+            matrixraft_facade: "MatrixRaftPipelineEvidence.packetLossReorderRecoveredPeerCount"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV per-peer Progress recovery after transport fault and reorder".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft packet-loss/reorder recovered peer count".to_string(),
+            note: "Counts peers that both saw the combined fault and reached clean append progress afterward."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "PipelineEvidence::packet_loss_reorder_all_faulted_peers_recovered"
+                .to_string(),
+            matrixraft_facade:
+                "MatrixRaftPipelineEvidence.packetLossReorderAllFaultedPeersRecovered".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore all-peer Progress recovery gate after transport/reorder faults"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft all faulted peers recovered release gate".to_string(),
+            note: "This is the fail-closed production signal required before QPS/latency parity can claim deeper per-peer replication-pipeline behavior."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "NodeRuntime".to_string(),
+            matrixraft_facade: "MatrixRaftNodeRuntime".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore peer worker / RaftRouter event loop"
+                .to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft node runtime and scheduler worker"
+                .to_string(),
+            note: "NodeRuntime is the canonical production event-loop boundary for lifecycle commands, ReadIndex routing, peer pipeline pressure, and timer backpressure."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "RuntimeTimerStatus".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimeTimerStatus".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore tick metrics and scheduler delay telemetry"
+                .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft heartbeat/election timer status and scheduler pressure".to_string(),
+            note: "RuntimeTimerStatus keeps heartbeat, election, lease, pending tick, rejected tick, and completed tick counters stable for Grafana, logs, and latency/QPS readiness triage."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "RuntimeAdminReport".to_string(),
+            matrixraft_facade: "MatrixRaftAdminStatus".to_string(),
+            raft_rs_or_tikv_reference: "RaftStore admin/status view".to_string(),
+            byteraft_or_baseline_reference: "GetInfo/admin status".to_string(),
+            note: "Admin reports are the stable status boundary for dashboards, logs, and production readiness gates."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_production_readiness_report".to_string(),
+            matrixraft_facade: "MatrixRaftProductionReadinessReport".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore release gate with benchmark, telemetry, and operational evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft production readiness and ByteRaft release gate".to_string(),
+            note: "Production-readiness reports are the canonical deploy gate for release blockers, QPS/latency/memory parity, and ranked runtime-pressure bottlenecks."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_production_readiness_report_with_runtime_pressure_policy"
+                .to_string(),
+            matrixraft_facade: "MatrixRaftPolicyAwareProductionReadinessReport".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore flow-control policy deployment gate".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft fail-closed runtime-pressure deployment gate".to_string(),
+            note: "Policy-aware production readiness reports keep the stable production gate while rejecting runtime-pressure evidence whose rejected_component does not match the configured fail-closed admission policy."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftFreshPolicyProductionReadinessReport".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore release gates require fresh flow-control and scheduler telemetry"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft fail-closed runtime-pressure freshness deployment gate".to_string(),
+            note: "Freshness-aware production readiness reports reject stale, invalid, missing, or future-dated runtime-pressure evidence before QPS, latency, or memory parity can be claimed."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_local_status_report".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimeLocalStatusReport".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore local peer status and ProgressTracker snapshot".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft local status/GetInfo replica progress view".to_string(),
+            note: "Local runtime status binds node state, peer replication progress, WAL/snapshot health, and readiness evidence for bounded-stale read and latency debugging."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_admin_report".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimeAdminReport".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore admin/status aggregation across peers".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft GetInfo/admin status aggregation".to_string(),
+            note: "Runtime admin reports aggregate local status, release blockers, memory pressure, QPS/latency readiness, and peer-pipeline lag for operator triage."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "AdminCommand::ReleaseMemory".to_string(),
+            matrixraft_facade: "MatrixRaftAdminCommandType::ReleaseMemory".to_string(),
+            raft_rs_or_tikv_reference: "RaftStore admin command / memory pressure control".to_string(),
+            byteraft_or_baseline_reference: "release_memory admin action".to_string(),
+            note: "ReleaseMemory is the explicit operator and runtime-pressure path for bounded cache/log-buffer cleanup under memory pressure."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "PersistentRaftWal".to_string(),
+            matrixraft_facade: "PersistentRaftWalOptions".to_string(),
+            raft_rs_or_tikv_reference: "RaftEngine/WAL".to_string(),
+            byteraft_or_baseline_reference: "persistent log segment lifecycle".to_string(),
+            note: "WAL naming stays explicit because production readiness depends on fsync, recovery, and compaction evidence."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "DebugSnapshot".to_string(),
+            matrixraft_facade: "matrixraft_debug_snapshot_json".to_string(),
+            raft_rs_or_tikv_reference: "debug/metrics bundle".to_string(),
+            byteraft_or_baseline_reference: "support envelope".to_string(),
+            note: "DebugSnapshot is the handoff bundle for logs, Grafana, alerts, benchmark parity, memory, and latency evidence."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "DiagnosticLogEntry".to_string(),
+            matrixraft_facade: "matrixraft_*_diagnostic_json_lines".to_string(),
+            raft_rs_or_tikv_reference: "TiKV structured log / slog fields".to_string(),
+            byteraft_or_baseline_reference: "diagnostic log line".to_string(),
+            note: "DiagnosticLogEntry is the canonical logging record before rendering JSON lines or Prometheus counters for release triage."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_admin_diagnostic_log_entries".to_string(),
+            matrixraft_facade: "MatrixRaftAdminDiagnosticLogs".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore admin structured logs and status fields".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft admin/GetInfo diagnostic log lines".to_string(),
+            note: "Admin diagnostic log entries keep release blockers, unhealthy peers, memory pressure, WAL lag, and QPS/latency failures readable before JSON or Prometheus rendering."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_admin_diagnostic_json_lines".to_string(),
+            matrixraft_facade: "MatrixRaftAdminDiagnosticJsonLines".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore JSON structured log export".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft admin/GetInfo diagnostic JSON lines".to_string(),
+            note: "Admin diagnostic JSON lines provide machine-stable operator evidence for release automation, Grafana log panels, and support bundle triage."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_local_status_diagnostic_log_entries".to_string(),
+            matrixraft_facade: "MatrixRaftLocalStatusDiagnosticLogs".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore local peer structured status logs".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft local replica status diagnostic log lines".to_string(),
+            note: "Local-status diagnostic log entries expose per-replica progress, read readiness, WAL/snapshot health, and scheduler pressure for follower-read debugging."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_local_status_diagnostic_json_lines".to_string(),
+            matrixraft_facade: "MatrixRaftLocalStatusDiagnosticJsonLines".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore local status JSON log export".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft local replica diagnostic JSON lines".to_string(),
+            note: "Local-status diagnostic JSON lines keep random-replica read lag, bounded-stale readiness, and peer pipeline evidence parseable in support bundles."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_node_runtime_status_diagnostic_log_entries".to_string(),
+            matrixraft_facade: "MatrixRaftNodeRuntimeStatusDiagnosticLogs".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore scheduler and peer worker structured logs".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft node-runtime diagnostic log lines".to_string(),
+            note: "Node-runtime diagnostic logs expose event-loop timers, pending ticks, dropped work, memory pressure, and replication scheduler saturation for scale debugging."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_node_runtime_status_diagnostic_json_lines".to_string(),
+            matrixraft_facade: "MatrixRaftNodeRuntimeStatusDiagnosticJsonLines".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore scheduler JSON structured log export".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft node-runtime diagnostic JSON lines".to_string(),
+            note: "Node-runtime diagnostic JSON lines make timer backlog, queue saturation, and scale-readiness failures stable inputs for dashboards and release verifiers."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_diagnostic_log_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftDiagnosticLogPrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore diagnostic log counters exported to Prometheus".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft diagnostic log severity/source metrics".to_string(),
+            note: "Diagnostic-log Prometheus output turns structured log entries into release-scale counters without losing source, severity, QPS, latency, memory, WAL, or peer-pipeline labels."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "RuntimePressureAdmission".to_string(),
+            matrixraft_facade: "matrixraft_runtime_pressure_admission".to_string(),
+            raft_rs_or_tikv_reference: "raftstore flow control / backpressure".to_string(),
+            byteraft_or_baseline_reference: "admission and throttle decision".to_string(),
+            note: "RuntimePressureAdmission connects memory, latency, scale, and peer pipeline telemetry to observe-only or fail-closed admission decisions."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "QueuePressureMetricNames".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressureMetricNames".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore queue pressure metric names".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft scheduler queue pressure metrics"
+                .to_string(),
+            note: "QueuePressureMetricNames pins mailbox and per-replica queue depth and rejection metric names for QPS and memory-pressure dashboards."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_queue_pressure_metric_names".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressureMetricNamesFactory".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore queue metric-name contract".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue metric-name contract".to_string(),
+            note: "The queue-pressure metric-name helper keeps scrape names stable as embedders wire mailbox and per-peer channel pressure into Prometheus."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_queue_pressure_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressurePrometheus".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore mailbox and peer queue scrape".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue pressure scrape".to_string(),
+            note: "The queue-pressure Prometheus helper exports mailbox and per-replica channel depth, limits, max depth, and rejected enqueue counters for operator triage."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_queue_pressure_grafana_panels".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressureGrafanaPanels".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore queue pressure dashboards".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue pressure dashboard panels".to_string(),
+            note: "Queue-pressure Grafana panels surface queue depth and rejection rate beside memory and runtime-pressure panels for release-scale tuning."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "QueuePressureThresholds".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressureThresholds".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore mailbox saturation thresholds".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft queue saturation and rejection thresholds".to_string(),
+            note: "QueuePressureThresholds pins utilization and rejected-send thresholds used by queue-aware runtime admission."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "QueuePressureDetail".to_string(),
+            matrixraft_facade: "MatrixRaftQueuePressureDetail".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore queue pressure detail".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue pressure detail".to_string(),
+            note: "QueuePressureDetail records queue saturation and rejected enqueue evidence for bottleneck ranking and diagnostic logs."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_admission_with_queue_pressure".to_string(),
+            matrixraft_facade: "MatrixRaftQueueAwareRuntimePressureAdmission".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore queue-aware flow control".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft queue-aware admission gate".to_string(),
+            note: "Queue-aware runtime-pressure admission can stay observe-only or fail closed when mailbox and per-replica queues saturate under release-scale QPS."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "LatencyPressureDetail".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimeLatencyPressureDetail".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore latency histogram and flow-control detail"
+                .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release p95/p99 latency threshold evidence".to_string(),
+            note: "LatencyPressureDetail is the stable tail-latency evidence record for sample count, p95, p99, configured threshold, and excess used by dashboards, logs, and production gates."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "NodeRuntimeTimerPressureDetail".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimeNodeTimerPressureDetail".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore tick scheduler saturation detail".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft event-loop timer queue pressure evidence".to_string(),
+            note: "NodeRuntimeTimerPressureDetail records timer utilization percent, threshold, and excess so release-scale QPS and latency evidence can reject scheduler saturation before ticks are dropped."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "NodeRuntimeTimerThresholds".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimeNodeTimerThresholds".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore scheduler flow-control thresholds".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft runtime timer saturation threshold".to_string(),
+            note: "NodeRuntimeTimerThresholds pins the proactive timer-utilization warning threshold used by runtime pressure admission and production observability."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_validate_runtime_pressure_admission_evidence".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePressureAdmissionEvidenceValidator".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore release telemetry consistency checks".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft runtime-pressure evidence validation".to_string(),
+            note: "Runtime-pressure admission evidence validation rejects malformed memory, latency, scale, pipeline, and read-backlog detail before Grafana, logs, or production gates can advertise impossible pressure samples."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_validate_runtime_pressure_admission_evidence_with_policy"
+                .to_string(),
+            matrixraft_facade:
+                "MatrixRaftRuntimePressureAdmissionPolicyAwareEvidenceValidator".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore flow-control policy consistency checks".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft fail-closed runtime-pressure rejection validation".to_string(),
+            note: "Policy-aware runtime-pressure validation rejects admissions whose rejected_component does not match the configured fail-closed pressure priority, so production gates cannot advertise a lower-priority blocker while read backlog, timer, or latency pressure is active."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_admission_with_scale_targets".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimeScalePressureAdmission".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore QPS and apply throughput flow control"
+                .to_string(),
+            byteraft_or_baseline_reference: "release QPS/throughput target admission"
+                .to_string(),
+            note: "Scale-target admission keeps release QPS, append/read/apply throughput, and replication bandwidth misses visible before production parity is claimed."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_admission_with_pipeline_pressure".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePeerPipelinePressureAdmission".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore per-peer Progress and raftstore flow control".to_string(),
+            byteraft_or_baseline_reference: "ByteRaft per-peer pipeline saturation admission"
+                .to_string(),
+            note: "Peer-pipeline admission maps append/apply/reorder queues and backpressure rejections into a fail-closed production guard."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure"
+                .to_string(),
+            matrixraft_facade: "MatrixRaftRuntimeNodeTimerPressureAdmission".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore scheduler backpressure guard".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft node event-loop timer pressure admission".to_string(),
+            note: "Node-runtime timer admission turns pending-tick queue utilization into observe-only or fail-closed pressure evidence before release-scale latency or QPS parity is claimed."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftRuntimeFullPressureAdmission".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore QPS, Progress, read-index, and flow-control gates".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft release-scale QPS, per-peer pipeline, and read backlog admission"
+                    .to_string(),
+            note: "Full runtime-pressure admission keeps scale targets, peer pipeline pressure, and read backlog pressure in one fail-closed production decision."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_runtime_pressure_admission_with_scale_pipeline_read_backlog_and_node_runtime_timer_pressure"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftRuntimeCompletePressureAdmission".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore QPS, Progress, read-index, scheduler, and flow-control gates"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft release-scale QPS, per-peer pipeline, read backlog, and timer pressure admission"
+                    .to_string(),
+            note: "Complete runtime-pressure admission keeps scale targets, peer pipeline pressure, read backlog pressure, and node-runtime timer saturation in one fail-closed production decision."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_bottleneck_summary".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePressureBottleneckSummary".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore flow-control bottleneck and dashboard triage signal".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft release-scale QPS/latency bottleneck ranking".to_string(),
+            note: "Runtime-pressure bottleneck summaries rank memory, latency, scale, peer-pipeline, read-backlog, and timer pressure by excess or deficit percent so release automation can explain failed QPS/latency parity without parsing raw detail arrays."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_freshness_report".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePressureFreshnessReport".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore release-dashboard freshness window".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft release-scale QPS/latency/memory evidence freshness gate".to_string(),
+            note: "Runtime-pressure freshness reports classify fresh, low-fresh, stale, and invalid telemetry windows so memory, latency, and QPS evidence cannot be reused after its release gate age budget expires."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_freshness_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePressureFreshnessPrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore Prometheus freshness scrape for release dashboards".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft release-scale QPS/latency/memory freshness telemetry".to_string(),
+            note: "Runtime-pressure freshness Prometheus exports generated time, age, stale boundary, remaining freshness, status, and issue counters so Grafana can reject stale QPS, latency, or memory evidence before parity is claimed."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_freshness_diagnostic_log_entries".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePressureFreshnessDiagnosticLogEntries"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore structured telemetry freshness diagnostics".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft release-scale QPS/latency/memory freshness logs".to_string(),
+            note: "Runtime-pressure freshness diagnostic entries make stale, low-fresh, invalid, and future-dated benchmark evidence visible to log-only release gates without parsing Prometheus text."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_runtime_pressure_freshness_diagnostic_json_lines".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePressureFreshnessDiagnosticJsonLines".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore JSON log freshness diagnostics".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft release-scale freshness diagnostic JSON lines".to_string(),
+            note: "Runtime-pressure freshness JSON lines preserve generated time, age, stale boundary, remaining freshness, status, and issue fields for release automation and centralized log queries."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_public_api_contract_validation_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftPublicApiContractValidationPrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore public API compatibility dashboard scrape".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft API mapping and release-contract drift telemetry".to_string(),
+            note: "Public API contract validation Prometheus exports API mapping readiness, coverage, category drift, and blocker metrics so release dashboards can fail closed on unmapped TiKV or ByteRaft reference vocabulary."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_snapshot_lifecycle_evidence_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftSnapshotLifecyclePrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore snapshot send/apply progress Prometheus scrape".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft snapshot sender/downloader lifecycle Prometheus evidence"
+                    .to_string(),
+            note: "Snapshot lifecycle Prometheus turns sender, downloader, retry, timeout, rate-limit, install, rollback, and compacted-log rejoin proof into release-dashboard metrics."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_wal_lifecycle_evidence_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftWalLifecyclePrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV RaftEngine/WAL segment lifecycle Prometheus scrape".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft WAL segment compaction and slow-fsync Prometheus evidence".to_string(),
+            note: "WAL lifecycle Prometheus exposes retained ranges, log-index ranges, released segments, slow fsync, and compaction-after-pressure proof before durability or QPS parity is accepted."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_membership_readiness_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftMembershipReadinessPrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore joint-consensus and learner/witness readiness scrape"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft membership transition readiness Prometheus evidence".to_string(),
+            note: "Membership readiness Prometheus keeps failover, scale-up, scale-down, joint quorum, learner catch-up, witness, and scheduler-generation gaps visible in release dashboards."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_production_readiness_input_with_runtime_pressure_evidence"
+                .to_string(),
+            matrixraft_facade: "MatrixRaftProductionReadinessRuntimePressureEvidence".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release dashboard evidence feeding raftstore flow-control gates".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale QPS, latency, memory, and per-peer pipeline evidence"
+                    .to_string(),
+            note: "Production-readiness runtime-pressure evidence wires release-scale telemetry into the fail-closed deployment gate instead of requiring callers to hand-assemble admission records."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_input_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftProductionReadinessCompletePressureEvidence"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release dashboard evidence feeding read-index, scheduler, and raftstore flow-control gates"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale QPS, latency, memory, pipeline, read backlog, and timer evidence"
+                    .to_string(),
+            note: "Timer-aware production-readiness runtime-pressure evidence wires live read backlog and node-runtime timer utilization into the same fail-closed deployment gate as release-scale QPS and latency telemetry."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_production_readiness_input_with_benchmark_artifacts"
+                .to_string(),
+            matrixraft_facade: "MatrixRaftProductionReadinessBenchmarkInput".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark evidence attached to readiness input".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft diagnostic benchmark artifacts attached to a release gate"
+                    .to_string(),
+            note: "The diagnostic helper accepts matched benchmark report/summary artifacts and carries their blockers into the production-readiness report so failed QPS, latency, throughput, correctness, CPU, or memory evidence remains explainable."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_production_readiness_input_with_asserted_benchmark_artifacts"
+                .to_string(),
+            matrixraft_facade: "MatrixRaftAssertedProductionReadinessBenchmarkInput"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark fail-closed readiness input".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft production-clean benchmark artifacts attached to a release gate"
+                    .to_string(),
+            note: "The asserted helper rejects any matched-but-failing benchmark artifacts before readiness input is trusted as release evidence."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_artifacts"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftProductionReadinessBenchmarkRuntimePressureEvidence"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark evidence feeding raftstore flow-control gates".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale benchmark artifacts feeding runtime admission"
+                    .to_string(),
+            note: "Production-readiness benchmark runtime-pressure input validates the benchmark report/summary pair, derives BaselineRaft-backed scale targets, and attaches fail-closed admission evidence in one call."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_artifacts"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftAssertedProductionReadinessBenchmarkRuntimePressureEvidence"
+                    .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark fail-closed scale and raftstore flow-control evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft production-clean benchmark artifacts feeding runtime admission"
+                    .to_string(),
+            note: "The asserted runtime-pressure helper rejects matched-but-failing benchmark artifacts before deriving QPS scale targets or accepting runtime pressure evidence."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftProductionReadinessBenchmarkFullPressureEvidence".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, ReadIndex backlog, and raftstore flow-control evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale benchmark artifacts feeding runtime and read backlog admission"
+                    .to_string(),
+            note: "Read-backlog benchmark runtime-pressure input binds benchmark-derived QPS targets, live read backlog, and fail-closed production admission in one call."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftAssertedProductionReadinessBenchmarkFullPressureEvidence"
+                    .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark fail-closed ReadIndex backlog and raftstore flow-control evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft production-clean benchmark artifacts feeding runtime and read backlog admission"
+                    .to_string(),
+            note: "The asserted read-backlog helper rejects matched-but-failing benchmark artifacts before QPS scale targets, peer-pipeline pressure, or pending-read backlog evidence are trusted."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftProductionReadinessBenchmarkCompletePressureEvidence".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, ReadIndex backlog, scheduler, and raftstore flow-control evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale benchmark artifacts feeding runtime, read backlog, and timer admission"
+                    .to_string(),
+            note: "Timer-aware benchmark runtime-pressure input binds benchmark-derived QPS targets, live read backlog, node-runtime timer saturation, and fail-closed production admission in one call."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftAssertedProductionReadinessBenchmarkCompletePressureEvidence"
+                    .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark fail-closed ReadIndex, scheduler, and flow-control evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft production-clean benchmark artifacts feeding runtime, read backlog, and timer admission"
+                    .to_string(),
+            note: "The asserted complete-pressure helper rejects matched-but-failing benchmark artifacts before QPS scale targets, read backlog, peer-pipeline pressure, or node-runtime timer evidence are trusted."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_production_readiness_report_with_benchmark_artifacts"
+                .to_string(),
+            matrixraft_facade: "MatrixRaftProductionReadinessBenchmarkReport".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark readiness report with diagnostic blockers".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft benchmark parity artifacts rendered as a readiness report"
+                    .to_string(),
+            note: "The diagnostic report helper preserves failing benchmark blockers for dashboards, runbooks, and operator triage."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_production_readiness_report_with_asserted_benchmark_artifacts"
+                .to_string(),
+            matrixraft_facade: "MatrixRaftAssertedProductionReadinessBenchmarkReport"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark fail-closed readiness report".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft production-clean benchmark parity readiness report".to_string(),
+            note: "The asserted report helper is the public release-gate API for callers that require QPS, latency, throughput, correctness, CPU, and memory parity to be proven before a readiness report is built."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_artifacts"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftProductionReadinessBenchmarkRuntimePressureReport"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark and raftstore flow-control readiness report".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale benchmark artifacts producing a gated readiness report"
+                    .to_string(),
+            note: "Production-readiness benchmark runtime-pressure reports validate benchmark artifacts, derive scale pressure, attach runtime admission evidence, and run the fail-closed deployment gate in one release call."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_artifacts"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftAssertedProductionReadinessBenchmarkRuntimePressureReport"
+                    .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark fail-closed scale and flow-control readiness report"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft production-clean benchmark artifacts producing a runtime-pressure gated readiness report"
+                    .to_string(),
+            note: "The asserted runtime-pressure report helper is the release automation path when QPS, latency, throughput, correctness, CPU, and memory parity must be proven before scale-target admission is trusted."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftProductionReadinessBenchmarkFullPressureReport"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark and ReadIndex flow-control readiness report".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale benchmark artifacts producing a read backlog gated readiness report"
+                    .to_string(),
+            note: "Read-backlog benchmark runtime-pressure reports fail closed when benchmark parity is clean but read serving queues are already over budget."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftAssertedProductionReadinessBenchmarkFullPressureReport"
+                    .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark fail-closed ReadIndex backlog readiness report"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft production-clean benchmark artifacts producing a read backlog gated readiness report"
+                    .to_string(),
+            note: "The asserted read-backlog report helper is the release automation path when benchmark parity and live read-serving backlog both need hard-gate semantics."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftProductionReadinessBenchmarkCompletePressureReport"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, ReadIndex, scheduler, and flow-control readiness report"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale benchmark artifacts producing a read backlog and timer gated readiness report"
+                    .to_string(),
+            note: "Timer-aware benchmark runtime-pressure reports fail closed when benchmark parity is clean but read serving queues or node-runtime timer queues are already over budget."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftAssertedProductionReadinessBenchmarkCompletePressureReport"
+                    .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark fail-closed ReadIndex and scheduler readiness report"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft production-clean benchmark artifacts producing a read backlog and timer gated readiness report"
+                    .to_string(),
+            note: "The asserted complete-pressure report helper is the release automation path when benchmark parity, read backlog, and node-runtime timer pressure all need hard-gate semantics."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_release_benchmark_runtime_timer_status".to_string(),
+            matrixraft_facade: "MatrixRaftReleaseBenchmarkRuntimeTimerStatus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark scheduler/timer pressure baseline".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release promotion no-pressure timer evidence fixture".to_string(),
+            note: "Release benchmark verifier examples use this canonical timer-status baseline so readiness artifacts cannot drift between producer and consumer."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_benchmark_runtime_pressure_readiness_artifact".to_string(),
+            matrixraft_facade: "MatrixRaftBenchmarkRuntimePressureReadinessArtifact".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, raftstore flow-control, Prometheus, and structured logs"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale readiness artifact with metrics and diagnostic logs"
+                    .to_string(),
+            note: "Benchmark runtime-pressure readiness artifacts package the fail-closed production report, Prometheus readiness metrics, and diagnostic JSON lines so release automation cannot split QPS evidence from operator logs."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+                .to_string(),
+            matrixraft_facade: "MatrixRaftBenchmarkFullPressureReadinessArtifact".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, ReadIndex backlog, Prometheus, and structured logs"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale readiness artifact with read backlog metrics and diagnostic logs"
+                    .to_string(),
+            note: "Read-backlog benchmark readiness artifacts serialize the same fail-closed report, Prometheus text, and diagnostic JSON lines after read backlog pressure is included."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftBenchmarkCompletePressureReadinessArtifact"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, ReadIndex backlog, scheduler pressure, Prometheus, and structured logs"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale readiness artifact with read backlog and timer metrics"
+                    .to_string(),
+            note: "Timer-aware benchmark readiness artifacts serialize the same fail-closed report, Prometheus text, and diagnostic JSON lines after read backlog and node-runtime timer pressure are included."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact"
+                .to_string(),
+            matrixraft_facade:
+                "MatrixRaftAssertedBenchmarkRuntimePressureReadinessArtifact".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark gate that rejects non-production-clean QPS evidence before dashboard export"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale readiness artifact requiring production-clean benchmark evidence"
+                    .to_string(),
+            note: "Asserted benchmark runtime-pressure artifacts refuse matched-but-failing benchmark artifacts before Prometheus, Grafana, or diagnostic release payloads are emitted."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftAssertedBenchmarkFullPressureReadinessArtifact".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark and ReadIndex backlog gate that rejects non-production-clean QPS evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale readiness artifact requiring clean benchmark and read-backlog evidence"
+                    .to_string(),
+            note: "Asserted read-backlog artifacts keep release dashboards from publishing pending-read pressure evidence derived from a failing benchmark comparison."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftAssertedBenchmarkCompletePressureReadinessArtifact".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, ReadIndex backlog, and scheduler pressure gate with production-clean QPS evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale readiness artifact requiring clean benchmark, backlog, and timer evidence"
+                    .to_string(),
+            note: "Asserted complete-pressure artifacts require production-clean benchmark evidence before read backlog, peer pipeline, and node-runtime timer pressure are exported as release evidence."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact"
+                .to_string(),
+            matrixraft_facade: "MatrixRaftValidateBenchmarkRuntimePressureReadinessArtifact"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark artifact validation and Prometheus/log consistency checks"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release artifact validation with schema, freshness, metrics, and diagnostic logs"
+                    .to_string(),
+            note: "Benchmark runtime-pressure readiness artifact validation rejects stale schemas, stale timestamps, report drift, Prometheus drift, and diagnostic JSON-line drift before release automation trusts production-readiness evidence."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftValidateBenchmarkFullPressureReadinessArtifact".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark validation, ReadIndex backlog, Prometheus, and structured log consistency checks"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release artifact validation with read backlog pressure evidence"
+                    .to_string(),
+            note: "Read-backlog readiness artifact validation recomputes the full-pressure release artifact so promotion checks cannot accidentally compare a read-heavy artifact against the zero-backlog compatibility path."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftValidateBenchmarkCompletePressureReadinessArtifact".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark validation, ReadIndex backlog, scheduler pressure, Prometheus, and structured log consistency checks"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release artifact validation with read backlog and timer pressure evidence"
+                    .to_string(),
+            note: "Timer-aware readiness artifact validation recomputes the complete release artifact so promotion checks cannot drop node-runtime timer pressure while validating QPS and read-backlog evidence."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftValidateAssertedBenchmarkRuntimePressureReadinessArtifact".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark artifact validation that recomputes from production-clean QPS evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft asserted release artifact validation with schema, freshness, metrics, and diagnostic logs"
+                    .to_string(),
+            note: "Asserted readiness artifact validation recomputes the release artifact through the production-clean benchmark gate, so a stale or failing benchmark cannot validate an otherwise well-formed artifact."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftValidateAssertedBenchmarkFullPressureReadinessArtifact".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark and ReadIndex backlog artifact validation from production-clean QPS evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft asserted release artifact validation with read-backlog pressure evidence"
+                    .to_string(),
+            note: "Asserted read-backlog validation rejects artifacts whose source benchmark no longer satisfies production-clean QPS, latency, memory, and correctness gates."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
+                    .to_string(),
+            matrixraft_facade:
+                "MatrixRaftValidateAssertedBenchmarkCompletePressureReadinessArtifact".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, ReadIndex backlog, and scheduler pressure artifact validation from production-clean evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft asserted release artifact validation with read-backlog and timer pressure evidence"
+                    .to_string(),
+            note: "Asserted complete-pressure validation recomputes the artifact through the strongest release gate before trusting dashboard, Prometheus, or diagnostic payloads."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_debug_snapshot_with_runtime_pressure_evidence".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePressureDebugSnapshot".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release dashboard, structured log, and raftstore flow-control evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft support bundle carrying QPS, latency, memory, and pipeline pressure"
+                    .to_string(),
+            note: "Runtime-pressure debug snapshots keep admission metrics and diagnostic log entries in the same support bundle used by release-scale QPS and latency triage."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftFullRuntimePressureDebugSnapshot".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release dashboard with QPS, read-index, Progress, and flow-control evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft support bundle carrying QPS, latency, memory, pipeline, and read backlog pressure"
+                    .to_string(),
+            note: "Read-backlog-aware debug snapshots keep release-scale admission evidence from dropping pending ReadIndex or bounded-stale read pressure."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_debug_snapshot_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftCompleteRuntimePressureDebugSnapshot"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release dashboard with QPS, read-index, scheduler, Progress, and flow-control evidence"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft support bundle carrying QPS, latency, memory, pipeline, read backlog, and timer pressure"
+                    .to_string(),
+            note: "Timer-aware debug snapshots keep release-scale admission evidence from dropping node-runtime timer saturation beside QPS, pipeline, and read-backlog pressure."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts"
+                .to_string(),
+            matrixraft_facade: "MatrixRaftBenchmarkRuntimePressureSupportBundle".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, raftstore flow-control, dashboard, and structured log bundle"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale benchmark artifacts plus runtime pressure evidence"
+                    .to_string(),
+            note: "Benchmark runtime-pressure support bundles combine BaselineRaft-derived QPS targets, benchmark parity metrics, runtime admission metrics, and diagnostic logs in one release artifact."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftBenchmarkFullPressureSupportBundle".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, ReadIndex backlog, dashboard, and structured log bundle"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale benchmark artifacts plus runtime and read backlog pressure evidence"
+                    .to_string(),
+            note: "Read-backlog benchmark support bundles keep benchmark parity, QPS targets, pending read queues, admission metrics, and diagnostics together."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical:
+                "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts"
+                    .to_string(),
+            matrixraft_facade: "MatrixRaftBenchmarkCompletePressureSupportBundle"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV release benchmark, ReadIndex backlog, scheduler pressure, dashboard, and structured log bundle"
+                    .to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-scale benchmark artifacts plus runtime, read backlog, and timer pressure evidence"
+                    .to_string(),
+            note: "Timer-aware benchmark support bundles keep benchmark parity, QPS targets, pending read queues, timer utilization, admission metrics, and diagnostics together."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "RuntimePressureAdmissionPolicy".to_string(),
+            matrixraft_facade: "MatrixRaftRuntimePressurePolicy".to_string(),
+            raft_rs_or_tikv_reference: "raftstore flow-control policy".to_string(),
+            byteraft_or_baseline_reference: "admission policy / throttle mode".to_string(),
+            note: "RuntimePressureAdmissionPolicy pins observe-only, reject, and throttle behavior to a stable operator-facing name."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_parity_report".to_string(),
+            matrixraft_facade: "MatrixRaftParityReport".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore semantic readiness report".to_string(),
+            byteraft_or_baseline_reference: "BaselineRaft compatibility and release gate report"
+                .to_string(),
+            note: "The parity report is the canonical API for checking semantic readiness before RustRaft claims production compatibility."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_baseline_raft_parity_matrix".to_string(),
+            matrixraft_facade: "MatrixRaftBaselineParityMatrix".to_string(),
+            raft_rs_or_tikv_reference: "raft-rs/TiKV feature parity matrix".to_string(),
+            byteraft_or_baseline_reference: "ByteRaft/BaselineRaft parity matrix"
+                .to_string(),
+            note: "The matrix makes compatibility, intentional differences, and remaining production gaps auditable by release reviewers."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "BenchmarkRunner".to_string(),
+            matrixraft_facade: "MatrixRaftBenchmarkRunner".to_string(),
+            raft_rs_or_tikv_reference: "raftstore benchmark harness".to_string(),
+            byteraft_or_baseline_reference: "release QPS/latency parity runner".to_string(),
+            note: "BenchmarkRunner is the stable release-parity harness for C++ baseline comparisons."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_grafana_dashboard".to_string(),
+            matrixraft_facade: "MatrixRaftGrafanaDashboard".to_string(),
+            raft_rs_or_tikv_reference: "TiKV Grafana raftstore dashboard".to_string(),
+            byteraft_or_baseline_reference: "ByteRaft operational dashboard".to_string(),
+            note: "The dashboard export keeps QPS, latency, memory, WAL, snapshot, and peer-pipeline panels reviewable."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_grafana_dashboard_json".to_string(),
+            matrixraft_facade: "MatrixRaftGrafanaDashboardJson".to_string(),
+            raft_rs_or_tikv_reference: "TiKV Grafana dashboard JSON provisioning".to_string(),
+            byteraft_or_baseline_reference: "ByteRaft dashboard JSON import".to_string(),
+            note: "The JSON export pins the exact dashboard artifact consumed by Grafana provisioning and release review."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_alert_rules".to_string(),
+            matrixraft_facade: "MatrixRaftAlertRules".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore alert rules".to_string(),
+            byteraft_or_baseline_reference: "ByteRaft release and runtime alerts".to_string(),
+            note: "Alert rules are mapped so production readiness gates remain tied to reference operational vocabulary."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_alert_rules_json".to_string(),
+            matrixraft_facade: "MatrixRaftAlertRulesJson".to_string(),
+            raft_rs_or_tikv_reference: "TiKV alertmanager rule JSON provisioning".to_string(),
+            byteraft_or_baseline_reference: "ByteRaft alert rule JSON import".to_string(),
+            note: "The JSON export keeps alert provisioning tied to the same readiness, QPS, latency, memory, WAL, and snapshot thresholds as the typed rules."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_observability_provisioning".to_string(),
+            matrixraft_facade: "MatrixRaftObservabilityProvisioning".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore observability bundle".to_string(),
+            byteraft_or_baseline_reference: "ByteRaft production observability bundle"
+                .to_string(),
+            note: "The provisioning bundle groups dashboard, alert, debug-artifact, Prometheus, and runbook contracts for production rollout."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_observability_provisioning_runbook_steps".to_string(),
+            matrixraft_facade: "MatrixRaftObservabilityProvisioningRunbook".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore observability provisioning runbook checklist".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft release-observability runbook checklist".to_string(),
+            note: "The provisioning runbook helper gives CI and operators the static remediation checklist that must accompany alert, dashboard, metric, debug bundle, runtime-pressure, and benchmark freshness provisioning."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_observability_required_metric_names".to_string(),
+            matrixraft_facade: "MatrixRaftObservabilityRequiredMetricNames".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore required metric catalog".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft production benchmark and runtime metric catalog".to_string(),
+            note: "The flattened catalog gives CI, Grafana provisioning, and release automation one stable list covering readiness, QPS, latency, memory, lifecycle, runtime-pressure, and BaselineRaft parity metrics."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_validate_required_metric_scrape_texts".to_string(),
+            matrixraft_facade: "MatrixRaftValidateRequiredMetricScrapeTexts".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore Prometheus scrape contract validation"
+                .to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft production metric scrape completeness gate".to_string(),
+            note: "The scrape validator compares emitted Prometheus payloads with the required QPS, latency, memory, runtime-pressure, lifecycle, and benchmark metric catalog before release evidence is trusted."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_observability_provisioning_json".to_string(),
+            matrixraft_facade: "MatrixRaftObservabilityProvisioningJson".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore observability bundle JSON"
+                .to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft production observability bundle JSON import".to_string(),
+            note: "The JSON export is the stable artifact for CI and deployment systems that cannot link the Rust types directly."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_validate_observability_provisioning".to_string(),
+            matrixraft_facade: "MatrixRaftValidateObservabilityProvisioning".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore dashboard and alert provisioning validation".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft operational provisioning drift validation".to_string(),
+            note: "The validator fails closed when dashboard panels, alert expressions, required metrics, or runbook artifacts drift from the production contract."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_validate_observability_provisioning_json".to_string(),
+            matrixraft_facade: "MatrixRaftValidateObservabilityProvisioningJson".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore JSON observability provisioning validation".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft JSON provisioning drift validation".to_string(),
+            note: "The JSON validator lets CI check imported Grafana, alert, metric, and runbook bundles before release promotion."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_observability_provisioning_validation_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftObservabilityProvisioningValidationPrometheus"
+                .to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore provisioning validation Prometheus metric".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft provisioning validation readiness metric".to_string(),
+            note: "The validation Prometheus export makes provisioning drift visible beside runtime readiness, QPS, latency, memory, and WAL panels."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_operator_runbook_steps_with_diagnostics".to_string(),
+            matrixraft_facade: "MatrixRaftDiagnosticOperatorRunbook".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore diagnostic runbook fed by structured logs and alerts".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft diagnostic runbook with production-readiness blockers".to_string(),
+            note: "The diagnostic runbook helper joins structured diagnostic targets, production-readiness evidence, and alert rules so release support gets the first corrective action instead of a raw blocker list."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_operator_runbook_prometheus".to_string(),
+            matrixraft_facade: "MatrixRaftOperatorRunbookPrometheus".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore runbook step Prometheus scrape for Grafana triage".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft runbook-step telemetry for release dashboards".to_string(),
+            note: "The Prometheus exporter turns active operator steps into grouped step totals, per-step presence, and first-step signals that dashboards can route without parsing JSON."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "examples/readiness_report.rs".to_string(),
+            matrixraft_facade: "MatrixRaftReadinessReportExample".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore release-readiness and status-report example".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft production readiness example wiring".to_string(),
+            note: "The example is part of the open-source embedding contract for constructing readiness evidence without TemporalStore adapter code."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "examples/read_safety.rs".to_string(),
+            matrixraft_facade: "MatrixRaftReadSafetyExample".to_string(),
+            raft_rs_or_tikv_reference: "TiKV ReadIndex and lease-read example".to_string(),
+            byteraft_or_baseline_reference: "ByteRaft safe-read example flow".to_string(),
+            note: "The example maps quorum ReadIndex, lease-read, and bounded-stale follower-read checks to the canonical RustRaft read-safety helpers."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "examples/debug_artifacts.rs".to_string(),
+            matrixraft_facade: "MatrixRaftDebugArtifactsExample".to_string(),
+            raft_rs_or_tikv_reference: "TiKV raftstore debug bundle and Prometheus example"
+                .to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft support bundle and dashboard artifact example".to_string(),
+            note: "The example keeps debug snapshot, Prometheus, Grafana, alert, and diagnostic-log rendering discoverable for release triage."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "examples/baseline_raft_parity_benchmark.rs".to_string(),
+            matrixraft_facade: "MatrixRaftBaselineRaftParityBenchmarkExample".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV raftstore benchmark and pressure-snapshot example".to_string(),
+            byteraft_or_baseline_reference:
+                "BaselineRaft-vs-RustRaft parity benchmark example".to_string(),
+            note: "The example shows the release-scale QPS, latency, throughput, CPU, and memory parity path expected before production claims."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "examples/open_source_surface.rs".to_string(),
+            matrixraft_facade: "MatrixRaftOpenSourceSurfaceExample".to_string(),
+            raft_rs_or_tikv_reference:
+                "TiKV-style public raftstore module surface example".to_string(),
+            byteraft_or_baseline_reference:
+                "ByteRaft-compatible standalone crate surface example".to_string(),
+            note: "The example proves the standalone module, adapter-boundary, parity-matrix, and compatibility-report surface for open-source consumers."
+                .to_string(),
+        },
+        ApiNameMapping {
+            canonical: "matrixraft_operator_runbook_steps".to_string(),
+            matrixraft_facade: "MatrixRaftOperatorRunbook".to_string(),
+            raft_rs_or_tikv_reference: "TiKV operator runbook / raftstore triage".to_string(),
+            byteraft_or_baseline_reference: "ByteRaft operational triage".to_string(),
+            note: "Runbook steps give every alert a deterministic remediation route for production support."
+                .to_string(),
+        },
+    ]
+}
+
+pub fn matrixraft_core_interface_names() -> Vec<String> {
+    [
+        "Config",
+        "SnapshotMetadata",
+        "PeerProgress",
+        "NodeRuntime",
+        "RuntimeTimerStatus",
+        "RuntimeAdminReport",
+        "AdminCommand::ReleaseMemory",
+        "MailBox",
+        "MailBoxPressureStats",
+        "MailBox::try_send_checked",
+        "MailBox::try_send_many_checked",
+        "MailBox::pressure_stats_checked",
+        "MailBox::fetch_checked",
+        "MailChannel",
+        "MailChannelPressureStats",
+        "MailChannel::try_send_checked",
+        "MailChannel::try_send_many_checked",
+        "MailChannel::pressure_stats_checked",
+        "ChannelSelector",
+        "ChannelSelector::try_send_many_to_channel_checked",
+        "ChannelSelector::select_checked",
+        "PersistentRaftWal",
+        "DebugSnapshot",
+        "DiagnosticLogEntry",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 pub fn matrixraft_public_module_names() -> Vec<String> {
@@ -762,6 +2949,8 @@ pub fn matrixraft_public_module_names() -> Vec<String> {
         "storage",
         "benchmark",
         "fault",
+        "mailbox",
+        "channel_selector",
     ]
     .into_iter()
     .map(str::to_string)
@@ -801,11 +2990,205 @@ pub fn matrixraft_benchmark_interface_names() -> Vec<String> {
         "RuntimeBenchmarkRunner",
         "BenchmarkOptions",
         "BenchmarkReport",
+        "ReleasePressureSnapshot",
+        "matrixraft_release_pressure_snapshot_json",
+        "matrixraft_release_pressure_snapshot_from_json",
+        "matrixraft_release_pressure_snapshot_from_json_bytes",
+        "matrixraft_validate_release_pressure_snapshot",
+        "matrixraft_read_release_pressure_snapshot",
+        "matrixraft_write_release_pressure_snapshot_atomic",
         "matrixraft_baseline_raft_benchmark_workloads",
         "matrixraft_run_baseline_raft_parity_benchmark",
         "matrixraft_assert_baseline_raft_parity",
         "matrixraft_assert_production_baseline_raft_parity",
         "matrixraft_baseline_raft_benchmark_evidence",
+        "matrixraft_baseline_raft_benchmark_grafana_panels",
+        "matrixraft_baseline_raft_benchmark_metric_names",
+        "matrixraft_baseline_raft_benchmark_summary_prometheus",
+        "matrixraft_benchmark_runbook_steps",
+        "matrixraft_scale_rate_metrics_from_benchmark_report",
+        "matrixraft_scale_optimization_targets_from_baseline_raft_report",
+        "matrixraft_scale_optimization_inputs_from_benchmark_report",
+        "matrixraft_validate_benchmark_scale_optimization_inputs",
+        "matrixraft_release_benchmark_runtime_timer_status",
+        "matrixraft_benchmark_runtime_pressure_readiness_artifact",
+        "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog",
+        "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer",
+        "matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact",
+        "matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog",
+        "matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer",
+        "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact",
+        "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog",
+        "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer",
+        "matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact",
+        "matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog",
+        "matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer",
+        "matrixraft_debug_snapshot_with_benchmark_scale_inputs",
+        "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts",
+        "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "matrixraft_production_readiness_input_with_benchmark_artifacts",
+        "matrixraft_production_readiness_input_with_asserted_benchmark_artifacts",
+        "matrixraft_production_readiness_report_with_benchmark_artifacts",
+        "matrixraft_production_readiness_report_with_asserted_benchmark_artifacts",
+        "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_artifacts",
+        "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_artifacts",
+        "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_artifacts",
+        "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_artifacts",
+        "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "matrixraft_production_readiness_input_with_runtime_pressure_evidence",
+        "matrixraft_production_readiness_input_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+pub fn matrixraft_observability_interface_names() -> Vec<String> {
+    [
+        "matrixraft_metric_names",
+        "matrixraft_scale_metric_names",
+        "matrixraft_scale_metrics_prometheus",
+        "matrixraft_scale_target_metric_names",
+        "matrixraft_scale_target_metrics_prometheus",
+        "matrixraft_scale_grafana_panels",
+        "matrixraft_scale_target_grafana_panels",
+        "matrixraft_memory_metric_names",
+        "matrixraft_memory_metrics_prometheus",
+        "matrixraft_memory_grafana_panels",
+        "matrixraft_queue_pressure_metric_names",
+        "matrixraft_queue_pressure_prometheus",
+        "matrixraft_queue_pressure_grafana_panels",
+        "matrixraft_latency_metrics_prometheus",
+        "matrixraft_runtime_pressure_admission",
+        "matrixraft_runtime_pressure_admission_with_scale_targets",
+        "matrixraft_runtime_pressure_admission_with_pipeline_pressure",
+        "matrixraft_runtime_pressure_admission_with_queue_pressure",
+        "matrixraft_runtime_pressure_admission_with_node_runtime_timer_pressure",
+        "matrixraft_runtime_pressure_admission_with_scale_and_pipeline_pressure",
+        "matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure",
+        "matrixraft_runtime_pressure_admission_with_scale_pipeline_read_backlog_and_node_runtime_timer_pressure",
+        "matrixraft_runtime_pressure_bottleneck_summary",
+        "matrixraft_runtime_pressure_freshness_report",
+        "matrixraft_runtime_pressure_freshness_prometheus",
+        "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
+        "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
+        "matrixraft_public_api_contract_validation_prometheus",
+        "matrixraft_runtime_pressure_admission_prometheus",
+        "matrixraft_validate_runtime_pressure_admission_evidence",
+        "matrixraft_validate_runtime_pressure_admission_evidence_with_policy",
+        "matrixraft_runtime_pressure_metric_names",
+        "matrixraft_runtime_pressure_grafana_panels",
+        "matrixraft_public_api_contract_validation_grafana_panels",
+        "matrixraft_debug_snapshot_with_runtime_pressure_evidence",
+        "matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence",
+        "matrixraft_debug_snapshot_with_runtime_pressure_read_backlog_and_node_runtime_timer_evidence",
+        "matrixraft_node_runtime_status_prometheus",
+        "matrixraft_node_runtime_grafana_panels",
+        "RuntimePressureAdmission",
+        "LatencyPressureDetail",
+        "NodeRuntimeTimerPressureDetail",
+        "NodeRuntimeTimerThresholds",
+        "RuntimePressureAdmissionPolicy",
+        "RuntimePressureMetricNames",
+        "QueuePressureMetricNames",
+        "QueuePressureThresholds",
+        "QueuePressureDetail",
+        "SnapshotLifecycleEvidence",
+        "matrixraft_snapshot_lifecycle_metric_names",
+        "matrixraft_snapshot_lifecycle_evidence_prometheus",
+        "matrixraft_snapshot_lifecycle_grafana_panels",
+        "SnapshotLifecycleMetricNames",
+        "matrixraft_wal_lifecycle_metric_names",
+        "matrixraft_wal_lifecycle_evidence_prometheus",
+        "matrixraft_wal_lifecycle_grafana_panels",
+        "WalLifecycleMetricNames",
+        "matrixraft_membership_readiness_metric_names",
+        "matrixraft_membership_readiness_prometheus",
+        "matrixraft_membership_readiness_grafana_panels",
+        "MembershipReadinessMetricNames",
+        "matrixraft_production_readiness_metric_names",
+        "matrixraft_production_readiness_grafana_panels",
+        "ProductionReadinessMetricNames",
+        "matrixraft_grafana_dashboard",
+        "matrixraft_grafana_dashboard_json",
+        "matrixraft_alert_rules",
+        "matrixraft_alert_rules_json",
+        "matrixraft_debug_snapshot_with_benchmark_summary",
+        "matrixraft_debug_snapshot_with_benchmark_artifacts",
+        "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_artifacts",
+        "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts",
+        "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_read_backlog_and_node_runtime_timer_artifacts",
+        "matrixraft_observability_provisioning",
+        "matrixraft_observability_provisioning_json",
+        "matrixraft_observability_provisioning_runbook_steps",
+        "matrixraft_observability_required_metric_names",
+        "matrixraft_validate_required_metric_scrape_texts",
+        "matrixraft_validate_observability_provisioning",
+        "matrixraft_validate_observability_provisioning_json",
+        "matrixraft_observability_provisioning_validation_prometheus",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+pub fn matrixraft_diagnostic_interface_names() -> Vec<String> {
+    [
+        "matrixraft_admin_diagnostic_log_entries",
+        "matrixraft_admin_diagnostic_json_lines",
+        "matrixraft_local_status_diagnostic_log_entries",
+        "matrixraft_local_status_diagnostic_json_lines",
+        "matrixraft_node_runtime_status_diagnostic_log_entries",
+        "matrixraft_node_runtime_status_diagnostic_json_lines",
+        "matrixraft_diagnostic_log_prometheus",
+        "matrixraft_optimization_report",
+        "matrixraft_optimization_report_prometheus",
+        "matrixraft_optimization_diagnostic_log_entries",
+        "matrixraft_optimization_diagnostic_json_lines",
+        "matrixraft_runtime_pressure_diagnostic_log_entries",
+        "matrixraft_runtime_pressure_diagnostic_json_lines",
+        "matrixraft_runtime_pressure_freshness_diagnostic_log_entries",
+        "matrixraft_runtime_pressure_freshness_diagnostic_json_lines",
+        "matrixraft_membership_readiness_diagnostic_log_entries",
+        "matrixraft_membership_readiness_diagnostic_json_lines",
+        "matrixraft_production_readiness_diagnostic_log_entries",
+        "matrixraft_production_readiness_diagnostic_json_lines",
+        "matrixraft_scale_optimization_hints",
+        "matrixraft_memory_optimization_hints",
+        "matrixraft_operator_triage_summary",
+        "matrixraft_operator_triage_prometheus",
+        "matrixraft_operator_runbook_steps",
+        "matrixraft_operator_runbook_steps_with_diagnostics",
+        "matrixraft_operator_runbook_prometheus",
+        "matrixraft_debug_bundle_contract",
+        "matrixraft_debug_snapshot_json",
+        "matrixraft_debug_snapshot_with_scale_metrics",
+        "matrixraft_debug_snapshot_with_runtime_metrics",
+        "matrixraft_debug_snapshot_with_observability_metrics",
+        "matrixraft_debug_snapshot_with_performance_targets",
+        "matrixraft_validate_debug_snapshot",
+        "matrixraft_validate_debug_snapshot_json",
+        "matrixraft_debug_bundle_validation_prometheus",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+pub fn matrixraft_evidence_interface_names() -> Vec<String> {
+    [
+        "PipelineEvidence",
+        "PipelineEvidence::packet_loss_reorder_faulted_peer_count",
+        "PipelineEvidence::packet_loss_reorder_recovered_peer_count",
+        "PipelineEvidence::packet_loss_reorder_all_faulted_peers_recovered",
     ]
     .into_iter()
     .map(str::to_string)
@@ -815,8 +3198,13 @@ pub fn matrixraft_benchmark_interface_names() -> Vec<String> {
 pub fn matrixraft_compatibility_report_names() -> Vec<String> {
     [
         "matrixraft_public_api_contract",
+        "matrixraft_validate_public_api_contract",
+        "matrixraft_api_name_mappings",
         "matrixraft_standalone_readiness_report",
         "matrixraft_production_readiness_report",
+        "matrixraft_production_readiness_report_with_runtime_pressure_policy",
+        "matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness",
+        "matrixraft_production_readiness_report_prometheus",
         "matrixraft_data_node_process_rollout_readiness_report",
         "matrixraft_meta_process_rollout_readiness_report",
         "matrixraft_baseline_raft_runtime_capability_report",

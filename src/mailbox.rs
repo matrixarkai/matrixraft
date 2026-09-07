@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::RaftError;
+
 pub const MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS: u64 = i64::MAX as u64;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -49,18 +51,30 @@ impl Default for MailBoxFetchPolicy {
 #[derive(Debug)]
 struct MailBoxInner<Mail> {
     channels: [VecDeque<Mail>; 3],
+    max_channel_depth: usize,
+    rejected_send_count: u64,
 }
 
 impl<Mail> MailBoxInner<Mail> {
     fn new() -> Self {
         Self {
             channels: std::array::from_fn(|_| VecDeque::new()),
+            max_channel_depth: 0,
+            rejected_send_count: 0,
         }
     }
 
     fn has_new_mail(&self) -> bool {
         self.channels.iter().any(|channel| !channel.is_empty())
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MailBoxPressureStats {
+    pub high_watermark: usize,
+    pub total_len: usize,
+    pub max_channel_depth: usize,
+    pub rejected_send_count: u64,
 }
 
 #[derive(Debug)]
@@ -82,38 +96,98 @@ impl<Mail> MailBox<Mail> {
     }
 
     pub fn try_send(&self, priority: MailPriority, mail: Mail) -> bool {
-        let mut inner = self.inner.lock().expect("mailbox mutex poisoned");
+        self.try_send_checked(priority, mail)
+            .expect("mailbox mutex poisoned")
+    }
+
+    pub fn try_send_checked(&self, priority: MailPriority, mail: Mail) -> Result<bool, RaftError> {
+        let mut inner = self.inner.lock().map_err(mailbox_poisoned)?;
         let channel = &mut inner.channels[priority.index()];
         if channel.len() >= self.high_watermark {
-            return false;
+            inner.rejected_send_count = inner.rejected_send_count.saturating_add(1);
+            return Ok(false);
         }
 
         channel.push_back(mail);
+        let depth = channel.len();
+        inner.max_channel_depth = inner.max_channel_depth.max(depth);
         self.readable.notify_one();
-        true
+        Ok(true)
+    }
+
+    pub fn try_send_many(&self, priority: MailPriority, mails: Vec<Mail>) -> Result<(), Vec<Mail>> {
+        self.try_send_many_checked(priority, mails)
+            .expect("mailbox mutex poisoned")
+    }
+
+    pub fn try_send_many_checked(
+        &self,
+        priority: MailPriority,
+        mails: Vec<Mail>,
+    ) -> Result<Result<(), Vec<Mail>>, RaftError> {
+        let mut inner = self.inner.lock().map_err(mailbox_poisoned)?;
+        let channel = &mut inner.channels[priority.index()];
+        if channel.len().saturating_add(mails.len()) > self.high_watermark {
+            inner.rejected_send_count = inner
+                .rejected_send_count
+                .saturating_add(mails.len().try_into().unwrap_or(u64::MAX));
+            return Ok(Err(mails));
+        }
+
+        channel.extend(mails);
+        let depth = channel.len();
+        inner.max_channel_depth = inner.max_channel_depth.max(depth);
+        self.readable.notify_one();
+        Ok(Ok(()))
     }
 
     pub fn wait_and_send(&self, priority: MailPriority, mail: Mail) {
-        let mut inner = self.inner.lock().expect("mailbox mutex poisoned");
+        self.wait_and_send_checked(priority, mail)
+            .expect("mailbox mutex poisoned");
+    }
+
+    pub fn wait_and_send_checked(
+        &self,
+        priority: MailPriority,
+        mail: Mail,
+    ) -> Result<(), RaftError> {
+        let mut inner = self.inner.lock().map_err(mailbox_poisoned)?;
         while inner.channels[priority.index()].len() >= self.high_watermark {
-            inner = self.writable.wait(inner).expect("mailbox mutex poisoned");
+            inner = self.writable.wait(inner).map_err(mailbox_poisoned)?;
         }
 
         inner.channels[priority.index()].push_back(mail);
+        inner.max_channel_depth = inner
+            .max_channel_depth
+            .max(inner.channels[priority.index()].len());
         self.readable.notify_one();
+        Ok(())
     }
 
     pub fn send(&self, priority: MailPriority, mail: Mail) {
-        let mut inner = self.inner.lock().expect("mailbox mutex poisoned");
+        self.send_checked(priority, mail)
+            .expect("mailbox mutex poisoned");
+    }
+
+    pub fn send_checked(&self, priority: MailPriority, mail: Mail) -> Result<(), RaftError> {
+        let mut inner = self.inner.lock().map_err(mailbox_poisoned)?;
         inner.channels[priority.index()].push_back(mail);
+        inner.max_channel_depth = inner
+            .max_channel_depth
+            .max(inner.channels[priority.index()].len());
         self.readable.notify_one();
+        Ok(())
     }
 
     pub fn fetch(&self, policy: MailBoxFetchPolicy) -> Vec<Mail> {
-        let mut inner = self.inner.lock().expect("mailbox mutex poisoned");
+        self.fetch_checked(policy).expect("mailbox mutex poisoned")
+    }
+
+    pub fn fetch_checked(&self, policy: MailBoxFetchPolicy) -> Result<Vec<Mail>, RaftError> {
+        let mut inner = self.inner.lock().map_err(mailbox_poisoned)?;
         if !inner.has_new_mail() && policy.timeout_ms == MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS {
             while !inner.has_new_mail() {
-                inner = self.readable.wait(inner).expect("mailbox mutex poisoned");
+                inner = self.readable.wait(inner).map_err(mailbox_poisoned)?;
             }
         } else if !inner.has_new_mail() && policy.timeout_ms != 0 {
             let deadline = Instant::now() + Duration::from_millis(policy.timeout_ms);
@@ -126,7 +200,7 @@ impl<Mail> MailBox<Mail> {
                 let (next_inner, timeout) = self
                     .readable
                     .wait_timeout(inner, wait_for)
-                    .expect("mailbox mutex poisoned");
+                    .map_err(mailbox_poisoned)?;
                 inner = next_inner;
                 if inner.has_new_mail() || timeout.timed_out() {
                     break;
@@ -155,32 +229,69 @@ impl<Mail> MailBox<Mail> {
             }
         }
         self.writable.notify_all();
-        output
+        Ok(output)
     }
 
     pub fn clear(&self) {
-        let mut inner = self.inner.lock().expect("mailbox mutex poisoned");
+        self.clear_checked().expect("mailbox mutex poisoned");
+    }
+
+    pub fn clear_checked(&self) -> Result<(), RaftError> {
+        let mut inner = self.inner.lock().map_err(mailbox_poisoned)?;
         for channel in &mut inner.channels {
             channel.clear();
         }
         self.writable.notify_all();
+        Ok(())
     }
 
     pub fn len(&self, priority: MailPriority) -> usize {
-        self.inner.lock().expect("mailbox mutex poisoned").channels[priority.index()].len()
+        self.len_checked(priority).expect("mailbox mutex poisoned")
+    }
+
+    pub fn len_checked(&self, priority: MailPriority) -> Result<usize, RaftError> {
+        Ok(self.inner.lock().map_err(mailbox_poisoned)?.channels[priority.index()].len())
     }
 
     pub fn total_len(&self) -> usize {
-        self.inner
+        self.total_len_checked().expect("mailbox mutex poisoned")
+    }
+
+    pub fn total_len_checked(&self) -> Result<usize, RaftError> {
+        Ok(self
+            .inner
             .lock()
-            .expect("mailbox mutex poisoned")
+            .map_err(mailbox_poisoned)?
             .channels
             .iter()
             .map(VecDeque::len)
-            .sum()
+            .sum())
     }
 
     pub fn is_empty(&self) -> bool {
         self.total_len() == 0
     }
+
+    pub fn is_empty_checked(&self) -> Result<bool, RaftError> {
+        Ok(self.total_len_checked()? == 0)
+    }
+
+    pub fn pressure_stats(&self) -> MailBoxPressureStats {
+        self.pressure_stats_checked()
+            .expect("mailbox mutex poisoned")
+    }
+
+    pub fn pressure_stats_checked(&self) -> Result<MailBoxPressureStats, RaftError> {
+        let inner = self.inner.lock().map_err(mailbox_poisoned)?;
+        Ok(MailBoxPressureStats {
+            high_watermark: self.high_watermark,
+            total_len: inner.channels.iter().map(VecDeque::len).sum(),
+            max_channel_depth: inner.max_channel_depth,
+            rejected_send_count: inner.rejected_send_count,
+        })
+    }
+}
+
+fn mailbox_poisoned<T>(_error: T) -> RaftError {
+    RaftError::Storage("mailbox mutex poisoned".to_string())
 }

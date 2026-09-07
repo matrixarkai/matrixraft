@@ -69,10 +69,22 @@ pub struct RuntimeTimerStatus {
     pub leader_lease_valid: bool,
     pub heartbeat_ticks: u64,
     pub election_ticks: u64,
+    #[serde(default)]
+    pub pending_ticks: u64,
+    #[serde(default)]
+    pub max_pending_ticks: u64,
+    #[serde(default)]
+    pub accepted_ticks: u64,
+    #[serde(default)]
+    pub rejected_ticks: u64,
+    #[serde(default)]
+    pub completed_ticks: u64,
     pub pre_vote_executions: u64,
     pub campaign_executions: u64,
     pub leader_transfer_executions: u64,
     pub last_tick_reason: String,
+    #[serde(default)]
+    pub last_tick_admission_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -108,31 +120,6 @@ pub enum LeaderTransferAdmissionKind {
     IgnoredIneligiblePeer,
     Duplicate,
     Replaced,
-}
-
-/// What a leader-transfer request actually did.
-///
-/// `transfer_leader` returns `Ok` for all three, because none of them is an
-/// error: an unknown or ineligible transferee is *ignored* (as etcd/raft drops
-/// a `MsgTransferLeader` naming a peer it does not know), and a transferee that
-/// is still catching up leaves the transfer queued. Only `Transferred` means
-/// leadership moved.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LeaderTransferOutcome {
-    /// The admission declined the request; nothing changed.
-    Ignored,
-    /// Accepted, but the transferee has not caught up yet, so it is queued.
-    Pending,
-    /// Leadership moved to the transferee.
-    Transferred,
-}
-
-impl LeaderTransferOutcome {
-    /// True only when leadership actually moved.
-    pub fn is_transferred(self) -> bool {
-        matches!(self, Self::Transferred)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -747,11 +734,226 @@ pub fn matrixraft_admin_diagnostic_json_lines(report: &RuntimeAdminReport) -> St
         .join("\n")
 }
 
+pub fn matrixraft_local_status_diagnostic_log_entries(
+    report: &RuntimeLocalStatusReport,
+) -> Vec<DiagnosticLogEntry> {
+    let group_id = report.node_status.group_id.to_string();
+    let node_id = report.node_status.node_id.to_string();
+    let mut entries = Vec::with_capacity(3 + report.peer_pipeline.len() + report.blockers.len());
+    entries.push(DiagnosticLogEntry {
+        target: "rustraft.local_status".to_string(),
+        severity: if report.ready {
+            DiagnosticSeverity::Info
+        } else {
+            DiagnosticSeverity::Warn
+        },
+        message: if report.ready {
+            "rustraft local status ready".to_string()
+        } else {
+            "rustraft local status degraded".to_string()
+        },
+        fields: vec![
+            ("group_id".to_string(), group_id.clone()),
+            ("node_id".to_string(), node_id.clone()),
+            ("ready".to_string(), report.ready.to_string()),
+            (
+                "blocker_count".to_string(),
+                report.blockers.len().to_string(),
+            ),
+            (
+                "peer_pipeline_count".to_string(),
+                report.peer_pipeline.len().to_string(),
+            ),
+        ],
+    });
+    entries.push(DiagnosticLogEntry {
+        target: "rustraft.local_status.replication".to_string(),
+        severity: health_severity(report.replication_health.status),
+        message: report.replication_health.reason.clone(),
+        fields: vec![
+            ("group_id".to_string(), group_id.clone()),
+            ("node_id".to_string(), node_id.clone()),
+            (
+                "commit_index".to_string(),
+                report.replication_health.commit_index.to_string(),
+            ),
+            (
+                "lagging_peer_count".to_string(),
+                report.replication_health.lagging_peer_count.to_string(),
+            ),
+            (
+                "max_peer_lag".to_string(),
+                report.replication_health.max_peer_lag.to_string(),
+            ),
+        ],
+    });
+    entries.push(DiagnosticLogEntry {
+        target: "rustraft.local_status.apply".to_string(),
+        severity: health_severity(report.apply_health.status),
+        message: report.apply_health.reason.clone(),
+        fields: vec![
+            ("group_id".to_string(), group_id.clone()),
+            ("node_id".to_string(), node_id.clone()),
+            (
+                "commit_index".to_string(),
+                report.apply_health.commit_index.to_string(),
+            ),
+            (
+                "applied_index".to_string(),
+                report.apply_health.applied_index.to_string(),
+            ),
+            (
+                "apply_lag".to_string(),
+                report.apply_health.apply_lag.to_string(),
+            ),
+        ],
+    });
+
+    for peer in &report.peer_pipeline {
+        let peer_lag = report
+            .node_status
+            .commit_index
+            .saturating_sub(peer.match_index);
+        let active_pressure = peer_lag > 0
+            || peer.append_queue_depth > 0
+            || peer.reorder_queue_depth > 0
+            || peer.reorder_dropped_packages > 0;
+        let recovered_history = !active_pressure
+            && (peer.reorder_entries_converged > 0
+                || (peer.packet_loss_events > 0 && peer.network_error_probe_transitions > 0));
+        entries.push(DiagnosticLogEntry {
+            target: "rustraft.local_status.peer_pipeline".to_string(),
+            severity: if active_pressure {
+                DiagnosticSeverity::Warn
+            } else {
+                DiagnosticSeverity::Info
+            },
+            message: if active_pressure {
+                "peer_pipeline_pressure".to_string()
+            } else if recovered_history {
+                "peer_pipeline_recovered".to_string()
+            } else {
+                "peer_pipeline_healthy".to_string()
+            },
+            fields: vec![
+                ("group_id".to_string(), group_id.clone()),
+                ("node_id".to_string(), node_id.clone()),
+                ("peer_id".to_string(), peer.peer_id.to_string()),
+                ("match_index".to_string(), peer.match_index.to_string()),
+                ("next_index".to_string(), peer.next_index.to_string()),
+                ("peer_lag".to_string(), peer_lag.to_string()),
+                (
+                    "append_queue_depth".to_string(),
+                    peer.append_queue_depth.to_string(),
+                ),
+                (
+                    "reorder_queue_depth".to_string(),
+                    peer.reorder_queue_depth.to_string(),
+                ),
+                (
+                    "reorder_entries_converged".to_string(),
+                    peer.reorder_entries_converged.to_string(),
+                ),
+                (
+                    "reorder_dropped_packages".to_string(),
+                    peer.reorder_dropped_packages.to_string(),
+                ),
+                (
+                    "packet_loss_events".to_string(),
+                    peer.packet_loss_events.to_string(),
+                ),
+                (
+                    "network_error_probe_transitions".to_string(),
+                    peer.network_error_probe_transitions.to_string(),
+                ),
+                (
+                    "snapshot_installed_index".to_string(),
+                    peer.snapshot_installed_index.to_string(),
+                ),
+            ],
+        });
+    }
+
+    entries.extend(report.blockers.iter().map(|blocker| DiagnosticLogEntry {
+        target: "rustraft.local_status.blocker".to_string(),
+        severity: DiagnosticSeverity::Error,
+        message: blocker.clone(),
+        fields: vec![
+            ("group_id".to_string(), group_id.clone()),
+            ("node_id".to_string(), node_id.clone()),
+        ],
+    }));
+    entries
+}
+
+pub fn matrixraft_local_status_diagnostic_json_lines(report: &RuntimeLocalStatusReport) -> String {
+    matrixraft_local_status_diagnostic_log_entries(report)
+        .into_iter()
+        .map(|entry| {
+            serde_json::to_string(&entry)
+                .expect("RustRaft local status diagnostic entry must serialize")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn matrixraft_optimization_diagnostic_log_entries(
+    report: &OptimizationReport,
+) -> Vec<DiagnosticLogEntry> {
+    report
+        .hints
+        .iter()
+        .map(|hint| DiagnosticLogEntry {
+            target: format!("rustraft.optimization.{}", hint.component),
+            severity: optimization_diagnostic_severity(hint.severity),
+            message: hint.id.clone(),
+            fields: vec![
+                ("component".to_string(), hint.component.clone()),
+                ("recommendation".to_string(), hint.recommendation.clone()),
+                (
+                    "observed_value".to_string(),
+                    hint.observed_value.to_string(),
+                ),
+                ("threshold".to_string(), hint.threshold.to_string()),
+                ("optimization_ready".to_string(), report.ready.to_string()),
+                ("hint_count".to_string(), report.hint_count.to_string()),
+                (
+                    "critical_count".to_string(),
+                    report.critical_count.to_string(),
+                ),
+                (
+                    "warning_count".to_string(),
+                    report.warning_count.to_string(),
+                ),
+            ],
+        })
+        .collect()
+}
+
+pub fn matrixraft_optimization_diagnostic_json_lines(report: &OptimizationReport) -> String {
+    matrixraft_optimization_diagnostic_log_entries(report)
+        .into_iter()
+        .map(|entry| {
+            serde_json::to_string(&entry)
+                .expect("RustRaft optimization diagnostic entry must serialize")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn health_severity(status: HealthStatus) -> DiagnosticSeverity {
     match status {
         HealthStatus::Healthy => DiagnosticSeverity::Info,
         HealthStatus::Degraded => DiagnosticSeverity::Warn,
         HealthStatus::Unavailable => DiagnosticSeverity::Error,
+    }
+}
+
+fn optimization_diagnostic_severity(severity: OptimizationHintSeverity) -> DiagnosticSeverity {
+    match severity {
+        OptimizationHintSeverity::Info => DiagnosticSeverity::Info,
+        OptimizationHintSeverity::Warning => DiagnosticSeverity::Warn,
+        OptimizationHintSeverity::Critical => DiagnosticSeverity::Error,
     }
 }
 

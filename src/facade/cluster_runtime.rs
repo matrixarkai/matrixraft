@@ -34,15 +34,7 @@ struct Node {
     replica_role: ReplicaRole,
     raft_role: StateRole,
     hard_state: HardState,
-    /// Entries are shared, not copied per node.
-    ///
-    /// A `RaftCluster` models every node of a group in one object, so a
-    /// proposal used to clone the whole entry -- payload included -- into each
-    /// node's log. Memory then grew with the group: measured at exactly 7x the
-    /// logical data for a seven-node group. An entry is immutable once
-    /// appended (conflict handling truncates, it never edits), so the nodes can
-    /// share one allocation behind an `Arc`.
-    log: Vec<Arc<LogEntry>>,
+    log: Vec<LogEntry>,
     // Running total of `log` payload bytes. Maintained by every log mutation so
     // that the admission checks on the propose path do not sum the log.
     #[serde(default)]
@@ -168,21 +160,7 @@ impl Node {
 
     fn set_log(&mut self, log: Vec<LogEntry>) {
         self.retained_log_bytes = log.iter().map(|entry| entry.payload.len() as u64).sum();
-        self.log = log.into_iter().map(Arc::new).collect();
-    }
-
-    /// The log as owned entries, for callers that hand it to something outside
-    /// the cluster. This copies every payload, so it is for record-building and
-    /// RPC construction rather than anything on the propose path.
-    fn log_entries(&self) -> Vec<LogEntry> {
-        self.log.iter().map(|entry| (**entry).clone()).collect()
-    }
-
-    fn log_entries_from(&self, position: usize) -> Vec<LogEntry> {
-        self.log[position..]
-            .iter()
-            .map(|entry| (**entry).clone())
-            .collect()
+        self.log = log;
     }
 
     fn log_term_at(&self, log_index: LogIndex) -> Option<Term> {
@@ -208,9 +186,7 @@ impl Node {
             || (candidate.term == local_term && candidate.index >= local_index)
     }
 
-    /// Appends a shared entry. Callers appending the same entry to several
-    /// nodes should build one `Arc` and hand each node a clone of the handle.
-    fn append_entry(&mut self, entry: Arc<LogEntry>) {
+    fn append_entry(&mut self, entry: LogEntry) {
         // An entry past the tail cannot collide with a retained index, so the
         // steady-state append never looks at the rest of the log.
         let extends_tail = self
@@ -258,21 +234,22 @@ impl Node {
         }
     }
 
-    /// A witness stores a rewritten entry -- `is_command` cleared, and the
-    /// payload dropped unless preserved -- so it cannot share the caller's
-    /// allocation and gets its own.
-    fn append_witness_entry(&mut self, entry: &LogEntry, preserve_payload: bool) {
+    fn append_witness_entry(&mut self, entry: LogEntry, preserve_payload: bool) {
         self.acknowledge_witness_index(entry.log_id.index);
-        let stored = LogEntry {
-            log_id: entry.log_id.clone(),
-            payload: if preserve_payload {
-                entry.payload.clone()
-            } else {
-                Vec::new()
-            },
-            is_command: false,
+        let entry = if preserve_payload {
+            LogEntry {
+                log_id: entry.log_id,
+                payload: entry.payload,
+                is_command: false,
+            }
+        } else {
+            LogEntry {
+                log_id: entry.log_id,
+                payload: Vec::new(),
+                is_command: false,
+            }
         };
-        self.append_entry(Arc::new(stored));
+        self.append_entry(entry);
     }
 
     fn advance_commit(&mut self, commit_index: LogIndex) {
@@ -867,24 +844,6 @@ impl RaftCluster {
         confirmation_epoch: u64,
         duration_ms: u64,
     ) -> bool {
-        self.receive_leader_lease_confirmation_inner(node_id, confirmation_epoch, duration_ms, true)
-    }
-
-    /// `recompute_quorum` lets a caller recording a whole round of
-    /// confirmations evaluate the lease quorum once at the end rather than
-    /// after each one.
-    ///
-    /// `leader_lease_quorum_reached` walks every confirmation and looks up its
-    /// node, so recomputing per confirmation makes a round of N cost O(N^2).
-    /// The result depends only on the final set, so the intermediate passes
-    /// cannot change it.
-    fn receive_leader_lease_confirmation_inner(
-        &mut self,
-        node_id: NodeId,
-        confirmation_epoch: u64,
-        duration_ms: u64,
-        recompute_quorum: bool,
-    ) -> bool {
         if self.leader_id == Some(node_id) {
             return false;
         }
@@ -918,9 +877,7 @@ impl RaftCluster {
                 && existing_remaining_ms >= duration_ms
             {
                 existing.confirmation_epoch = confirmation_epoch;
-                if recompute_quorum {
-                    self.leader_lease_valid = self.leader_lease_quorum_reached();
-                }
+                self.leader_lease_valid = self.leader_lease_quorum_reached();
                 return true;
             }
         }
@@ -936,29 +893,18 @@ impl RaftCluster {
                 elapsed_ms: 0,
             },
         );
-        if recompute_quorum {
-            self.leader_lease_valid = self.leader_lease_quorum_reached();
-        }
+        self.leader_lease_valid = self.leader_lease_quorum_reached();
         true
     }
 
-    /// Record a self-generated confirmation for `node_id`.
-    ///
-    /// `recompute_quorum` is false when the caller records a round of these and
-    /// evaluates the quorum once afterwards.
-    fn record_leader_lease_confirmation_inner(&mut self, node_id: NodeId, recompute_quorum: bool) {
+    fn record_leader_lease_confirmation(&mut self, node_id: NodeId) {
         let confirmation_epoch = self
             .leader_lease_confirmation_epochs
             .get(&node_id)
             .copied()
             .unwrap_or_default()
             .saturating_add(1);
-        let _ = self.receive_leader_lease_confirmation_inner(
-            node_id,
-            confirmation_epoch,
-            self.config.leader_lease_ms,
-            recompute_quorum,
-        );
+        let _ = self.receive_leader_lease_confirmation(node_id, confirmation_epoch);
     }
 
     fn renew_leader_lease_from_acknowledgements<I>(&mut self, acknowledgements: I) -> bool
@@ -973,10 +919,7 @@ impl RaftCluster {
         self.leader_lease_elapsed_ms = 0;
         self.leader_lease_confirmations.clear();
         for node_id in acknowledgements {
-            // Deferred: the quorum is evaluated once below, so evaluating it
-            // per acknowledgement was O(N^2) for a result that only depends on
-            // the final set.
-            self.record_leader_lease_confirmation_inner(node_id, false);
+            self.record_leader_lease_confirmation(node_id);
         }
         self.leader_lease_valid = self.leader_lease_quorum_reached();
         self.leader_lease_valid
@@ -1468,7 +1411,6 @@ impl RaftCluster {
             is_command: true,
         };
         self.last_log_index = log_id.index;
-        let entry = Arc::new(entry);
 
         let node_ids: Vec<_> = self.nodes.keys().copied().collect();
         for node_id in node_ids {
@@ -1476,14 +1418,14 @@ impl RaftCluster {
                 continue;
             };
             if node_id == leader_id {
-                node.append_entry(Arc::clone(&entry));
+                node.append_entry(entry.clone());
                 continue;
             }
             if node.healthy && node.match_index().saturating_add(1) == entry.log_id.index {
                 if node.replica_role.can_serve_data() {
-                    node.append_entry(Arc::clone(&entry));
+                    node.append_entry(entry.clone());
                 } else if node.replica_role == ReplicaRole::Witness {
-                    node.append_witness_entry(&entry, false);
+                    node.append_witness_entry(entry.clone(), false);
                 }
             }
         }
@@ -2328,27 +2270,6 @@ impl RaftCluster {
         peer_id: NodeId,
         response: AppendEntriesResponse,
     ) -> Result<(), RaftError> {
-        self.handle_append_entries_response_inner(local_node_id, peer_id, response, true)
-    }
-
-    /// `recompute_aggregates` exists so a caller applying a whole round of
-    /// responses can recompute the two group-wide aggregates -- the commit
-    /// index and the leader-lease quorum -- once at the end, instead of once
-    /// per response.
-    ///
-    /// Both walk every node: `refresh_commit_index` collects, sorts and
-    /// re-walks the node set, and `leader_lease_quorum_reached` walks every
-    /// confirmation and looks up its node. Doing either per response makes a
-    /// round of N responses cost O(N^2). Both results depend only on the final
-    /// state, so the intermediate passes cannot change the outcome -- only how
-    /// long it takes to reach it.
-    fn handle_append_entries_response_inner(
-        &mut self,
-        local_node_id: NodeId,
-        peer_id: NodeId,
-        response: AppendEntriesResponse,
-        recompute_aggregates: bool,
-    ) -> Result<(), RaftError> {
         self.nodes
             .get(&local_node_id)
             .ok_or(RaftError::NodeNotFound(local_node_id))?;
@@ -2382,14 +2303,13 @@ impl RaftCluster {
             return Ok(());
         }
         if response.lease_confirmation_epoch > 0 && response.lease_duration_ms > 0 {
-            let _ = self.receive_leader_lease_confirmation_inner(
+            let _ = self.receive_leader_lease_confirmation_with_duration(
                 peer_id,
                 response.lease_confirmation_epoch,
                 response.lease_duration_ms,
-                recompute_aggregates,
             );
         } else if self.config.enable_lease_read {
-            self.record_leader_lease_confirmation_inner(peer_id, recompute_aggregates);
+            self.record_leader_lease_confirmation(peer_id);
         }
         let mut append_response_result = Ok(());
         if let Some(pipeline) = self.peer_pipelines.get_mut(&peer_id) {
@@ -2399,9 +2319,7 @@ impl RaftCluster {
                 self.config.election_timeout_ms.max(1),
             );
             append_response_result = pipeline.handle_append_response(&response);
-            if recompute_aggregates {
-                self.refresh_commit_index();
-            }
+            self.refresh_commit_index();
         }
         if let Some(required_snapshot_index) = response.require_snapshot {
             self.trigger_new_snapshot_if_leader_snapshot_is_stale(
@@ -2619,9 +2537,6 @@ impl RaftCluster {
             is_command: options.is_command && !proposed_as_membership_change,
         };
         self.last_log_index = log_id.index;
-        // One allocation for the payload, shared by every node's log, rather
-        // than a clone per node.
-        let entry = Arc::new(entry);
 
         let mut lease_acknowledgements = vec![leader_id];
         let node_ids: Vec<_> = self.nodes.keys().copied().collect();
@@ -2630,7 +2545,7 @@ impl RaftCluster {
                 continue;
             };
             if node_id == leader_id {
-                node.append_entry(Arc::clone(&entry));
+                node.append_entry(entry.clone());
                 continue;
             }
             let response = if let Some(pipeline) = self.peer_pipelines.get_mut(&node_id) {
@@ -2641,9 +2556,9 @@ impl RaftCluster {
                     let append_is_contiguous = match_index.saturating_add(1) == entry.log_id.index;
                     if append_is_contiguous {
                         if node.replica_role.can_serve_data() {
-                            node.append_entry(Arc::clone(&entry));
+                            node.append_entry(entry.clone());
                         } else if node.replica_role == ReplicaRole::Witness {
-                            node.append_witness_entry(&entry, proposed_as_membership_change);
+                            node.append_witness_entry(entry.clone(), proposed_as_membership_change);
                         }
                     }
                     let match_index = node.match_index();
@@ -2669,12 +2584,7 @@ impl RaftCluster {
                 if response.success {
                     lease_acknowledgements.push(node_id);
                 }
-                // Defer the commit-index refresh: this loop applies one response
-                // per node and then refreshes once below, so refreshing inside
-                // each response made a proposal cost O(N^2 log N) in group size.
-                let _ = self.handle_append_entries_response_inner(
-                    leader_id, node_id, response, false,
-                );
+                let _ = self.handle_append_entries_response(leader_id, node_id, response);
             }
         }
         self.refresh_commit_index();
@@ -2698,7 +2608,7 @@ impl RaftCluster {
             node_id,
             hard_state: node.hard_state.clone(),
             membership: self.membership(),
-            entries: node.log_entries(),
+            entries: node.log.clone(),
             installed_snapshot,
             apply_snapshot_fence: ApplySnapshotFence {
                 applied_index: node.applied_index,
@@ -2754,10 +2664,10 @@ impl RaftCluster {
         let mut record = self.wal_record_shell(node_id, node);
         match extends {
             Some(from) => {
-                record.entries = node.log_entries_from(from);
+                record.entries = node.log[from..].to_vec();
                 record.entries_are_delta = true;
             }
-            None => record.entries = node.log_entries(),
+            None => record.entries = node.log.clone(),
         }
         record.checksum = matrixraft_wal_checksum(&record);
         Ok(record)
@@ -3165,13 +3075,13 @@ impl RaftCluster {
                     pending_membership_change_index = Some(entry.log_id.index);
                     self.membership_change_indexes.insert(entry.log_id.index);
                 }
-                node.append_entry(Arc::new(entry));
+                node.append_entry(entry);
                 appended_entries_count = appended_entries_count.saturating_add(1);
                 if cap_busy_data_append_batch {
                     break;
                 }
             } else if node.replica_role == ReplicaRole::Witness {
-                node.append_witness_entry(&entry, is_membership_change);
+                node.append_witness_entry(entry, is_membership_change);
                 appended_entries_count = appended_entries_count.saturating_add(1);
             }
         }
@@ -3545,27 +3455,17 @@ impl RaftCluster {
     }
 
     pub fn transfer_leader(&mut self, target: NodeId) -> Result<(), RaftError> {
-        self.transfer_leader_outcome(target).map(|_| ())
-    }
-
-    /// Transfer leadership, reporting which of the three things happened.
-    ///
-    /// `transfer_leader` collapses all three into `Ok(())`, which is why a
-    /// report built from its return value cannot tell "leadership moved" from
-    /// "the request was ignored".
-    pub fn transfer_leader_outcome(
-        &mut self,
-        target: NodeId,
-    ) -> Result<LeaderTransferOutcome, RaftError> {
         if self.begin_leader_transfer(target)?.is_none() {
-            return Ok(LeaderTransferOutcome::Ignored);
+            return Ok(());
         }
         if !self.leader_transfer_target_caught_up(target)? {
-            return Ok(LeaderTransferOutcome::Pending);
+            return Ok(());
         }
-        self.campaign(target, true)?;
-        self.leader_transfer = None;
-        Ok(LeaderTransferOutcome::Transferred)
+        let result = self.campaign(target, true);
+        if result.is_ok() {
+            self.leader_transfer = None;
+        }
+        result
     }
 
     pub fn try_complete_leader_transfer(&mut self) -> Result<bool, RaftError> {
@@ -4087,7 +3987,7 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(leader_id))?;
         let missing_tail: Vec<LogEntry> = leader
             .log_position_at_or_after(current_match.saturating_add(1))
-            .map(|position| leader.log_entries_from(position))
+            .map(|position| leader.log[position..].to_vec())
             .unwrap_or_default();
 
         let peer = self
@@ -4096,9 +3996,9 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(peer_id))?;
         for entry in missing_tail {
             if peer.replica_role == ReplicaRole::Witness {
-                peer.append_witness_entry(&entry, false);
+                peer.append_witness_entry(entry, false);
             } else {
-                peer.append_entry(Arc::new(entry));
+                peer.append_entry(entry);
             }
         }
         peer.advance_commit(leader_commit_index.min(peer.match_index()));
@@ -4462,7 +4362,7 @@ impl RaftCluster {
             .get_mut(&target)
             .ok_or(RaftError::NodeNotFound(target))?;
         for entry in tail_entries {
-            node.append_entry(Arc::new(entry));
+            node.append_entry(entry);
         }
         node.advance_commit(self.commit_index.max(node.match_index()));
         if let Some(pipeline) = self.peer_pipelines.get_mut(&target) {

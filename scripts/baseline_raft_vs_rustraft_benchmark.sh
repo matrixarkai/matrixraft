@@ -3,11 +3,12 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: baseline_raft_vs_rustraft_benchmark.sh [--rustraft-root PATH] [--baseline_raft-root PATH] [--baseline_raft-archive PATH] [--baseline_raft-bin PATH] [--out PATH] [--summary-out PATH] [--node-count N] [--iterations N] [--batch-size N] [--payload-size-bytes N] [--pass-tolerance-percent PCT] [--release|--debug] [--native-kvbench-adapter] [--build-native-kvbench-adapter]
+Usage: baseline_raft_vs_rustraft_benchmark.sh [--rustraft-root PATH] [--baseline_raft-root PATH] [--baseline_raft-archive PATH] [--baseline_raft-bin PATH] [--out PATH] [--summary-out PATH] [--scale-out PATH] [--readiness-input PATH] [--readiness-artifact-out PATH] [--readiness-labels key=value,...] [--node-count N] [--iterations N] [--batch-size N] [--payload-size-bytes N] [--pass-tolerance-percent PCT] [--release|--debug] [--native-kvbench-adapter] [--build-native-kvbench-adapter]
 
 Runs the standalone RustRaft BaselineRaft parity benchmark harness from outside
 TemporalStore and writes the JSON report to --out plus a compact production
-summary to --summary-out.
+summary to --summary-out and benchmark-derived scale optimization inputs to
+--scale-out.
 
 Environment:
   RUSTRAFT_ROOT   RustRaft checkout. Defaults to this script's parent repo.
@@ -30,6 +31,42 @@ Environment:
   BENCHMARK_OUT   Output report path.
   BENCHMARK_SUMMARY_OUT
                   Output compact pass/fail summary path.
+  BENCHMARK_SCALE_OUT
+                  Output benchmark-derived scale optimization input path.
+  RUSTRAFT_BENCHMARK_READINESS_INPUT
+                  ProductionReadinessInput JSON used to emit the optional combined
+                  benchmark/runtime-pressure readiness artifact.
+  RUSTRAFT_BENCHMARK_READINESS_ARTIFACT_OUT
+                  Output path for the optional validated readiness artifact.
+  RUSTRAFT_BENCHMARK_READINESS_LABELS
+                  Comma-separated Prometheus labels for the readiness artifact.
+  RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT
+                  Optional JSON pressure snapshot consumed by both readiness artifact
+                  generation and post-run saved-artifact verification.
+  RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT_OUT
+                  Optional output path for a pressure snapshot captured from the
+                  live RUSTRAFT_BENCHMARK_* counter environment before the parity
+                  benchmark starts. When RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT is
+                  unset, the generated file is also used as the benchmark and
+                  verifier pressure snapshot input.
+  RUSTRAFT_BENCHMARK_PROCESS_RESIDENT_MEMORY_BYTES, RUSTRAFT_BENCHMARK_HEAP_ALLOCATED_BYTES,
+  RUSTRAFT_BENCHMARK_LOG_CACHE_BYTES, RUSTRAFT_BENCHMARK_SNAPSHOT_BUFFER_BYTES,
+  RUSTRAFT_BENCHMARK_REPLICATION_BUFFER_BYTES
+                  Optional live memory counters embedded in the readiness artifact.
+  RUSTRAFT_BENCHMARK_APPEND_P99_MS, RUSTRAFT_BENCHMARK_VOTE_P99_MS,
+  RUSTRAFT_BENCHMARK_PRE_VOTE_P99_MS, RUSTRAFT_BENCHMARK_READ_INDEX_P99_MS,
+  RUSTRAFT_BENCHMARK_SNAPSHOT_INSTALL_P99_MS
+                  Optional live latency p99 samples embedded in the readiness artifact.
+  RUSTRAFT_BENCHMARK_PENDING_READ_INDEX_REQUESTS, RUSTRAFT_BENCHMARK_PENDING_BOUNDED_STALE_READS
+                  Optional live read-backlog counters embedded in the readiness artifact.
+  RUSTRAFT_BENCHMARK_PENDING_READ_INDEX_WARNING, RUSTRAFT_BENCHMARK_PENDING_BOUNDED_STALE_READ_WARNING
+                  Optional read-backlog warning thresholds used by the readiness gate.
+  RUSTRAFT_BENCHMARK_RUNTIME_TIMER_PENDING_TICKS, RUSTRAFT_BENCHMARK_RUNTIME_TIMER_MAX_PENDING_TICKS,
+  RUSTRAFT_BENCHMARK_RUNTIME_TIMER_ACCEPTED_TICKS, RUSTRAFT_BENCHMARK_RUNTIME_TIMER_REJECTED_TICKS,
+  RUSTRAFT_BENCHMARK_RUNTIME_TIMER_COMPLETED_TICKS
+                  Optional live node-runtime timer pressure counters embedded in the readiness artifact.
+  RUSTRAFT_BENCHMARK_RUNTIME_TIMER_UTILIZATION_WARNING_PERCENT
+                  Optional node-runtime timer utilization threshold used by the readiness gate.
   RUSTRAFT_BENCHMARK_ITERATIONS
                   Operations per workload iteration count. Defaults to 128.
   RUSTRAFT_BENCHMARK_BATCH_SIZE
@@ -55,6 +92,23 @@ baseline_raft_archive="${BASELINE_RAFT_ARCHIVE:-}"
 baseline_raft_bin="${BASELINE_RAFT_BENCHMARK_BIN:-}"
 out_path="${BENCHMARK_OUT:-$rustraft_root/target/baseline_raft-vs-rustraft-benchmark/report.json}"
 summary_path="${BENCHMARK_SUMMARY_OUT:-${out_path%.json}.summary.json}"
+scale_path="${BENCHMARK_SCALE_OUT:-${out_path%.json}.scale.json}"
+readiness_input_path="${RUSTRAFT_BENCHMARK_READINESS_INPUT:-}"
+readiness_artifact_path="${RUSTRAFT_BENCHMARK_READINESS_ARTIFACT_OUT:-}"
+readiness_labels="${RUSTRAFT_BENCHMARK_READINESS_LABELS:-}"
+pressure_snapshot_path="${RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT:-}"
+pressure_snapshot_out_path="${RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT_OUT:-}"
+pending_read_index_requests="${RUSTRAFT_BENCHMARK_PENDING_READ_INDEX_REQUESTS:-}"
+pending_bounded_stale_reads="${RUSTRAFT_BENCHMARK_PENDING_BOUNDED_STALE_READS:-}"
+pending_read_index_warning="${RUSTRAFT_BENCHMARK_PENDING_READ_INDEX_WARNING:-}"
+pending_bounded_stale_read_warning="${RUSTRAFT_BENCHMARK_PENDING_BOUNDED_STALE_READ_WARNING:-}"
+runtime_timer_pending_ticks="${RUSTRAFT_BENCHMARK_RUNTIME_TIMER_PENDING_TICKS:-}"
+runtime_timer_max_pending_ticks="${RUSTRAFT_BENCHMARK_RUNTIME_TIMER_MAX_PENDING_TICKS:-}"
+runtime_timer_accepted_ticks="${RUSTRAFT_BENCHMARK_RUNTIME_TIMER_ACCEPTED_TICKS:-}"
+runtime_timer_rejected_ticks="${RUSTRAFT_BENCHMARK_RUNTIME_TIMER_REJECTED_TICKS:-}"
+runtime_timer_completed_ticks="${RUSTRAFT_BENCHMARK_RUNTIME_TIMER_COMPLETED_TICKS:-}"
+runtime_timer_last_admission_reason="${RUSTRAFT_BENCHMARK_RUNTIME_TIMER_LAST_ADMISSION_REASON:-}"
+runtime_timer_utilization_warning_percent="${RUSTRAFT_BENCHMARK_RUNTIME_TIMER_UTILIZATION_WARNING_PERCENT:-}"
 cargo_profile=(--release)
 build_profile=release
 verifier_profile_arg=--release
@@ -108,6 +162,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --summary-out)
       summary_path="$2"
+      shift 2
+      ;;
+    --scale-out)
+      scale_path="$2"
+      shift 2
+      ;;
+    --readiness-input)
+      readiness_input_path="$2"
+      shift 2
+      ;;
+    --readiness-artifact-out)
+      readiness_artifact_path="$2"
+      shift 2
+      ;;
+    --readiness-labels)
+      readiness_labels="$2"
       shift 2
       ;;
     --iterations)
@@ -252,9 +322,46 @@ if [[ -z "$summary_path" ]]; then
   exit 2
 fi
 
+if [[ -z "$scale_path" ]]; then
+  echo "benchmark:invalid_scale_path:empty" >&2
+  exit 2
+fi
+
 if [[ "$out_path" == "$summary_path" ]]; then
   echo "benchmark:artifact_path_collision:report_summary:$out_path" >&2
   exit 2
+fi
+
+if [[ "$out_path" == "$scale_path" ]]; then
+  echo "benchmark:artifact_path_collision:report_scale:$out_path" >&2
+  exit 2
+fi
+
+if [[ "$summary_path" == "$scale_path" ]]; then
+  echo "benchmark:artifact_path_collision:summary_scale:$summary_path" >&2
+  exit 2
+fi
+if [[ -n "$pressure_snapshot_out_path" ]]; then
+  if [[ "$pressure_snapshot_out_path" == "$out_path" ]]; then
+    echo "benchmark:artifact_path_collision:pressure_snapshot_report:$pressure_snapshot_out_path" >&2
+    exit 2
+  fi
+  if [[ "$pressure_snapshot_out_path" == "$summary_path" ]]; then
+    echo "benchmark:artifact_path_collision:pressure_snapshot_summary:$pressure_snapshot_out_path" >&2
+    exit 2
+  fi
+  if [[ "$pressure_snapshot_out_path" == "$scale_path" ]]; then
+    echo "benchmark:artifact_path_collision:pressure_snapshot_scale:$pressure_snapshot_out_path" >&2
+    exit 2
+  fi
+  if [[ -n "$readiness_input_path" && "$pressure_snapshot_out_path" == "$readiness_input_path" ]]; then
+    echo "benchmark:artifact_path_collision:pressure_snapshot_readiness_input:$pressure_snapshot_out_path" >&2
+    exit 2
+  fi
+  if [[ -n "$readiness_artifact_path" && "$pressure_snapshot_out_path" == "$readiness_artifact_path" ]]; then
+    echo "benchmark:artifact_path_collision:pressure_snapshot_readiness_artifact:$pressure_snapshot_out_path" >&2
+    exit 2
+  fi
 fi
 
 if [[ -d "$out_path" ]]; then
@@ -264,6 +371,11 @@ fi
 
 if [[ -d "$summary_path" ]]; then
   echo "benchmark:invalid_summary_path:is_directory:$summary_path" >&2
+  exit 2
+fi
+
+if [[ -d "$scale_path" ]]; then
+  echo "benchmark:invalid_scale_path:is_directory:$scale_path" >&2
   exit 2
 fi
 
@@ -611,7 +723,37 @@ fi
 
 mkdir -p "$(dirname -- "$out_path")"
 mkdir -p "$(dirname -- "$summary_path")"
-rm -f -- "$out_path" "$summary_path"
+mkdir -p "$(dirname -- "$scale_path")"
+if [[ -n "$readiness_artifact_path" && -z "$readiness_input_path" ]]; then
+  echo "benchmark:readiness_artifact_requires_input:$readiness_artifact_path" >&2
+  exit 2
+fi
+if [[ -n "$readiness_input_path" && -z "$readiness_artifact_path" ]]; then
+  echo "benchmark:readiness_input_requires_artifact_out:$readiness_input_path" >&2
+  exit 2
+fi
+if [[ -n "$readiness_artifact_path" ]]; then
+  mkdir -p "$(dirname -- "$readiness_artifact_path")"
+fi
+if [[ -n "$pressure_snapshot_out_path" ]]; then
+  mkdir -p "$(dirname -- "$pressure_snapshot_out_path")"
+  rm -f -- "$pressure_snapshot_out_path"
+  cargo run \
+    --manifest-path "$rustraft_root/Cargo.toml" \
+    "${cargo_profile[@]}" \
+    --example baseline_raft_pressure_snapshot \
+    -- \
+    --out "$pressure_snapshot_out_path"
+  fsync_file "$pressure_snapshot_out_path"
+  fsync_parent_dir "$pressure_snapshot_out_path"
+  if [[ -z "$pressure_snapshot_path" ]]; then
+    pressure_snapshot_path="$pressure_snapshot_out_path"
+  fi
+fi
+rm -f -- "$out_path" "$summary_path" "$scale_path"
+if [[ -n "$readiness_artifact_path" ]]; then
+  rm -f -- "$readiness_artifact_path"
+fi
 
 out_dir="$(dirname -- "$out_path")"
 out_file="$(basename -- "$out_path")"
@@ -627,6 +769,11 @@ RUSTRAFT_BENCHMARK_BATCH_SIZE="$benchmark_batch_size" \
 RUSTRAFT_BENCHMARK_PAYLOAD_SIZE_BYTES="$benchmark_payload_size_bytes" \
 RUSTRAFT_BENCHMARK_PASS_TOLERANCE_PERCENT="$benchmark_pass_tolerance_percent" \
 RUSTRAFT_BENCHMARK_SUMMARY_OUT="$summary_path" \
+RUSTRAFT_BENCHMARK_SCALE_OUT="$scale_path" \
+RUSTRAFT_BENCHMARK_READINESS_INPUT="$readiness_input_path" \
+RUSTRAFT_BENCHMARK_READINESS_ARTIFACT_OUT="$readiness_artifact_path" \
+RUSTRAFT_BENCHMARK_READINESS_LABELS="$readiness_labels" \
+RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT="$pressure_snapshot_path" \
 cargo run \
   --manifest-path "$rustraft_root/Cargo.toml" \
   "${cargo_profile[@]}" \
@@ -648,10 +795,27 @@ if [[ -f "$summary_path" ]]; then
   fsync_file "$summary_path"
   fsync_parent_dir "$summary_path"
 fi
+if [[ -f "$scale_path" ]]; then
+  fsync_file "$scale_path"
+  fsync_parent_dir "$scale_path"
+fi
+if [[ -n "$readiness_artifact_path" && -f "$readiness_artifact_path" ]]; then
+  fsync_file "$readiness_artifact_path"
+  fsync_parent_dir "$readiness_artifact_path"
+fi
 
 echo "BaselineRaft-vs-RustRaft benchmark report: $out_path"
 if [[ -f "$summary_path" ]]; then
   echo "BaselineRaft-vs-RustRaft benchmark summary: $summary_path"
+fi
+if [[ -f "$scale_path" ]]; then
+  echo "BaselineRaft-vs-RustRaft scale optimization inputs: $scale_path"
+fi
+if [[ -n "$readiness_artifact_path" && -f "$readiness_artifact_path" ]]; then
+  echo "BaselineRaft-vs-RustRaft readiness artifact: $readiness_artifact_path"
+fi
+if [[ -n "$pressure_snapshot_path" && -f "$pressure_snapshot_path" ]]; then
+  echo "BaselineRaft-vs-RustRaft pressure snapshot: $pressure_snapshot_path"
 fi
 echo "BaselineRaft root: $baseline_raft_root"
 echo "BaselineRaft benchmark harness: $baseline_raft_bin"
@@ -665,17 +829,74 @@ if [[ "$benchmark_status" -eq 0 ]]; then
     echo "benchmark:artifact_missing_after_benchmark:summary:$summary_path" >&2
     exit 1
   fi
+  if [[ ! -f "$scale_path" ]]; then
+    echo "benchmark:artifact_missing_after_benchmark:scale:$scale_path" >&2
+    exit 1
+  fi
+  if [[ -n "$readiness_artifact_path" && ! -f "$readiness_artifact_path" ]]; then
+    echo "benchmark:artifact_missing_after_benchmark:readiness:$readiness_artifact_path" >&2
+    exit 1
+  fi
 fi
 
 verifier_status=0
 if [[ -f "$out_path" && -f "$summary_path" ]]; then
+  verifier_args=(
+    --rustraft-root "$rustraft_root"
+    --report "$out_path"
+    --summary "$summary_path"
+    --scale "$scale_path"
+    --max-age-seconds "$benchmark_max_artifact_age_seconds"
+    "$verifier_profile_arg"
+  )
+  if [[ -n "$readiness_input_path" && -n "$readiness_artifact_path" ]]; then
+    verifier_args+=(
+      --readiness-input "$readiness_input_path"
+      --readiness-artifact "$readiness_artifact_path"
+    )
+    if [[ -n "$readiness_labels" ]]; then
+      verifier_args+=(--readiness-labels "$readiness_labels")
+    fi
+    if [[ -n "$pressure_snapshot_path" ]]; then
+      verifier_args+=(--pressure-snapshot "$pressure_snapshot_path")
+    fi
+    if [[ -n "$pending_read_index_requests" ]]; then
+      verifier_args+=(--pending-read-index-requests "$pending_read_index_requests")
+    fi
+    if [[ -n "$pending_bounded_stale_reads" ]]; then
+      verifier_args+=(--pending-bounded-stale-reads "$pending_bounded_stale_reads")
+    fi
+    if [[ -n "$pending_read_index_warning" ]]; then
+      verifier_args+=(--pending-read-index-warning "$pending_read_index_warning")
+    fi
+    if [[ -n "$pending_bounded_stale_read_warning" ]]; then
+      verifier_args+=(--pending-bounded-stale-read-warning "$pending_bounded_stale_read_warning")
+    fi
+    if [[ -n "$runtime_timer_pending_ticks" ]]; then
+      verifier_args+=(--runtime-timer-pending-ticks "$runtime_timer_pending_ticks")
+    fi
+    if [[ -n "$runtime_timer_max_pending_ticks" ]]; then
+      verifier_args+=(--runtime-timer-max-pending-ticks "$runtime_timer_max_pending_ticks")
+    fi
+    if [[ -n "$runtime_timer_accepted_ticks" ]]; then
+      verifier_args+=(--runtime-timer-accepted-ticks "$runtime_timer_accepted_ticks")
+    fi
+    if [[ -n "$runtime_timer_rejected_ticks" ]]; then
+      verifier_args+=(--runtime-timer-rejected-ticks "$runtime_timer_rejected_ticks")
+    fi
+    if [[ -n "$runtime_timer_completed_ticks" ]]; then
+      verifier_args+=(--runtime-timer-completed-ticks "$runtime_timer_completed_ticks")
+    fi
+    if [[ -n "$runtime_timer_last_admission_reason" ]]; then
+      verifier_args+=(--runtime-timer-last-admission-reason "$runtime_timer_last_admission_reason")
+    fi
+    if [[ -n "$runtime_timer_utilization_warning_percent" ]]; then
+      verifier_args+=(--runtime-timer-utilization-warning-percent "$runtime_timer_utilization_warning_percent")
+    fi
+  fi
   set +e
   bash "$rustraft_root/scripts/verify_baseline_raft_benchmark_artifacts.sh" \
-    --rustraft-root "$rustraft_root" \
-    --report "$out_path" \
-    --summary "$summary_path" \
-    --max-age-seconds "$benchmark_max_artifact_age_seconds" \
-    "$verifier_profile_arg"
+    "${verifier_args[@]}"
   verifier_status=$?
   set -e
 fi

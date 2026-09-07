@@ -60,6 +60,8 @@ pub struct PeerProgress {
     pub reorder_queue_depth: u64,
     pub out_of_order_append_rejections: u64,
     pub reorder_entries_rejected: u64,
+    #[serde(default)]
+    pub reorder_entries_converged: u64,
     pub reorder_entry_timeouts: u64,
     pub reorder_dropped_packages: u64,
     #[serde(default)]
@@ -154,6 +156,8 @@ pub struct ObservedPeerPipeline {
     pub out_of_order_append_rejections: u64,
     #[serde(default)]
     pub reorder_entries_rejected: u64,
+    #[serde(default)]
+    pub reorder_entries_converged: u64,
     #[serde(default)]
     pub reorder_entry_timeouts: u64,
     #[serde(default)]
@@ -1007,10 +1011,16 @@ impl ReplicationPipeline {
     }
 
     fn drain_reorder_queue(&mut self) {
+        let mut converged = 0_u64;
         while self.reorder_queue.remove(&self.status.next_index) {
             self.status.match_index = self.status.next_index;
             self.status.next_index = self.status.next_index.saturating_add(1);
+            converged = converged.saturating_add(1);
         }
+        self.status.reorder_entries_converged = self
+            .status
+            .reorder_entries_converged
+            .saturating_add(converged);
         self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
     }
 
@@ -1051,6 +1061,8 @@ pub struct PipelineLimits {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineEvidence {
     pub per_peer_pipeline_state_present: bool,
+    #[serde(default)]
+    pub peer_pipeline_observed_peer_count: u64,
     pub append_backpressure_enforced: bool,
     pub apply_backpressure_enforced: bool,
     pub memory_replicate_bytes_enforced: bool,
@@ -1064,6 +1076,12 @@ pub struct PipelineEvidence {
     pub reorder_convergence_present: bool,
     #[serde(default)]
     pub packet_loss_reorder_same_peer_recovered: bool,
+    #[serde(default)]
+    pub packet_loss_reorder_faulted_peer_count: u64,
+    #[serde(default)]
+    pub packet_loss_reorder_recovered_peer_count: u64,
+    #[serde(default)]
+    pub packet_loss_reorder_all_faulted_peers_recovered: bool,
     pub stale_term_rejection_present: bool,
     pub reorder_queue_enabled: bool,
 }
@@ -1081,6 +1099,8 @@ pub struct ReplicationPipelineEvidenceValidationReport {
     pub valid: bool,
     pub schema_valid: bool,
     pub peer_state_present: bool,
+    #[serde(default)]
+    pub peer_pipeline_observed_peer_count: u64,
     pub append_backpressure_enforced: bool,
     pub apply_backpressure_enforced: bool,
     pub memory_replicate_bytes_enforced: bool,
@@ -1092,6 +1112,12 @@ pub struct ReplicationPipelineEvidenceValidationReport {
     pub reorder_convergence_present: bool,
     #[serde(default)]
     pub packet_loss_reorder_same_peer_recovered: bool,
+    #[serde(default)]
+    pub packet_loss_reorder_faulted_peer_count: u64,
+    #[serde(default)]
+    pub packet_loss_reorder_recovered_peer_count: u64,
+    #[serde(default)]
+    pub packet_loss_reorder_all_faulted_peers_recovered: bool,
     pub stale_term_rejection_present: bool,
     pub reorder_queue_enabled: bool,
     #[serde(default)]
@@ -1153,6 +1179,7 @@ impl PeerProgress {
             reorder_queue_depth: 0,
             out_of_order_append_rejections: 0,
             reorder_entries_rejected: 0,
+            reorder_entries_converged: 0,
             reorder_entry_timeouts: 0,
             reorder_dropped_packages: 0,
             stale_term_rejections: 0,
@@ -1233,6 +1260,7 @@ pub fn matrixraft_peer_pipeline_status_from_observed(
         reorder_queue_depth: observed.reorder_queue_depth,
         out_of_order_append_rejections: observed.out_of_order_append_rejections,
         reorder_entries_rejected: observed.reorder_entries_rejected,
+        reorder_entries_converged: observed.reorder_entries_converged,
         reorder_entry_timeouts: observed.reorder_entry_timeouts,
         reorder_dropped_packages: observed.reorder_dropped_packages,
         stale_term_rejections: observed.stale_term_rejections,
@@ -1279,8 +1307,17 @@ pub fn matrixraft_pipeline_evidence(
     peers: &[PeerProgress],
     limits: PipelineLimits,
 ) -> PipelineEvidence {
+    let packet_loss_reorder_faulted_peer_count = peers
+        .iter()
+        .filter(|peer| peer.packet_loss_events > 0 && peer_has_reorder_fault(peer))
+        .count() as u64;
+    let packet_loss_reorder_recovered_peer_count = peers
+        .iter()
+        .filter(|peer| peer_has_packet_loss_reorder_recovery(peer))
+        .count() as u64;
     PipelineEvidence {
         per_peer_pipeline_state_present: !peers.is_empty(),
+        peer_pipeline_observed_peer_count: peers.len() as u64,
         append_backpressure_enforced: peers.iter().any(|peer| {
             peer.append_queue_limit == limits.max_inflights_replicate
                 && (peer.append_queue_max_depth >= peer.append_queue_limit
@@ -1299,6 +1336,7 @@ pub fn matrixraft_pipeline_evidence(
         out_of_order_append_handling_present: peers.iter().any(|peer| {
             peer.out_of_order_append_rejections > 0
                 || peer.reorder_entries_rejected > 0
+                || peer.reorder_entries_converged > 0
                 || peer.reorder_entry_timeouts > 0
                 || peer.reorder_dropped_packages > 0
         }),
@@ -1308,32 +1346,18 @@ pub fn matrixraft_pipeline_evidence(
         packet_loss_probe_present: peers
             .iter()
             .any(|peer| peer.packet_loss_events > 0 && peer.network_error_probe_transitions > 0),
-        packet_loss_recovery_present: peers.iter().any(|peer| {
-            peer.packet_loss_events > 0
-                && peer.network_error_probe_transitions > 0
-                && peer.append_accepted > 0
-                && peer.match_index.saturating_add(1) >= peer.next_index
-        }),
+        packet_loss_recovery_present: peers.iter().any(peer_has_packet_loss_recovery),
         reorder_convergence_present: peers.iter().any(|peer| {
-            (peer.out_of_order_append_rejections > 0
-                || peer.reorder_entries_rejected > 0
-                || peer.reorder_entry_timeouts > 0
-                || peer.reorder_dropped_packages > 0)
+            peer_has_reorder_fault(peer)
                 && peer.append_accepted > 0
                 && peer.reorder_queue_depth == 0
                 && peer.match_index.saturating_add(1) >= peer.next_index
         }),
-        packet_loss_reorder_same_peer_recovered: peers.iter().any(|peer| {
-            peer.packet_loss_events > 0
-                && peer.network_error_probe_transitions > 0
-                && (peer.out_of_order_append_rejections > 0
-                    || peer.reorder_entries_rejected > 0
-                    || peer.reorder_entry_timeouts > 0
-                    || peer.reorder_dropped_packages > 0)
-                && peer.append_accepted > 0
-                && peer.reorder_queue_depth == 0
-                && peer.match_index.saturating_add(1) >= peer.next_index
-        }),
+        packet_loss_reorder_same_peer_recovered: packet_loss_reorder_recovered_peer_count > 0,
+        packet_loss_reorder_faulted_peer_count,
+        packet_loss_reorder_recovered_peer_count,
+        packet_loss_reorder_all_faulted_peers_recovered: packet_loss_reorder_faulted_peer_count > 0
+            && packet_loss_reorder_faulted_peer_count == packet_loss_reorder_recovered_peer_count,
         stale_term_rejection_present: peers.iter().any(|peer| peer.stale_term_rejections > 0),
         reorder_queue_enabled: limits.enable_reorder_queue
             && limits.reorder_window_size > 0
@@ -1383,6 +1407,20 @@ pub fn matrixraft_validate_replication_pipeline_evidence_artifact(
     let packet_loss_reorder_same_peer_recovered = recomputed
         .packet_loss_reorder_same_peer_recovered
         && artifact.evidence.packet_loss_reorder_same_peer_recovered;
+    let peer_pipeline_observed_peer_count = artifact.peers.len() as u64;
+    let packet_loss_reorder_faulted_peer_count = recomputed.packet_loss_reorder_faulted_peer_count;
+    let packet_loss_reorder_recovered_peer_count =
+        recomputed.packet_loss_reorder_recovered_peer_count;
+    let packet_loss_reorder_all_faulted_peers_recovered = recomputed
+        .packet_loss_reorder_all_faulted_peers_recovered
+        && artifact
+            .evidence
+            .packet_loss_reorder_all_faulted_peers_recovered
+        && artifact.evidence.packet_loss_reorder_faulted_peer_count
+            == packet_loss_reorder_faulted_peer_count
+        && artifact.evidence.packet_loss_reorder_recovered_peer_count
+            == packet_loss_reorder_recovered_peer_count
+        && artifact.evidence.peer_pipeline_observed_peer_count == peer_pipeline_observed_peer_count;
     let stale_term_rejection_present =
         recomputed.stale_term_rejection_present && artifact.evidence.stale_term_rejection_present;
     let reorder_queue_enabled = recomputed.reorder_queue_enabled
@@ -1415,6 +1453,10 @@ pub fn matrixraft_validate_replication_pipeline_evidence_artifact(
             packet_loss_reorder_same_peer_recovered,
             "packet_loss_reorder_same_peer_recovered",
         ),
+        (
+            packet_loss_reorder_all_faulted_peers_recovered,
+            "packet_loss_reorder_all_faulted_peers_recovered",
+        ),
         (stale_term_rejection_present, "stale_term_rejection_present"),
         (reorder_queue_enabled, "reorder_queue_enabled"),
     ] {
@@ -1427,6 +1469,7 @@ pub fn matrixraft_validate_replication_pipeline_evidence_artifact(
         valid: missing.is_empty(),
         schema_valid,
         peer_state_present,
+        peer_pipeline_observed_peer_count,
         append_backpressure_enforced,
         apply_backpressure_enforced,
         memory_replicate_bytes_enforced,
@@ -1437,8 +1480,30 @@ pub fn matrixraft_validate_replication_pipeline_evidence_artifact(
         packet_loss_recovery_present,
         reorder_convergence_present,
         packet_loss_reorder_same_peer_recovered,
+        packet_loss_reorder_faulted_peer_count,
+        packet_loss_reorder_recovered_peer_count,
+        packet_loss_reorder_all_faulted_peers_recovered,
         stale_term_rejection_present,
         reorder_queue_enabled,
         missing,
     }
+}
+
+fn peer_has_packet_loss_recovery(peer: &PeerProgress) -> bool {
+    peer.packet_loss_events > 0
+        && peer.network_error_probe_transitions > 0
+        && peer.append_accepted > 0
+        && peer.match_index.saturating_add(1) >= peer.next_index
+}
+
+fn peer_has_reorder_fault(peer: &PeerProgress) -> bool {
+    peer.out_of_order_append_rejections > 0
+        || peer.reorder_entries_rejected > 0
+        || peer.reorder_entries_converged > 0
+        || peer.reorder_entry_timeouts > 0
+        || peer.reorder_dropped_packages > 0
+}
+
+fn peer_has_packet_loss_reorder_recovery(peer: &PeerProgress) -> bool {
+    peer_has_packet_loss_recovery(peer) && peer_has_reorder_fault(peer)
 }

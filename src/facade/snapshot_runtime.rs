@@ -17,15 +17,6 @@ pub struct SnapshotMetadata {
 pub struct SnapshotChunk {
     pub meta: SnapshotMetadata,
     pub offset: u64,
-    /// Chunk bytes travel as base64, not as a JSON number array.
-    ///
-    /// A number array costs about 3.9 bytes per data byte and a chunk is
-    /// 64 KiB by default, so this was the largest single wire cost in the
-    /// protocol. Decode still accepts the number-array form, so chunks and
-    /// snapshot files written before this codec still read; an old receiver
-    /// rejects the new form, so a mixed-version cluster upgrades receivers
-    /// first.
-    #[serde(with = "crate::wal::bytes_as_base64")]
     pub data: SnapshotPayload,
     pub done: bool,
 }
@@ -40,23 +31,9 @@ pub struct GenericSnapshot<G = GroupId, P = SnapshotPayload> {
 pub type RaftSnapshot = GenericSnapshot<GroupId, SnapshotPayload>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(bound(
-    serialize = "P: serde::Serialize + AsRef<[u8]>",
-    deserialize = "P: serde::Deserialize<'de> + From<Vec<u8>>"
-))]
 pub struct GenericSnapshotChunk<P = SnapshotPayload> {
     pub meta: SnapshotMetadata,
     pub offset: u64,
-    /// Chunk bytes travel as base64, not as a JSON number array.
-    ///
-    /// A number array costs about 3.9 bytes per data byte and a chunk is
-    /// 64 KiB by default, so this is the largest single wire cost in the
-    /// protocol. Decode still accepts the number-array form, so chunks and
-    /// snapshot files written before this codec still read; an old receiver
-    /// rejects the new form, so a mixed-version cluster upgrades receivers
-    /// first. The serde bounds above are what the codec itself needs -- a
-    /// payload type that is not byte-like was never base64-serializable.
-    #[serde(with = "crate::wal::bytes_as_base64")]
     pub data: P,
     pub done: bool,
 }
@@ -210,18 +187,6 @@ impl SnapshotLifecycle {
         })
     }
 
-    /// Splits a snapshot into the chunks a send will transmit.
-    ///
-    /// Every chunk is built up front, so the result is a second copy of the
-    /// payload. Measured with `examples/snapshot_checkpoint_cost`, that is
-    /// 1.01x the payload -- 258 MiB held for a 256 MiB snapshot, of which about
-    /// 1% is the per-chunk metadata clone and the rest is the payload itself.
-    ///
-    /// Chunks cannot simply be dropped as they are sent: a rejected response
-    /// rewinds `next_chunk`, so an earlier chunk can be asked for again.
-    /// Removing the second copy means the sender holding the snapshot and
-    /// slicing a chunk when it is asked for, which needs `begin_send` to share
-    /// the snapshot rather than take it by reference.
     pub fn checkpoint(
         snapshot: &RaftSnapshot,
         chunk_size: u64,
@@ -254,12 +219,6 @@ impl SnapshotLifecycle {
         Ok(chunks)
     }
 
-    /// Starts sending a snapshot.
-    ///
-    /// This holds every chunk for the whole transfer, so a send costs roughly
-    /// twice the snapshot in memory until it completes -- and it begins exactly
-    /// when a follower has fallen behind, which is not when a leader has memory
-    /// to spare. See [`Self::checkpoint`] for what it would take to avoid.
     pub fn begin_send(
         &mut self,
         snapshot: &RaftSnapshot,

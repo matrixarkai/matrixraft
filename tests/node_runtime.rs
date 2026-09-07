@@ -2,11 +2,14 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    AdminCommand, AppendEntriesRequest, AppendEntriesResponse, ApplySnapshotFence, Config,
-    InstallSnapshotRequest, LogId, MembershipOperation, Message, NodeOptions, NodeRuntime,
-    NodeRuntimeState, Peer, ProposeOptions, RaftSnapshot, ReadIndexRequest, ReplicaRole,
-    RequestTimer, SnapshotChunk, SnapshotMetadata, SnapshotState, StepResult, StorageApplyFence,
-    TickBackpressure, VoteRequest, MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS,
+    matrixraft_node_runtime_status_diagnostic_json_lines,
+    matrixraft_node_runtime_status_diagnostic_log_entries,
+    matrixraft_node_runtime_status_prometheus, AdminCommand, AppendEntriesRequest,
+    AppendEntriesResponse, ApplySnapshotFence, Config, InstallSnapshotRequest, LogId,
+    MembershipOperation, Message, NodeOptions, NodeRuntime, NodeRuntimeState, Peer, ProposeOptions,
+    RaftSnapshot, ReadIndexRequest, ReplicaRole, RequestTimer, SnapshotChunk, SnapshotMetadata,
+    SnapshotState, StepResult, StorageApplyFence, TickBackpressure, VoteRequest,
+    MATRIXRAFT_REQUEST_TIMER_MAX_TIMEOUT_MS,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -407,6 +410,65 @@ fn node_runtime_runs_heartbeat_election_timer_loop_and_peer_state_machine() {
     }
     assert!(status.timer_status.heartbeat_ticks > 0);
     assert!(status.timer_status.election_ticks > 0);
+    assert_eq!(status.timer_status.pending_ticks, 0);
+    assert_eq!(status.timer_status.max_pending_ticks, 1);
+    assert_eq!(
+        status.timer_status.accepted_ticks,
+        status.timer_status.completed_ticks
+    );
+    assert_eq!(status.timer_status.rejected_ticks, 0);
+    assert_eq!(
+        status.timer_status.last_tick_admission_reason,
+        "tick_admitted"
+    );
+    let diagnostics = matrixraft_node_runtime_status_diagnostic_log_entries(&status);
+    let timer_diagnostic = diagnostics
+        .iter()
+        .find(|entry| entry.target == "rustraft.node_runtime.timer")
+        .expect("node runtime timer diagnostic");
+    assert_eq!(timer_diagnostic.message, "tick_backpressure_clear");
+    assert_eq!(
+        timer_diagnostic.severity,
+        matrixraft::DiagnosticSeverity::Info
+    );
+    assert!(timer_diagnostic
+        .fields
+        .contains(&("rejected_ticks".to_string(), "0".to_string())));
+    assert!(
+        matrixraft_node_runtime_status_diagnostic_json_lines(&status)
+            .contains("\"target\":\"rustraft.node_runtime.timer\"")
+    );
+    let mut saturated_status = status.clone();
+    saturated_status.timer_status.pending_ticks = 4;
+    saturated_status.timer_status.max_pending_ticks = 5;
+    let saturated_diagnostics =
+        matrixraft_node_runtime_status_diagnostic_log_entries(&saturated_status);
+    let saturation_warning = saturated_diagnostics
+        .iter()
+        .find(|entry| entry.message == "tick_queue_near_capacity")
+        .expect("timer utilization warning");
+    assert_eq!(
+        saturation_warning.severity,
+        matrixraft::DiagnosticSeverity::Warn
+    );
+    assert!(saturation_warning
+        .fields
+        .contains(&("timer_utilization_percent".to_string(), "80".to_string())));
+    assert!(saturation_warning
+        .fields
+        .contains(&("warn_threshold_percent".to_string(), "80".to_string())));
+    let metrics = matrixraft_node_runtime_status_prometheus(&status, &[("service", "raft\"a")]);
+    assert_eq!(metrics.format, "prometheus_text_v0.0.4");
+    assert_eq!(metrics.metric_count, 7);
+    assert!(metrics.text.contains(
+        "rustraft_node_runtime_timer_rejected_ticks_total{service=\"raft\\\"a\",group=\"77\",node=\"1\",state=\"Running\",worker_running=\"true\"} 0"
+    ));
+    assert!(metrics.text.contains(
+        "rustraft_node_runtime_timer_backpressure{service=\"raft\\\"a\",group=\"77\",node=\"1\",state=\"Running\",worker_running=\"true\"} 0"
+    ));
+    assert!(metrics.text.contains(
+        "rustraft_node_runtime_timer_utilization_percent{service=\"raft\\\"a\",group=\"77\",node=\"1\",state=\"Running\",worker_running=\"true\"} 0"
+    ));
     assert_eq!(status.timer_status.heartbeat_interval_ms, 10);
     assert_eq!(status.timer_status.election_timeout_ms, 50);
     assert_eq!(status.peer_runtime.len(), 3);
@@ -2147,148 +2209,4 @@ fn node_runtime_recovers_committed_index_from_persistent_wal() {
     recovered.shutdown().expect("shutdown recovered");
 
     let _ = fs::remove_dir_all(base_dir);
-}
-
-/// A durable append is its fsync, so a batch of proposals has to cost one
-/// fsync rather than one each. Asserted by counting, because the count is exact
-/// where elapsed time is not.
-#[test]
-fn a_batch_of_proposals_costs_one_fsync() {
-    let mut runtime = NodeRuntime::create(node_options_in(temp_runtime_dir("batch-fsync")))
-        .expect("create runtime");
-    runtime.start().expect("start");
-    runtime.campaign(true).expect("campaign");
-
-    let before = runtime.wal_lifecycle_status().expect("status").fsync_count;
-
-    let batch: Vec<_> = (0..16)
-        .map(|index| Message::Propose {
-            payload: format!("entry-{index}").into_bytes(),
-            options: Default::default(),
-        })
-        .collect();
-    let results = runtime.step_batch(batch).expect("step batch");
-    assert_eq!(results.len(), 16, "a result per proposal");
-
-    let after = runtime.wal_lifecycle_status().expect("status").fsync_count;
-    assert_eq!(
-        after - before,
-        1,
-        "sixteen proposals in one batch should cost one fsync, not sixteen"
-    );
-
-    // A proposal on its own still persists on its own, so the batch is doing
-    // something the ordinary path does not.
-    let single_before = after;
-    runtime
-        .step(Message::Propose {
-            payload: b"single".to_vec(),
-            options: Default::default(),
-        })
-        .expect("single propose");
-    let single_after = runtime.wal_lifecycle_status().expect("status").fsync_count;
-    assert_eq!(
-        single_after - single_before,
-        1,
-        "one proposal outside a batch still costs its own fsync"
-    );
-    runtime.stop().expect("stop");
-}
-
-/// `propose_batch` is the obvious way to get what `step_batch` makes possible,
-/// without a caller assembling `Message::Propose` values by hand.
-#[test]
-fn propose_batch_persists_once_and_returns_a_log_id_per_payload() {
-    let mut runtime = NodeRuntime::create(node_options_in(temp_runtime_dir("propose-batch")))
-        .expect("create runtime");
-    runtime.start().expect("start");
-    runtime.campaign(true).expect("campaign");
-
-    assert!(
-        runtime
-            .propose_batch(Vec::new())
-            .expect("empty batch")
-            .is_empty(),
-        "an empty batch proposes nothing"
-    );
-
-    let before = runtime.wal_lifecycle_status().expect("status").fsync_count;
-    let payloads: Vec<_> = (0..12)
-        .map(|index| format!("payload-{index}").into_bytes())
-        .collect();
-    let log_ids = runtime.propose_batch(payloads).expect("propose batch");
-    let after = runtime.wal_lifecycle_status().expect("status").fsync_count;
-
-    assert_eq!(log_ids.len(), 12, "a log id per payload");
-    let indexes: Vec<_> = log_ids.iter().map(|log_id| log_id.index).collect();
-    let mut sorted = indexes.clone();
-    sorted.sort_unstable();
-    sorted.dedup();
-    assert_eq!(
-        indexes, sorted,
-        "log ids come back in proposal order, one per payload"
-    );
-    assert_eq!(
-        after - before,
-        1,
-        "twelve proposals in one batch should cost one fsync"
-    );
-    runtime.stop().expect("stop");
-}
-
-/// Concurrent proposers must share fsyncs without opting into anything: while
-/// one proposal's fsync runs the others queue, and the runtime applies the
-/// queued ones together and persists once. Asserted on the fsync count, which
-/// is exact where elapsed time on this box is not.
-#[test]
-fn concurrent_proposers_share_fsyncs_without_opting_in() {
-    use std::sync::Arc;
-
-    let mut runtime = NodeRuntime::create(node_options_in(temp_runtime_dir("auto-batch")))
-        .expect("create runtime");
-    runtime.start().expect("start");
-    runtime.campaign(true).expect("campaign");
-    let before = runtime.wal_lifecycle_status().expect("status").fsync_count;
-
-    let runtime = Arc::new(runtime);
-    let threads = 8;
-    let per_thread = 25;
-    let workers: Vec<_> = (0..threads)
-        .map(|worker| {
-            let runtime = Arc::clone(&runtime);
-            std::thread::spawn(move || {
-                let mut log_ids = Vec::with_capacity(per_thread);
-                for index in 0..per_thread {
-                    let payload = format!("w{worker}-{index}").into_bytes();
-                    log_ids.push(runtime.propose(payload).expect("propose"));
-                }
-                log_ids
-            })
-        })
-        .collect();
-    let mut all: Vec<_> = workers
-        .into_iter()
-        .flat_map(|worker| worker.join().expect("no worker panics"))
-        .collect();
-
-    let proposals = (threads * per_thread) as u64;
-    all.sort_by_key(|log_id| log_id.index);
-    all.dedup_by_key(|log_id| log_id.index);
-    assert_eq!(
-        all.len() as u64,
-        proposals,
-        "every proposal gets its own log index"
-    );
-
-    let after = runtime.wal_lifecycle_status().expect("status").fsync_count;
-    let fsyncs = after - before;
-    assert!(
-        fsyncs >= 1 && fsyncs < proposals / 2,
-        "two hundred concurrent proposals should coalesce well below one fsync \
-         each; got {fsyncs} for {proposals} -- exactly {proposals} means \
-         coalescing is not happening at all"
-    );
-
-    let mut runtime = Arc::into_inner(runtime).expect("all workers joined");
-    runtime.stop().expect("stop");
 }

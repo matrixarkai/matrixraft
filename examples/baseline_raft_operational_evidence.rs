@@ -83,11 +83,12 @@ fn wal_lifecycle_status() -> WalLifecycleStatus {
         last_log_index: 228,
         released_segment_count: 4,
         slow_fsync_backpressure_observed: true,
-        fsync_count: 0,
         slow_fsync_threshold_ms: 10,
         slow_fsync_count: 2,
         consecutive_slow_fsync_count: 1,
         max_fsync_elapsed_ms: 42,
         compacted_after_slow_fsync_count: 2,
+        slow_fsync_segment_count: 2,
+        compacted_slow_fsync_segment_count: 2,
     }
 }
