@@ -256,7 +256,7 @@ pub struct ScaleRateMetrics {
     pub apply_mib_per_sec: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScaleOptimizationTargets {
     pub min_proposal_qps: u64,
     pub min_append_entries_qps: u64,
@@ -288,19 +288,6 @@ impl ScaleRateMetrics {
             apply_entries_qps: 0,
             replication_mib_per_sec: 0,
             apply_mib_per_sec: 0,
-        }
-    }
-}
-
-impl Default for ScaleOptimizationTargets {
-    fn default() -> Self {
-        Self {
-            min_proposal_qps: 0,
-            min_append_entries_qps: 0,
-            min_read_index_qps: 0,
-            min_apply_entries_qps: 0,
-            min_replication_mib_per_sec: 0,
-            min_apply_mib_per_sec: 0,
         }
     }
 }
@@ -8958,8 +8945,7 @@ fn matrixraft_prometheus_sample_line_is_well_formed(line: &str) -> bool {
         }
         rest = &rest[labels_end + 1..];
     }
-    rest.trim_start()
-        .split_whitespace()
+    rest.split_whitespace()
         .next()
         .is_some_and(|value| !value.starts_with('#'))
 }
@@ -8985,51 +8971,6 @@ fn matrixraft_prometheus_metric_values<'a>(
         line.rsplit_once(' ')
             .and_then(|(_, value)| value.parse::<f64>().ok())
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prometheus_metric_values_ignore_shadow_metric_names() {
-        let text = concat!(
-            "rustraft_baseline_raft_benchmark_worst_p99_ratio_shadow 99\n",
-            "  rustraft_baseline_raft_benchmark_worst_p99_ratio{workload=\"steady\"} 1.05\n",
-            "rustraft_baseline_raft_benchmark_worst_p99_ratio_extra 42\n",
-        );
-
-        assert_eq!(
-            matrixraft_prometheus_metric_max_value(
-                text,
-                "rustraft_baseline_raft_benchmark_worst_p99_ratio",
-            ),
-            Some(1.05),
-        );
-        assert_eq!(
-            matrixraft_prometheus_metric_min_value(
-                text,
-                "rustraft_baseline_raft_benchmark_worst_p99_ratio",
-            ),
-            Some(1.05),
-        );
-    }
-
-    #[test]
-    fn grafana_metric_reference_checks_all_occurrences_without_shadow_suffixes() {
-        assert!(matrixraft_expr_references_metric(
-            "sum(rate(rustraft_append_latency_ms_shadow[5m])) + histogram_quantile(0.99, sum(rate(rustraft_append_latency_ms_bucket[5m])))",
-            "rustraft_append_latency_ms",
-        ));
-        assert!(!matrixraft_expr_references_metric(
-            "sum(rate(rustraft_append_latency_ms_shadow[5m]))",
-            "rustraft_append_latency_ms",
-        ));
-        assert!(matrixraft_expr_references_metric(
-            "sum(rate(rustraft_append_latency_ms_bucket[5m]))",
-            "rustraft_append_latency_ms",
-        ));
-    }
 }
 
 pub fn matrixraft_operator_runbook_prometheus(
@@ -10179,11 +10120,10 @@ fn throughput_mib_expr(metric: &str) -> String {
 }
 
 fn target_percent(observed: u64, target: u64) -> u64 {
-    if target == 0 {
-        0
-    } else {
-        observed.saturating_mul(100) / target
-    }
+    observed
+        .saturating_mul(100)
+        .checked_div(target)
+        .unwrap_or(0)
 }
 
 fn bool_metric(value: bool) -> u64 {
@@ -10234,4 +10174,49 @@ fn escape_prometheus_label_value(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prometheus_metric_values_ignore_shadow_metric_names() {
+        let text = concat!(
+            "rustraft_baseline_raft_benchmark_worst_p99_ratio_shadow 99\n",
+            "  rustraft_baseline_raft_benchmark_worst_p99_ratio{workload=\"steady\"} 1.05\n",
+            "rustraft_baseline_raft_benchmark_worst_p99_ratio_extra 42\n",
+        );
+
+        assert_eq!(
+            matrixraft_prometheus_metric_max_value(
+                text,
+                "rustraft_baseline_raft_benchmark_worst_p99_ratio",
+            ),
+            Some(1.05),
+        );
+        assert_eq!(
+            matrixraft_prometheus_metric_min_value(
+                text,
+                "rustraft_baseline_raft_benchmark_worst_p99_ratio",
+            ),
+            Some(1.05),
+        );
+    }
+
+    #[test]
+    fn grafana_metric_reference_checks_all_occurrences_without_shadow_suffixes() {
+        assert!(matrixraft_expr_references_metric(
+            "sum(rate(rustraft_append_latency_ms_shadow[5m])) + histogram_quantile(0.99, sum(rate(rustraft_append_latency_ms_bucket[5m])))",
+            "rustraft_append_latency_ms",
+        ));
+        assert!(!matrixraft_expr_references_metric(
+            "sum(rate(rustraft_append_latency_ms_shadow[5m]))",
+            "rustraft_append_latency_ms",
+        ));
+        assert!(matrixraft_expr_references_metric(
+            "sum(rate(rustraft_append_latency_ms_bucket[5m]))",
+            "rustraft_append_latency_ms",
+        ));
+    }
 }

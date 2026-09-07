@@ -1179,11 +1179,10 @@ fn matrixraft_api_mapping_coverage_by_category(
                 .filter(|name| canonical_names.contains(**name))
                 .map(|name| (*name).to_string())
                 .collect();
-            let coverage_percent = if advertised_name_count == 0 {
-                100
-            } else {
-                mapped_name_count * 100 / advertised_name_count
-            };
+            // No advertised names is full coverage, not zero -- there is nothing left uncovered.
+            let coverage_percent = (mapped_name_count * 100)
+                .checked_div(advertised_name_count)
+                .unwrap_or(100);
             let unmapped_names = advertised_names
                 .iter()
                 .filter(|name| !canonical_names.contains(**name))
