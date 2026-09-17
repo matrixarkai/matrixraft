@@ -6617,14 +6617,14 @@ pub fn matrixraft_public_api_contract_validation_grafana_panels() -> Vec<Grafana
             "Public API Contract Ready",
             "rustraft_public_api_contract_ready",
             "bool",
-            "Fail-closed public API/reference mapping readiness; 1 means API names, TiKV references, and ByteRaft references are coherent.",
+            "Fail-closed public API/reference mapping readiness; 1 means API names, TiKV references, and BaselineRaft references are coherent.",
         ),
         (
             1411,
             "Public API Mapping Coverage",
             "rustraft_public_api_mapping_coverage_percent",
             "percent",
-            "Percent of advertised public API names that carry explicit TiKV/ByteRaft vocabulary mappings.",
+            "Percent of advertised public API names that carry explicit TiKV vocabulary mappings.",
         ),
         (
             1412,
@@ -6645,7 +6645,7 @@ pub fn matrixraft_public_api_contract_validation_grafana_panels() -> Vec<Grafana
             "Public API Unmapped Required",
             "rustraft_public_api_unmapped_reference_required_total",
             "short",
-            "Reference-required API names missing TiKV or ByteRaft vocabulary mappings.",
+            "Reference-required API names missing TiKV or BaselineRaft vocabulary mappings.",
         ),
         (
             1415,
@@ -8812,7 +8812,7 @@ pub(crate) fn matrixraft_benchmark_runbook_steps_for_state(
             "resolve_baseline_raft_benchmark_failure",
             "critical",
             "benchmark_parity",
-            "Inspect benchmark_prometheus, failed workloads, benchmark blockers, and BaselineRaft ratio panels before claiming C++ parity.",
+            "Inspect benchmark_prometheus, failed workloads, benchmark blockers, and BaselineRaft ratio panels before claiming baseline comparability.",
             "rustraft_baseline_raft_benchmark_passed is 1, rustraft_baseline_raft_benchmark_failed_workload_total is 0, rustraft_baseline_raft_benchmark_blocker_total is 0, and every required workload passed under matrixraft_debug_snapshot_with_benchmark_artifacts.",
         ));
     }

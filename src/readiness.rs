@@ -233,7 +233,7 @@ pub struct ApiNameMapping {
     pub canonical: String,
     pub matrixraft_facade: String,
     pub raft_rs_or_tikv_reference: String,
-    pub byteraft_or_baseline_reference: String,
+    pub baseline_reference: String,
     pub note: String,
 }
 
@@ -900,9 +900,9 @@ pub fn matrixraft_validate_public_api_contract(
                 mapping.canonical
             ));
         }
-        if mapping.byteraft_or_baseline_reference.trim().is_empty() {
+        if mapping.baseline_reference.trim().is_empty() {
             blockers.push(format!(
-                "api_mapping:{}:missing_byteraft_or_baseline_reference",
+                "api_mapping:{}:missing_baseline_reference",
                 mapping.canonical
             ));
         }
@@ -1380,7 +1380,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "Storage".to_string(),
             matrixraft_facade: "MatrixRaftStorage".to_string(),
             raft_rs_or_tikv_reference: "raft::Storage".to_string(),
-            byteraft_or_baseline_reference: "Raft log/snapshot storage".to_string(),
+            baseline_reference: "Raft log/snapshot storage".to_string(),
             note: "Use the unprefixed trait in native Rust; the facade name is reserved for compatibility adapters."
                 .to_string(),
         },
@@ -1388,7 +1388,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "Transport".to_string(),
             matrixraft_facade: "MatrixRaftTransport".to_string(),
             raft_rs_or_tikv_reference: "Raft message router / RaftStore transport".to_string(),
-            byteraft_or_baseline_reference: "AppendEntries/Vote/Snapshot RPC transport"
+            baseline_reference: "AppendEntries/Vote/Snapshot RPC transport"
                 .to_string(),
             note: "Transport owns RPC dispatch; production services provide the network implementation."
                 .to_string(),
@@ -1397,7 +1397,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "Config".to_string(),
             matrixraft_facade: "MatrixRaftOptions".to_string(),
             raft_rs_or_tikv_reference: "raft::Config / TiKV raftstore tuning".to_string(),
-            byteraft_or_baseline_reference: "raft group options".to_string(),
+            baseline_reference: "raft group options".to_string(),
             note: "Config owns timing, payload, log-buffer, and election-safety limits; facade options adapt product-level defaults into the canonical runtime."
                 .to_string(),
         },
@@ -1405,7 +1405,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "AppendEntriesRequest".to_string(),
             matrixraft_facade: "MatrixRaftAppendEntriesRequest".to_string(),
             raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgAppend".to_string(),
-            byteraft_or_baseline_reference: "append_entries".to_string(),
+            baseline_reference: "append_entries".to_string(),
             note: "Canonical RustRaft request fields stay typed; facade messages preserve MatrixRaft wire-shape naming."
                 .to_string(),
         },
@@ -1413,7 +1413,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "AppendEntriesResponse".to_string(),
             matrixraft_facade: "MatrixRaftAppendEntriesResponse".to_string(),
             raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgAppendResponse".to_string(),
-            byteraft_or_baseline_reference: "append_entries_response".to_string(),
+            baseline_reference: "append_entries_response".to_string(),
             note: "Rejected index, rejection hint, and snapshot-required state map to replication pipeline backoff."
                 .to_string(),
         },
@@ -1421,7 +1421,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "VoteRequest".to_string(),
             matrixraft_facade: "MatrixRaftVoteRequest".to_string(),
             raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgRequestVote".to_string(),
-            byteraft_or_baseline_reference: "request_vote".to_string(),
+            baseline_reference: "request_vote".to_string(),
             note: "VoteRequest is the canonical election request; facade naming keeps MatrixRaft wire compatibility."
                 .to_string(),
         },
@@ -1430,7 +1430,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftVoteResponse".to_string(),
             raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgRequestVoteResponse"
                 .to_string(),
-            byteraft_or_baseline_reference: "request_vote_response".to_string(),
+            baseline_reference: "request_vote_response".to_string(),
             note: "VoteResponse carries election grant/reject evidence for parity checks and operator diagnostics."
                 .to_string(),
         },
@@ -1438,7 +1438,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "PreVoteRequest".to_string(),
             matrixraft_facade: "MatrixRaftPreVoteRequest".to_string(),
             raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgRequestPreVote".to_string(),
-            byteraft_or_baseline_reference: "pre_vote".to_string(),
+            baseline_reference: "pre_vote".to_string(),
             note: "PreVoteRequest keeps disruptive election prevention explicit for TiKV-style raftstore readiness."
                 .to_string(),
         },
@@ -1447,7 +1447,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftPreVoteResponse".to_string(),
             raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgRequestPreVoteResponse"
                 .to_string(),
-            byteraft_or_baseline_reference: "pre_vote_response".to_string(),
+            baseline_reference: "pre_vote_response".to_string(),
             note: "PreVoteResponse exposes pre-election quorum evidence without overloading the regular vote path."
                 .to_string(),
         },
@@ -1455,7 +1455,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "InstallSnapshotRequest".to_string(),
             matrixraft_facade: "MatrixRaftInstallSnapshotRequest".to_string(),
             raft_rs_or_tikv_reference: "eraftpb::MessageType::MsgSnapshot".to_string(),
-            byteraft_or_baseline_reference: "install_snapshot".to_string(),
+            baseline_reference: "install_snapshot".to_string(),
             note: "InstallSnapshotRequest is the canonical sender boundary for compacted-log recovery."
                 .to_string(),
         },
@@ -1464,7 +1464,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftInstallSnapshotResponse".to_string(),
             raft_rs_or_tikv_reference: "snapshot apply response / raftstore snapshot status"
                 .to_string(),
-            byteraft_or_baseline_reference: "install_snapshot_response".to_string(),
+            baseline_reference: "install_snapshot_response".to_string(),
             note: "InstallSnapshotResponse gives snapshot sender/downloader lifecycle tests a stable completion vocabulary."
                 .to_string(),
         },
@@ -1472,7 +1472,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "ReadIndexRequest".to_string(),
             matrixraft_facade: "MatrixRaftReadIndexOptions".to_string(),
             raft_rs_or_tikv_reference: "ReadIndex / MsgReadIndex".to_string(),
-            byteraft_or_baseline_reference: "read_index / lease_read".to_string(),
+            baseline_reference: "read_index / lease_read".to_string(),
             note: "Lease reads and quorum reads are explicit options so followers can fail closed or serve bounded stale reads."
                 .to_string(),
         },
@@ -1480,7 +1480,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "ReadIndexResponse".to_string(),
             matrixraft_facade: "MatrixRaftReadIndexStatus".to_string(),
             raft_rs_or_tikv_reference: "ReadState / MsgReadIndexResp".to_string(),
-            byteraft_or_baseline_reference: "read_index_response / lease_read_result"
+            baseline_reference: "read_index_response / lease_read_result"
                 .to_string(),
             note: "ReadIndexResponse separates safe-read proof, lease-read eligibility, and bounded-stale fallback status."
                 .to_string(),
@@ -1489,7 +1489,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "MailBox".to_string(),
             matrixraft_facade: "MatrixRaftMailBox".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore scheduler mailbox".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft event queue".to_string(),
+            baseline_reference: "BaselineRaft event queue".to_string(),
             note: "MailBox is the priority queue boundary for scheduler and transport work that embedders can monitor for pressure."
                 .to_string(),
         },
@@ -1498,7 +1498,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftMailBox::TrySendChecked".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore non-blocking mailbox send with backpressure".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft checked event enqueue".to_string(),
+            baseline_reference: "BaselineRaft checked event enqueue".to_string(),
             note: "The checked send path returns queue saturation and lock failures as values so production runtimes can shed or retry work without process aborts."
                 .to_string(),
         },
@@ -1506,7 +1506,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "MailBox::try_send_many_checked".to_string(),
             matrixraft_facade: "MatrixRaftMailBox::TrySendManyChecked".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore bounded mailbox batch enqueue".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft checked event batch enqueue"
+            baseline_reference: "BaselineRaft checked event batch enqueue"
                 .to_string(),
             note: "The checked mailbox batch path rejects oversized scheduler bursts before queueing them, keeping local work-queue memory bounded under high QPS."
                 .to_string(),
@@ -1515,7 +1515,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "MailBoxPressureStats".to_string(),
             matrixraft_facade: "MatrixRaftMailBoxPressureStats".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore mailbox pressure counters".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft queue pressure snapshot".to_string(),
+            baseline_reference: "BaselineRaft queue pressure snapshot".to_string(),
             note: "MailBoxPressureStats exposes high watermark, current depth, max observed depth, and rejected enqueue count for memory and QPS tuning."
                 .to_string(),
         },
@@ -1523,7 +1523,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "MailBox::pressure_stats_checked".to_string(),
             matrixraft_facade: "MatrixRaftMailBox::PressureStatsChecked".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore checked mailbox pressure read".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft checked queue pressure read".to_string(),
+            baseline_reference: "BaselineRaft checked queue pressure read".to_string(),
             note: "The checked mailbox pressure read returns runtime queue telemetry without hiding lock failures behind panics."
                 .to_string(),
         },
@@ -1531,7 +1531,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "MailBox::fetch_checked".to_string(),
             matrixraft_facade: "MatrixRaftMailBox::FetchChecked".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore bounded mailbox drain".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft checked event dequeue".to_string(),
+            baseline_reference: "BaselineRaft checked event dequeue".to_string(),
             note: "The checked fetch path preserves priority ordering and deadline behavior while surfacing queue runtime failures as RaftError."
                 .to_string(),
         },
@@ -1539,7 +1539,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "MailChannel".to_string(),
             matrixraft_facade: "MatrixRaftMailChannel".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore per-peer ready queue".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft per-replica event lane".to_string(),
+            baseline_reference: "BaselineRaft per-replica event lane".to_string(),
             note: "MailChannel names the per-replica queue used by the selector to track burst pressure and preserve per-peer scheduling."
                 .to_string(),
         },
@@ -1548,7 +1548,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftMailChannel::TrySendChecked".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore per-peer enqueue with flow-control feedback".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft checked per-peer enqueue".to_string(),
+            baseline_reference: "BaselineRaft checked per-peer enqueue".to_string(),
             note: "The checked channel send keeps overflow as a recoverable result that returns the caller's mail while reporting runtime failures as RaftError."
                 .to_string(),
         },
@@ -1557,7 +1557,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftMailChannel::TrySendManyChecked".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore bounded per-peer batch enqueue".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft checked batch enqueue".to_string(),
+            baseline_reference: "BaselineRaft checked batch enqueue".to_string(),
             note: "The checked batch path rejects oversized bursts before queueing them, keeping memory pressure bounded under release-scale fanout."
                 .to_string(),
         },
@@ -1565,7 +1565,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "MailChannelPressureStats".to_string(),
             matrixraft_facade: "MatrixRaftMailChannelPressureStats".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore per-peer ready-queue pressure counters".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft per-replica queue pressure snapshot".to_string(),
+            baseline_reference: "BaselineRaft per-replica queue pressure snapshot".to_string(),
             note: "MailChannelPressureStats exposes the replica id, queue limit, queued depth, selector-visible total, max depth, and rejected enqueue count."
                 .to_string(),
         },
@@ -1573,7 +1573,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "MailChannel::pressure_stats_checked".to_string(),
             matrixraft_facade: "MatrixRaftMailChannel::PressureStatsChecked".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore checked per-peer pressure read".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft checked replica queue pressure read".to_string(),
+            baseline_reference: "BaselineRaft checked replica queue pressure read".to_string(),
             note: "The checked per-channel pressure read lets production callers observe per-peer burst pressure while preserving recoverable error handling."
                 .to_string(),
         },
@@ -1581,7 +1581,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "ChannelSelector".to_string(),
             matrixraft_facade: "MatrixRaftChannelSelector".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore ready peer selector".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft replica scheduler selector".to_string(),
+            baseline_reference: "BaselineRaft replica scheduler selector".to_string(),
             note: "ChannelSelector is the fairness and fanout boundary for selecting active peer queues under release-scale workloads."
                 .to_string(),
         },
@@ -1591,7 +1591,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore bounded batch send and ready-peer notification".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft checked batch enqueue and selector wake".to_string(),
             note: "The selector-level checked batch API keeps bounded fanout enqueue and selector wakeup in one recoverable operation for production callers."
                 .to_string(),
@@ -1600,7 +1600,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "ChannelSelector::select_checked".to_string(),
             matrixraft_facade: "MatrixRaftChannelSelector::SelectChecked".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore bounded ready-poll loop".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft checked ready-queue selector".to_string(),
+            baseline_reference: "BaselineRaft checked ready-queue selector".to_string(),
             note: "The checked selector keeps deadline-bound polling and global-mail draining available without converting poisoned queue state into a process panic."
                 .to_string(),
         },
@@ -1609,7 +1609,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftReadSafetyDecision".to_string(),
             raft_rs_or_tikv_reference: "TiKV ReadIndex and lease-read safety check"
                 .to_string(),
-            byteraft_or_baseline_reference: "ByteRaft safe read / lease read gate".to_string(),
+            baseline_reference: "BaselineRaft safe read / lease read gate".to_string(),
             note: "The helper maps live leader, quorum, applied-index, and bounded-stale evidence into a fail-closed read decision."
                 .to_string(),
         },
@@ -1618,7 +1618,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftAppendSafetyDecision".to_string(),
             raft_rs_or_tikv_reference: "raft-rs append log matching and rejection hint"
                 .to_string(),
-            byteraft_or_baseline_reference: "AppendEntries safety and backoff gate".to_string(),
+            baseline_reference: "AppendEntries safety and backoff gate".to_string(),
             note: "The helper names the append acceptance contract that protects log matching, compacted-entry rejection, and pipeline retry behavior."
                 .to_string(),
         },
@@ -1627,7 +1627,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftLearnerPromotionDecision".to_string(),
             raft_rs_or_tikv_reference: "TiKV learner catch-up and promote-peer workflow"
                 .to_string(),
-            byteraft_or_baseline_reference: "learner catch-up / auto-promote gate".to_string(),
+            baseline_reference: "learner catch-up / auto-promote gate".to_string(),
             note: "The helper keeps learner promotion tied to observed match index, lag, and membership readiness rather than a caller-only flag."
                 .to_string(),
         },
@@ -1635,7 +1635,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "SnapshotMetadata".to_string(),
             matrixraft_facade: "MatrixRaftSnapshotDesc".to_string(),
             raft_rs_or_tikv_reference: "Snapshot metadata".to_string(),
-            byteraft_or_baseline_reference: "snapshot descriptor".to_string(),
+            baseline_reference: "snapshot descriptor".to_string(),
             note: "The canonical type carries snapshot id, last log id, and membership; facade conversion keeps MatrixRaft field names."
                 .to_string(),
         },
@@ -1644,7 +1644,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftSnapshotLifecycleEvidence".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore snapshot send/apply progress and lifecycle metrics".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft snapshot sender/downloader lifecycle evidence".to_string(),
             note: "SnapshotLifecycleEvidence is the canonical production gate for retry, timeout, rate-limit, sustained load, coherent transfer completion, rollback, membership-change, and compacted-log rejoin proof."
                 .to_string(),
@@ -1653,7 +1653,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "PeerProgress".to_string(),
             matrixraft_facade: "MatrixRaftAsyncStatus".to_string(),
             raft_rs_or_tikv_reference: "Progress / ProgressTracker".to_string(),
-            byteraft_or_baseline_reference: "per-peer replication pipeline status".to_string(),
+            baseline_reference: "per-peer replication pipeline status".to_string(),
             note: "Use PeerProgress for QPS, lag, inflight bytes, snapshot transfer, and packet-loss/reorder evidence."
                 .to_string(),
         },
@@ -1662,7 +1662,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftPipelineEvidence".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore ProgressTracker and transport fault evidence".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft replication pipeline readiness evidence".to_string(),
             note: "PipelineEvidence is the production gate for append/apply backpressure, memory limits, stale terms, packet-loss probes, reorder convergence, and per-peer fault recovery."
                 .to_string(),
@@ -1673,7 +1673,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV per-peer ProgressTracker transport fault coverage".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft packet-loss/reorder faulted peer count".to_string(),
             note: "Counts every peer that observed both packet loss and reordered append evidence so production parity cannot rely on a single sampled peer."
                 .to_string(),
@@ -1684,7 +1684,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV per-peer Progress recovery after transport fault and reorder".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft packet-loss/reorder recovered peer count".to_string(),
             note: "Counts peers that both saw the combined fault and reached clean append progress afterward."
                 .to_string(),
@@ -1697,7 +1697,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV raftstore all-peer Progress recovery gate after transport/reorder faults"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft all faulted peers recovered release gate".to_string(),
             note: "This is the fail-closed production signal required before QPS/latency parity can claim deeper per-peer replication-pipeline behavior."
                 .to_string(),
@@ -1707,7 +1707,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftNodeRuntime".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore peer worker / RaftRouter event loop"
                 .to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft node runtime and scheduler worker"
+            baseline_reference: "BaselineRaft node runtime and scheduler worker"
                 .to_string(),
             note: "NodeRuntime is the canonical production event-loop boundary for lifecycle commands, ReadIndex routing, peer pipeline pressure, and timer backpressure."
                 .to_string(),
@@ -1717,7 +1717,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimeTimerStatus".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore tick metrics and scheduler delay telemetry"
                 .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft heartbeat/election timer status and scheduler pressure".to_string(),
             note: "RuntimeTimerStatus keeps heartbeat, election, lease, pending tick, rejected tick, and completed tick counters stable for Grafana, logs, and latency/QPS readiness triage."
                 .to_string(),
@@ -1726,7 +1726,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "RuntimeAdminReport".to_string(),
             matrixraft_facade: "MatrixRaftAdminStatus".to_string(),
             raft_rs_or_tikv_reference: "RaftStore admin/status view".to_string(),
-            byteraft_or_baseline_reference: "GetInfo/admin status".to_string(),
+            baseline_reference: "GetInfo/admin status".to_string(),
             note: "Admin reports are the stable status boundary for dashboards, logs, and production readiness gates."
                 .to_string(),
         },
@@ -1736,8 +1736,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV raftstore release gate with benchmark, telemetry, and operational evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
-                "BaselineRaft production readiness and ByteRaft release gate".to_string(),
+            baseline_reference:
+                "BaselineRaft production readiness and BaselineRaft release gate".to_string(),
             note: "Production-readiness reports are the canonical deploy gate for release blockers, QPS/latency/memory parity, and ranked runtime-pressure bottlenecks."
                 .to_string(),
         },
@@ -1747,7 +1747,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftPolicyAwareProductionReadinessReport".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore flow-control policy deployment gate".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft fail-closed runtime-pressure deployment gate".to_string(),
             note: "Policy-aware production readiness reports keep the stable production gate while rejecting runtime-pressure evidence whose rejected_component does not match the configured fail-closed admission policy."
                 .to_string(),
@@ -1760,7 +1760,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV raftstore release gates require fresh flow-control and scheduler telemetry"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft fail-closed runtime-pressure freshness deployment gate".to_string(),
             note: "Freshness-aware production readiness reports reject stale, invalid, missing, or future-dated runtime-pressure evidence before QPS, latency, or memory parity can be claimed."
                 .to_string(),
@@ -1770,8 +1770,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimeLocalStatusReport".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore local peer status and ProgressTracker snapshot".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft local status/GetInfo replica progress view".to_string(),
+            baseline_reference:
+                "BaselineRaft local status/GetInfo replica progress view".to_string(),
             note: "Local runtime status binds node state, peer replication progress, WAL/snapshot health, and readiness evidence for bounded-stale read and latency debugging."
                 .to_string(),
         },
@@ -1780,8 +1780,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimeAdminReport".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore admin/status aggregation across peers".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft GetInfo/admin status aggregation".to_string(),
+            baseline_reference:
+                "BaselineRaft GetInfo/admin status aggregation".to_string(),
             note: "Runtime admin reports aggregate local status, release blockers, memory pressure, QPS/latency readiness, and peer-pipeline lag for operator triage."
                 .to_string(),
         },
@@ -1789,7 +1789,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "AdminCommand::ReleaseMemory".to_string(),
             matrixraft_facade: "MatrixRaftAdminCommandType::ReleaseMemory".to_string(),
             raft_rs_or_tikv_reference: "RaftStore admin command / memory pressure control".to_string(),
-            byteraft_or_baseline_reference: "release_memory admin action".to_string(),
+            baseline_reference: "release_memory admin action".to_string(),
             note: "ReleaseMemory is the explicit operator and runtime-pressure path for bounded cache/log-buffer cleanup under memory pressure."
                 .to_string(),
         },
@@ -1797,7 +1797,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "PersistentRaftWal".to_string(),
             matrixraft_facade: "PersistentRaftWalOptions".to_string(),
             raft_rs_or_tikv_reference: "RaftEngine/WAL".to_string(),
-            byteraft_or_baseline_reference: "persistent log segment lifecycle".to_string(),
+            baseline_reference: "persistent log segment lifecycle".to_string(),
             note: "WAL naming stays explicit because production readiness depends on fsync, recovery, and compaction evidence."
                 .to_string(),
         },
@@ -1805,7 +1805,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "DebugSnapshot".to_string(),
             matrixraft_facade: "matrixraft_debug_snapshot_json".to_string(),
             raft_rs_or_tikv_reference: "debug/metrics bundle".to_string(),
-            byteraft_or_baseline_reference: "support envelope".to_string(),
+            baseline_reference: "support envelope".to_string(),
             note: "DebugSnapshot is the handoff bundle for logs, Grafana, alerts, benchmark parity, memory, and latency evidence."
                 .to_string(),
         },
@@ -1813,7 +1813,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "DiagnosticLogEntry".to_string(),
             matrixraft_facade: "matrixraft_*_diagnostic_json_lines".to_string(),
             raft_rs_or_tikv_reference: "TiKV structured log / slog fields".to_string(),
-            byteraft_or_baseline_reference: "diagnostic log line".to_string(),
+            baseline_reference: "diagnostic log line".to_string(),
             note: "DiagnosticLogEntry is the canonical logging record before rendering JSON lines or Prometheus counters for release triage."
                 .to_string(),
         },
@@ -1822,8 +1822,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftAdminDiagnosticLogs".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore admin structured logs and status fields".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft admin/GetInfo diagnostic log lines".to_string(),
+            baseline_reference:
+                "BaselineRaft admin/GetInfo diagnostic log lines".to_string(),
             note: "Admin diagnostic log entries keep release blockers, unhealthy peers, memory pressure, WAL lag, and QPS/latency failures readable before JSON or Prometheus rendering."
                 .to_string(),
         },
@@ -1831,8 +1831,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_admin_diagnostic_json_lines".to_string(),
             matrixraft_facade: "MatrixRaftAdminDiagnosticJsonLines".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore JSON structured log export".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft admin/GetInfo diagnostic JSON lines".to_string(),
+            baseline_reference:
+                "BaselineRaft admin/GetInfo diagnostic JSON lines".to_string(),
             note: "Admin diagnostic JSON lines provide machine-stable operator evidence for release automation, Grafana log panels, and support bundle triage."
                 .to_string(),
         },
@@ -1841,8 +1841,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftLocalStatusDiagnosticLogs".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore local peer structured status logs".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft local replica status diagnostic log lines".to_string(),
+            baseline_reference:
+                "BaselineRaft local replica status diagnostic log lines".to_string(),
             note: "Local-status diagnostic log entries expose per-replica progress, read readiness, WAL/snapshot health, and scheduler pressure for follower-read debugging."
                 .to_string(),
         },
@@ -1850,8 +1850,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_local_status_diagnostic_json_lines".to_string(),
             matrixraft_facade: "MatrixRaftLocalStatusDiagnosticJsonLines".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore local status JSON log export".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft local replica diagnostic JSON lines".to_string(),
+            baseline_reference:
+                "BaselineRaft local replica diagnostic JSON lines".to_string(),
             note: "Local-status diagnostic JSON lines keep random-replica read lag, bounded-stale readiness, and peer pipeline evidence parseable in support bundles."
                 .to_string(),
         },
@@ -1860,8 +1860,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftNodeRuntimeStatusDiagnosticLogs".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore scheduler and peer worker structured logs".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft node-runtime diagnostic log lines".to_string(),
+            baseline_reference:
+                "BaselineRaft node-runtime diagnostic log lines".to_string(),
             note: "Node-runtime diagnostic logs expose event-loop timers, pending ticks, dropped work, memory pressure, and replication scheduler saturation for scale debugging."
                 .to_string(),
         },
@@ -1870,8 +1870,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftNodeRuntimeStatusDiagnosticJsonLines".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore scheduler JSON structured log export".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft node-runtime diagnostic JSON lines".to_string(),
+            baseline_reference:
+                "BaselineRaft node-runtime diagnostic JSON lines".to_string(),
             note: "Node-runtime diagnostic JSON lines make timer backlog, queue saturation, and scale-readiness failures stable inputs for dashboards and release verifiers."
                 .to_string(),
         },
@@ -1880,8 +1880,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftDiagnosticLogPrometheus".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore diagnostic log counters exported to Prometheus".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft diagnostic log severity/source metrics".to_string(),
+            baseline_reference:
+                "BaselineRaft diagnostic log severity/source metrics".to_string(),
             note: "Diagnostic-log Prometheus output turns structured log entries into release-scale counters without losing source, severity, QPS, latency, memory, WAL, or peer-pipeline labels."
                 .to_string(),
         },
@@ -1889,7 +1889,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "RuntimePressureAdmission".to_string(),
             matrixraft_facade: "matrixraft_runtime_pressure_admission".to_string(),
             raft_rs_or_tikv_reference: "raftstore flow control / backpressure".to_string(),
-            byteraft_or_baseline_reference: "admission and throttle decision".to_string(),
+            baseline_reference: "admission and throttle decision".to_string(),
             note: "RuntimePressureAdmission connects memory, latency, scale, and peer pipeline telemetry to observe-only or fail-closed admission decisions."
                 .to_string(),
         },
@@ -1897,7 +1897,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "QueuePressureMetricNames".to_string(),
             matrixraft_facade: "MatrixRaftQueuePressureMetricNames".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore queue pressure metric names".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft scheduler queue pressure metrics"
+            baseline_reference: "BaselineRaft scheduler queue pressure metrics"
                 .to_string(),
             note: "QueuePressureMetricNames pins mailbox and per-replica queue depth and rejection metric names for QPS and memory-pressure dashboards."
                 .to_string(),
@@ -1906,7 +1906,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_queue_pressure_metric_names".to_string(),
             matrixraft_facade: "MatrixRaftQueuePressureMetricNamesFactory".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore queue metric-name contract".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft queue metric-name contract".to_string(),
+            baseline_reference: "BaselineRaft queue metric-name contract".to_string(),
             note: "The queue-pressure metric-name helper keeps scrape names stable as embedders wire mailbox and per-peer channel pressure into Prometheus."
                 .to_string(),
         },
@@ -1914,7 +1914,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_queue_pressure_prometheus".to_string(),
             matrixraft_facade: "MatrixRaftQueuePressurePrometheus".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore mailbox and peer queue scrape".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft queue pressure scrape".to_string(),
+            baseline_reference: "BaselineRaft queue pressure scrape".to_string(),
             note: "The queue-pressure Prometheus helper exports mailbox and per-replica channel depth, limits, max depth, and rejected enqueue counters for operator triage."
                 .to_string(),
         },
@@ -1922,7 +1922,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_queue_pressure_grafana_panels".to_string(),
             matrixraft_facade: "MatrixRaftQueuePressureGrafanaPanels".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore queue pressure dashboards".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft queue pressure dashboard panels".to_string(),
+            baseline_reference: "BaselineRaft queue pressure dashboard panels".to_string(),
             note: "Queue-pressure Grafana panels surface queue depth and rejection rate beside memory and runtime-pressure panels for release-scale tuning."
                 .to_string(),
         },
@@ -1930,7 +1930,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "QueuePressureThresholds".to_string(),
             matrixraft_facade: "MatrixRaftQueuePressureThresholds".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore mailbox saturation thresholds".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft queue saturation and rejection thresholds".to_string(),
             note: "QueuePressureThresholds pins utilization and rejected-send thresholds used by queue-aware runtime admission."
                 .to_string(),
@@ -1939,7 +1939,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "QueuePressureDetail".to_string(),
             matrixraft_facade: "MatrixRaftQueuePressureDetail".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore queue pressure detail".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft queue pressure detail".to_string(),
+            baseline_reference: "BaselineRaft queue pressure detail".to_string(),
             note: "QueuePressureDetail records queue saturation and rejected enqueue evidence for bottleneck ranking and diagnostic logs."
                 .to_string(),
         },
@@ -1947,7 +1947,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_runtime_pressure_admission_with_queue_pressure".to_string(),
             matrixraft_facade: "MatrixRaftQueueAwareRuntimePressureAdmission".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore queue-aware flow control".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft queue-aware admission gate".to_string(),
+            baseline_reference: "BaselineRaft queue-aware admission gate".to_string(),
             note: "Queue-aware runtime-pressure admission can stay observe-only or fail closed when mailbox and per-replica queues saturate under release-scale QPS."
                 .to_string(),
         },
@@ -1956,7 +1956,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimeLatencyPressureDetail".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore latency histogram and flow-control detail"
                 .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release p95/p99 latency threshold evidence".to_string(),
             note: "LatencyPressureDetail is the stable tail-latency evidence record for sample count, p95, p99, configured threshold, and excess used by dashboards, logs, and production gates."
                 .to_string(),
@@ -1965,8 +1965,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "NodeRuntimeTimerPressureDetail".to_string(),
             matrixraft_facade: "MatrixRaftRuntimeNodeTimerPressureDetail".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore tick scheduler saturation detail".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft event-loop timer queue pressure evidence".to_string(),
+            baseline_reference:
+                "BaselineRaft event-loop timer queue pressure evidence".to_string(),
             note: "NodeRuntimeTimerPressureDetail records timer utilization percent, threshold, and excess so release-scale QPS and latency evidence can reject scheduler saturation before ticks are dropped."
                 .to_string(),
         },
@@ -1974,8 +1974,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "NodeRuntimeTimerThresholds".to_string(),
             matrixraft_facade: "MatrixRaftRuntimeNodeTimerThresholds".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore scheduler flow-control thresholds".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft runtime timer saturation threshold".to_string(),
+            baseline_reference:
+                "BaselineRaft runtime timer saturation threshold".to_string(),
             note: "NodeRuntimeTimerThresholds pins the proactive timer-utilization warning threshold used by runtime pressure admission and production observability."
                 .to_string(),
         },
@@ -1984,7 +1984,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimePressureAdmissionEvidenceValidator".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore release telemetry consistency checks".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft runtime-pressure evidence validation".to_string(),
             note: "Runtime-pressure admission evidence validation rejects malformed memory, latency, scale, pipeline, and read-backlog detail before Grafana, logs, or production gates can advertise impossible pressure samples."
                 .to_string(),
@@ -1996,7 +1996,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 "MatrixRaftRuntimePressureAdmissionPolicyAwareEvidenceValidator".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore flow-control policy consistency checks".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft fail-closed runtime-pressure rejection validation".to_string(),
             note: "Policy-aware runtime-pressure validation rejects admissions whose rejected_component does not match the configured fail-closed pressure priority, so production gates cannot advertise a lower-priority blocker while read backlog, timer, or latency pressure is active."
                 .to_string(),
@@ -2006,7 +2006,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimeScalePressureAdmission".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore QPS and apply throughput flow control"
                 .to_string(),
-            byteraft_or_baseline_reference: "release QPS/throughput target admission"
+            baseline_reference: "release QPS/throughput target admission"
                 .to_string(),
             note: "Scale-target admission keeps release QPS, append/read/apply throughput, and replication bandwidth misses visible before production parity is claimed."
                 .to_string(),
@@ -2016,7 +2016,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimePeerPipelinePressureAdmission".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore per-peer Progress and raftstore flow control".to_string(),
-            byteraft_or_baseline_reference: "ByteRaft per-peer pipeline saturation admission"
+            baseline_reference: "BaselineRaft per-peer pipeline saturation admission"
                 .to_string(),
             note: "Peer-pipeline admission maps append/apply/reorder queues and backpressure rejections into a fail-closed production guard."
                 .to_string(),
@@ -2026,8 +2026,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             matrixraft_facade: "MatrixRaftRuntimeNodeTimerPressureAdmission".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore scheduler backpressure guard".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft node event-loop timer pressure admission".to_string(),
+            baseline_reference:
+                "BaselineRaft node event-loop timer pressure admission".to_string(),
             note: "Node-runtime timer admission turns pending-tick queue utilization into observe-only or fail-closed pressure evidence before release-scale latency or QPS parity is claimed."
                 .to_string(),
         },
@@ -2038,8 +2038,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimeFullPressureAdmission".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore QPS, Progress, read-index, and flow-control gates".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft release-scale QPS, per-peer pipeline, and read backlog admission"
+            baseline_reference:
+                "BaselineRaft release-scale QPS, per-peer pipeline, and read backlog admission"
                     .to_string(),
             note: "Full runtime-pressure admission keeps scale targets, peer pipeline pressure, and read backlog pressure in one fail-closed production decision."
                 .to_string(),
@@ -2052,8 +2052,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV raftstore QPS, Progress, read-index, scheduler, and flow-control gates"
                     .to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft release-scale QPS, per-peer pipeline, read backlog, and timer pressure admission"
+            baseline_reference:
+                "BaselineRaft release-scale QPS, per-peer pipeline, read backlog, and timer pressure admission"
                     .to_string(),
             note: "Complete runtime-pressure admission keeps scale targets, peer pipeline pressure, read backlog pressure, and node-runtime timer saturation in one fail-closed production decision."
                 .to_string(),
@@ -2063,8 +2063,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimePressureBottleneckSummary".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore flow-control bottleneck and dashboard triage signal".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft release-scale QPS/latency bottleneck ranking".to_string(),
+            baseline_reference:
+                "BaselineRaft release-scale QPS/latency bottleneck ranking".to_string(),
             note: "Runtime-pressure bottleneck summaries rank memory, latency, scale, peer-pipeline, read-backlog, and timer pressure by excess or deficit percent so release automation can explain failed QPS/latency parity without parsing raw detail arrays."
                 .to_string(),
         },
@@ -2073,8 +2073,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimePressureFreshnessReport".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore release-dashboard freshness window".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft release-scale QPS/latency/memory evidence freshness gate".to_string(),
+            baseline_reference:
+                "BaselineRaft release-scale QPS/latency/memory evidence freshness gate".to_string(),
             note: "Runtime-pressure freshness reports classify fresh, low-fresh, stale, and invalid telemetry windows so memory, latency, and QPS evidence cannot be reused after its release gate age budget expires."
                 .to_string(),
         },
@@ -2083,8 +2083,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimePressureFreshnessPrometheus".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore Prometheus freshness scrape for release dashboards".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft release-scale QPS/latency/memory freshness telemetry".to_string(),
+            baseline_reference:
+                "BaselineRaft release-scale QPS/latency/memory freshness telemetry".to_string(),
             note: "Runtime-pressure freshness Prometheus exports generated time, age, stale boundary, remaining freshness, status, and issue counters so Grafana can reject stale QPS, latency, or memory evidence before parity is claimed."
                 .to_string(),
         },
@@ -2094,8 +2094,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore structured telemetry freshness diagnostics".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft release-scale QPS/latency/memory freshness logs".to_string(),
+            baseline_reference:
+                "BaselineRaft release-scale QPS/latency/memory freshness logs".to_string(),
             note: "Runtime-pressure freshness diagnostic entries make stale, low-fresh, invalid, and future-dated benchmark evidence visible to log-only release gates without parsing Prometheus text."
                 .to_string(),
         },
@@ -2104,8 +2104,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftRuntimePressureFreshnessDiagnosticJsonLines".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore JSON log freshness diagnostics".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft release-scale freshness diagnostic JSON lines".to_string(),
+            baseline_reference:
+                "BaselineRaft release-scale freshness diagnostic JSON lines".to_string(),
             note: "Runtime-pressure freshness JSON lines preserve generated time, age, stale boundary, remaining freshness, status, and issue fields for release automation and centralized log queries."
                 .to_string(),
         },
@@ -2114,9 +2114,9 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftPublicApiContractValidationPrometheus".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore public API compatibility dashboard scrape".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft API mapping and release-contract drift telemetry".to_string(),
-            note: "Public API contract validation Prometheus exports API mapping readiness, coverage, category drift, and blocker metrics so release dashboards can fail closed on unmapped TiKV or ByteRaft reference vocabulary."
+            baseline_reference:
+                "BaselineRaft API mapping and release-contract drift telemetry".to_string(),
+            note: "Public API contract validation Prometheus exports API mapping readiness, coverage, category drift, and blocker metrics so release dashboards can fail closed on unmapped TiKV or BaselineRaft reference vocabulary."
                 .to_string(),
         },
         ApiNameMapping {
@@ -2124,8 +2124,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftSnapshotLifecyclePrometheus".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore snapshot send/apply progress Prometheus scrape".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft snapshot sender/downloader lifecycle Prometheus evidence"
+            baseline_reference:
+                "BaselineRaft snapshot sender/downloader lifecycle Prometheus evidence"
                     .to_string(),
             note: "Snapshot lifecycle Prometheus turns sender, downloader, retry, timeout, rate-limit, install, rollback, and compacted-log rejoin proof into release-dashboard metrics."
                 .to_string(),
@@ -2135,8 +2135,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftWalLifecyclePrometheus".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV RaftEngine/WAL segment lifecycle Prometheus scrape".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft WAL segment compaction and slow-fsync Prometheus evidence".to_string(),
+            baseline_reference:
+                "BaselineRaft WAL segment compaction and slow-fsync Prometheus evidence".to_string(),
             note: "WAL lifecycle Prometheus exposes retained ranges, log-index ranges, released segments, slow fsync, and compaction-after-pressure proof before durability or QPS parity is accepted."
                 .to_string(),
         },
@@ -2146,8 +2146,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV raftstore joint-consensus and learner/witness readiness scrape"
                     .to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft membership transition readiness Prometheus evidence".to_string(),
+            baseline_reference:
+                "BaselineRaft membership transition readiness Prometheus evidence".to_string(),
             note: "Membership readiness Prometheus keeps failover, scale-up, scale-down, joint quorum, learner catch-up, witness, and scheduler-generation gaps visible in release dashboards."
                 .to_string(),
         },
@@ -2157,7 +2157,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftProductionReadinessRuntimePressureEvidence".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV release dashboard evidence feeding raftstore flow-control gates".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale QPS, latency, memory, and per-peer pipeline evidence"
                     .to_string(),
             note: "Production-readiness runtime-pressure evidence wires release-scale telemetry into the fail-closed deployment gate instead of requiring callers to hand-assemble admission records."
@@ -2172,7 +2172,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release dashboard evidence feeding read-index, scheduler, and raftstore flow-control gates"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale QPS, latency, memory, pipeline, read backlog, and timer evidence"
                     .to_string(),
             note: "Timer-aware production-readiness runtime-pressure evidence wires live read backlog and node-runtime timer utilization into the same fail-closed deployment gate as release-scale QPS and latency telemetry."
@@ -2184,7 +2184,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftProductionReadinessBenchmarkInput".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark evidence attached to readiness input".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft diagnostic benchmark artifacts attached to a release gate"
                     .to_string(),
             note: "The diagnostic helper accepts matched benchmark report/summary artifacts and carries their blockers into the production-readiness report so failed QPS, latency, throughput, correctness, CPU, or memory evidence remains explainable."
@@ -2197,7 +2197,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark fail-closed readiness input".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft production-clean benchmark artifacts attached to a release gate"
                     .to_string(),
             note: "The asserted helper rejects any matched-but-failing benchmark artifacts before readiness input is trusted as release evidence."
@@ -2211,7 +2211,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark evidence feeding raftstore flow-control gates".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale benchmark artifacts feeding runtime admission"
                     .to_string(),
             note: "Production-readiness benchmark runtime-pressure input validates the benchmark report/summary pair, derives BaselineRaft-backed scale targets, and attaches fail-closed admission evidence in one call."
@@ -2227,7 +2227,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark fail-closed scale and raftstore flow-control evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft production-clean benchmark artifacts feeding runtime admission"
                     .to_string(),
             note: "The asserted runtime-pressure helper rejects matched-but-failing benchmark artifacts before deriving QPS scale targets or accepting runtime pressure evidence."
@@ -2242,7 +2242,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, ReadIndex backlog, and raftstore flow-control evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale benchmark artifacts feeding runtime and read backlog admission"
                     .to_string(),
             note: "Read-backlog benchmark runtime-pressure input binds benchmark-derived QPS targets, live read backlog, and fail-closed production admission in one call."
@@ -2258,7 +2258,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark fail-closed ReadIndex backlog and raftstore flow-control evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft production-clean benchmark artifacts feeding runtime and read backlog admission"
                     .to_string(),
             note: "The asserted read-backlog helper rejects matched-but-failing benchmark artifacts before QPS scale targets, peer-pipeline pressure, or pending-read backlog evidence are trusted."
@@ -2273,7 +2273,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, ReadIndex backlog, scheduler, and raftstore flow-control evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale benchmark artifacts feeding runtime, read backlog, and timer admission"
                     .to_string(),
             note: "Timer-aware benchmark runtime-pressure input binds benchmark-derived QPS targets, live read backlog, node-runtime timer saturation, and fail-closed production admission in one call."
@@ -2289,7 +2289,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark fail-closed ReadIndex, scheduler, and flow-control evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft production-clean benchmark artifacts feeding runtime, read backlog, and timer admission"
                     .to_string(),
             note: "The asserted complete-pressure helper rejects matched-but-failing benchmark artifacts before QPS scale targets, read backlog, peer-pipeline pressure, or node-runtime timer evidence are trusted."
@@ -2301,7 +2301,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftProductionReadinessBenchmarkReport".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark readiness report with diagnostic blockers".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft benchmark parity artifacts rendered as a readiness report"
                     .to_string(),
             note: "The diagnostic report helper preserves failing benchmark blockers for dashboards, runbooks, and operator triage."
@@ -2314,7 +2314,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark fail-closed readiness report".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft production-clean benchmark parity readiness report".to_string(),
             note: "The asserted report helper is the public release-gate API for callers that require QPS, latency, throughput, correctness, CPU, and memory parity to be proven before a readiness report is built."
                 .to_string(),
@@ -2327,7 +2327,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark and raftstore flow-control readiness report".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale benchmark artifacts producing a gated readiness report"
                     .to_string(),
             note: "Production-readiness benchmark runtime-pressure reports validate benchmark artifacts, derive scale pressure, attach runtime admission evidence, and run the fail-closed deployment gate in one release call."
@@ -2343,7 +2343,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark fail-closed scale and flow-control readiness report"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft production-clean benchmark artifacts producing a runtime-pressure gated readiness report"
                     .to_string(),
             note: "The asserted runtime-pressure report helper is the release automation path when QPS, latency, throughput, correctness, CPU, and memory parity must be proven before scale-target admission is trusted."
@@ -2357,7 +2357,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark and ReadIndex flow-control readiness report".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale benchmark artifacts producing a read backlog gated readiness report"
                     .to_string(),
             note: "Read-backlog benchmark runtime-pressure reports fail closed when benchmark parity is clean but read serving queues are already over budget."
@@ -2373,7 +2373,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark fail-closed ReadIndex backlog readiness report"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft production-clean benchmark artifacts producing a read backlog gated readiness report"
                     .to_string(),
             note: "The asserted read-backlog report helper is the release automation path when benchmark parity and live read-serving backlog both need hard-gate semantics."
@@ -2388,7 +2388,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, ReadIndex, scheduler, and flow-control readiness report"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale benchmark artifacts producing a read backlog and timer gated readiness report"
                     .to_string(),
             note: "Timer-aware benchmark runtime-pressure reports fail closed when benchmark parity is clean but read serving queues or node-runtime timer queues are already over budget."
@@ -2404,7 +2404,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark fail-closed ReadIndex and scheduler readiness report"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft production-clean benchmark artifacts producing a read backlog and timer gated readiness report"
                     .to_string(),
             note: "The asserted complete-pressure report helper is the release automation path when benchmark parity, read backlog, and node-runtime timer pressure all need hard-gate semantics."
@@ -2415,7 +2415,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftReleaseBenchmarkRuntimeTimerStatus".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark scheduler/timer pressure baseline".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release promotion no-pressure timer evidence fixture".to_string(),
             note: "Release benchmark verifier examples use this canonical timer-status baseline so readiness artifacts cannot drift between producer and consumer."
                 .to_string(),
@@ -2426,7 +2426,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, raftstore flow-control, Prometheus, and structured logs"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale readiness artifact with metrics and diagnostic logs"
                     .to_string(),
             note: "Benchmark runtime-pressure readiness artifacts package the fail-closed production report, Prometheus readiness metrics, and diagnostic JSON lines so release automation cannot split QPS evidence from operator logs."
@@ -2439,7 +2439,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, ReadIndex backlog, Prometheus, and structured logs"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale readiness artifact with read backlog metrics and diagnostic logs"
                     .to_string(),
             note: "Read-backlog benchmark readiness artifacts serialize the same fail-closed report, Prometheus text, and diagnostic JSON lines after read backlog pressure is included."
@@ -2454,7 +2454,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, ReadIndex backlog, scheduler pressure, Prometheus, and structured logs"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale readiness artifact with read backlog and timer metrics"
                     .to_string(),
             note: "Timer-aware benchmark readiness artifacts serialize the same fail-closed report, Prometheus text, and diagnostic JSON lines after read backlog and node-runtime timer pressure are included."
@@ -2468,7 +2468,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark gate that rejects non-production-clean QPS evidence before dashboard export"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale readiness artifact requiring production-clean benchmark evidence"
                     .to_string(),
             note: "Asserted benchmark runtime-pressure artifacts refuse matched-but-failing benchmark artifacts before Prometheus, Grafana, or diagnostic release payloads are emitted."
@@ -2483,7 +2483,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark and ReadIndex backlog gate that rejects non-production-clean QPS evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale readiness artifact requiring clean benchmark and read-backlog evidence"
                     .to_string(),
             note: "Asserted read-backlog artifacts keep release dashboards from publishing pending-read pressure evidence derived from a failing benchmark comparison."
@@ -2498,7 +2498,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, ReadIndex backlog, and scheduler pressure gate with production-clean QPS evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale readiness artifact requiring clean benchmark, backlog, and timer evidence"
                     .to_string(),
             note: "Asserted complete-pressure artifacts require production-clean benchmark evidence before read backlog, peer pipeline, and node-runtime timer pressure are exported as release evidence."
@@ -2512,7 +2512,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark artifact validation and Prometheus/log consistency checks"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release artifact validation with schema, freshness, metrics, and diagnostic logs"
                     .to_string(),
             note: "Benchmark runtime-pressure readiness artifact validation rejects stale schemas, stale timestamps, report drift, Prometheus drift, and diagnostic JSON-line drift before release automation trusts production-readiness evidence."
@@ -2527,7 +2527,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark validation, ReadIndex backlog, Prometheus, and structured log consistency checks"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release artifact validation with read backlog pressure evidence"
                     .to_string(),
             note: "Read-backlog readiness artifact validation recomputes the full-pressure release artifact so promotion checks cannot accidentally compare a read-heavy artifact against the zero-backlog compatibility path."
@@ -2542,7 +2542,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark validation, ReadIndex backlog, scheduler pressure, Prometheus, and structured log consistency checks"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release artifact validation with read backlog and timer pressure evidence"
                     .to_string(),
             note: "Timer-aware readiness artifact validation recomputes the complete release artifact so promotion checks cannot drop node-runtime timer pressure while validating QPS and read-backlog evidence."
@@ -2557,7 +2557,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark artifact validation that recomputes from production-clean QPS evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft asserted release artifact validation with schema, freshness, metrics, and diagnostic logs"
                     .to_string(),
             note: "Asserted readiness artifact validation recomputes the release artifact through the production-clean benchmark gate, so a stale or failing benchmark cannot validate an otherwise well-formed artifact."
@@ -2572,7 +2572,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark and ReadIndex backlog artifact validation from production-clean QPS evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft asserted release artifact validation with read-backlog pressure evidence"
                     .to_string(),
             note: "Asserted read-backlog validation rejects artifacts whose source benchmark no longer satisfies production-clean QPS, latency, memory, and correctness gates."
@@ -2587,7 +2587,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, ReadIndex backlog, and scheduler pressure artifact validation from production-clean evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft asserted release artifact validation with read-backlog and timer pressure evidence"
                     .to_string(),
             note: "Asserted complete-pressure validation recomputes the artifact through the strongest release gate before trusting dashboard, Prometheus, or diagnostic payloads."
@@ -2599,7 +2599,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release dashboard, structured log, and raftstore flow-control evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft support bundle carrying QPS, latency, memory, and pipeline pressure"
                     .to_string(),
             note: "Runtime-pressure debug snapshots keep admission metrics and diagnostic log entries in the same support bundle used by release-scale QPS and latency triage."
@@ -2613,7 +2613,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release dashboard with QPS, read-index, Progress, and flow-control evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft support bundle carrying QPS, latency, memory, pipeline, and read backlog pressure"
                     .to_string(),
             note: "Read-backlog-aware debug snapshots keep release-scale admission evidence from dropping pending ReadIndex or bounded-stale read pressure."
@@ -2628,7 +2628,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release dashboard with QPS, read-index, scheduler, Progress, and flow-control evidence"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft support bundle carrying QPS, latency, memory, pipeline, read backlog, and timer pressure"
                     .to_string(),
             note: "Timer-aware debug snapshots keep release-scale admission evidence from dropping node-runtime timer saturation beside QPS, pipeline, and read-backlog pressure."
@@ -2641,7 +2641,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, raftstore flow-control, dashboard, and structured log bundle"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale benchmark artifacts plus runtime pressure evidence"
                     .to_string(),
             note: "Benchmark runtime-pressure support bundles combine BaselineRaft-derived QPS targets, benchmark parity metrics, runtime admission metrics, and diagnostic logs in one release artifact."
@@ -2655,7 +2655,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, ReadIndex backlog, dashboard, and structured log bundle"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale benchmark artifacts plus runtime and read backlog pressure evidence"
                     .to_string(),
             note: "Read-backlog benchmark support bundles keep benchmark parity, QPS targets, pending read queues, admission metrics, and diagnostics together."
@@ -2670,7 +2670,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             raft_rs_or_tikv_reference:
                 "TiKV release benchmark, ReadIndex backlog, scheduler pressure, dashboard, and structured log bundle"
                     .to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-scale benchmark artifacts plus runtime, read backlog, and timer pressure evidence"
                     .to_string(),
             note: "Timer-aware benchmark support bundles keep benchmark parity, QPS targets, pending read queues, timer utilization, admission metrics, and diagnostics together."
@@ -2680,7 +2680,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "RuntimePressureAdmissionPolicy".to_string(),
             matrixraft_facade: "MatrixRaftRuntimePressurePolicy".to_string(),
             raft_rs_or_tikv_reference: "raftstore flow-control policy".to_string(),
-            byteraft_or_baseline_reference: "admission policy / throttle mode".to_string(),
+            baseline_reference: "admission policy / throttle mode".to_string(),
             note: "RuntimePressureAdmissionPolicy pins observe-only, reject, and throttle behavior to a stable operator-facing name."
                 .to_string(),
         },
@@ -2688,7 +2688,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_parity_report".to_string(),
             matrixraft_facade: "MatrixRaftParityReport".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore semantic readiness report".to_string(),
-            byteraft_or_baseline_reference: "BaselineRaft compatibility and release gate report"
+            baseline_reference: "BaselineRaft compatibility and release gate report"
                 .to_string(),
             note: "The parity report is the canonical API for checking semantic readiness before RustRaft claims production compatibility."
                 .to_string(),
@@ -2697,7 +2697,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_baseline_raft_parity_matrix".to_string(),
             matrixraft_facade: "MatrixRaftBaselineParityMatrix".to_string(),
             raft_rs_or_tikv_reference: "raft-rs/TiKV feature parity matrix".to_string(),
-            byteraft_or_baseline_reference: "ByteRaft/BaselineRaft parity matrix"
+            baseline_reference: "BaselineRaft parity matrix"
                 .to_string(),
             note: "The matrix makes compatibility, intentional differences, and remaining production gaps auditable by release reviewers."
                 .to_string(),
@@ -2706,15 +2706,15 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "BenchmarkRunner".to_string(),
             matrixraft_facade: "MatrixRaftBenchmarkRunner".to_string(),
             raft_rs_or_tikv_reference: "raftstore benchmark harness".to_string(),
-            byteraft_or_baseline_reference: "release QPS/latency parity runner".to_string(),
-            note: "BenchmarkRunner is the stable release-parity harness for C++ baseline comparisons."
+            baseline_reference: "release QPS/latency parity runner".to_string(),
+            note: "BenchmarkRunner is the stable release harness for baseline comparisons."
                 .to_string(),
         },
         ApiNameMapping {
             canonical: "matrixraft_grafana_dashboard".to_string(),
             matrixraft_facade: "MatrixRaftGrafanaDashboard".to_string(),
             raft_rs_or_tikv_reference: "TiKV Grafana raftstore dashboard".to_string(),
-            byteraft_or_baseline_reference: "ByteRaft operational dashboard".to_string(),
+            baseline_reference: "BaselineRaft operational dashboard".to_string(),
             note: "The dashboard export keeps QPS, latency, memory, WAL, snapshot, and peer-pipeline panels reviewable."
                 .to_string(),
         },
@@ -2722,7 +2722,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_grafana_dashboard_json".to_string(),
             matrixraft_facade: "MatrixRaftGrafanaDashboardJson".to_string(),
             raft_rs_or_tikv_reference: "TiKV Grafana dashboard JSON provisioning".to_string(),
-            byteraft_or_baseline_reference: "ByteRaft dashboard JSON import".to_string(),
+            baseline_reference: "BaselineRaft dashboard JSON import".to_string(),
             note: "The JSON export pins the exact dashboard artifact consumed by Grafana provisioning and release review."
                 .to_string(),
         },
@@ -2730,7 +2730,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_alert_rules".to_string(),
             matrixraft_facade: "MatrixRaftAlertRules".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore alert rules".to_string(),
-            byteraft_or_baseline_reference: "ByteRaft release and runtime alerts".to_string(),
+            baseline_reference: "BaselineRaft release and runtime alerts".to_string(),
             note: "Alert rules are mapped so production readiness gates remain tied to reference operational vocabulary."
                 .to_string(),
         },
@@ -2738,7 +2738,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_alert_rules_json".to_string(),
             matrixraft_facade: "MatrixRaftAlertRulesJson".to_string(),
             raft_rs_or_tikv_reference: "TiKV alertmanager rule JSON provisioning".to_string(),
-            byteraft_or_baseline_reference: "ByteRaft alert rule JSON import".to_string(),
+            baseline_reference: "BaselineRaft alert rule JSON import".to_string(),
             note: "The JSON export keeps alert provisioning tied to the same readiness, QPS, latency, memory, WAL, and snapshot thresholds as the typed rules."
                 .to_string(),
         },
@@ -2746,7 +2746,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_observability_provisioning".to_string(),
             matrixraft_facade: "MatrixRaftObservabilityProvisioning".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore observability bundle".to_string(),
-            byteraft_or_baseline_reference: "ByteRaft production observability bundle"
+            baseline_reference: "BaselineRaft production observability bundle"
                 .to_string(),
             note: "The provisioning bundle groups dashboard, alert, debug-artifact, Prometheus, and runbook contracts for production rollout."
                 .to_string(),
@@ -2756,7 +2756,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftObservabilityProvisioningRunbook".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore observability provisioning runbook checklist".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft release-observability runbook checklist".to_string(),
             note: "The provisioning runbook helper gives CI and operators the static remediation checklist that must accompany alert, dashboard, metric, debug bundle, runtime-pressure, and benchmark freshness provisioning."
                 .to_string(),
@@ -2765,8 +2765,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_observability_required_metric_names".to_string(),
             matrixraft_facade: "MatrixRaftObservabilityRequiredMetricNames".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore required metric catalog".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft production benchmark and runtime metric catalog".to_string(),
+            baseline_reference:
+                "BaselineRaft production benchmark and runtime metric catalog".to_string(),
             note: "The flattened catalog gives CI, Grafana provisioning, and release automation one stable list covering readiness, QPS, latency, memory, lifecycle, runtime-pressure, and BaselineRaft parity metrics."
                 .to_string(),
         },
@@ -2775,8 +2775,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftValidateRequiredMetricScrapeTexts".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore Prometheus scrape contract validation"
                 .to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft production metric scrape completeness gate".to_string(),
+            baseline_reference:
+                "BaselineRaft production metric scrape completeness gate".to_string(),
             note: "The scrape validator compares emitted Prometheus payloads with the required QPS, latency, memory, runtime-pressure, lifecycle, and benchmark metric catalog before release evidence is trusted."
                 .to_string(),
         },
@@ -2785,8 +2785,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftObservabilityProvisioningJson".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore observability bundle JSON"
                 .to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft production observability bundle JSON import".to_string(),
+            baseline_reference:
+                "BaselineRaft production observability bundle JSON import".to_string(),
             note: "The JSON export is the stable artifact for CI and deployment systems that cannot link the Rust types directly."
                 .to_string(),
         },
@@ -2795,8 +2795,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftValidateObservabilityProvisioning".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore dashboard and alert provisioning validation".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft operational provisioning drift validation".to_string(),
+            baseline_reference:
+                "BaselineRaft operational provisioning drift validation".to_string(),
             note: "The validator fails closed when dashboard panels, alert expressions, required metrics, or runbook artifacts drift from the production contract."
                 .to_string(),
         },
@@ -2805,8 +2805,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftValidateObservabilityProvisioningJson".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore JSON observability provisioning validation".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft JSON provisioning drift validation".to_string(),
+            baseline_reference:
+                "BaselineRaft JSON provisioning drift validation".to_string(),
             note: "The JSON validator lets CI check imported Grafana, alert, metric, and runbook bundles before release promotion."
                 .to_string(),
         },
@@ -2816,8 +2816,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
                 .to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore provisioning validation Prometheus metric".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft provisioning validation readiness metric".to_string(),
+            baseline_reference:
+                "BaselineRaft provisioning validation readiness metric".to_string(),
             note: "The validation Prometheus export makes provisioning drift visible beside runtime readiness, QPS, latency, memory, and WAL panels."
                 .to_string(),
         },
@@ -2826,8 +2826,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftDiagnosticOperatorRunbook".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore diagnostic runbook fed by structured logs and alerts".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft diagnostic runbook with production-readiness blockers".to_string(),
+            baseline_reference:
+                "BaselineRaft diagnostic runbook with production-readiness blockers".to_string(),
             note: "The diagnostic runbook helper joins structured diagnostic targets, production-readiness evidence, and alert rules so release support gets the first corrective action instead of a raw blocker list."
                 .to_string(),
         },
@@ -2836,8 +2836,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftOperatorRunbookPrometheus".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore runbook step Prometheus scrape for Grafana triage".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft runbook-step telemetry for release dashboards".to_string(),
+            baseline_reference:
+                "BaselineRaft runbook-step telemetry for release dashboards".to_string(),
             note: "The Prometheus exporter turns active operator steps into grouped step totals, per-step presence, and first-step signals that dashboards can route without parsing JSON."
                 .to_string(),
         },
@@ -2846,8 +2846,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftReadinessReportExample".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore release-readiness and status-report example".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft production readiness example wiring".to_string(),
+            baseline_reference:
+                "BaselineRaft production readiness example wiring".to_string(),
             note: "The example is part of the open-source embedding contract for constructing readiness evidence without TemporalStore adapter code."
                 .to_string(),
         },
@@ -2855,7 +2855,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "examples/read_safety.rs".to_string(),
             matrixraft_facade: "MatrixRaftReadSafetyExample".to_string(),
             raft_rs_or_tikv_reference: "TiKV ReadIndex and lease-read example".to_string(),
-            byteraft_or_baseline_reference: "ByteRaft safe-read example flow".to_string(),
+            baseline_reference: "BaselineRaft safe-read example flow".to_string(),
             note: "The example maps quorum ReadIndex, lease-read, and bounded-stale follower-read checks to the canonical RustRaft read-safety helpers."
                 .to_string(),
         },
@@ -2864,8 +2864,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftDebugArtifactsExample".to_string(),
             raft_rs_or_tikv_reference: "TiKV raftstore debug bundle and Prometheus example"
                 .to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft support bundle and dashboard artifact example".to_string(),
+            baseline_reference:
+                "BaselineRaft support bundle and dashboard artifact example".to_string(),
             note: "The example keeps debug snapshot, Prometheus, Grafana, alert, and diagnostic-log rendering discoverable for release triage."
                 .to_string(),
         },
@@ -2874,7 +2874,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftBaselineRaftParityBenchmarkExample".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV raftstore benchmark and pressure-snapshot example".to_string(),
-            byteraft_or_baseline_reference:
+            baseline_reference:
                 "BaselineRaft-vs-RustRaft parity benchmark example".to_string(),
             note: "The example shows the release-scale QPS, latency, throughput, CPU, and memory parity path expected before production claims."
                 .to_string(),
@@ -2884,8 +2884,8 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             matrixraft_facade: "MatrixRaftOpenSourceSurfaceExample".to_string(),
             raft_rs_or_tikv_reference:
                 "TiKV-style public raftstore module surface example".to_string(),
-            byteraft_or_baseline_reference:
-                "ByteRaft-compatible standalone crate surface example".to_string(),
+            baseline_reference:
+                "BaselineRaft-compatible standalone crate surface example".to_string(),
             note: "The example proves the standalone module, adapter-boundary, parity-matrix, and compatibility-report surface for open-source consumers."
                 .to_string(),
         },
@@ -2893,7 +2893,7 @@ pub fn matrixraft_api_name_mappings() -> Vec<ApiNameMapping> {
             canonical: "matrixraft_operator_runbook_steps".to_string(),
             matrixraft_facade: "MatrixRaftOperatorRunbook".to_string(),
             raft_rs_or_tikv_reference: "TiKV operator runbook / raftstore triage".to_string(),
-            byteraft_or_baseline_reference: "ByteRaft operational triage".to_string(),
+            baseline_reference: "BaselineRaft operational triage".to_string(),
             note: "Runbook steps give every alert a deterministic remediation route for production support."
                 .to_string(),
         },

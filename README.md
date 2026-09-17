@@ -19,7 +19,7 @@ The Cargo crate is named `matrixraft`, and the naming follows from that:
   `SnapshotMetadata`.
 - **Evidence records are canonical when they gate release decisions** —
   `SnapshotLifecycleEvidence` is named as a Rust evidence type and mapped to the
-  TiKV/raft-rs and ByteRaft/BaselineRaft vocabulary because it controls
+  TiKV/raft-rs and BaselineRaft vocabulary because it controls
   production snapshot lifecycle readiness.
 - **Free functions carry the crate name** — `matrixraft_parity_report`,
   `matrixraft_production_readiness_report` — because they are imported into a
@@ -34,7 +34,7 @@ The Cargo crate is named `matrixraft`, and the naming follows from that:
   are a published interface that dashboards and alert rules are built from, so
   renaming them is an operational change rather than a tidy-up.
 - **Reference vocabulary is explicit.** `matrixraft_api_name_mappings()` is the
-  translation table for TiKV/raft-rs, MatrixRaft facade, and ByteRaft/BaselineRaft
+  translation table for TiKV/raft-rs, MatrixRaft facade, and BaselineRaft
   concepts so reviewers do not have to infer whether a name is canonical Rust API,
   compatibility facade, metric surface, or reference-system vocabulary.
 
@@ -244,7 +244,7 @@ Reports include `production_blockers` such as
 `durability:storage_apply_fence`, making missing production evidence easy to
 surface in TemporalStore readiness gates and CI.
 Production readiness now also runs `matrixraft_validate_public_api_contract` on
-the embedded public API contract, so required TiKV/ByteRaft reference mappings
+the embedded public API contract, so required TiKV reference mappings
 show up as `public_api:*` missing evidence and blockers before RustRaft can be
 called production ready.
 Production readiness also requires an accepted runtime-pressure admission sample
@@ -544,13 +544,13 @@ safety surfaces so release reviews can see which APIs are intended for embedders
 and dashboards.
 `matrixraft_api_name_mappings` gives those reviews a deterministic name map from
 canonical RustRaft API names to MatrixRaft facade names, TiKV/raft-rs concepts,
-and ByteRaft/BaselineRaft reference vocabulary.
+and BaselineRaft reference vocabulary.
 `matrixraft_public_api_contract_validation_prometheus` exports that validator as
 release-dashboard metrics, including mapping readiness, coverage, unmapped
 reference-required names, unmapped advertised names, per-category coverage, and
 blockers.
 Embedding examples are part of the same advertised contract: shipped examples
-must also carry TiKV/raft-rs and ByteRaft/BaselineRaft mappings before the
+must also carry TiKV/raft-rs and BaselineRaft mappings before the
 public API validator accepts the surface.
 `matrixraft_evidence_interface_names` does the same for production evidence
 fields, including the per-peer packet-loss/reorder recovery counters and

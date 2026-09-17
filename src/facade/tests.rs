@@ -818,7 +818,7 @@ mod tests {
             &"public_api:api_mapping:missing_required_canonical:ReadIndexRequest".to_string()
         ));
         assert!(actions.iter().any(|action| {
-            action.contains("fix RustRaft public API canonical names and TiKV/ByteRaft mappings")
+            action.contains("fix RustRaft public API canonical names and TiKV mappings")
         }));
     }
 

@@ -751,43 +751,33 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "ReadIndexRequest"
             && mapping.raft_rs_or_tikv_reference.contains("MsgReadIndex")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("lease_read")
+            && mapping.baseline_reference.contains("lease_read")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_read_safety_decision"
             && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
-            && mapping.byteraft_or_baseline_reference.contains("safe read")
+            && mapping.baseline_reference.contains("safe read")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_append_safety_decision"
             && mapping.raft_rs_or_tikv_reference.contains("append")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("AppendEntries")
+            && mapping.baseline_reference.contains("AppendEntries")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_learner_promotion_decision"
             && mapping.raft_rs_or_tikv_reference.contains("learner")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("auto-promote")
+            && mapping.baseline_reference.contains("auto-promote")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_parity_report"
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("BaselineRaft")
+            && mapping.baseline_reference.contains("BaselineRaft")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_baseline_raft_parity_matrix"
             && mapping
                 .raft_rs_or_tikv_reference
                 .contains("feature parity matrix")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("parity matrix")
+            && mapping.baseline_reference.contains("parity matrix")
     }));
     assert!(validation
         .mapping_coverage_by_category
@@ -808,14 +798,12 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
             && mapping
                 .raft_rs_or_tikv_reference
                 .contains("ProgressTracker")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("replication pipeline")
+            && mapping.baseline_reference.contains("replication pipeline")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "PipelineEvidence"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("replication pipeline readiness")
             && mapping.note.contains("per-peer fault recovery")
     }));
@@ -825,7 +813,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
                 .raft_rs_or_tikv_reference
                 .contains("all-peer Progress")
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("all faulted peers recovered")
             && mapping.note.contains("fail-closed production signal")
     }));
@@ -851,24 +839,22 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_runtime_admin_report"
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("GetInfo/admin")
+            && mapping.baseline_reference.contains("GetInfo/admin")
             && mapping.note.contains("QPS/latency")
             && mapping.note.contains("peer-pipeline lag")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_production_readiness_report"
             && mapping
-                .byteraft_or_baseline_reference
-                .contains("ByteRaft release gate")
+                .baseline_reference
+                .contains("BaselineRaft release gate")
             && mapping.note.contains("QPS/latency/memory parity")
             && mapping.note.contains("ranked runtime-pressure bottlenecks")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_production_readiness_report_with_runtime_pressure_policy"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("fail-closed runtime-pressure deployment gate")
             && mapping
                 .note
@@ -878,7 +864,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         mapping.canonical
             == "matrixraft_production_readiness_report_with_runtime_pressure_policy_and_freshness"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("runtime-pressure freshness deployment gate")
             && mapping
                 .note
@@ -891,9 +877,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_local_status_diagnostic_json_lines"
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("local replica")
+            && mapping.baseline_reference.contains("local replica")
             && mapping.note.contains("random-replica read lag")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
@@ -909,14 +893,14 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_runtime_pressure_bottleneck_summary"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("QPS/latency bottleneck")
             && mapping.note.contains("excess or deficit percent")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_runtime_pressure_freshness_report"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("QPS/latency/memory evidence freshness gate")
             && mapping.note.contains("stale")
     }));
@@ -938,22 +922,20 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "InstallSnapshotResponse"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("install_snapshot_response")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "SnapshotLifecycleEvidence"
             && mapping.raft_rs_or_tikv_reference.contains("raftstore")
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("sender/downloader lifecycle")
             && mapping.note.contains("coherent transfer completion")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "BenchmarkRunner"
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("QPS/latency parity")
+            && mapping.baseline_reference.contains("QPS/latency parity")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_release_benchmark_runtime_timer_status"
@@ -961,45 +943,41 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
                 .raft_rs_or_tikv_reference
                 .contains("scheduler/timer pressure")
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("no-pressure timer evidence")
             && mapping.note.contains("producer and consumer")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_benchmark_runtime_pressure_readiness_artifact"
             && mapping.raft_rs_or_tikv_reference.contains("Prometheus")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("diagnostic logs")
+            && mapping.baseline_reference.contains("diagnostic logs")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical
             == "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
             && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("read backlog metrics")
+            && mapping.baseline_reference.contains("read backlog metrics")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical
             == "matrixraft_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
             && mapping.raft_rs_or_tikv_reference.contains("scheduler pressure")
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("timer metrics")
             && mapping.note.contains("node-runtime timer pressure")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact"
             && mapping.raft_rs_or_tikv_reference.contains("Prometheus")
-            && mapping.byteraft_or_baseline_reference.contains("schema")
+            && mapping.baseline_reference.contains("schema")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical
             == "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog"
             && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("read backlog pressure evidence")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
@@ -1007,7 +985,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
             == "matrixraft_validate_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"
             && mapping.raft_rs_or_tikv_reference.contains("scheduler pressure")
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("timer pressure evidence")
             && mapping.note.contains("drop node-runtime timer pressure")
     }));
@@ -1015,21 +993,21 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         mapping.canonical
             == "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_artifacts"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("BaselineRaft release-scale benchmark artifacts")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical
             == "matrixraft_production_readiness_input_with_asserted_benchmark_runtime_pressure_artifacts"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("production-clean benchmark artifacts")
             && mapping.note.contains("deriving QPS scale targets")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_production_readiness_input_with_benchmark_artifacts"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("diagnostic benchmark artifacts")
             && mapping.note.contains("failed QPS")
     }));
@@ -1044,7 +1022,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
             == "matrixraft_production_readiness_input_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
             && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("read backlog admission")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
@@ -1063,31 +1041,27 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         mapping.canonical
             == "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_artifacts"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("BaselineRaft release-scale benchmark artifacts")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical
             == "matrixraft_production_readiness_report_with_asserted_benchmark_runtime_pressure_artifacts"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("runtime-pressure gated readiness report")
             && mapping.note.contains("latency")
             && mapping.note.contains("scale-target admission")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_production_readiness_report_with_benchmark_artifacts"
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("readiness report")
+            && mapping.baseline_reference.contains("readiness report")
             && mapping.note.contains("operator triage")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical
             == "matrixraft_production_readiness_report_with_asserted_benchmark_artifacts"
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("production-clean")
+            && mapping.baseline_reference.contains("production-clean")
             && mapping.note.contains("QPS")
             && mapping.note.contains("memory parity")
     }));
@@ -1096,7 +1070,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
             == "matrixraft_production_readiness_report_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
             && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("read backlog gated")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
@@ -1120,16 +1094,12 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_grafana_dashboard_json"
             && mapping.raft_rs_or_tikv_reference.contains("JSON")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("dashboard JSON")
+            && mapping.baseline_reference.contains("dashboard JSON")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_alert_rules_json"
             && mapping.raft_rs_or_tikv_reference.contains("alertmanager")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("alert rule JSON")
+            && mapping.baseline_reference.contains("alert rule JSON")
             && mapping.note.contains("QPS")
             && mapping.note.contains("latency")
     }));
@@ -1139,7 +1109,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
                 .raft_rs_or_tikv_reference
                 .contains("observability bundle")
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("production observability bundle")
             && mapping.note.contains("runbook")
     }));
@@ -1148,9 +1118,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
             && mapping
                 .raft_rs_or_tikv_reference
                 .contains("required metric catalog")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("production benchmark")
+            && mapping.baseline_reference.contains("production benchmark")
             && mapping.note.contains("QPS")
             && mapping.note.contains("memory")
     }));
@@ -1159,16 +1127,14 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
             && mapping
                 .raft_rs_or_tikv_reference
                 .contains("Prometheus scrape")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("scrape completeness")
+            && mapping.baseline_reference.contains("scrape completeness")
             && mapping.note.contains("latency")
             && mapping.note.contains("benchmark")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_validate_observability_provisioning"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("provisioning drift validation")
             && mapping.note.contains("fails closed")
     }));
@@ -1182,16 +1148,14 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
         mapping.canonical
             == "matrixraft_runtime_pressure_admission_with_scale_pipeline_and_read_backlog_pressure"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("read backlog admission")
             && mapping.note.contains("fail-closed production decision")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical
             == "matrixraft_debug_snapshot_with_runtime_pressure_and_read_backlog_evidence"
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("read backlog pressure")
+            && mapping.baseline_reference.contains("read backlog pressure")
             && mapping.note.contains("ReadIndex")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
@@ -1199,21 +1163,19 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
             == "matrixraft_debug_snapshot_with_benchmark_runtime_pressure_and_read_backlog_artifacts"
             && mapping.raft_rs_or_tikv_reference.contains("ReadIndex")
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("read backlog pressure")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "LatencyPressureDetail"
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("p95/p99 latency")
+            && mapping.baseline_reference.contains("p95/p99 latency")
             && mapping.note.contains("sample count")
             && mapping.note.contains("production gates")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_validate_runtime_pressure_admission_evidence"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("runtime-pressure evidence validation")
             && mapping.note.contains("memory")
             && mapping.note.contains("scale")
@@ -1222,7 +1184,7 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_validate_runtime_pressure_admission_evidence_with_policy"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("fail-closed runtime-pressure rejection validation")
             && mapping
                 .note
@@ -1251,14 +1213,12 @@ fn open_source_surface_names_modules_examples_reports_and_adapter_boundary() {
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "examples/debug_artifacts.rs"
             && mapping.raft_rs_or_tikv_reference.contains("Prometheus")
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("support bundle")
+            && mapping.baseline_reference.contains("support bundle")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "examples/baseline_raft_parity_benchmark.rs"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("BaselineRaft-vs-RustRaft")
             && mapping.note.contains("QPS")
             && mapping.note.contains("memory")

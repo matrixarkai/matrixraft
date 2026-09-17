@@ -396,7 +396,7 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "QueuePressureMetricNames"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("scheduler queue pressure metrics")
             && mapping.note.contains("QPS and memory-pressure dashboards")
     }));
@@ -410,15 +410,13 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_queue_pressure_grafana_panels"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("queue pressure dashboard panels")
             && mapping.note.contains("release-scale tuning")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "QueuePressureThresholds"
-            && mapping
-                .byteraft_or_baseline_reference
-                .contains("queue saturation")
+            && mapping.baseline_reference.contains("queue saturation")
             && mapping.note.contains("queue-aware runtime admission")
     }));
     assert!(api.api_name_mappings.iter().any(|mapping| {
@@ -429,7 +427,7 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "matrixraft_runtime_pressure_admission_with_queue_pressure"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("queue-aware admission gate")
             && mapping.note.contains("fail closed")
     }));
@@ -448,7 +446,7 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "MailBoxPressureStats"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("queue pressure snapshot")
             && mapping.note.contains("rejected enqueue count")
     }));
@@ -469,7 +467,7 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "MailChannelPressureStats"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("per-replica queue pressure snapshot")
             && mapping.note.contains("selector-visible total")
     }));
@@ -483,7 +481,7 @@ fn observability_contract_exports_metrics_parity_readiness_and_blocker_reports()
     assert!(api.api_name_mappings.iter().any(|mapping| {
         mapping.canonical == "ChannelSelector::select_checked"
             && mapping
-                .byteraft_or_baseline_reference
+                .baseline_reference
                 .contains("checked ready-queue selector")
             && mapping.note.contains("deadline-bound polling")
     }));
