@@ -84,6 +84,15 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+  prohibited-vocabulary:
+    name: prohibited vocabulary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check tracked files for prohibited vocabulary
+        shell: bash
+        run: ./scripts/check_prohibited_vocabulary.sh
+
   license-headers:
     name: license headers (SPDX)
     runs-on: ubuntu-latest
