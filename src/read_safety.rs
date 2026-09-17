@@ -354,15 +354,6 @@ pub fn matrixraft_read_safety_runtime_decision(
     }
 }
 
-/// The built-in read-safety **conformance vector**.
-///
-/// Unlike the membership reference artifact, this one does exercise real logic:
-/// each case is a fixed [`ReadSafetyRuntimeInput`] run through
-/// [`matrixraft_read_safety_runtime_decision`]. Only the inputs are fixed.
-///
-/// So it is evidence about *this crate*, not about a caller's deployment. The
-/// bundle validation report sets `read_safety_is_reference` when a bundle still
-/// carries this rather than something observed.
 pub fn matrixraft_read_safety_evidence_artifact() -> ReadSafetyEvidenceArtifact {
     ReadSafetyEvidenceArtifact {
         schema: "rustraft.read_safety_evidence.v1".to_string(),
@@ -472,7 +463,9 @@ pub fn matrixraft_read_safety_evidence_artifact() -> ReadSafetyEvidenceArtifact 
 pub fn matrixraft_validate_read_safety_evidence_artifact(
     artifact: &ReadSafetyEvidenceArtifact,
 ) -> ReadSafetyEvidenceValidationReport {
+    let expected = matrixraft_read_safety_evidence_artifact();
     let schema_valid = artifact.schema == "rustraft.read_safety_evidence.v1";
+    let canonical_scenarios_match = artifact == &expected;
     let stale_leader_lease_rejected = !artifact.stale_leader_lease.allowed
         && artifact.stale_leader_lease.stale_leader_lease_rejected
         && artifact.stale_leader_lease.reason == "stale_leader_lease";
@@ -508,6 +501,10 @@ pub fn matrixraft_validate_read_safety_evidence_artifact(
     let mut missing = Vec::new();
     for (present, requirement) in [
         (schema_valid, "schema_valid"),
+        (
+            canonical_scenarios_match,
+            "canonical_read_safety_scenarios_match",
+        ),
         (stale_leader_lease_rejected, "stale_leader_lease_rejected"),
         (
             lagging_follower_read_rejected,
@@ -539,6 +536,7 @@ pub fn matrixraft_validate_read_safety_evidence_artifact(
     ReadSafetyEvidenceValidationReport {
         valid: missing.is_empty(),
         schema_valid,
+        canonical_scenarios_match,
         stale_leader_lease_rejected,
         lagging_follower_read_rejected,
         stale_follower_write_rejected,

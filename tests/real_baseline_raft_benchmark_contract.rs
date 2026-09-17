@@ -5,15 +5,31 @@ use matrixraft::benchmark::{
     matrixraft_assert_production_baseline_raft_parity,
     matrixraft_assert_production_baseline_raft_summary,
     matrixraft_baseline_raft_benchmark_evidence,
-    matrixraft_baseline_raft_benchmark_failure_summary, matrixraft_find_baseline_raft_harness,
+    matrixraft_baseline_raft_benchmark_failure_summary,
+    matrixraft_baseline_raft_benchmark_metric_names,
+    matrixraft_baseline_raft_benchmark_summary_prometheus, matrixraft_find_baseline_raft_harness,
     matrixraft_find_or_build_baseline_raft_harness,
-    matrixraft_probe_baseline_raft_native_benchmark, matrixraft_run_baseline_raft_parity_benchmark,
-    matrixraft_validate_production_baseline_raft_benchmark_options, BenchmarkEngine,
-    BenchmarkEngineSource, BenchmarkHarnessKind, BenchmarkOptions, BenchmarkRunner,
-    BenchmarkWorkload, ExternalBaselineRaftRunner, RuntimeBenchmarkRunner,
+    matrixraft_probe_baseline_raft_native_benchmark, matrixraft_read_release_pressure_snapshot,
+    matrixraft_release_pressure_snapshot_from_json,
+    matrixraft_release_pressure_snapshot_from_json_bytes,
+    matrixraft_release_pressure_snapshot_json, matrixraft_run_baseline_raft_parity_benchmark,
+    matrixraft_scale_optimization_inputs_from_benchmark_report,
+    matrixraft_scale_optimization_targets_from_baseline_raft_report,
+    matrixraft_scale_rate_metrics_from_benchmark_report,
+    matrixraft_validate_benchmark_scale_optimization_inputs,
+    matrixraft_validate_production_baseline_raft_benchmark_options,
+    matrixraft_validate_release_pressure_snapshot,
+    matrixraft_write_release_pressure_snapshot_atomic, BenchmarkEngine, BenchmarkEngineSource,
+    BenchmarkHarnessKind, BenchmarkOptions, BenchmarkRunner, BenchmarkWorkload,
+    ExternalBaselineRaftRunner, ReleasePressureSnapshot, RuntimeBenchmarkRunner,
     MATRIXRAFT_BENCHMARK_MAX_PRODUCTION_PASS_TOLERANCE_PERCENT,
     MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
     MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES,
+};
+use matrixraft::{
+    matrixraft_release_benchmark_runtime_timer_status, matrixraft_scale_optimization_hints,
+    LatencyMetrics, LatencyOptimizationThresholds, MemoryMetrics, MemoryOptimizationThresholds,
+    NodeRuntimeTimerThresholds, ReadBacklogMetrics, ReadBacklogThresholds,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -29,6 +45,120 @@ fn temp_dir(name: &str) -> PathBuf {
         "rustraft-real-baseline_raft-{name}-{}-{nonce}",
         std::process::id()
     ))
+}
+
+#[test]
+fn release_pressure_snapshot_json_helpers_round_trip_public_contract() {
+    let snapshot = ReleasePressureSnapshot::complete(
+        MemoryMetrics::zero(),
+        MemoryOptimizationThresholds::default(),
+        LatencyMetrics::zero(),
+        LatencyOptimizationThresholds::default(),
+        ReadBacklogMetrics::zero(),
+        ReadBacklogThresholds::default(),
+        matrixraft_release_benchmark_runtime_timer_status(),
+        NodeRuntimeTimerThresholds::default(),
+    );
+
+    matrixraft_validate_release_pressure_snapshot(&snapshot)
+        .expect("complete release pressure snapshot must validate");
+    let json = matrixraft_release_pressure_snapshot_json(&snapshot);
+    assert!(json.contains("\"memory_metrics\""));
+    assert!(json.contains("\"timer_status\""));
+    assert_eq!(
+        matrixraft_release_pressure_snapshot_from_json(&json).expect("parse json"),
+        snapshot
+    );
+    assert_eq!(
+        matrixraft_release_pressure_snapshot_from_json_bytes(json.as_bytes())
+            .expect("parse json bytes"),
+        snapshot
+    );
+    let empty = ReleasePressureSnapshot::default();
+    let error = matrixraft_validate_release_pressure_snapshot(&empty)
+        .expect_err("empty pressure snapshots should fail closed");
+    assert_eq!(error, "benchmark:release_pressure_snapshot_empty");
+    let parse_error = matrixraft_release_pressure_snapshot_from_json("{")
+        .expect_err("invalid json should be reported through benchmark namespace");
+    assert!(parse_error.starts_with("benchmark:invalid_release_pressure_snapshot_json:"));
+
+    let root = temp_dir("pressure-snapshot-file-round-trip");
+    let snapshot_path = root.join("nested").join("pressure-snapshot.json");
+    matrixraft_write_release_pressure_snapshot_atomic(&snapshot_path, &snapshot)
+        .expect("write pressure snapshot");
+    assert_eq!(
+        matrixraft_read_release_pressure_snapshot(&snapshot_path).expect("read snapshot"),
+        snapshot
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn release_pressure_snapshot_atomic_writer_tolerates_same_process_concurrency() {
+    let snapshot = ReleasePressureSnapshot::complete(
+        MemoryMetrics::zero(),
+        MemoryOptimizationThresholds::default(),
+        LatencyMetrics::zero(),
+        LatencyOptimizationThresholds::default(),
+        ReadBacklogMetrics::zero(),
+        ReadBacklogThresholds::default(),
+        matrixraft_release_benchmark_runtime_timer_status(),
+        NodeRuntimeTimerThresholds::default(),
+    );
+    let root = temp_dir("pressure-snapshot-concurrent-writes");
+    let snapshot_path = root.join("pressure-snapshot.json");
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let snapshot = snapshot.clone();
+            let snapshot_path = snapshot_path.clone();
+            std::thread::spawn(move || {
+                for _ in 0..16 {
+                    matrixraft_write_release_pressure_snapshot_atomic(&snapshot_path, &snapshot)
+                        .expect("write pressure snapshot concurrently");
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("writer thread must not panic");
+    }
+    assert_eq!(
+        matrixraft_read_release_pressure_snapshot(&snapshot_path)
+            .expect("read concurrently written snapshot"),
+        snapshot
+    );
+    let leftover_temp_files = fs::read_dir(&root)
+        .expect("read pressure snapshot dir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+        .count();
+    assert_eq!(leftover_temp_files, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn release_pressure_snapshot_writer_syncs_after_rename_for_release_durability() {
+    let benchmark_source = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("benchmark.rs"),
+    )
+    .expect("read benchmark source");
+
+    let rename = benchmark_source
+        .find("fs::rename(&tmp_path, path)")
+        .expect("snapshot writer should atomically rename temp file into place");
+    let parent_sync = benchmark_source
+        .find("matrixraft_sync_release_pressure_snapshot_parent_dir(parent)?")
+        .expect("snapshot writer should sync parent directory after rename");
+    assert!(
+        rename < parent_sync,
+        "release snapshot artifact name must be synced after rename"
+    );
+    assert!(benchmark_source.contains("#[cfg(unix)]"));
+    assert!(benchmark_source.contains("benchmark:release_pressure_snapshot_parent_sync_failed"));
 }
 
 #[cfg(unix)]
@@ -252,6 +382,30 @@ fn benchmark_artifact_verifier_rejects_path_collision_before_parsing() {
     assert!(stderr.contains("benchmark:artifact_path_collision:report_summary"));
     assert!(!stderr.contains("failed to parse report"));
 
+    let example = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("baseline_raft_parity_verify.rs"),
+    )
+    .expect("read verifier example");
+    assert!(example.contains("benchmark:readiness_verification_requires_input_and_artifact"));
+    assert!(example.contains("benchmark:readiness_labels_require_artifact"));
+    assert!(example.contains("artifact_path_collision(\"readiness_input_artifact\""));
+    assert!(example.contains("artifact_path_collision(\"pressure_snapshot_report\""));
+    assert!(example.contains("artifact_path_collision(\"pressure_snapshot_summary\""));
+    assert!(example.contains("artifact_path_collision(\"pressure_snapshot_scale\""));
+    assert!(example.contains("artifact_path_collision(\"pressure_snapshot_readiness_input\""));
+    assert!(example.contains("\"pressure_snapshot_readiness_artifact\""));
+    assert!(!example.contains("artifact_path_collision(\"report_pressure_snapshot\""));
+    assert!(!example.contains("artifact_path_collision(\"summary_pressure_snapshot\""));
+    assert!(!example.contains("artifact_path_collision(\"scale_pressure_snapshot\""));
+    assert!(!example.contains("artifact_path_collision(\"readiness_input_pressure_snapshot\""));
+    assert!(!example.contains("\"readiness_artifact_pressure_snapshot\""));
+    assert!(example.contains("parse_prometheus_labels"));
+    assert!(example.contains("matrixraft_validate_benchmark_scale_optimization_inputs"));
+    assert!(example
+        .contains("matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact"));
+
     let _ = fs::remove_dir_all(root);
 }
 
@@ -320,6 +474,126 @@ fn benchmark_artifact_verifier_rejects_missing_summary_before_parsing() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("benchmark:artifact_missing:summary"));
+    assert!(!stderr.contains("failed to parse report"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn benchmark_artifact_verifier_rejects_missing_scale_artifact_before_parsing() {
+    let root = temp_dir("missing-scale");
+    fs::create_dir_all(&root).expect("root");
+    let report = root.join("report.json");
+    let summary = root.join("summary.json");
+    let scale = root.join("missing-scale.json");
+    fs::write(&report, "{}").expect("report");
+    fs::write(&summary, "{}").expect("summary");
+
+    let verify_script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("verify_baseline_raft_benchmark_artifacts.sh");
+    let output = Command::new("bash")
+        .arg(verify_script)
+        .arg("--report")
+        .arg(&report)
+        .arg("--summary")
+        .arg(&summary)
+        .arg("--scale")
+        .arg(&scale)
+        .output()
+        .expect("run artifact verifier");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("benchmark:artifact_missing:scale"));
+    assert!(!stderr.contains("failed to parse report"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn benchmark_artifact_verifier_rejects_missing_readiness_artifact_before_parsing() {
+    let root = temp_dir("missing-readiness");
+    fs::create_dir_all(&root).expect("root");
+    let report = root.join("report.json");
+    let summary = root.join("summary.json");
+    let readiness_input = root.join("readiness-input.json");
+    let readiness = root.join("missing-readiness.json");
+    fs::write(&report, "{}").expect("report");
+    fs::write(&summary, "{}").expect("summary");
+    fs::write(&readiness_input, "{}").expect("readiness input");
+
+    let verify_script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("verify_baseline_raft_benchmark_artifacts.sh");
+    let output = Command::new("bash")
+        .arg(verify_script)
+        .arg("--report")
+        .arg(&report)
+        .arg("--summary")
+        .arg(&summary)
+        .arg("--readiness-input")
+        .arg(&readiness_input)
+        .arg("--readiness-artifact")
+        .arg(&readiness)
+        .output()
+        .expect("run artifact verifier");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("benchmark:artifact_missing:readiness"));
+    assert!(!stderr.contains("failed to parse report"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn benchmark_artifact_verifier_rejects_readiness_labels_without_artifact() {
+    let root = temp_dir("readiness-labels-without-artifact");
+    fs::create_dir_all(&root).expect("root");
+    let report = root.join("report.json");
+    let summary = root.join("summary.json");
+    fs::write(&report, "{}").expect("report");
+    fs::write(&summary, "{}").expect("summary");
+
+    let verify_script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("verify_baseline_raft_benchmark_artifacts.sh");
+    let output = Command::new("bash")
+        .arg(verify_script)
+        .arg("--report")
+        .arg(&report)
+        .arg("--summary")
+        .arg(&summary)
+        .arg("--readiness-labels")
+        .arg("service=rustraft-ci")
+        .output()
+        .expect("run artifact verifier");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("benchmark:readiness_labels_require_artifact"));
     assert!(!stderr.contains("failed to parse report"));
 
     let _ = fs::remove_dir_all(root);
@@ -520,8 +794,23 @@ fn baseline_raft_benchmark_script_verifies_successful_artifacts_before_exit() {
     assert!(benchmark_script.contains("if [[ \"$benchmark_status\" -eq 0 ]]; then"));
     assert!(benchmark_script.contains("benchmark:artifact_missing_after_benchmark:report"));
     assert!(benchmark_script.contains("benchmark:artifact_missing_after_benchmark:summary"));
+    assert!(benchmark_script.contains("benchmark:artifact_missing_after_benchmark:scale"));
+    assert!(benchmark_script.contains("benchmark:artifact_missing_after_benchmark:readiness"));
+    assert!(benchmark_script.contains("benchmark:readiness_artifact_requires_input"));
+    assert!(benchmark_script.contains("benchmark:readiness_input_requires_artifact_out"));
     assert!(benchmark_script.contains("verify_baseline_raft_benchmark_artifacts.sh"));
-    assert!(benchmark_script.contains("rm -f -- \"$out_path\" \"$summary_path\""));
+    assert!(benchmark_script.contains("rm -f -- \"$out_path\" \"$summary_path\" \"$scale_path\""));
+    assert!(benchmark_script.contains("rm -f -- \"$readiness_artifact_path\""));
+    assert!(benchmark_script
+        .contains("scale_path=\"${BENCHMARK_SCALE_OUT:-${out_path%.json}.scale.json}\""));
+    assert!(benchmark_script
+        .contains("readiness_input_path=\"${RUSTRAFT_BENCHMARK_READINESS_INPUT:-}\""));
+    assert!(benchmark_script
+        .contains("readiness_artifact_path=\"${RUSTRAFT_BENCHMARK_READINESS_ARTIFACT_OUT:-}\""));
+    assert!(benchmark_script.contains("--scale-out)"));
+    assert!(benchmark_script.contains("--readiness-input)"));
+    assert!(benchmark_script.contains("--readiness-artifact-out)"));
+    assert!(benchmark_script.contains("--readiness-labels)"));
     assert!(benchmark_script.contains("out_dir=\"$(dirname -- \"$out_path\")\""));
     assert!(benchmark_script.contains("out_file=\"$(basename -- \"$out_path\")\""));
     assert!(benchmark_script.contains("tmp_report=\"$(mktemp \"$out_dir/.${out_file}.XXXXXX\")\""));
@@ -535,8 +824,13 @@ fn baseline_raft_benchmark_script_verifies_successful_artifacts_before_exit() {
     assert!(benchmark_script.contains("fsync_parent_dir \"$out_path\""));
     assert!(benchmark_script.contains("fsync_file \"$summary_path\""));
     assert!(benchmark_script.contains("fsync_parent_dir \"$summary_path\""));
+    assert!(benchmark_script.contains("fsync_file \"$scale_path\""));
+    assert!(benchmark_script.contains("fsync_parent_dir \"$scale_path\""));
+    assert!(benchmark_script.contains("fsync_file \"$readiness_artifact_path\""));
+    assert!(benchmark_script.contains("fsync_parent_dir \"$readiness_artifact_path\""));
     assert!(benchmark_script.contains("--report \"$out_path\""));
     assert!(benchmark_script.contains("--summary \"$summary_path\""));
+    assert!(benchmark_script.contains("--scale \"$scale_path\""));
     assert!(benchmark_script.contains(
         "benchmark_max_artifact_age_seconds=\"${RUSTRAFT_BENCHMARK_MAX_ARTIFACT_AGE_SECONDS:-86400}\""
     ));
@@ -567,10 +861,48 @@ fn baseline_raft_benchmark_script_verifies_successful_artifacts_before_exit() {
     assert!(benchmark_script.contains("--node-count)"));
     assert!(benchmark_script.contains("--pass-tolerance-percent)"));
     assert!(benchmark_script.contains("RUSTRAFT_BENCHMARK_NODE_COUNT=\"$benchmark_node_count\""));
+    assert!(benchmark_script.contains("RUSTRAFT_BENCHMARK_SCALE_OUT=\"$scale_path\""));
+    assert!(
+        benchmark_script.contains("RUSTRAFT_BENCHMARK_READINESS_INPUT=\"$readiness_input_path\"")
+    );
+    assert!(benchmark_script
+        .contains("RUSTRAFT_BENCHMARK_READINESS_ARTIFACT_OUT=\"$readiness_artifact_path\""));
+    assert!(benchmark_script.contains("RUSTRAFT_BENCHMARK_READINESS_LABELS=\"$readiness_labels\""));
+    assert!(benchmark_script.contains("RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT"));
+    assert!(benchmark_script.contains("RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT_OUT"));
+    assert!(benchmark_script
+        .contains("pressure_snapshot_out_path=\"${RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT_OUT:-}\""));
+    assert!(benchmark_script.contains("--example baseline_raft_pressure_snapshot"));
+    assert!(benchmark_script.contains("--out \"$pressure_snapshot_out_path\""));
+    assert!(benchmark_script
+        .contains("RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT=\"$pressure_snapshot_path\""));
+    assert!(benchmark_script.contains("pressure_snapshot_path=\"$pressure_snapshot_out_path\""));
+    assert!(benchmark_script
+        .contains("echo \"BaselineRaft-vs-RustRaft pressure snapshot: $pressure_snapshot_path\""));
+    assert!(benchmark_script.contains("benchmark:artifact_path_collision:pressure_snapshot_report"));
+    assert!(
+        benchmark_script.contains("benchmark:artifact_path_collision:pressure_snapshot_summary")
+    );
+    assert!(benchmark_script.contains("benchmark:artifact_path_collision:pressure_snapshot_scale"));
+    assert!(benchmark_script
+        .contains("benchmark:artifact_path_collision:pressure_snapshot_readiness_input"));
+    assert!(benchmark_script
+        .contains("benchmark:artifact_path_collision:pressure_snapshot_readiness_artifact"));
+    assert!(benchmark_script.contains("RUSTRAFT_BENCHMARK_PROCESS_RESIDENT_MEMORY_BYTES"));
+    assert!(benchmark_script.contains("RUSTRAFT_BENCHMARK_APPEND_P99_MS"));
+    assert!(benchmark_script.contains("RUSTRAFT_BENCHMARK_PENDING_READ_INDEX_REQUESTS"));
+    assert!(benchmark_script.contains("RUSTRAFT_BENCHMARK_RUNTIME_TIMER_PENDING_TICKS"));
     assert!(benchmark_script.contains(
         "RUSTRAFT_BENCHMARK_PASS_TOLERANCE_PERCENT=\"$benchmark_pass_tolerance_percent\""
     ));
     assert!(benchmark_script.contains("--max-age-seconds \"$benchmark_max_artifact_age_seconds\""));
+    assert!(benchmark_script.contains("verifier_args=("));
+    assert!(benchmark_script.contains("--readiness-input \"$readiness_input_path\""));
+    assert!(benchmark_script.contains("--readiness-artifact \"$readiness_artifact_path\""));
+    assert!(benchmark_script.contains("--readiness-labels \"$readiness_labels\""));
+    assert!(benchmark_script.contains("--pressure-snapshot \"$pressure_snapshot_path\""));
+    assert!(benchmark_script.contains("--pending-read-index-requests"));
+    assert!(benchmark_script.contains("--runtime-timer-pending-ticks"));
     assert!(benchmark_script.contains("cargo_profile=(--release)"));
     assert!(benchmark_script.contains("build_profile=release"));
     assert!(benchmark_script.contains("verifier_profile_arg=--release"));
@@ -600,14 +932,230 @@ fn benchmark_artifact_verifier_script_rejects_non_file_artifacts() {
 
     assert!(verifier_script.contains("benchmark:artifact_not_file:report"));
     assert!(verifier_script.contains("benchmark:artifact_not_file:summary"));
+    assert!(verifier_script.contains("benchmark:artifact_not_file:scale"));
+    assert!(verifier_script.contains("benchmark:artifact_not_file:readiness_input"));
+    assert!(verifier_script.contains("benchmark:artifact_not_file:readiness"));
+    assert!(verifier_script.contains("benchmark:artifact_not_file:pressure_snapshot"));
+    assert!(verifier_script.contains("benchmark:artifact_missing:pressure_snapshot"));
+    assert!(verifier_script.contains("benchmark:artifact_unreadable:pressure_snapshot"));
     assert!(verifier_script.contains("benchmark:artifact_empty:report"));
     assert!(verifier_script.contains("benchmark:artifact_empty:summary"));
+    assert!(verifier_script.contains("benchmark:artifact_empty:scale"));
+    assert!(verifier_script.contains("benchmark:artifact_empty:readiness_input"));
+    assert!(verifier_script.contains("benchmark:artifact_empty:readiness"));
+    assert!(verifier_script.contains("benchmark:artifact_empty:pressure_snapshot"));
     assert!(verifier_script.contains("benchmark:artifact_path_collision:report_summary"));
+    assert!(verifier_script.contains("benchmark:artifact_path_collision:report_scale"));
+    assert!(verifier_script.contains("benchmark:artifact_path_collision:summary_scale"));
+    assert!(verifier_script.contains("benchmark:artifact_path_collision:readiness_input_artifact"));
+    assert!(verifier_script.contains("benchmark:artifact_path_collision:pressure_snapshot_report"));
+    assert!(verifier_script.contains("benchmark:artifact_path_collision:pressure_snapshot_summary"));
+    assert!(verifier_script.contains("benchmark:artifact_path_collision:pressure_snapshot_scale"));
+    assert!(verifier_script
+        .contains("benchmark:artifact_path_collision:pressure_snapshot_readiness_input"));
+    assert!(verifier_script
+        .contains("benchmark:artifact_path_collision:pressure_snapshot_readiness_artifact"));
+    assert!(
+        verifier_script.contains("benchmark:readiness_verification_requires_input_and_artifact")
+    );
+    assert!(verifier_script.contains("benchmark:readiness_labels_require_artifact"));
+    assert!(verifier_script.contains("benchmark:pressure_snapshot_requires_readiness_artifact"));
     assert!(verifier_script.contains("[[ \"$report_path\" == \"$summary_path\" ]]"));
+    assert!(verifier_script.contains("[[ \"$pressure_snapshot_path\" == \"$report_path\" ]]"));
+    assert!(verifier_script.contains("[[ \"$pressure_snapshot_path\" == \"$summary_path\" ]]"));
+    assert!(verifier_script.contains("[[ \"$pressure_snapshot_path\" == \"$scale_path\" ]]"));
+    assert!(
+        verifier_script.contains("[[ \"$pressure_snapshot_path\" == \"$readiness_input_path\" ]]")
+    );
+    assert!(verifier_script
+        .contains("[[ \"$pressure_snapshot_path\" == \"$readiness_artifact_path\" ]]"));
     assert!(verifier_script.contains("[[ ! -f \"$report_path\" ]]"));
     assert!(verifier_script.contains("[[ ! -f \"$summary_path\" ]]"));
+    assert!(verifier_script.contains("[[ -n \"$scale_path\" && ! -f \"$scale_path\" ]]"));
+    assert!(verifier_script
+        .contains("[[ -n \"$readiness_input_path\" && ! -f \"$readiness_input_path\" ]]"));
+    assert!(verifier_script
+        .contains("[[ -n \"$readiness_artifact_path\" && ! -f \"$readiness_artifact_path\" ]]"));
+    assert!(verifier_script
+        .contains("[[ -n \"$pressure_snapshot_path\" && ! -f \"$pressure_snapshot_path\" ]]"));
+    assert!(verifier_script
+        .contains("[[ -n \"$pressure_snapshot_path\" && ! -e \"$pressure_snapshot_path\" ]]"));
+    assert!(verifier_script
+        .contains("[[ -n \"$pressure_snapshot_path\" && ! -r \"$pressure_snapshot_path\" ]]"));
     assert!(verifier_script.contains("[[ ! -s \"$report_path\" ]]"));
     assert!(verifier_script.contains("[[ ! -s \"$summary_path\" ]]"));
+    assert!(verifier_script.contains("[[ -n \"$scale_path\" && ! -s \"$scale_path\" ]]"));
+    assert!(verifier_script
+        .contains("[[ -n \"$readiness_input_path\" && ! -s \"$readiness_input_path\" ]]"));
+    assert!(verifier_script
+        .contains("[[ -n \"$readiness_artifact_path\" && ! -s \"$readiness_artifact_path\" ]]"));
+    assert!(verifier_script
+        .contains("[[ -n \"$pressure_snapshot_path\" && ! -s \"$pressure_snapshot_path\" ]]"));
+}
+
+#[cfg(unix)]
+#[test]
+fn benchmark_artifact_verifier_requires_readiness_artifact_with_pressure_snapshot_before_cargo_run()
+{
+    let root = temp_dir("pressure-snapshot-without-readiness-artifact");
+    fs::create_dir_all(&root).expect("root");
+    let report = root.join("report.json");
+    let summary = root.join("summary.json");
+    let pressure_snapshot = root.join("pressure-snapshot.json");
+    fs::write(&report, "{}").expect("report");
+    fs::write(&summary, "{}").expect("summary");
+    fs::write(&pressure_snapshot, "{}").expect("pressure snapshot");
+
+    let verify_script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("verify_baseline_raft_benchmark_artifacts.sh");
+    let output = Command::new("bash")
+        .arg(verify_script)
+        .arg("--rustraft-root")
+        .arg(env!("CARGO_MANIFEST_DIR"))
+        .arg("--report")
+        .arg(&report)
+        .arg("--summary")
+        .arg(&summary)
+        .arg("--pressure-snapshot")
+        .arg(&pressure_snapshot)
+        .output()
+        .expect("run artifact verifier");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("benchmark:pressure_snapshot_requires_readiness_artifact"));
+    assert!(!stderr.contains("failed to parse report"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn benchmark_artifact_verifier_preflights_missing_pressure_snapshot_before_cargo_run() {
+    let root = temp_dir("missing-pressure-snapshot");
+    fs::create_dir_all(&root).expect("root");
+    let report = root.join("report.json");
+    let summary = root.join("summary.json");
+    let pressure_snapshot = root.join("missing-pressure-snapshot.json");
+    fs::write(&report, "{}").expect("report");
+    fs::write(&summary, "{}").expect("summary");
+
+    let verify_script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("verify_baseline_raft_benchmark_artifacts.sh");
+    let output = Command::new("bash")
+        .arg(verify_script)
+        .arg("--rustraft-root")
+        .arg(env!("CARGO_MANIFEST_DIR"))
+        .arg("--report")
+        .arg(&report)
+        .arg("--summary")
+        .arg(&summary)
+        .arg("--pressure-snapshot")
+        .arg(&pressure_snapshot)
+        .output()
+        .expect("run artifact verifier");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("benchmark:artifact_missing:pressure_snapshot"));
+    assert!(!stderr.contains("failed to parse report"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn benchmark_artifact_verifier_rejects_pressure_snapshot_path_collision_before_cargo_run() {
+    let root = temp_dir("pressure-snapshot-path-collision");
+    fs::create_dir_all(&root).expect("root");
+    let report = root.join("report.json");
+    let summary = root.join("summary.json");
+    fs::write(&report, "{}").expect("report");
+    fs::write(&summary, "{}").expect("summary");
+
+    let verify_script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("verify_baseline_raft_benchmark_artifacts.sh");
+    let output = Command::new("bash")
+        .arg(verify_script)
+        .arg("--rustraft-root")
+        .arg(env!("CARGO_MANIFEST_DIR"))
+        .arg("--report")
+        .arg(&report)
+        .arg("--summary")
+        .arg(&summary)
+        .arg("--pressure-snapshot")
+        .arg(&report)
+        .output()
+        .expect("run artifact verifier");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("benchmark:artifact_path_collision:pressure_snapshot_report"));
+    assert!(!stderr.contains("failed to parse report"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn benchmark_artifact_verifier_example_uses_canonical_pressure_snapshot_collision_labels() {
+    let root = temp_dir("pressure-snapshot-example-path-collision");
+    fs::create_dir_all(&root).expect("root");
+    let report = root.join("report.json");
+    let summary = root.join("summary.json");
+    fs::write(&report, "{}").expect("report");
+    fs::write(&summary, "{}").expect("summary");
+
+    let output = Command::new("cargo")
+        .arg("run")
+        .arg("--quiet")
+        .arg("--example")
+        .arg("baseline_raft_parity_verify")
+        .arg("--")
+        .arg("--report")
+        .arg(&report)
+        .arg("--summary")
+        .arg(&summary)
+        .arg("--pressure-snapshot")
+        .arg(&report)
+        .output()
+        .expect("run artifact verifier example");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("benchmark:artifact_path_collision:pressure_snapshot_report"));
+    assert!(!stderr.contains("benchmark:artifact_path_collision:report_pressure_snapshot"));
+    assert!(!stderr.contains("benchmark:pressure_snapshot_requires_readiness_artifact"));
+    assert!(!stderr.contains("failed to parse report"));
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -627,6 +1175,67 @@ fn production_benchmark_options_validator_rejects_non_release_scale_inputs() {
     assert!(error.contains("benchmark:batch_size_below_production_min:1:2"));
     assert!(error.contains("benchmark:payload_size_below_production_min:1024:4096"));
     assert!(error.contains("benchmark:invalid_pass_tolerance_percent:10.100"));
+}
+
+#[cfg(unix)]
+#[test]
+fn benchmark_report_derives_scale_rates_and_baseline_backed_targets() {
+    let root = temp_dir("scale-rate-targets");
+    make_fake_baseline_raft_harness(&root);
+    make_fake_git_checkout(&root);
+
+    let options = BenchmarkOptions {
+        iterations_per_workload: 4,
+        batch_size: 2,
+        payload_size_bytes: 4096,
+        pass_tolerance_percent: 10.0,
+        ..Default::default()
+    };
+    let mut baseline_raft =
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
+    let report =
+        matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
+
+    let rates = matrixraft_scale_rate_metrics_from_benchmark_report(&report);
+    let targets = matrixraft_scale_optimization_targets_from_baseline_raft_report(&report);
+
+    assert!(rates.proposal_qps > 0);
+    assert!(rates.append_entries_qps > 0);
+    assert!(rates.read_index_qps > 0);
+    assert!(rates.apply_entries_qps > 0);
+    assert!(rates.replication_mib_per_sec > 0);
+    assert!(rates.apply_mib_per_sec > 0);
+    assert_eq!(targets.min_proposal_qps, 1);
+    assert_eq!(targets.min_append_entries_qps, 1);
+    assert_eq!(targets.min_read_index_qps, 1);
+    assert_eq!(targets.min_apply_entries_qps, 1);
+    assert_eq!(targets.min_replication_mib_per_sec, 1);
+    assert_eq!(targets.min_apply_mib_per_sec, 1);
+    assert!(
+        matrixraft_scale_optimization_hints(&rates, &targets).is_empty(),
+        "same-workload RustRaft rates above BaselineRaft tolerance should not emit scale warnings"
+    );
+    let inputs = matrixraft_scale_optimization_inputs_from_benchmark_report(&report);
+    assert_eq!(inputs.scale_rates, rates);
+    assert_eq!(inputs.scale_targets, targets);
+    assert!(inputs.hints.is_empty());
+    matrixraft_validate_benchmark_scale_optimization_inputs(&inputs, &report)
+        .expect("fresh scale optimization inputs must validate against report");
+    let mut drifted_inputs = inputs.clone();
+    drifted_inputs.scale_rates.proposal_qps += 1;
+    let error = matrixraft_validate_benchmark_scale_optimization_inputs(&drifted_inputs, &report)
+        .expect_err("scale rate drift must fail verifier");
+    assert!(error.contains("benchmark:scale_optimization_rates_mismatch"));
+    let mut zero_target_inputs = inputs.clone();
+    zero_target_inputs.scale_targets.min_read_index_qps = 0;
+    let error =
+        matrixraft_validate_benchmark_scale_optimization_inputs(&zero_target_inputs, &report)
+            .expect_err("zero release-scale target must fail verifier");
+    assert!(error.contains("benchmark:scale_optimization_targets_mismatch"));
+    assert!(error.contains("benchmark:scale_optimization_target_zero:min_read_index_qps"));
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -649,12 +1258,40 @@ fn direct_baseline_raft_benchmark_example_preflights_options_before_harness_look
         "production option preflight must happen before BaselineRaft harness lookup"
     );
     assert!(example.contains("BaselineRaft parity benchmark invalid production options"));
+    assert!(example.contains("matrixraft_scale_optimization_inputs_from_benchmark_report"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_SCALE_OUT"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_READINESS_INPUT"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_READINESS_ARTIFACT_OUT"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_READINESS_LABELS"));
+    assert!(example.contains("ReleasePressureSnapshot"));
+    assert!(example.contains("matrixraft_read_release_pressure_snapshot"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT"));
+    assert!(example.contains("memory_metrics_from_env"));
+    assert!(example.contains("latency_metrics_from_env"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_PROCESS_RESIDENT_MEMORY_BYTES"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_HEAP_ALLOCATED_BYTES"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_APPEND_P99_MS"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_READ_INDEX_P99_MS"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_PENDING_READ_INDEX_REQUESTS"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_PENDING_BOUNDED_STALE_READS"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_RUNTIME_TIMER_PENDING_TICKS"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_RUNTIME_TIMER_MAX_PENDING_TICKS"));
+    assert!(example.contains("RUSTRAFT_BENCHMARK_RUNTIME_TIMER_REJECTED_TICKS"));
+    assert!(example
+        .contains("matrixraft_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"));
+    assert!(example
+        .contains("matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"));
+    assert!(example.contains("matrixraft_release_benchmark_runtime_timer_status()"));
+    assert!(example.contains("ReadBacklogMetrics::zero()"));
+    assert!(example.contains("NodeRuntimeTimerThresholds::default()"));
     assert!(example.contains("write_summary_artifact_atomic"));
+    assert!(example.contains("write_scale_artifact_atomic"));
+    assert!(example.contains("write_json_artifact_atomic"));
     assert!(example.contains("fs::create_dir_all(parent)"));
     assert!(example.contains("File::create(&tmp_path)"));
     assert!(example.contains("tmp_file.write_all"));
     assert!(example.contains("tmp_file.sync_all()"));
-    assert!(example.contains("fs::rename(&tmp_path, summary_out)"));
+    assert!(example.contains("fs::rename(&tmp_path, out)"));
     assert!(example.contains("fs::remove_file(&tmp_path)"));
 }
 
@@ -666,6 +1303,7 @@ fn direct_baseline_raft_benchmark_example_writes_summary_atomically() {
     make_fake_git_checkout(&root);
     let summary_dir = root.join("artifacts");
     let summary_path = summary_dir.join("summary.json");
+    let scale_path = summary_dir.join("scale.json");
 
     let output = Command::new("cargo")
         .arg("run")
@@ -681,6 +1319,7 @@ fn direct_baseline_raft_benchmark_example_writes_summary_atomically() {
         .env("RUSTRAFT_BENCHMARK_BATCH_SIZE", "2")
         .env("RUSTRAFT_BENCHMARK_PAYLOAD_SIZE_BYTES", "4096")
         .env("RUSTRAFT_BENCHMARK_SUMMARY_OUT", &summary_path)
+        .env("RUSTRAFT_BENCHMARK_SCALE_OUT", &scale_path)
         .output()
         .expect("run direct benchmark example");
 
@@ -697,8 +1336,15 @@ fn direct_baseline_raft_benchmark_example_writes_summary_atomically() {
     let summary_json: serde_json::Value = serde_json::from_str(&summary).expect("summary json");
     assert_eq!(
         summary_json["schema"],
-        "rustraft.baseline_raft_benchmark_summary.v1"
+        "matrixraft.baseline_raft_benchmark_summary.v1"
     );
+    let scale = fs::read_to_string(&scale_path).expect("scale artifact");
+    let scale_json: serde_json::Value = serde_json::from_str(&scale).expect("scale json");
+    assert!(scale_json["scale_rates"]["proposal_qps"].as_u64().is_some());
+    assert!(scale_json["scale_targets"]["min_proposal_qps"]
+        .as_u64()
+        .is_some());
+    assert!(scale_json["hints"].as_array().is_some());
     let leftovers = fs::read_dir(&summary_dir)
         .expect("summary dir")
         .filter_map(Result::ok)
@@ -707,6 +1353,10 @@ fn direct_baseline_raft_benchmark_example_writes_summary_atomically() {
                 .file_name()
                 .to_string_lossy()
                 .starts_with(".summary.json.")
+                || entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".scale.json.")
         })
         .collect::<Vec<_>>();
     assert!(
@@ -737,11 +1387,69 @@ fn readme_documents_release_scale_benchmark_contract() {
     assert!(
         readme.contains("--summary-out target/baseline_raft-vs-rustraft-benchmark/summary.json")
     );
+    assert!(readme.contains("--scale-out target/baseline_raft-vs-rustraft-benchmark/scale.json"));
+    assert!(readme.contains("--scale target/baseline_raft-vs-rustraft-benchmark/scale.json"));
+    assert!(readme.contains(
+        "--readiness-input target/baseline_raft-vs-rustraft-benchmark/readiness-input.json"
+    ));
+    assert!(readme.contains(
+        "--readiness-artifact target/baseline_raft-vs-rustraft-benchmark/readiness-artifact.json"
+    ));
+    assert!(readme.contains("--readiness-labels service=rustraft-ci,workload=release-scale"));
+    assert!(readme.contains("rejects scale-rate"));
+    assert!(readme.contains("readiness paths are supplied"));
+    assert!(readme.contains("readiness-report"));
+    assert!(readme.contains("node-runtime timer readiness artifact"));
+    assert!(readme.contains("asserted benchmark/runtime-pressure/read-backlog/node-runtime-timer"));
+    assert!(readme.contains("baseline_raft_pressure_snapshot"));
+    assert!(readme.contains("RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT_OUT"));
+    assert!(readme.contains("single replayable pressure artifact"));
+    assert!(readme.contains("production-clean benchmark gate"));
+    assert!(readme.contains("benchmark-derived scale optimization inputs"));
     assert!(readme.contains("at least 5 nodes"));
     assert!(readme.contains("at least 128 iterations per workload"));
     assert!(readme.contains("payloads must be at least 4096 bytes"));
     assert!(readme.contains("pass tolerance must be finite and no higher than 10%"));
     assert!(readme.contains("scripts/verify_baseline_raft_benchmark_artifacts.sh"));
+}
+
+#[test]
+fn pressure_snapshot_example_captures_replayable_release_pressure_artifact() {
+    let snapshot_example = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("baseline_raft_pressure_snapshot.rs"),
+    )
+    .expect("read pressure snapshot example");
+
+    assert!(snapshot_example.contains("ReleasePressureSnapshot"));
+    assert!(snapshot_example.contains("matrixraft_release_pressure_snapshot_json"));
+    assert!(snapshot_example.contains("matrixraft_write_release_pressure_snapshot_atomic"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT_OUT"));
+    assert!(snapshot_example.contains("matrixraft_release_benchmark_runtime_timer_status"));
+    assert!(snapshot_example.contains("memory_metrics_from_env"));
+    assert!(snapshot_example.contains("memory_thresholds_from_env"));
+    assert!(snapshot_example.contains("latency_metrics_from_env"));
+    assert!(snapshot_example.contains("latency_thresholds_from_env"));
+    assert!(snapshot_example.contains("read_backlog_metrics_from_env"));
+    assert!(snapshot_example.contains("read_backlog_thresholds_from_env"));
+    assert!(snapshot_example.contains("runtime_timer_status_from_env"));
+    assert!(snapshot_example.contains("timer_thresholds_from_env"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_PROCESS_RESIDENT_MEMORY_BYTES"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_HEAP_ALLOCATED_BYTES"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_LOG_CACHE_BYTES"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_SNAPSHOT_BUFFER_BYTES"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_REPLICATION_BUFFER_BYTES"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_APPEND_P99_MS"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_READ_INDEX_P99_MS"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_PENDING_READ_INDEX_REQUESTS"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_PENDING_BOUNDED_STALE_READS"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_RUNTIME_TIMER_PENDING_TICKS"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_RUNTIME_TIMER_MAX_PENDING_TICKS"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_RUNTIME_TIMER_REJECTED_TICKS"));
+    assert!(snapshot_example.contains("RUSTRAFT_BENCHMARK_RUNTIME_TIMER_LAST_ADMISSION_REASON"));
+    assert!(snapshot_example.contains("matrixraft_write_release_pressure_snapshot_atomic"));
+    assert!(snapshot_example.contains("matrixraft_release_pressure_snapshot_json"));
 }
 
 #[test]
@@ -757,8 +1465,64 @@ fn benchmark_artifact_verifier_script_defaults_to_release() {
     assert!(verify_script.contains("--release)"));
     assert!(verify_script.contains("--debug)"));
     assert!(verify_script.contains("cargo_profile=()"));
+    assert!(verify_script.contains("readiness_input_path=\"\""));
+    assert!(verify_script.contains("readiness_artifact_path=\"\""));
+    assert!(verify_script.contains("readiness_labels=\"\""));
+    assert!(verify_script.contains("scale_path=\"\""));
+    assert!(verify_script.contains("--scale)"));
+    assert!(verify_script.contains("--readiness-input)"));
+    assert!(verify_script.contains("--readiness-artifact)"));
+    assert!(verify_script.contains("--readiness-labels)"));
+    assert!(verify_script.contains("--pressure-snapshot)"));
+    assert!(verify_script
+        .contains("pressure_snapshot_path=\"${RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT:-}\""));
+    assert!(verify_script.contains("--pending-read-index-requests)"));
+    assert!(verify_script.contains("--pending-bounded-stale-reads)"));
+    assert!(verify_script.contains("--runtime-timer-pending-ticks)"));
+    assert!(verify_script.contains("--runtime-timer-max-pending-ticks)"));
+    assert!(verify_script.contains("--runtime-timer-rejected-ticks)"));
+    assert!(verify_script.contains("verifier_args=("));
+    assert!(verify_script.contains("verifier_args+=(--scale \"$scale_path\")"));
+    assert!(verify_script.contains("verifier_args+=(--readiness-input \"$readiness_input_path\")"));
+    assert!(verify_script
+        .contains("verifier_args+=(--readiness-artifact \"$readiness_artifact_path\")"));
+    assert!(verify_script.contains("verifier_args+=(--readiness-labels \"$readiness_labels\")"));
+    assert!(
+        verify_script.contains("verifier_args+=(--pressure-snapshot \"$pressure_snapshot_path\")")
+    );
+    assert!(verify_script.contains(
+        "verifier_args+=(--pending-read-index-requests \"$pending_read_index_requests\")"
+    ));
+    assert!(verify_script.contains(
+        "verifier_args+=(--runtime-timer-pending-ticks \"$runtime_timer_pending_ticks\")"
+    ));
     assert!(verify_script.contains("The verifier runs in release mode by default"));
+    assert!(verify_script
+        .contains("recomputes the asserted benchmark/runtime-pressure readiness artifact"));
+    assert!(verify_script.contains("Memory and latency evidence is read from --pressure-snapshot"));
+    assert!(verify_script.contains("production-clean benchmark gate"));
     assert!(verify_script.contains("\"${cargo_profile[@]}\""));
+
+    let verifier_example = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join("baseline_raft_parity_verify.rs"),
+    )
+    .expect("read verifier example");
+    assert!(verifier_example
+        .contains("matrixraft_validate_asserted_benchmark_runtime_pressure_readiness_artifact_with_read_backlog_and_node_runtime_timer"));
+    assert!(verifier_example.contains("ReleasePressureSnapshot"));
+    assert!(verifier_example.contains("matrixraft_read_release_pressure_snapshot"));
+    assert!(verifier_example.contains("--pressure-snapshot"));
+    assert!(verifier_example.contains("RUSTRAFT_BENCHMARK_PRESSURE_SNAPSHOT"));
+    assert!(verifier_example.contains("memory_metrics_from_env"));
+    assert!(verifier_example.contains("latency_metrics_from_env"));
+    assert!(verifier_example.contains("RUSTRAFT_BENCHMARK_PROCESS_RESIDENT_MEMORY_BYTES"));
+    assert!(verifier_example.contains("RUSTRAFT_BENCHMARK_APPEND_P99_MS"));
+    assert!(verifier_example.contains("read_backlog_metrics_from_inputs"));
+    assert!(verifier_example.contains("RUSTRAFT_BENCHMARK_PENDING_READ_INDEX_REQUESTS"));
+    assert!(verifier_example.contains("RUSTRAFT_BENCHMARK_RUNTIME_TIMER_REJECTED_TICKS"));
+    assert!(verifier_example.contains("matrixraft_release_benchmark_runtime_timer_status()"));
 }
 
 #[cfg(unix)]
@@ -1339,6 +2103,8 @@ cat <<JSON
   "p50_latency_micros": 1000000,
   "p99_latency_micros": 1000000,
   "throughput_ops_per_sec": 1.0,
+  "cpu_utilization_percent": 95.0,
+  "peak_resident_memory_bytes": 1073741824,
   "correctness_passed": true
 }
 JSON
@@ -1414,6 +2180,59 @@ fn real_baseline_raft_runner_uses_external_harness_and_production_sources() {
     let summary = matrixraft_baseline_raft_benchmark_failure_summary(&report);
     assert_eq!(summary.generated_at_unix_ms, report.generated_at_unix_ms);
     matrixraft_assert_production_baseline_raft_summary(&summary).expect("production summary");
+    let benchmark_metric_names = matrixraft_baseline_raft_benchmark_metric_names();
+    assert_eq!(
+        benchmark_metric_names.worst_p99_ratio,
+        "rustraft_baseline_raft_benchmark_worst_p99_ratio"
+    );
+    assert_eq!(
+        benchmark_metric_names.workload_throughput_ratio,
+        "rustraft_baseline_raft_benchmark_workload_throughput_ratio"
+    );
+    assert_eq!(
+        benchmark_metric_names.worst_cpu_ratio,
+        "rustraft_baseline_raft_benchmark_worst_cpu_ratio"
+    );
+    assert_eq!(
+        benchmark_metric_names.workload_peak_resident_memory_ratio,
+        "rustraft_baseline_raft_benchmark_workload_peak_resident_memory_ratio"
+    );
+    let benchmark_prometheus = matrixraft_baseline_raft_benchmark_summary_prometheus(
+        &summary,
+        &[("service", "raft\"a"), ("cluster", "prod\n1")],
+    );
+    assert_eq!(benchmark_prometheus.format, "prometheus_text_v0.0.4");
+    assert_eq!(
+        benchmark_prometheus.metric_count,
+        16 + (summary.workloads.len() as u64 * 6)
+    );
+    assert!(benchmark_prometheus.text.contains(
+        "rustraft_baseline_raft_benchmark_passed{service=\"raft\\\"a\",cluster=\"prod\\n1\"} 1"
+    ));
+    assert!(benchmark_prometheus.text.contains(
+        "rustraft_baseline_raft_benchmark_production_evidence_ready{service=\"raft\\\"a\",cluster=\"prod\\n1\"} 1"
+    ));
+    assert!(benchmark_prometheus.text.contains(
+        "rustraft_baseline_raft_benchmark_generated_at_unix_ms{service=\"raft\\\"a\",cluster=\"prod\\n1\"}"
+    ));
+    assert!(benchmark_prometheus.text.contains(
+        "rustraft_baseline_raft_benchmark_age_ms{service=\"raft\\\"a\",cluster=\"prod\\n1\",freshness_status=\"fresh\"}"
+    ));
+    assert!(benchmark_prometheus.text.contains(
+        "rustraft_baseline_raft_benchmark_fresh{service=\"raft\\\"a\",cluster=\"prod\\n1\",freshness_status=\"fresh\"} 1"
+    ));
+    assert!(benchmark_prometheus.text.contains(
+        "rustraft_baseline_raft_benchmark_freshness_status{service=\"raft\\\"a\",cluster=\"prod\\n1\",freshness_status=\"fresh\"} 1"
+    ));
+    assert!(benchmark_prometheus
+        .text
+        .contains("rustraft_baseline_raft_benchmark_worst_p99_ratio"));
+    assert!(benchmark_prometheus.text.contains(
+        "rustraft_baseline_raft_benchmark_workload_p50_ratio{service=\"raft\\\"a\",cluster=\"prod\\n1\",workload=\"single_key_writes\"}"
+    ));
+    assert!(benchmark_prometheus.text.contains(
+        "rustraft_baseline_raft_benchmark_workload_throughput_ratio{service=\"raft\\\"a\",cluster=\"prod\\n1\",workload=\"read_index_reads\"}"
+    ));
 
     let evidence = matrixraft_baseline_raft_benchmark_evidence(&report);
     assert!(evidence.real_baseline_raft);
@@ -1422,6 +2241,7 @@ fn real_baseline_raft_runner_uses_external_harness_and_production_sources() {
     assert!(evidence.matrixraft_rust_candidate);
     assert!(evidence.correctness_passed);
     assert!(evidence.performance_within_threshold);
+    assert!(evidence.resource_within_threshold);
     assert!(evidence.blockers.is_empty());
     assert!(report.comparisons.iter().all(|comparison| {
         comparison.baseline_raft.engine_source == BenchmarkEngineSource::RealBaselineRaft
@@ -2338,6 +3158,114 @@ fn production_summary_rejects_nonfinite_workload_ratios() {
 
 #[cfg(unix)]
 #[test]
+fn production_summary_rejects_reported_resource_ratio_regression() {
+    let root = temp_dir("summary-resource-ratio-regression");
+    make_fake_baseline_raft_harness(&root);
+    make_fake_git_checkout(&root);
+
+    let options = BenchmarkOptions {
+        iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
+        batch_size: 2,
+        payload_size_bytes: 4096,
+        ..Default::default()
+    };
+    let mut baseline_raft =
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
+    let mut report =
+        matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
+    report.environment_fingerprint =
+        "os=linux;arch=x86_64;target=x86_64-unknown-linux-gnu;debug_assertions=false".to_string();
+    let mut summary = matrixraft_baseline_raft_benchmark_failure_summary(&report);
+    let workload = &mut summary.workloads[0];
+    workload.baseline_raft_cpu_utilization_percent = 40.0;
+    workload.matrixraft_cpu_utilization_percent = 60.0;
+    workload.cpu_ratio = 1.5;
+    workload.passed = false;
+    workload
+        .blockers
+        .push("cpu_ratio_1.500_exceeds_1.100".to_string());
+    summary.passed = false;
+    summary.production_evidence_ready = false;
+    summary.failed_workload_count = 1;
+    summary.performance_blocker_count = 1;
+    summary.worst_cpu_ratio = 1.5;
+    summary.blockers.push(format!(
+        "{}:cpu_ratio_1.500_exceeds_1.100",
+        workload.workload.id()
+    ));
+
+    let summary_error = matrixraft_assert_production_baseline_raft_summary(&summary)
+        .expect_err("reported summary resource regression must not satisfy production parity");
+    assert!(
+        summary_error.contains("benchmark:summary_cpu_regression"),
+        "{summary_error}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn production_benchmark_rejects_reported_resource_ratio_regressions() {
+    let root = temp_dir("resource-ratio-regression");
+    make_fake_baseline_raft_harness(&root);
+    make_fake_git_checkout(&root);
+
+    let options = BenchmarkOptions {
+        iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
+        batch_size: 2,
+        payload_size_bytes: 4096,
+        ..Default::default()
+    };
+    let mut baseline_raft =
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
+    let mut report =
+        matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
+    report.environment_fingerprint =
+        "os=linux;arch=x86_64;target=x86_64-unknown-linux-gnu;debug_assertions=false".to_string();
+
+    let comparison = &mut report.comparisons[0];
+    comparison.baseline_raft.cpu_utilization_percent = 40.0;
+    comparison.rustraft.cpu_utilization_percent = 60.0;
+    comparison.cpu_ratio = 1.5;
+    comparison.baseline_raft.peak_resident_memory_bytes = 512 * 1024 * 1024;
+    comparison.rustraft.peak_resident_memory_bytes = 768 * 1024 * 1024;
+    comparison.peak_resident_memory_ratio = 1.5;
+    comparison.passed = false;
+    comparison
+        .blockers
+        .push("cpu_ratio_1.500_exceeds_1.100".to_string());
+    comparison
+        .blockers
+        .push("peak_resident_memory_ratio_1.500_exceeds_1.100".to_string());
+    report.passed = false;
+
+    let error = matrixraft_assert_production_baseline_raft_parity(&report)
+        .expect_err("reported resource regressions must not satisfy production parity");
+    assert!(error.contains("cpu_ratio_1.500_exceeds_1.100"), "{error}");
+    assert!(
+        error.contains("peak_resident_memory_ratio_1.500_exceeds_1.100"),
+        "{error}"
+    );
+
+    let evidence = matrixraft_baseline_raft_benchmark_evidence(&report);
+    assert!(!evidence.resource_within_threshold);
+    assert!(
+        evidence
+            .performance_blockers
+            .iter()
+            .any(|blocker| blocker.contains("peak_resident_memory_ratio_1.500_exceeds_1.100")),
+        "{:#?}",
+        evidence.performance_blockers
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
 fn production_benchmark_rejects_sample_run_id_pair_mismatch() {
     let root = temp_dir("sample-run-id-pair-mismatch");
     make_fake_baseline_raft_harness(&root);
@@ -2505,6 +3433,120 @@ fn production_benchmark_reports_missing_regression_blocker_from_ratios() {
             .performance_blockers
             .iter()
             .any(|blocker| blocker.contains("benchmark:comparison_missing_p99_regression_blocker")),
+        "{:#?}",
+        evidence.performance_blockers
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn production_benchmark_reports_missing_resource_regression_blockers() {
+    let root = temp_dir("missing-resource-regression-blocker");
+    make_fake_baseline_raft_harness(&root);
+    make_fake_git_checkout(&root);
+
+    let options = BenchmarkOptions {
+        iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
+        batch_size: 2,
+        payload_size_bytes: 4096,
+        ..Default::default()
+    };
+    let mut baseline_raft =
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
+    let mut report =
+        matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
+    report.environment_fingerprint =
+        "os=linux;arch=x86_64;target=x86_64-unknown-linux-gnu;debug_assertions=false".to_string();
+
+    let comparison = &mut report.comparisons[0];
+    comparison.baseline_raft.cpu_utilization_percent = 40.0;
+    comparison.rustraft.cpu_utilization_percent = 60.0;
+    comparison.cpu_ratio = 1.5;
+    comparison.passed = false;
+    comparison.blockers.clear();
+    report.passed = false;
+
+    let error = matrixraft_assert_production_baseline_raft_parity(&report)
+        .expect_err("missing resource regression blocker must not satisfy production parity");
+    assert!(
+        error.contains("benchmark:comparison_missing_cpu_regression_blocker"),
+        "{error}"
+    );
+
+    let evidence = matrixraft_baseline_raft_benchmark_evidence(&report);
+    assert!(!evidence.resource_within_threshold);
+    assert!(
+        evidence
+            .performance_blockers
+            .iter()
+            .any(|blocker| blocker.contains("benchmark:comparison_missing_cpu_regression_blocker")),
+        "{:#?}",
+        evidence.performance_blockers
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn production_benchmark_rejects_incomplete_resource_evidence() {
+    let root = temp_dir("incomplete-resource-evidence");
+    make_fake_baseline_raft_harness(&root);
+    make_fake_git_checkout(&root);
+
+    let options = BenchmarkOptions {
+        iterations_per_workload: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_ITERATIONS_PER_WORKLOAD,
+        batch_size: 2,
+        payload_size_bytes: 4096,
+        ..Default::default()
+    };
+    let mut baseline_raft =
+        ExternalBaselineRaftRunner::from_root(&root, "release").expect("runner");
+    let mut rustraft = RuntimeBenchmarkRunner::new("release");
+    let mut report =
+        matrixraft_run_baseline_raft_parity_benchmark(&mut baseline_raft, &mut rustraft, &options);
+    report.environment_fingerprint =
+        "os=linux;arch=x86_64;target=x86_64-unknown-linux-gnu;debug_assertions=false".to_string();
+
+    let comparison = &mut report.comparisons[0];
+    comparison.baseline_raft.cpu_utilization_percent = 0.0;
+    comparison.baseline_raft.peak_resident_memory_bytes = 0;
+
+    let error = matrixraft_assert_production_baseline_raft_parity(&report)
+        .expect_err("one-sided resource evidence must not satisfy production parity");
+    assert!(
+        error.contains("benchmark:comparison_cpu_resource_missing_baseline_raft"),
+        "{error}"
+    );
+    assert!(
+        error.contains("benchmark:comparison_peak_resident_memory_resource_missing_baseline_raft"),
+        "{error}"
+    );
+
+    let summary = matrixraft_baseline_raft_benchmark_failure_summary(&report);
+    let summary_error = matrixraft_assert_production_baseline_raft_summary(&summary)
+        .expect_err("summary must also reject one-sided resource evidence");
+    assert!(
+        summary_error
+            .contains("benchmark:summary_cpu_resource:single_key_writes_missing_baseline_raft"),
+        "{summary_error}"
+    );
+    assert!(
+        summary_error.contains(
+            "benchmark:summary_peak_resident_memory_resource:single_key_writes_missing_baseline_raft"
+        ),
+        "{summary_error}"
+    );
+
+    let evidence = matrixraft_baseline_raft_benchmark_evidence(&report);
+    assert!(!evidence.resource_within_threshold);
+    assert!(
+        evidence.performance_blockers.iter().any(|blocker| {
+            blocker.contains("benchmark:comparison_cpu_resource_missing_baseline_raft")
+        }),
         "{:#?}",
         evidence.performance_blockers
     );

@@ -3,9 +3,10 @@
 
 use matrixraft::{
     matrixraft_apply_batch_outcome, matrixraft_peer_pipeline_status_from_observed,
-    AppendEntriesResponse, ApplyBatchStatus, LogEntry, LogId, ObservedPeerPipeline, Peer,
-    PipelineLimits, ProgressState, RaftCluster, ReplicaRole, ReplicationPipeline, SnapshotState,
-    StateRole,
+    matrixraft_replication_pipeline_evidence_artifact,
+    matrixraft_validate_replication_pipeline_evidence_artifact, AppendEntriesResponse,
+    ApplyBatchStatus, LogEntry, LogId, ObservedPeerPipeline, Peer, PipelineLimits, ProgressState,
+    RaftCluster, ReplicaRole, ReplicationPipeline, SnapshotState, StateRole,
 };
 
 fn entry(index: u64, payload: &[u8]) -> LogEntry {
@@ -64,6 +65,7 @@ fn observed_peer_pipeline_converts_into_full_status_surface() {
         reorder_queue_depth: 4,
         out_of_order_append_rejections: 2,
         reorder_entries_rejected: 3,
+        reorder_entries_converged: 6,
         reorder_entry_timeouts: 4,
         reorder_dropped_packages: 5,
         stale_term_rejections: 6,
@@ -105,6 +107,7 @@ fn observed_peer_pipeline_converts_into_full_status_surface() {
     assert!(status.learner_caught_up);
     assert!(status.witness_quorum_reached);
     assert_eq!(status.reorder_dropped_packages, 5);
+    assert_eq!(status.reorder_entries_converged, 6);
     assert_eq!(status.stale_term_rejections, 6);
     assert_eq!(status.packet_loss_events, 7);
     assert_eq!(status.network_error_probe_transitions, 2);
@@ -623,6 +626,7 @@ fn replication_pipeline_drains_and_expires_reorder_queue() {
         .expect("drain through queued three");
     assert_eq!(pipeline.status().match_index, 3);
     assert_eq!(pipeline.status().reorder_queue_depth, 0);
+    assert_eq!(pipeline.status().reorder_entries_converged, 1);
 
     pipeline
         .receive_out_of_order(&entry(5, b"five"))
@@ -805,6 +809,74 @@ fn raft_cluster_network_error_immediately_probes_replicating_peer() {
         cluster.status(1).expect("leader").last_log_index
     );
     assert_eq!(after.inflight_entries, 0);
+}
+
+#[test]
+fn raft_cluster_pipeline_evidence_proves_same_peer_packet_loss_reorder_recovery() {
+    let mut cluster = RaftCluster::new(288, Default::default(), vec![peer(1), peer(2), peer(3)])
+        .expect("cluster");
+    cluster.start().expect("start");
+    cluster.propose(b"warmup".to_vec()).expect("warmup");
+
+    cluster.set_node_healthy(2, false).expect("isolate peer");
+    cluster
+        .propose(b"missed-during-loss".to_vec())
+        .expect("write during packet loss");
+    cluster.set_node_healthy(2, true).expect("heal peer");
+    cluster
+        .record_network_error_for(2)
+        .expect("network error moves peer to probe and catches up");
+
+    let next = cluster
+        .peer_pipeline_status(2)
+        .expect("after loss")
+        .next_index;
+    cluster
+        .receive_out_of_order_append_for(2, entry(next + 1, b"future"))
+        .expect("queue out-of-order append on same peer");
+    assert_eq!(
+        cluster
+            .peer_pipeline_status(2)
+            .expect("queued reorder")
+            .reorder_queue_depth,
+        1
+    );
+    cluster
+        .receive_out_of_order_append_for(2, entry(next, b"gap"))
+        .expect("fill gap and drain same peer reorder queue");
+
+    let recovered = cluster.peer_pipeline_status(2).expect("recovered peer");
+    assert!(recovered.packet_loss_events > 0);
+    assert!(recovered.network_error_probe_transitions > 0);
+    assert_eq!(recovered.reorder_queue_depth, 0);
+    assert!(recovered.reorder_entries_converged > 0);
+    assert!(recovered.match_index.saturating_add(1) >= recovered.next_index);
+
+    let artifact = matrixraft_replication_pipeline_evidence_artifact(
+        cluster.peer_pipeline_statuses(),
+        PipelineLimits::default(),
+    );
+    let validation = matrixraft_validate_replication_pipeline_evidence_artifact(&artifact);
+
+    assert!(artifact.evidence.packet_loss_probe_present);
+    assert!(artifact.evidence.packet_loss_recovery_present);
+    assert!(artifact.evidence.reorder_convergence_present);
+    assert!(artifact.evidence.packet_loss_reorder_same_peer_recovered);
+    assert_eq!(artifact.evidence.packet_loss_reorder_faulted_peer_count, 1);
+    assert_eq!(
+        artifact.evidence.packet_loss_reorder_recovered_peer_count,
+        1
+    );
+    assert!(
+        artifact
+            .evidence
+            .packet_loss_reorder_all_faulted_peers_recovered
+    );
+    assert!(validation.packet_loss_reorder_same_peer_recovered);
+    assert!(validation.packet_loss_reorder_all_faulted_peers_recovered);
+    assert!(!validation
+        .missing
+        .contains(&"packet_loss_reorder_same_peer_recovered".to_string()));
 }
 
 #[test]

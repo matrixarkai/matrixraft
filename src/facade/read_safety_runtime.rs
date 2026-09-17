@@ -127,6 +127,8 @@ pub struct ReadSafetyEvidenceArtifact {
 pub struct ReadSafetyEvidenceValidationReport {
     pub valid: bool,
     pub schema_valid: bool,
+    #[serde(default)]
+    pub canonical_scenarios_match: bool,
     pub stale_leader_lease_rejected: bool,
     pub lagging_follower_read_rejected: bool,
     pub stale_follower_write_rejected: bool,
@@ -169,6 +171,8 @@ pub struct MembershipSemanticsEvidenceArtifact {
 pub struct MembershipSemanticsEvidenceValidationReport {
     pub valid: bool,
     pub schema_valid: bool,
+    #[serde(default)]
+    pub canonical_scenarios_match: bool,
     pub learner_added: bool,
     pub learner_caught_up: bool,
     pub learner_promoted: bool,

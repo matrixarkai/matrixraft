@@ -108,3 +108,171 @@ fn channel_selector_group_count_drives_channel_overflow() {
         .try_send_to_channel(Arc::clone(&channel), MailPriority::Normal, 4)
         .is_err());
 }
+
+#[test]
+fn channel_selector_checked_api_preserves_overflow_and_selection_contract() {
+    let selector = ChannelSelector::new();
+    let channel = MailChannel::new(7, 1);
+
+    selector
+        .send_global_checked("global")
+        .expect("checked global send");
+    assert!(selector
+        .try_send_to_channel_checked(Arc::clone(&channel), MailPriority::Normal, "one")
+        .expect("checked send")
+        .is_ok());
+
+    let selection = selector
+        .select_checked(
+            ChannelSelectorPolicy {
+                limit: 1,
+                timeout_ms: 0,
+            },
+            &[],
+        )
+        .expect("checked select");
+    assert_eq!(selection.global_mails, vec!["global"]);
+    assert_eq!(selection.channels[0].replica_id(), 7);
+    assert_eq!(
+        selection.channels[0]
+            .fetch_checked(&selector)
+            .expect("checked fetch"),
+        vec!["one"]
+    );
+    assert_eq!(
+        channel
+            .selector_total_mail_count_checked()
+            .expect("checked selector count"),
+        1
+    );
+
+    channel
+        .send_checked(MailPriority::Normal, "two")
+        .expect("checked unbounded send two");
+    channel
+        .send_checked(MailPriority::Normal, "three")
+        .expect("checked unbounded send three");
+    assert!(selector
+        .fire_checked(Arc::clone(&channel))
+        .expect("checked fire"));
+    let selection = selector
+        .select_checked(
+            ChannelSelectorPolicy {
+                limit: 1,
+                timeout_ms: 0,
+            },
+            &[],
+        )
+        .expect("checked select two");
+    assert_eq!(
+        selection.channels[0]
+            .fetch_checked(&selector)
+            .expect("checked fetch two and three"),
+        vec!["two", "three"]
+    );
+    assert!(selector
+        .try_send_to_channel_checked(Arc::clone(&channel), MailPriority::Normal, "four")
+        .expect("checked overflow")
+        .is_err());
+    let stats = channel
+        .pressure_stats_checked()
+        .expect("checked pressure stats");
+    assert_eq!(stats.replica_id, 7);
+    assert_eq!(stats.num_mail_limit, 1);
+    assert_eq!(stats.queued_len, 0);
+    assert_eq!(stats.max_depth, 2);
+    assert_eq!(stats.rejected_send_count, 1);
+    assert_eq!(channel.queued_len_checked().expect("checked queued len"), 0);
+}
+
+#[test]
+fn mail_channel_checked_batch_send_rejects_oversized_bursts_before_queueing() {
+    let selector = ChannelSelector::new();
+    let channel = MailChannel::new(8, 2);
+
+    assert!(channel
+        .try_send_many_checked(MailPriority::Normal, vec!["one", "two", "three"])
+        .expect("checked oversized burst")
+        .is_err());
+    assert_eq!(channel.queued_len_checked().expect("checked queued len"), 0);
+
+    assert!(channel
+        .try_send_many_checked(MailPriority::Normal, vec!["two", "three"])
+        .expect("checked burst send")
+        .is_ok());
+    let stats = channel
+        .pressure_stats_checked()
+        .expect("checked pressure stats");
+    assert_eq!(stats.replica_id, 8);
+    assert_eq!(stats.num_mail_limit, 2);
+    assert_eq!(stats.queued_len, 2);
+    assert_eq!(stats.max_depth, 2);
+    assert_eq!(stats.rejected_send_count, 3);
+    assert!(selector
+        .fire_checked(Arc::clone(&channel))
+        .expect("checked fire"));
+    let selection = selector
+        .select_checked(
+            ChannelSelectorPolicy {
+                limit: 1,
+                timeout_ms: 0,
+            },
+            &[],
+        )
+        .expect("checked select two");
+    assert_eq!(
+        selection.channels[0]
+            .fetch_checked(&selector)
+            .expect("checked fetch burst"),
+        vec!["two", "three"]
+    );
+    assert_eq!(channel.queued_len_checked().expect("checked queued len"), 0);
+}
+
+#[test]
+fn channel_selector_checked_batch_send_fires_only_bounded_batches() {
+    let selector = ChannelSelector::new();
+    let channel = MailChannel::new(9, 2);
+
+    assert!(selector
+        .try_send_many_to_channel_checked(
+            Arc::clone(&channel),
+            MailPriority::Normal,
+            vec!["one", "two", "three"],
+        )
+        .expect("checked oversized selector burst")
+        .is_err());
+    assert_eq!(channel.queued_len_checked().expect("checked queued len"), 0);
+    assert_eq!(
+        selector
+            .active_channel_count_checked()
+            .expect("checked active count"),
+        0
+    );
+
+    assert!(selector
+        .try_send_many_to_channel_checked(
+            Arc::clone(&channel),
+            MailPriority::Normal,
+            vec!["one", "two"],
+        )
+        .expect("checked selector batch send")
+        .is_ok());
+
+    let selection = selector
+        .select_checked(
+            ChannelSelectorPolicy {
+                limit: 1,
+                timeout_ms: 0,
+            },
+            &[],
+        )
+        .expect("checked select");
+    assert_eq!(selection.channels[0].replica_id(), 9);
+    assert_eq!(
+        selection.channels[0]
+            .fetch_checked(&selector)
+            .expect("checked fetch"),
+        vec!["one", "two"]
+    );
+}

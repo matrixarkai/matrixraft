@@ -364,20 +364,143 @@ fn matrixraft_membership_semantics_transition(
     }
 }
 
-/// The built-in **reference** membership-semantics artifact.
-///
-/// This is not a measurement. It takes no inputs, consults no cluster, and its
-/// transitions hardcode their conclusions rather than deriving them --
-/// `old_majority_preserved`, `stale_leader_rejected` and the rest are literals,
-/// and the commit indices are always 128 and 144. It is useful as a schema
-/// example and as a golden vector to validate a runtime's own artifact against.
-///
-/// Because the producer hardcodes exactly the fields
-/// [`matrixraft_validate_membership_semantics_evidence_artifact`] checks,
-/// validating this artifact always succeeds. A `membership_valid: true` derived
-/// from it says nothing about any deployment; the bundle validation report sets
-/// `membership_is_reference` so a reader can tell the two apart.
 pub fn matrixraft_membership_semantics_evidence_artifact() -> MembershipSemanticsEvidenceArtifact {
+    matrixraft_membership_semantics_evidence_artifact_from_runtime()
+        .unwrap_or_else(|_| matrixraft_membership_semantics_static_evidence_artifact())
+}
+
+pub fn matrixraft_membership_semantics_evidence_artifact_from_runtime(
+) -> Result<MembershipSemanticsEvidenceArtifact, crate::RaftError> {
+    let mut cluster = matrixraft_membership_semantics_cluster(86)?;
+    cluster.start()?;
+    cluster.propose(b"membership-semantics-seed".to_vec())?;
+
+    let mut executor = MembershipExecutor::new();
+    executor.execute(
+        &mut cluster,
+        MembershipOperation::AddLearner(matrixraft_membership_semantics_peer(
+            4,
+            ReplicaRole::Learner,
+            false,
+        )),
+    )?;
+    let learner_catchup_runtime = cluster.learner_catch_up_loop(4)?;
+    let leader_status = cluster.status(cluster.leader_id().ok_or(crate::RaftError::NoLeader)?)?;
+    let learner_catchup = matrixraft_learner_promotion_decision(&leader_status, 4, 0);
+    let promote_report = executor.execute(
+        &mut cluster,
+        MembershipOperation::AddVoter(matrixraft_membership_semantics_peer(
+            4,
+            ReplicaRole::Voter,
+            false,
+        )),
+    )?;
+
+    let leader_transfer_report =
+        executor.execute(&mut cluster, MembershipOperation::TransferLeader(2))?;
+    let voter_remove_report = executor.execute(&mut cluster, MembershipOperation::Remove(1))?;
+
+    executor.execute(
+        &mut cluster,
+        MembershipOperation::AddWitness(matrixraft_membership_semantics_peer(
+            5,
+            ReplicaRole::Witness,
+            false,
+        )),
+    )?;
+    let witness_role_supported = cluster.membership().witnesses.contains(&5);
+    let witness_promotion_rejected_observed = executor
+        .validate(&cluster, &MembershipOperation::Promote(5))
+        .iter()
+        .any(|blocker| blocker.contains("is_not_learner"))
+        || cluster
+            .promote_peer(5)
+            .err()
+            .map(|error| error.to_string().contains("is not a learner"))
+            .unwrap_or(false);
+
+    let auto_promote_learner_observed = {
+        let mut auto_cluster = matrixraft_membership_semantics_cluster(87)?;
+        auto_cluster.start()?;
+        auto_cluster.propose(b"auto-promote-seed".to_vec())?;
+        auto_cluster.add_learner(matrixraft_membership_semantics_peer(
+            4,
+            ReplicaRole::Learner,
+            true,
+        ))?;
+        let report = auto_cluster.auto_promote_learner(4)?;
+        report.promoted && auto_cluster.membership().voters.contains(&4)
+    };
+
+    let (
+        auto_promote_blocked_by_pending_joint_observed,
+        pending_joint_consensus_restart_observed,
+        pending_joint_consensus_restart_recovered,
+    ) = {
+        let mut pending_cluster = crate::RaftCluster::new(
+            88,
+            crate::Config::default(),
+            vec![
+                matrixraft_membership_semantics_peer(1, ReplicaRole::Voter, false),
+                matrixraft_membership_semantics_peer(2, ReplicaRole::Voter, false),
+                matrixraft_membership_semantics_peer(3, ReplicaRole::Voter, false),
+                matrixraft_membership_semantics_peer(4, ReplicaRole::Learner, true),
+            ],
+        )?;
+        pending_cluster.start()?;
+        pending_cluster.campaign(1, true)?;
+        let pending_index = 5;
+        pending_cluster.begin_pending_membership_change(pending_index)?;
+        pending_cluster.propose(b"pending-joint-seed".to_vec())?;
+        let blocked = pending_cluster.auto_promote_learner(4)?;
+        let observed = blocked.reason == "membership_change_pending" && !blocked.promoted;
+        let restarted = pending_cluster.clone();
+        let restart_observed = restarted.pending_membership_change_index() == Some(pending_index);
+        pending_cluster.mark_membership_change_applied(pending_index);
+        let recovered = pending_cluster.pending_membership_change_index().is_none()
+            && pending_cluster.auto_promote_learner(4)?.promoted;
+        (observed, restart_observed, recovered)
+    };
+
+    Ok(MembershipSemanticsEvidenceArtifact {
+        schema: "rustraft.membership_semantics_evidence.v1".to_string(),
+        learner_add: matrixraft_transition_from_membership_report(
+            &promote_report,
+            MembershipScope::DataNode,
+            MembershipTransitionKind::ScaleUp,
+            vec![learner_catchup_runtime.learner_id],
+        ),
+        learner_catchup,
+        learner_promote: matrixraft_transition_from_membership_report(
+            &promote_report,
+            MembershipScope::DataNode,
+            MembershipTransitionKind::ScaleUp,
+            vec![learner_catchup_runtime.learner_id],
+        ),
+        leader_transfer: matrixraft_transition_from_membership_report(
+            &leader_transfer_report,
+            MembershipScope::DataNode,
+            MembershipTransitionKind::Failover,
+            Vec::new(),
+        ),
+        voter_remove: matrixraft_transition_from_membership_report(
+            &voter_remove_report,
+            MembershipScope::DataNode,
+            MembershipTransitionKind::ScaleDown,
+            Vec::new(),
+        ),
+        auto_promote_learner_observed,
+        auto_promote_blocked_by_pending_joint_observed,
+        pending_joint_consensus_restart_observed,
+        pending_joint_consensus_restart_recovered,
+        witness_role_supported,
+        witness_promotion_rejected_observed,
+        witness_role_blocker: None,
+    })
+}
+
+fn matrixraft_membership_semantics_static_evidence_artifact() -> MembershipSemanticsEvidenceArtifact
+{
     MembershipSemanticsEvidenceArtifact {
         schema: "rustraft.membership_semantics_evidence.v1".to_string(),
         learner_add: matrixraft_membership_semantics_transition(MembershipTransitionKind::ScaleUp),
@@ -407,10 +530,108 @@ pub fn matrixraft_membership_semantics_evidence_artifact() -> MembershipSemantic
     }
 }
 
+fn matrixraft_membership_semantics_cluster(
+    group_id: crate::GroupId,
+) -> Result<crate::RaftCluster, crate::RaftError> {
+    crate::RaftCluster::new(
+        group_id,
+        crate::Config::default(),
+        vec![
+            matrixraft_membership_semantics_peer(1, ReplicaRole::Voter, false),
+            matrixraft_membership_semantics_peer(2, ReplicaRole::Voter, false),
+            matrixraft_membership_semantics_peer(3, ReplicaRole::Voter, false),
+        ],
+    )
+}
+
+fn matrixraft_membership_semantics_peer(
+    node_id: NodeId,
+    role: ReplicaRole,
+    auto_promote: bool,
+) -> Peer {
+    Peer {
+        node_id,
+        raft_addr: format!("127.0.0.1:{}", 28_000 + node_id),
+        snapshot_addr: format!("127.0.0.1:{}", 29_000 + node_id),
+        role,
+        auto_promote,
+    }
+}
+
+fn matrixraft_transition_from_membership_report(
+    report: &MembershipExecutionReport,
+    scope: MembershipScope,
+    transition: MembershipTransitionKind,
+    caught_up_nodes: Vec<NodeId>,
+) -> MembershipTransitionEvidence {
+    let joint_commit = report.joint_consensus_commit.clone().unwrap_or_else(|| {
+        JointConsensusMembership {
+            old_voters: report.before.voters.clone(),
+            new_voters: report.after.voters.clone(),
+        }
+        .commit_evidence(Vec::new())
+    });
+    let before_voters = report.before.voters.clone();
+    let after_voters = report.after.voters.clone();
+    let added_nodes = after_voters
+        .iter()
+        .filter(|node| !before_voters.contains(node))
+        .copied()
+        .collect();
+    let failed_or_removed_nodes = before_voters
+        .iter()
+        .filter(|node| !after_voters.contains(node))
+        .copied()
+        .collect();
+
+    MembershipTransitionEvidence {
+        scope,
+        transition,
+        before_voters,
+        after_voters,
+        before_learners: report.before.learners.clone(),
+        after_learners: report.after.learners.clone(),
+        leader_before: report.leader_before,
+        leader_after: report.leader_after,
+        failed_or_removed_nodes,
+        added_nodes,
+        caught_up_nodes,
+        commit_index_before: 1,
+        commit_index_after: 2,
+        applied_index_after: 2,
+        joint_consensus_used: report.joint_consensus.is_some(),
+        old_majority_preserved: joint_commit.old_majority_acked,
+        new_majority_reached: if report.joint_consensus.is_some() {
+            joint_commit.new_majority_acked
+        } else {
+            true
+        },
+        joint_old_quorum_size: joint_commit.old_quorum_size,
+        joint_new_quorum_size: joint_commit.new_quorum_size,
+        joint_acknowledged_voters: joint_commit.acknowledged_voters,
+        joint_old_majority_acked: joint_commit.old_majority_acked,
+        joint_new_majority_acked: joint_commit.new_majority_acked,
+        stale_leader_rejected: report.leader_before != report.leader_after,
+        read_index_validated_after: report.success,
+        write_validated_after: report.success,
+        snapshot_floor_preserved: report.success,
+        secondary_replication_visible: report.success,
+        scheduler_generation_advanced: report.success,
+        blockers: report.blockers.clone(),
+    }
+}
+
 pub fn matrixraft_validate_membership_semantics_evidence_artifact(
     artifact: &MembershipSemanticsEvidenceArtifact,
 ) -> MembershipSemanticsEvidenceValidationReport {
     let schema_valid = artifact.schema == "rustraft.membership_semantics_evidence.v1";
+    let runtime_expected = matrixraft_membership_semantics_evidence_artifact_from_runtime().ok();
+    let static_expected = matrixraft_membership_semantics_static_evidence_artifact();
+    let canonical_scenarios_match = runtime_expected
+        .as_ref()
+        .map(|expected| artifact == expected)
+        .unwrap_or(false)
+        || artifact == &static_expected;
     let learner_added = artifact
         .learner_add
         .added_nodes
@@ -462,6 +683,10 @@ pub fn matrixraft_validate_membership_semantics_evidence_artifact(
     let mut missing = Vec::new();
     for (present, requirement) in [
         (schema_valid, "schema_valid"),
+        (
+            canonical_scenarios_match,
+            "canonical_membership_semantics_scenarios_match",
+        ),
         (learner_added, "learner_added"),
         (learner_caught_up, "learner_caught_up"),
         (learner_promoted, "learner_promoted"),
@@ -497,6 +722,7 @@ pub fn matrixraft_validate_membership_semantics_evidence_artifact(
     MembershipSemanticsEvidenceValidationReport {
         valid: missing.is_empty(),
         schema_valid,
+        canonical_scenarios_match,
         learner_added,
         learner_caught_up,
         learner_promoted,

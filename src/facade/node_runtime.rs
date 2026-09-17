@@ -4,6 +4,8 @@
 // stoppable node runtime worker and command loop.
 // Split from src/lib.rs to keep the crate facade small and focused.
 
+const TIMER_UTILIZATION_WARN_PERCENT: u64 = 80;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeRuntimeState {
@@ -29,14 +31,186 @@ pub struct NodeRuntimeStatus {
     pub fatal_blocker_report: FatalBlockerReport,
 }
 
+pub fn matrixraft_node_runtime_status_diagnostic_log_entries(
+    status: &NodeRuntimeStatus,
+) -> Vec<DiagnosticLogEntry> {
+    let timer = &status.timer_status;
+    let timer_utilization_percent = matrixraft_runtime_timer_utilization_percent(timer);
+    let mut entries = vec![DiagnosticLogEntry {
+        target: "rustraft.node_runtime.timer".to_string(),
+        severity: if timer.rejected_ticks > 0 {
+            DiagnosticSeverity::Warn
+        } else {
+            DiagnosticSeverity::Info
+        },
+        message: if timer.rejected_ticks > 0 {
+            "tick_backpressure_observed".to_string()
+        } else {
+            "tick_backpressure_clear".to_string()
+        },
+        fields: vec![
+            ("group_id".to_string(), status.group_id.to_string()),
+            ("node_id".to_string(), status.node_id.to_string()),
+            ("state".to_string(), format!("{:?}", status.state)),
+            ("worker_running".to_string(), status.worker_running.to_string()),
+            (
+                "heartbeat_interval_ms".to_string(),
+                timer.heartbeat_interval_ms.to_string(),
+            ),
+            (
+                "election_timeout_ms".to_string(),
+                timer.election_timeout_ms.to_string(),
+            ),
+            ("heartbeat_ticks".to_string(), timer.heartbeat_ticks.to_string()),
+            ("election_ticks".to_string(), timer.election_ticks.to_string()),
+            ("pending_ticks".to_string(), timer.pending_ticks.to_string()),
+            (
+                "max_pending_ticks".to_string(),
+                timer.max_pending_ticks.to_string(),
+            ),
+            ("accepted_ticks".to_string(), timer.accepted_ticks.to_string()),
+            ("rejected_ticks".to_string(), timer.rejected_ticks.to_string()),
+            ("completed_ticks".to_string(), timer.completed_ticks.to_string()),
+            (
+                "last_tick_reason".to_string(),
+                timer.last_tick_reason.clone(),
+            ),
+            (
+                "last_tick_admission_reason".to_string(),
+                timer.last_tick_admission_reason.clone(),
+            ),
+            (
+                "timer_utilization_percent".to_string(),
+                timer_utilization_percent.to_string(),
+            ),
+        ],
+    }];
+    if timer_utilization_percent >= TIMER_UTILIZATION_WARN_PERCENT {
+        entries.push(DiagnosticLogEntry {
+            target: "rustraft.node_runtime.timer".to_string(),
+            severity: DiagnosticSeverity::Warn,
+            message: "tick_queue_near_capacity".to_string(),
+            fields: vec![
+                ("group_id".to_string(), status.group_id.to_string()),
+                ("node_id".to_string(), status.node_id.to_string()),
+                (
+                    "pending_ticks".to_string(),
+                    timer.pending_ticks.to_string(),
+                ),
+                (
+                    "max_pending_ticks".to_string(),
+                    timer.max_pending_ticks.to_string(),
+                ),
+                (
+                    "timer_utilization_percent".to_string(),
+                    timer_utilization_percent.to_string(),
+                ),
+                (
+                    "warn_threshold_percent".to_string(),
+                    TIMER_UTILIZATION_WARN_PERCENT.to_string(),
+                ),
+            ],
+        });
+    }
+    if timer.pending_ticks > 0 {
+        entries.push(DiagnosticLogEntry {
+            target: "rustraft.node_runtime.timer".to_string(),
+            severity: DiagnosticSeverity::Warn,
+            message: "tick_drain_pending".to_string(),
+            fields: vec![
+                ("group_id".to_string(), status.group_id.to_string()),
+                ("node_id".to_string(), status.node_id.to_string()),
+                ("pending_ticks".to_string(), timer.pending_ticks.to_string()),
+                (
+                    "max_pending_ticks".to_string(),
+                    timer.max_pending_ticks.to_string(),
+                ),
+            ],
+        });
+    }
+    entries
+}
+
+pub fn matrixraft_node_runtime_status_diagnostic_json_lines(status: &NodeRuntimeStatus) -> String {
+    matrixraft_node_runtime_status_diagnostic_log_entries(status)
+        .into_iter()
+        .map(|entry| {
+            serde_json::to_string(&entry)
+                .expect("RustRaft node runtime diagnostic entry must serialize")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn matrixraft_node_runtime_status_prometheus(
+    status: &NodeRuntimeStatus,
+    labels: &[(&str, &str)],
+) -> PrometheusMetricSet {
+    let mut text = String::new();
+    let group_id = status.group_id.to_string();
+    let node_id = status.node_id.to_string();
+    let state = format!("{:?}", status.state);
+    let worker_running = status.worker_running.to_string();
+    let mut runtime_labels = labels.to_vec();
+    runtime_labels.push(("group", group_id.as_str()));
+    runtime_labels.push(("node", node_id.as_str()));
+    runtime_labels.push(("state", state.as_str()));
+    runtime_labels.push(("worker_running", worker_running.as_str()));
+    let timer_utilization_percent =
+        matrixraft_runtime_timer_utilization_percent(&status.timer_status);
+
+    for (name, value) in [
+        (
+            "rustraft_node_runtime_timer_pending_ticks",
+            status.timer_status.pending_ticks,
+        ),
+        (
+            "rustraft_node_runtime_timer_max_pending_ticks",
+            status.timer_status.max_pending_ticks,
+        ),
+        (
+            "rustraft_node_runtime_timer_accepted_ticks_total",
+            status.timer_status.accepted_ticks,
+        ),
+        (
+            "rustraft_node_runtime_timer_rejected_ticks_total",
+            status.timer_status.rejected_ticks,
+        ),
+        (
+            "rustraft_node_runtime_timer_completed_ticks_total",
+            status.timer_status.completed_ticks,
+        ),
+        (
+            "rustraft_node_runtime_timer_backpressure",
+            u64::from(status.timer_status.rejected_ticks > 0 || status.timer_status.pending_ticks > 0),
+        ),
+        (
+            "rustraft_node_runtime_timer_utilization_percent",
+            timer_utilization_percent,
+        ),
+    ] {
+        push_prometheus_metric(&mut text, name, &runtime_labels, value);
+    }
+
+    PrometheusMetricSet {
+        format: "prometheus_text_v0.0.4".to_string(),
+        metric_count: 7,
+        text,
+    }
+}
+
+fn matrixraft_runtime_timer_utilization_percent(timer: &RuntimeTimerStatus) -> u64 {
+    timer
+        .pending_ticks
+        .saturating_mul(100)
+        .checked_div(timer.max_pending_ticks)
+        .unwrap_or(0)
+}
+
 enum NodeRuntimeOp {
     Start(mpsc::Sender<Result<(), RaftError>>),
     Stop(mpsc::Sender<Result<(), RaftError>>),
     Status(mpsc::Sender<Result<NodeRuntimeStatus, RaftError>>),
-    TransferLeaderOutcome(
-        NodeId,
-        mpsc::Sender<Result<crate::LeaderTransferOutcome, RaftError>>,
-    ),
     WalLifecycleStatus(mpsc::Sender<Result<WalLifecycleStatus, RaftError>>),
     WalRecoveryReport(mpsc::Sender<Result<Option<WalRecoveryReport>, RaftError>>),
     Step(
@@ -167,46 +341,6 @@ impl NodeRuntime {
                 "unexpected propose result: {other:?}"
             ))),
         }
-    }
-
-    /// Proposes several payloads and persists them together.
-    ///
-    /// A durable append is its fsync and very little else, so proposing one at
-    /// a time caps a node at a few hundred entries per second however fast the
-    /// rest of it is. This applies the whole batch and writes one WAL record
-    /// for it, which is one fsync rather than one each.
-    ///
-    /// Every proposal is durable when this returns and none before, exactly as
-    /// with [`Self::propose`]. Do not acknowledge any of them until it returns.
-    pub fn propose_batch(&self, payloads: Vec<Payload>) -> Result<Vec<LogId>, RaftError> {
-        self.propose_batch_with_options(payloads, ProposeOptions::default())
-    }
-
-    /// [`Self::propose_batch`], with the same options applied to every payload.
-    pub fn propose_batch_with_options(
-        &self,
-        payloads: Vec<Payload>,
-        options: ProposeOptions,
-    ) -> Result<Vec<LogId>, RaftError> {
-        if payloads.is_empty() {
-            return Ok(Vec::new());
-        }
-        let messages: Vec<Message> = payloads
-            .into_iter()
-            .map(|payload| Message::Propose {
-                payload,
-                options: options.clone(),
-            })
-            .collect();
-        self.step_batch(messages)?
-            .into_iter()
-            .map(|result| match result {
-                StepResult::Proposed(log_id) => Ok(log_id),
-                other => Err(RaftError::InvalidRequest(format!(
-                    "unexpected propose result: {other:?}"
-                ))),
-            })
-            .collect()
     }
 
     pub fn step(&self, message: Message) -> Result<StepResult, RaftError> {
@@ -871,26 +1005,6 @@ impl NodeRuntime {
         }
     }
 
-    /// Transfer leadership and report which of the three outcomes occurred.
-    ///
-    /// Prefer this to [`Self::transfer_leader`] when the caller needs to know
-    /// whether leadership actually moved: `transfer_leader` returns `Ok` for an
-    /// ignored request as well as a completed one.
-    pub fn transfer_leader_outcome(
-        &self,
-        target: NodeId,
-    ) -> Result<crate::LeaderTransferOutcome, RaftError> {
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.sender()?
-            .send(NodeRuntimeOp::TransferLeaderOutcome(target, reply_tx))
-            .map_err(|err| {
-                RaftError::Transport(format!(
-                    "failed to transfer leadership through raft node: {err}"
-                ))
-            })?;
-        recv_runtime_reply(reply_rx)?
-    }
-
     pub fn leader_transfer_state(&self) -> Result<Option<LeaderTransferState>, RaftError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.sender()?
@@ -1183,19 +1297,12 @@ fn runtime_step_operation_name(message: &Message) -> &'static str {
     }
 }
 
-/// Applies one message.
-///
-/// `persist_proposal` is false when the caller will persist for a whole batch
-/// of messages instead. A WAL record describes the log as it stands, so one
-/// record covers every proposal applied before it -- and one fsync makes them
-/// all durable, rather than one fsync each.
 fn runtime_step_message(
     cluster: &mut RaftCluster,
     wal: &mut Option<PersistentRaftWal>,
     membership_executor: &mut MembershipExecutor,
     node_id: NodeId,
     message: Message,
-    persist_proposal: bool,
 ) -> Result<StepResult, RaftError> {
     match message {
         Message::Propose { payload, options } => {
@@ -1205,7 +1312,7 @@ fn runtime_step_message(
                 ));
             }
             let log_id = cluster.propose_with_options(payload, options)?;
-            if let Some(wal) = wal.as_mut().filter(|_| persist_proposal) {
+            if let Some(wal) = wal.as_mut() {
                 // Built against what the WAL already holds, so a proposal does
                 // not copy and hash the whole log to write one entry.
                 wal.append_built(|coverage| cluster.wal_record_for_coverage(node_id, coverage))?;
@@ -1270,9 +1377,7 @@ fn raft_node_runtime_loop(
     let mut last_wal_recovery_report = None;
     let mut wal = match PersistentRaftWal::open(PersistentRaftWalOptions {
         dir: PathBuf::from(&options.wal_dir),
-        // See `PersistentRaftWalOptions::new`: this is now just how much the
-        // node holds in memory, and smaller is strictly cheaper.
-        max_records_per_segment: 1_000,
+        max_records_per_segment: 10_000,
         max_segment_bytes: options.config.max_segment_bytes,
         min_keep_segments: options.config.min_keep_segment_num as usize,
         fsync_on_append: true,
@@ -1310,20 +1415,28 @@ fn raft_node_runtime_loop(
     let mut campaign_executions = 0;
     let mut leader_transfer_executions = 0_u64;
     let mut last_tick_reason = "runtime_created".to_string();
+    let mut last_tick_admission_reason = "runtime_created".to_string();
+    let mut tick_backpressure = TickBackpressure::new(1);
     let mut blockers = Vec::<String>::new();
     let mut fatal_blockers = Vec::<String>::new();
     let mut membership_executor = MembershipExecutor::new();
-    // A command drained by proposal coalescing that turned out not to be a
-    // proposal; processed first on the next iteration, untouched.
-    let mut carried_command: Option<NodeRuntimeOp> = None;
     loop {
-        let command = if let Some(command) = carried_command.take() {
-            command
-        } else {
-            match command_rx.recv_timeout(heartbeat_interval) {
+        let command = match command_rx.recv_timeout(heartbeat_interval) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if state == NodeRuntimeState::Running {
+                    let tick_admission = tick_backpressure.admit_tick();
+                    last_tick_admission_reason = tick_admission.reason.clone();
+                    if !tick_admission.accepted {
+                        blockers.push(format!(
+                            "tick_backpressure:{}:{}/{}",
+                            tick_admission.reason,
+                            tick_admission.pending_ticks,
+                            tick_admission.max_pending_ticks
+                        ));
+                        last_tick_reason = "tick_backpressure".to_string();
+                        continue;
+                    }
                     heartbeat_ticks += 1;
                     election_elapsed_ms = election_elapsed_ms.saturating_add(heartbeat_interval_ms);
                     let _ = cluster.tick_leader_lease(heartbeat_interval_ms);
@@ -1438,93 +1551,11 @@ fn raft_node_runtime_loop(
                             cluster.clear_election_responses();
                         }
                     }
+                    let _ = tick_backpressure.complete_tick();
                 }
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        };
-        // Auto group commit. A durable proposal is its fsync and very little
-        // else, so a node answering concurrent proposers one at a time is
-        // capped at a few hundred per second whatever else it does. While one
-        // proposal's fsync runs, the next proposers queue; draining the queued
-        // proposals here applies them together, persists them with one fsync,
-        // and answers each sender individually. A lone proposal takes the
-        // ordinary path below unchanged, and a drained command that turned out
-        // not to be a proposal is carried into the next iteration.
-        let command = match command {
-            NodeRuntimeOp::Step(message @ Message::Propose { .. }, reply)
-                if state == NodeRuntimeState::Running =>
-            {
-                let mut pending = vec![(message, reply)];
-                // Bounded so a saturated queue cannot starve ticks and other
-                // commands indefinitely.
-                while pending.len() < 128 {
-                    match command_rx.try_recv() {
-                        Ok(NodeRuntimeOp::Step(next @ Message::Propose { .. }, next_reply)) => {
-                            pending.push((next, next_reply));
-                        }
-                        Ok(other) => {
-                            carried_command = Some(other);
-                            break;
-                        }
-                        Err(_) => break,
-                    }
-                }
-                if pending.len() == 1 {
-                    let (message, reply) = pending.pop().expect("one pending proposal");
-                    NodeRuntimeOp::Step(message, reply)
-                } else {
-                    let mut results = Vec::with_capacity(pending.len());
-                    let mut replies = Vec::with_capacity(pending.len());
-                    let mut any_applied = false;
-                    for (message, reply) in pending {
-                        let result = runtime_step_message(
-                            &mut cluster,
-                            &mut wal,
-                            &mut membership_executor,
-                            node_id,
-                            message,
-                            false,
-                        );
-                        any_applied |= result.is_ok();
-                        results.push(result);
-                        replies.push(reply);
-                    }
-                    // One record covers every proposal applied above, exactly
-                    // as step_batch persists. Nothing applied means nothing to
-                    // persist.
-                    let persisted: Result<(), RaftError> = if any_applied {
-                        match wal.as_mut() {
-                            Some(wal) => wal
-                                .append_built(|coverage| {
-                                    cluster.wal_record_for_coverage(node_id, coverage)
-                                })
-                                .map(|_| ()),
-                            None => Ok(()),
-                        }
-                    } else {
-                        Ok(())
-                    };
-                    for (result, reply) in results.into_iter().zip(replies) {
-                        // A proposal that applied but did not persist is not
-                        // durable, and must not be acknowledged as if it were.
-                        let result = match (&persisted, result) {
-                            (Err(error), Ok(_)) => Err(error.clone()),
-                            (_, result) => result,
-                        };
-                        let _ = reply.send(record_runtime_result(
-                            "propose",
-                            result,
-                            &mut blockers,
-                            &mut fatal_blockers,
-                            true,
-                        ));
-                    }
-                    continue;
-                }
-            }
-            other => other,
         };
         match command {
             NodeRuntimeOp::Start(reply) => {
@@ -1573,10 +1604,16 @@ fn raft_node_runtime_loop(
                         leader_lease_valid: cluster.leader_lease_valid,
                         heartbeat_ticks,
                         election_ticks,
+                        pending_ticks: tick_backpressure.pending_ticks,
+                        max_pending_ticks: tick_backpressure.max_pending_ticks,
+                        accepted_ticks: tick_backpressure.accepted_ticks,
+                        rejected_ticks: tick_backpressure.rejected_ticks,
+                        completed_ticks: tick_backpressure.completed_ticks,
                         pre_vote_executions,
                         campaign_executions,
                         leader_transfer_executions,
                         last_tick_reason: last_tick_reason.clone(),
+                        last_tick_admission_reason: last_tick_admission_reason.clone(),
                     },
                     peer_runtime: raft_peer_runtime_states(
                         &cluster,
@@ -1645,7 +1682,6 @@ fn raft_node_runtime_loop(
                     &mut membership_executor,
                     node_id,
                     message,
-                    true,
                 );
                 if result
                     .as_ref()
@@ -1691,14 +1727,7 @@ fn raft_node_runtime_loop(
                     })
                     .count() as u64;
                 campaign_executions = campaign_executions.saturating_add(campaign_message_count);
-                // A WAL record describes the log as it stands, so one record
-                // covers every proposal in the batch. Persisting per proposal
-                // made a batch of N cost N fsyncs, and an fsync is essentially
-                // the whole cost of a durable append.
-                let batch_has_proposal = messages
-                    .iter()
-                    .any(|message| matches!(message, Message::Propose { .. }));
-                let stepped: Result<Vec<StepResult>, RaftError> = messages
+                let result: Result<Vec<StepResult>, RaftError> = messages
                     .into_iter()
                     .map(|message| {
                         runtime_step_message(
@@ -1707,29 +1736,9 @@ fn raft_node_runtime_loop(
                             &mut membership_executor,
                             node_id,
                             message,
-                            false,
                         )
                     })
                     .collect();
-                // Persisted even when a message failed, so what is on disk
-                // still describes what the node applied.
-                let persisted = if batch_has_proposal {
-                    match wal.as_mut() {
-                        Some(wal) => wal
-                            .append_built(|coverage| {
-                                cluster.wal_record_for_coverage(node_id, coverage)
-                            })
-                            .map(|_| ()),
-                        None => Ok(()),
-                    }
-                } else {
-                    Ok(())
-                };
-                let result: Result<Vec<StepResult>, RaftError> = match (stepped, persisted) {
-                    (Ok(results), Ok(())) => Ok(results),
-                    (Err(error), _) => Err(error),
-                    (Ok(_), Err(error)) => Err(error),
-                };
                 let _ = reply.send(record_runtime_result(
                     "step_batch",
                     result,
@@ -1830,12 +1839,6 @@ fn raft_node_runtime_loop(
             NodeRuntimeOp::LeaderTransferState(reply) => {
                 let _ = reply.send(Ok(cluster.leader_transfer_state()));
             }
-            NodeRuntimeOp::TransferLeaderOutcome(target, reply) => {
-                // Performed and classified inside the runtime thread, so the
-                // outcome cannot be invalidated between doing the transfer and
-                // observing it.
-                let _ = reply.send(cluster.transfer_leader_outcome(target));
-            }
             NodeRuntimeOp::Shutdown(reply) => {
                 let result = cluster.stop();
                 let _ = reply.send(record_runtime_result(
@@ -1925,10 +1928,6 @@ fn respond_runtime_error(command: NodeRuntimeOp, error: RaftError) -> bool {
             let _ = reply.send(Err(error));
             false
         }
-        NodeRuntimeOp::TransferLeaderOutcome(_, reply) => {
-            let _ = reply.send(Err(error));
-            false
-        }
         NodeRuntimeOp::Shutdown(reply) => {
             let _ = reply.send(Err(error));
             true
@@ -1985,4 +1984,3 @@ fn recv_runtime_reply<T>(reply_rx: mpsc::Receiver<T>) -> Result<T, RaftError> {
         .recv_timeout(Duration::from_secs(5))
         .map_err(|err| RaftError::Transport(format!("raft node runtime did not reply: {err}")))
 }
-
