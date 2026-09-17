@@ -9,12 +9,26 @@
 # clippy, MSRV, licence and coverage, which is exactly what happened once.
 set -uo pipefail
 
-files=$(git ls-files)
-if [ -z "$files" ]; then
+root=$(git rev-parse --show-toplevel)
+# This file lists the names it bans, so it matches itself. Exclude it by the
+# path it actually has rather than a hard-coded string, so renaming it cannot
+# quietly turn the exclusion into a no-op that scans nothing away.
+self=$(realpath --relative-to="$root" "${BASH_SOURCE[0]}")
+
+all_files=$(git ls-files)
+if [ -z "$all_files" ]; then
   echo "no tracked files to scan"
   exit 1          # an empty scan must not read as a clean one
 fi
-echo "scanning $(echo "$files" | wc -l) tracked files"
+files=$(echo "$all_files" | grep -vxF "$self")
+
+total=$(echo "$all_files" | wc -l)
+scanned=$(echo "$files" | wc -l)
+if [ "$((total - scanned))" -ne 1 ]; then
+  echo "expected to exclude exactly this script ($self), excluded $((total - scanned))"
+  exit 1          # a broken exclusion is a broken check, not a passing one
+fi
+echo "scanning $scanned tracked files (excluding $self)"
 
 status=0
 report() {
