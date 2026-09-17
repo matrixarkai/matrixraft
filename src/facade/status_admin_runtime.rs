@@ -464,7 +464,7 @@ fn require_public_api_contract_validation(
         blockers.push(format!("public_api:{blocker}"));
     }
     actions.push(
-        "fix RustRaft public API canonical names and TiKV/ByteRaft mappings before production rollout"
+        "fix RustRaft public API canonical names and TiKV mappings before production rollout"
             .to_string(),
     );
 }
