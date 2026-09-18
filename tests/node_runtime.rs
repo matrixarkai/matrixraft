@@ -10,7 +10,7 @@ use matrixraft::{
 };
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn peer(node_id: u64) -> Peer {
     Peer {
@@ -2291,4 +2291,51 @@ fn concurrent_proposers_share_fsyncs_without_opting_in() {
 
     let mut runtime = Arc::into_inner(runtime).expect("all workers joined");
     runtime.stop().expect("stop");
+}
+
+#[test]
+fn a_busy_node_still_ticks() {
+    // The heartbeat, the leader lease and the election clock all hang off the
+    // runtime's tick. If a steady stream of commands can hold the tick off,
+    // then a node under load stops heartbeating, its peers' liveness is never
+    // checked and its lease never expires -- exactly when those matter most.
+    // So: send commands faster than the heartbeat interval and require that
+    // the tick still advances.
+    let options = timer_node_options(); // 10ms heartbeat
+    let mut runtime = NodeRuntime::create(options).expect("create runtime");
+    runtime.start().expect("start runtime");
+
+    let before = runtime
+        .status()
+        .expect("status")
+        .timer_status
+        .heartbeat_ticks;
+
+    let load_for = Duration::from_millis(600);
+    let deadline = Instant::now() + load_for;
+    let mut sent = 0_u64;
+    while Instant::now() < deadline {
+        runtime
+            .propose(format!("busy-{sent}").into_bytes())
+            .expect("propose under load");
+        sent += 1;
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let after = runtime
+        .status()
+        .expect("status")
+        .timer_status
+        .heartbeat_ticks;
+
+    // The load has to be real, or the test proves nothing about being busy.
+    assert!(
+        sent > 100,
+        "the load loop was not busy enough to test anything: {sent} commands in {load_for:?}"
+    );
+    println!("TICKPROBE sent={sent} before={before} after={after}");
+    assert!(
+        after > before,
+        "a node taking commands faster than its heartbeat interval never ticked:          {sent} commands over {load_for:?} at a 10ms interval left heartbeat_ticks          at {after} (was {before})"
+    );
 }
