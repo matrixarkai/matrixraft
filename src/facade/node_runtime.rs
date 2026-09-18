@@ -1316,13 +1316,33 @@ fn raft_node_runtime_loop(
     // A command drained by proposal coalescing that turned out not to be a
     // proposal; processed first on the next iteration, untouched.
     let mut carried_command: Option<NodeRuntimeOp> = None;
+    // When the next tick is due. The loop waits for what is left of the
+    // interval rather than starting a fresh one per receive, so arriving
+    // commands cannot hold the tick off indefinitely.
+    let mut next_tick = Instant::now() + heartbeat_interval;
     loop {
         let command = if let Some(command) = carried_command.take() {
             command
         } else {
-            match command_rx.recv_timeout(heartbeat_interval) {
+            // An elapsed deadline counts as a tick even when commands are
+            // queued. Waiting on the channel here instead would let a steady
+            // stream of commands restart the wait forever, and the heartbeat,
+            // the peer liveness check, the leader lease and the election clock
+            // all hang off this tick -- so a busy node would quietly stop
+            // doing all four.
+            let now = Instant::now();
+            let received = if now >= next_tick {
+                Err(mpsc::RecvTimeoutError::Timeout)
+            } else {
+                command_rx.recv_timeout(next_tick - now)
+            };
+            match received {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Set from now rather than by adding an interval, so a loop
+                // that fell behind ticks once and resynchronises instead of
+                // firing a burst of catch-up heartbeats.
+                next_tick = Instant::now() + heartbeat_interval;
                 if state == NodeRuntimeState::Running {
                     heartbeat_ticks += 1;
                     election_elapsed_ms = election_elapsed_ms.saturating_add(heartbeat_interval_ms);
