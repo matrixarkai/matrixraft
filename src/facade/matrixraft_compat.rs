@@ -3106,6 +3106,15 @@ impl MatrixRaftNode {
             && term.is_none_or(|term| term == status.term))
     }
 
+    /// The runtime's own view of this node: state, timers, WAL and peers.
+    ///
+    /// A server hosting many groups otherwise has no way to ask one of them how
+    /// it is doing -- the wiring record says what was configured, not what the
+    /// thread is running with.
+    pub fn runtime_status(&self) -> Result<NodeRuntimeStatus, RaftError> {
+        self.runtime.status()
+    }
+
     pub fn group_id(&self) -> GroupId {
         self.runtime.group_id()
     }
@@ -17468,10 +17477,20 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn create_node_with_creator_index(
         &mut self,
-        options: MatrixRaftOptions,
+        mut options: MatrixRaftOptions,
         start_index: LogIndex,
         creator_index: usize,
     ) -> Result<(), RaftError> {
+        // A group that says nothing about its tick takes the server's. Without
+        // this the context's tick interval is recorded and never reaches a
+        // node, and a zero is not an error either: `to_raft_config` does
+        // `tick_interval_ms.max(1)`, so it becomes a 1 ms heartbeat and an
+        // election timeout of `election_cycle_tick` milliseconds. A host that
+        // sets the interval once on the server should not have to repeat it in
+        // every group's options.
+        if options.tick_interval_ms == 0 {
+            options.tick_interval_ms = self.context.tick_interval_ms.max(1);
+        }
         let key = MatrixRaftRouteKey::new(options.group_id, options.peer_id);
         if self.nodes.contains_key(&key) {
             return Err(RaftError::InvalidRequest(format!(

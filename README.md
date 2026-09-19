@@ -292,6 +292,31 @@ Run it on your own hardware rather than taking these numbers:
 cargo run --release --example group_scaling -- 1024
 ```
 
+### One setting the server does apply: the tick
+
+`MatrixRaftGroupContextBuilder::tick_interval` sets a heartbeat interval for the
+whole server, and a group created through the server that leaves
+`tick_interval_ms` at zero takes it:
+
+```rust
+let context = MatrixRaftGroupContextBuilder::new()
+    .transport(transport)
+    .tick_interval(250)
+    .build()?;
+let mut server = MatrixRaftMultiRaftServer::new(context);
+
+options.tick_interval_ms = 0;     // says nothing, so it inherits 250ms
+server.create_node(options, 0)?;
+```
+
+A group that sets its own interval keeps it — the server's value is a default,
+not an override. Ask a running group what it ended up with through
+`server.node(group_id, node_id)?.runtime_status()?.timer_status`.
+
+Zero used to mean something worse than "unset": `to_raft_config` applies
+`tick_interval_ms.max(1)`, so a group that named no tick ran a **1 ms**
+heartbeat with an election timeout of `election_cycle_tick` milliseconds.
+
 ### Settings this crate records but does not act on
 
 `MatrixRaftGroupContext` and `MatrixRaftRuntimeWiring` carry the pool and
