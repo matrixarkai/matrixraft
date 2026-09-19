@@ -1,6 +1,6 @@
 # MatrixRaft
 
-[![CI](https://github.com/bjmeetsfo/MatrixRaft/actions/workflows/ci.yml/badge.svg)](https://github.com/bjmeetsfo/MatrixRaft/actions/workflows/ci.yml)
+[![CI](https://github.com/matrixarkai/matrixraft/actions/workflows/ci.yml/badge.svg)](https://github.com/matrixarkai/matrixraft/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.82-blue.svg)](Cargo.toml)
 
