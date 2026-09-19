@@ -58,9 +58,14 @@ fn node_options_in(base_dir: PathBuf) -> NodeOptions {
     }
 }
 
+/// The heartbeat interval `timer_node_options` runs at. Named because the tick
+/// tests assert against it, and a number repeated in a comment, a config field
+/// and an assertion message goes stale in one place at a time.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
+
 fn timer_node_options() -> NodeOptions {
     let mut options = node_options_in(temp_runtime_dir("timer"));
-    options.config.heartbeat_interval_ms = 10;
+    options.config.heartbeat_interval_ms = HEARTBEAT_INTERVAL.as_millis() as u64;
     options.config.election_timeout_ms = 50;
     options.config.leader_lease_ms = 20;
     options
@@ -2301,7 +2306,7 @@ fn a_busy_node_still_ticks() {
     // checked and its lease never expires -- exactly when those matter most.
     // So: send commands faster than the heartbeat interval and require that
     // the tick still advances.
-    let options = timer_node_options(); // 10ms heartbeat
+    let options = timer_node_options();
     let mut runtime = NodeRuntime::create(options).expect("create runtime");
     runtime.start().expect("start runtime");
 
@@ -2311,16 +2316,22 @@ fn a_busy_node_still_ticks() {
         .timer_status
         .heartbeat_ticks;
 
-    let load_for = Duration::from_millis(600);
-    let deadline = Instant::now() + load_for;
+    // Back to back, with no sleep between them. A sleep sets the loop's rate
+    // from the scheduler rather than from the node, and the condition under
+    // test is that the node's command channel is never idle.
+    let load_for = HEARTBEAT_INTERVAL * 60;
+    let started = Instant::now();
     let mut sent = 0_u64;
-    while Instant::now() < deadline {
+    let mut inside_propose = Duration::ZERO;
+    while started.elapsed() < load_for {
+        let call = Instant::now();
         runtime
             .propose(format!("busy-{sent}").into_bytes())
             .expect("propose under load");
+        inside_propose += call.elapsed();
         sent += 1;
-        std::thread::sleep(Duration::from_millis(1));
     }
+    let loaded_for = started.elapsed();
 
     let after = runtime
         .status()
@@ -2329,13 +2340,20 @@ fn a_busy_node_still_ticks() {
         .heartbeat_ticks;
 
     // The load has to be real, or the test proves nothing about being busy.
+    // What makes it real is that the node spent the window handling commands --
+    // not how many it got through. One propose is one fsync, which caps a node
+    // at a few hundred entries per second whatever else it is doing, so a
+    // command count measures the disk and the scheduler rather than the load.
     assert!(
-        sent > 100,
-        "the load loop was not busy enough to test anything: {sent} commands in {load_for:?}"
+        loaded_for >= HEARTBEAT_INTERVAL * 10,
+        "the load window covered {loaded_for:?}, too few heartbeat intervals for a tick to have had a fair chance"
     );
-    println!("TICKPROBE sent={sent} before={before} after={after}");
+    assert!(
+        inside_propose * 10 >= loaded_for * 9,
+        "the loop was idle for most of the window, so this tests nothing about a busy node: {inside_propose:?} inside propose out of {loaded_for:?} ({sent} commands)"
+    );
     assert!(
         after > before,
-        "a node taking commands faster than its heartbeat interval never ticked:          {sent} commands over {load_for:?} at a 10ms interval left heartbeat_ticks          at {after} (was {before})"
+        "a node busy with commands for {loaded_for:?} never ticked: {sent} commands, {inside_propose:?} of that window spent inside propose, at a {HEARTBEAT_INTERVAL:?} heartbeat interval, left heartbeat_ticks at {after} (was {before})"
     );
 }
