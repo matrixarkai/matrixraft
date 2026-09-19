@@ -21257,3 +21257,71 @@ fn matrixraft_multi_raft_server_rejects_vote_traffic_to_learners_but_accepts_app
     let _ = fs::remove_dir_all(wal_dir);
     let _ = fs::remove_dir_all(snapshot_dir);
 }
+
+#[test]
+fn a_group_that_names_no_tick_takes_the_servers() {
+    // MatrixRaftGroupContext carries a tick interval for the whole server. It
+    // used to be recorded and read by nothing, so a host that set it once still
+    // had to repeat the interval in every group's options -- and a group that
+    // left the field at zero did not inherit anything either: `to_raft_config`
+    // does `tick_interval_ms.max(1)`, which is a 1 ms heartbeat.
+    let dir = temp_dir("server-tick");
+    let wal_inherits = dir.join("inherits/wal");
+    let snapshot_inherits = dir.join("inherits/snapshot");
+    let wal_explicit = dir.join("explicit/wal");
+    let snapshot_explicit = dir.join("explicit/snapshot");
+    for path in [
+        &wal_inherits,
+        &snapshot_inherits,
+        &wal_explicit,
+        &snapshot_explicit,
+    ] {
+        fs::create_dir_all(path).expect("state dir");
+    }
+
+    let transport = MatrixRaftTransportBuilder::new()
+        .set_cluster_id(1)
+        .set_num_connection_group(1)
+        .bind_address_resolver()
+        .build()
+        .expect("transport");
+    let context = MatrixRaftGroupContextBuilder::new()
+        .transport(transport)
+        .tick_interval(250)
+        .build()
+        .expect("context");
+    let mut server = MatrixRaftMultiRaftServer::new(context);
+
+    let mut inherits = options(41, &wal_inherits, &snapshot_inherits);
+    inherits.tick_interval_ms = 0;
+    let mut explicit = options(42, &wal_explicit, &snapshot_explicit);
+    explicit.tick_interval_ms = 70;
+
+    server
+        .create_node(inherits, 0)
+        .expect("create the inheriting node");
+    server
+        .create_node(explicit, 0)
+        .expect("create the explicit node");
+
+    let inherited = server
+        .node(41, 1)
+        .expect("group 41")
+        .runtime_status()
+        .expect("status");
+    assert_eq!(
+        inherited.timer_status.heartbeat_interval_ms, 250,
+        "a group that named no tick should run at the server's 250ms, not at the 1ms a zero used to become"
+    );
+
+    // And the server default is a default, not an override.
+    let kept = server
+        .node(42, 1)
+        .expect("group 42")
+        .runtime_status()
+        .expect("status");
+    assert_eq!(
+        kept.timer_status.heartbeat_interval_ms, 70,
+        "a group that set its own tick must keep it"
+    );
+}
