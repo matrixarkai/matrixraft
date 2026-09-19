@@ -240,6 +240,84 @@ ledger. It records which Raft responsibilities are already owned by this
 standalone crate, which remain pending migration, and which must stay as
 TemporalStore-specific adapters.
 
+## Multiple Raft Groups In One Process
+
+`MatrixRaftMultiRaftServer` hosts many groups at once. It keys its nodes by
+`MatrixRaftRouteKey { group_id, node_id }`, so a store that owns a replica of
+each of many groups registers one entry per replica:
+
+```rust
+use matrixraft::{MatrixRaftGroupContextBuilder, MatrixRaftMultiRaftServer};
+
+let context = MatrixRaftGroupContextBuilder::new().transport(transport).build()?;
+let mut server = MatrixRaftMultiRaftServer::new(context);
+
+server.create_node(options_for_group_7, 0)?;
+server.create_node(options_for_group_8, 0)?;
+
+server.group_count();   // 2
+server.group_ids();     // [7, 8]
+server.route_keys();    // [(7, node), (8, node)]
+```
+
+Creation and removal have batch forms (`create_nodes`, `unregister_groups`),
+planning forms (`plan_create_nodes`, `plan_unregister_group`) that return what a
+batch *would* do without doing it, and `*_best_effort` variants that report a
+per-group outcome instead of failing the whole batch. Most inspection is
+available per group or per route key — `node_ids_on_group`, `group_topology`,
+`counts_by_group`, `runtime_wiring`.
+
+### What one more group costs
+
+Each registered node owns a `NodeRuntime`, and a `NodeRuntime` is an OS thread
+plus a command channel. Measured with `examples/group_scaling.rs` on Linux,
+release build, one group count per process:
+
+| groups | resident delta | per group | threads |
+|---|---|---|---|
+| 1 | 0.3 MiB | 272 KiB | 1 |
+| 64 | 3.4 MiB | 54 KiB | 64 |
+| 256 | 11.7 MiB | 47 KiB | 256 |
+| 1024 | 39.3 MiB | 39 KiB | 1024 |
+
+One thread per group at every size, and per-group memory settling near 39 KiB —
+the larger figures at small counts are fixed startup cost divided by a small
+denominator, not a group being more expensive. Plan accordingly: ten thousand
+groups in one process is ten thousand threads, and the memory is the smaller
+part of that bill.
+
+Run it on your own hardware rather than taking these numbers:
+
+```bash
+cargo run --release --example group_scaling -- 1024
+```
+
+### Settings this crate records but does not act on
+
+`MatrixRaftGroupContext` and `MatrixRaftRuntimeWiring` carry the pool and
+batching configuration a host store would use: `worker_num`, `reader_num`,
+`executor_num`, `applier_num`, the four `snapshot_*_num` counts,
+`apply_max_batch_count`, `driver_batch_bytes`, `max_messages_each_poll`,
+`max_queue_depth`, `heartbeat_merge` with `merge_heartbeat_interval_milli`,
+`watched_address_resolver` and `store_id`.
+
+Those are recorded, planned over and reported on. Of them, only
+`flexible_apply` reaches an implementation in this crate (in `fsm`). Nothing
+here shares a worker pool between groups or coalesces messages across them —
+each group ticks its own runtime and calls `broadcast_heartbeat` on its own
+`RaftCluster`.
+
+`HeartbeatMerger` is worth naming because it looks connected and is not. It
+buckets by destination address rather than by group, which is the right shape
+for coalescing heartbeats from many groups to a shared peer, and it carries
+contract tests — but no send path calls it. It is a component a host can use,
+not behaviour you get by setting `heartbeat_merge`.
+
+So treat the group context as a place to record the wiring a host should
+implement, not as a description of what happens when you set it. The benchmark
+harness reflects the same boundary: `BenchmarkOptions` takes a node count and no
+group count, and its workloads run as a single group.
+
 ## Open Source Surface
 
 RustRaft exposes its standalone boundary through public modules for `node`,
