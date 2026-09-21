@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
+use std::collections::BTreeSet;
+
 use matrixraft::{
     cluster::{Consensus, RaftCluster, ReadIndexRequest},
     config::Config,
@@ -11,8 +13,8 @@ use matrixraft::{
     node::{NodeOptions, NodeRuntime},
     readiness::{
         matrixraft_open_source_surface, matrixraft_parity_report, matrixraft_public_api_contract,
-        matrixraft_standalone_readiness_report, matrixraft_temporalstore_adapter_shape,
-        ReadinessSnapshot,
+        matrixraft_public_module_names, matrixraft_standalone_readiness_report,
+        matrixraft_temporalstore_adapter_shape, ReadinessSnapshot,
     },
     snapshot::{
         ApplySnapshotFence, PersistentRaftSnapshotStoreOptions, RaftSnapshot, SnapshotMetadata,
@@ -5773,4 +5775,52 @@ fn debug_artifacts_example_exports_complete_support_envelope() {
     assert!(example.contains("serde_json::to_string_pretty(&provisioning.dashboard)"));
     assert!(example.contains("serde_json::to_string_pretty(&provisioning.alert_rules)"));
     assert!(example.contains("serde_json::to_string_pretty(&provisioning)"));
+}
+
+/// The published module list must be the crate's actual modules.
+///
+/// Derived from `lib.rs` rather than written out again: a second hand-written
+/// list would go stale in its own way, which is the failure this is for. The
+/// list named 16 of 29 modules before this existed.
+#[test]
+fn the_published_module_list_is_the_crate_s_modules() {
+    let lib = include_str!("../src/lib.rs");
+    let declared: BTreeSet<String> = lib
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("pub mod ")?;
+            Some(rest.trim_end_matches(';').trim().to_string())
+        })
+        .filter(|name| !name.is_empty() && !name.contains(' '))
+        .collect();
+
+    // A parse that found nothing would make every assertion below vacuous.
+    assert!(
+        declared.len() >= 25,
+        "parsed only {} modules out of lib.rs, so this guard is checking nothing",
+        declared.len()
+    );
+
+    let published: BTreeSet<String> = matrixraft_public_module_names().into_iter().collect();
+
+    let unpublished: Vec<&String> = declared.difference(&published).collect();
+    assert!(
+        unpublished.is_empty(),
+        "these modules are public but missing from matrixraft_public_module_names, \
+         so the surface report under-reports the crate: {unpublished:?}"
+    );
+
+    let phantom: Vec<&String> = published.difference(&declared).collect();
+    assert!(
+        phantom.is_empty(),
+        "these names are published as modules but are not declared in lib.rs: {phantom:?}"
+    );
+
+    // The surface report is what an embedder actually reads.
+    let surface = matrixraft_open_source_surface();
+    assert_eq!(
+        surface.public_modules.len(),
+        declared.len(),
+        "the open-source surface should carry every module"
+    );
 }

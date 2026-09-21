@@ -745,22 +745,45 @@ pub fn matrixraft_public_api_contract() -> PublicApiContract {
     }
 }
 
+/// Every module this crate publishes.
+///
+/// `tests/module_contract.rs` derives the expected set from `lib.rs` and fails
+/// if the two disagree, because this list named 16 of 29 modules for a long
+/// time and nothing noticed: no test read it, so the surface an embedder is
+/// shown just stopped growing with the crate.
 pub fn matrixraft_public_module_names() -> Vec<String> {
     [
+        // The raft runtime.
         "node",
         "cluster",
         "driver",
         "config",
-        "durability",
         "fsm",
         "membership",
+        "pipeline",
+        "scheduler",
+        "lease",
+        "read_safety",
+        // Durability and state.
         "wal",
         "snapshot",
+        "storage",
+        "durability",
+        "log_buffer",
+        "checksum",
+        // Moving messages.
         "transport",
+        "mailbox",
+        "channel_selector",
+        "heartbeat_merge",
+        "rate_limit",
+        "unique_id",
+        // Telling an operator what happened.
         "status",
         "metrics",
         "readiness",
-        "storage",
+        "observability_artifacts",
+        "operational_evidence",
         "benchmark",
         "fault",
     ]
