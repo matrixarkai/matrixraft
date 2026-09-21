@@ -749,6 +749,7 @@ pub fn matrixraft_public_module_names() -> Vec<String> {
     [
         "node",
         "cluster",
+        "driver",
         "config",
         "durability",
         "fsm",

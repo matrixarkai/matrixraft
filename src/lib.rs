@@ -75,6 +75,7 @@ pub mod channel_selector;
 pub mod checksum;
 pub mod cluster;
 pub mod config;
+pub mod driver;
 pub mod durability;
 pub mod fault;
 pub mod fsm;
@@ -113,6 +114,7 @@ pub use checksum::{
     ChecksumResult, ChecksumType, FileChecksumContext, FileChecksumResult,
 };
 pub use config::{Config, ConfigError};
+pub use driver::{Driver, DriverGroupKey, DriverOptions, DriverStats, DriverTickReceiver};
 pub use durability::matrixraft_durability_parity_report;
 pub use fsm::{
     matrixraft_apply_entry, matrixraft_flexible_apply_with_store,
