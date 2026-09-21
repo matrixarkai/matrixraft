@@ -550,3 +550,139 @@ fn a_pool_batches_rather_than_handing_over_one_at_a_time() {
         "mail should arrive in batches, not one call per mail: {batches} batches for {sent} mails"
     );
 }
+
+/// Remembers how big each batch was, which is what a byte budget changes.
+#[derive(Debug, Default)]
+struct BatchRecorder {
+    batches: Mutex<Vec<usize>>,
+}
+
+impl BatchRecorder {
+    fn total(&self) -> usize {
+        self.batches.lock().expect("recorder mutex").iter().sum()
+    }
+    fn largest_batch(&self) -> usize {
+        self.batches
+            .lock()
+            .expect("recorder mutex")
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+impl DriverMailHandler<u64> for BatchRecorder {
+    fn handle_mail(&self, mails: Vec<u64>) {
+        self.batches
+            .lock()
+            .expect("recorder mutex")
+            .push(mails.len());
+    }
+}
+
+#[test]
+fn a_byte_budget_splits_a_batch_and_a_count_bound_alone_does_not() {
+    // `driver_batch_bytes` shipped inert because the pool cannot know how big a
+    // Mail is. A host that says gets the budget; one that does not gets the
+    // count bound, and `start` is explicit about which.
+    let options = DriverOptions {
+        worker_num: 1,
+        max_messages_each_poll: 64,
+        max_queue_depth: 8192,
+        driver_batch_bytes: 40, // four mails of ten bytes
+        ..DriverOptions::default()
+    };
+    let key = DriverGroupKey::new(1, 1);
+    let sent = 64_u64;
+
+    // With a size function: every batch must respect the budget.
+    let sized: DriverWorkerPool<u64> =
+        DriverWorkerPool::start_with_mail_size(options, Arc::new(|_mail: &u64| 10)).expect("pool");
+    let sized_recorder = Arc::new(BatchRecorder::default());
+    sized
+        .register_group(
+            key,
+            Arc::clone(&sized_recorder) as Arc<dyn DriverMailHandler<u64>>,
+        )
+        .expect("register");
+    for n in 0..sent {
+        sized.send(key, MailPriority::Normal, n).expect("send");
+    }
+    assert!(
+        wait_until("sized mail arrives", Duration::from_secs(30), || {
+            sized_recorder.total() >= sent as usize
+        }),
+        "only {} of {sent} arrived",
+        sized_recorder.total()
+    );
+    let largest = sized_recorder.largest_batch();
+    assert!(
+        largest <= 4,
+        "a 40 byte budget over 10 byte mails must not hand over more than 4 at once; \
+         the largest batch was {largest}"
+    );
+
+    // Without one: the same options, and the budget cannot apply.
+    let unsized_pool: DriverWorkerPool<u64> = DriverWorkerPool::start(options).expect("pool");
+    let unsized_recorder = Arc::new(BatchRecorder::default());
+    unsized_pool
+        .register_group(
+            key,
+            Arc::clone(&unsized_recorder) as Arc<dyn DriverMailHandler<u64>>,
+        )
+        .expect("register");
+    for n in 0..sent {
+        unsized_pool
+            .send(key, MailPriority::Normal, n)
+            .expect("send");
+    }
+    assert!(
+        wait_until("unsized mail arrives", Duration::from_secs(30), || {
+            unsized_recorder.total() >= sent as usize
+        }),
+        "only {} of {sent} arrived",
+        unsized_recorder.total()
+    );
+    assert!(
+        unsized_recorder.largest_batch() > 4,
+        "with no size function the byte budget cannot apply, so batches should \
+         exceed it; the largest was {}",
+        unsized_recorder.largest_batch()
+    );
+}
+
+#[test]
+fn a_mail_larger_than_the_whole_budget_still_arrives() {
+    // A budget that a single mail cannot fit under must not strand that mail.
+    let options = DriverOptions {
+        worker_num: 1,
+        driver_batch_bytes: 8,
+        ..DriverOptions::default()
+    };
+    let pool: DriverWorkerPool<u64> =
+        DriverWorkerPool::start_with_mail_size(options, Arc::new(|_mail: &u64| 4096))
+            .expect("pool");
+    let key = DriverGroupKey::new(1, 1);
+    let recorder = Arc::new(BatchRecorder::default());
+    pool.register_group(
+        key,
+        Arc::clone(&recorder) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register");
+    for n in 0..5 {
+        pool.send(key, MailPriority::Normal, n).expect("send");
+    }
+    assert!(
+        wait_until("oversized mail arrives", Duration::from_secs(30), || {
+            recorder.total() >= 5
+        }),
+        "an oversized mail was stranded: {} of 5 arrived",
+        recorder.total()
+    );
+    assert_eq!(
+        recorder.largest_batch(),
+        1,
+        "each mail is over the whole budget, so each should go on its own"
+    );
+}
