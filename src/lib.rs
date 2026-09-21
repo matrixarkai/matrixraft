@@ -95,6 +95,7 @@ pub mod read_safety;
 pub mod readiness;
 pub mod scheduler;
 pub mod snapshot;
+pub mod snapshot_pools;
 pub mod status;
 pub mod storage;
 pub mod transport;
@@ -219,6 +220,9 @@ pub use snapshot::{
     matrixraft_validate_snapshot_lifecycle_evidence_artifact,
     matrixraft_validate_snapshot_tail_catchup, SnapshotLifecycleEvidence,
     SnapshotLifecycleEvidenceArtifact, SnapshotLifecycleEvidenceValidationReport,
+};
+pub use snapshot_pools::{
+    SnapshotPhase, SnapshotPhaseHandler, SnapshotPhaseStats, SnapshotPoolOptions, SnapshotPools,
 };
 pub use status::{
     matrixraft_admin_diagnostic_json_lines, matrixraft_admin_diagnostic_log_entries,

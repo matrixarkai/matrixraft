@@ -768,6 +768,7 @@ pub fn matrixraft_public_module_names() -> Vec<String> {
         // Durability and state.
         "wal",
         "snapshot",
+        "snapshot_pools",
         "storage",
         "durability",
         "log_buffer",

@@ -436,12 +436,42 @@ zero grants nothing and stops every transfer it gates, which is not a state to
 reach by leaving a field at its default — leave the whole limiter unset to mean
 no limit.
 
+### Snapshot work: four jobs, four pools
+
+Moving a snapshot is four jobs, not one. Creating reads the state machine and
+writes a checkpoint; sending pushes chunks at a peer that asked; downloading
+pulls them from a peer that has them; loading installs what arrived. They cost
+different things and they stall for different reasons, which is why there are
+four counts rather than one.
+
+```rust
+let pools: SnapshotPools<MyWork> = SnapshotPools::start(SnapshotPoolOptions {
+    snapshot_creator_num: 1,
+    snapshot_sender_num: 2,
+    snapshot_downloader_num: 2,
+    snapshot_loader_num: 1,
+    max_queue_depth: 256,
+})?;
+pools.register_group(key, handler)?;                       // all four phases
+pools.submit(key, SnapshotPhase::Create, work)?;
+pools.stats(SnapshotPhase::Send);                          // per phase
+```
+
+`thread_count()` is the four counts added up — ten above — at one group or at
+sixty-four. Registration is all-or-nothing across the four, and a cancel stops
+all four.
+
+The property that earns the separation: **a stalled phase does not stop the
+others.** Its test parks the single send thread on a peer that never reads, then
+requires twenty checkpoints to finish anyway. Collapse the four pools into one
+and that test fails, which is the whole argument for four counts in one
+assertion.
+
 ### Settings this crate still only records
 
-`MatrixRaftGroupContext` and `MatrixRaftRuntimeWiring` carry more of the pool
-and batching configuration a host store would use: `reader_num`,
-`executor_num`, the four `snapshot_*_num` counts, `watched_address_resolver`
-and `store_id`.
+`MatrixRaftGroupContext` and `MatrixRaftRuntimeWiring` carry a little more
+configuration a host store would use: `reader_num`, `executor_num`,
+`watched_address_resolver` and `store_id`.
 
 Those are recorded, planned over and reported on. Of them only `flexible_apply`
 reaches an implementation (in `fsm`).
