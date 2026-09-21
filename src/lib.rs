@@ -70,6 +70,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+pub mod applier;
 pub mod benchmark;
 pub mod channel_selector;
 pub mod checksum;
@@ -100,6 +101,10 @@ pub mod transport;
 pub mod unique_id;
 pub mod wal;
 
+pub use applier::{
+    matrixraft_apply_task_through_index, Applier, ApplierOptions, ApplyHandler, ApplyWait,
+    GroupApplyProgress,
+};
 pub use benchmark::{
     matrixraft_production_readiness_input_with_benchmark_artifacts,
     matrixraft_production_readiness_input_with_benchmark_summary,

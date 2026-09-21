@@ -759,6 +759,7 @@ pub fn matrixraft_public_module_names() -> Vec<String> {
         "driver",
         "config",
         "fsm",
+        "applier",
         "membership",
         "pipeline",
         "scheduler",
