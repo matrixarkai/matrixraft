@@ -3,11 +3,15 @@
 
 //! MatrixRaft-style heartbeat merge queue for multi-group store transports.
 
-use crate::{AppendEntriesRequest, AppendEntriesResponse, Message, NodeId, RaftError};
+use crate::{
+    AppendEntriesRequest, AppendEntriesResponse, DriverTickReceiver, Message, NodeId, RaftError,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub const MATRIXRAFT_HEARTBEAT_MERGE_BUCKETS: usize = 16;
 
@@ -269,4 +273,141 @@ fn bucket_for_addr(raft_addr: &str, bucket_count: usize) -> usize {
     let mut hasher = DefaultHasher::new();
     raft_addr.hash(&mut hasher);
     (hasher.finish() as usize) % bucket_count.max(1)
+}
+
+/// Where merged heartbeats go once a flush has gathered them.
+///
+/// One call carries every heartbeat bound for one address, which is the whole
+/// point: many groups sharing a peer send one batch rather than one message
+/// each.
+pub trait MergedHeartbeatSender: Send + Sync {
+    fn send_merged(&self, batches: Vec<MergedHeartbeatBatch>);
+}
+
+/// Holds heartbeats back so many groups' heartbeats to one peer travel
+/// together, and flushes them on the driver's tick.
+///
+/// `HeartbeatMerger` buckets by destination address and can absorb a heartbeat,
+/// but something has to decide *when* to let the buckets go. That is the
+/// `merge_heartbeat_interval_milli` setting, and this is the piece that spends
+/// it: register a flusher with a [`crate::Driver`] at that interval and every
+/// tick drains the merger.
+///
+/// ```ignore
+/// let flusher = HeartbeatFlusher::new(HeartbeatMerger::enabled(), sender);
+/// driver.register_group_every(key, flusher.clone(), merge_heartbeat_interval_milli)?;
+/// ```
+///
+/// A merger that is disabled absorbs nothing: `maybe_merge` hands every message
+/// straight back, so a host can leave the call in place and turn the behaviour
+/// off with the setting rather than with a branch of its own.
+pub struct HeartbeatFlusher {
+    merger: Mutex<HeartbeatMerger>,
+    sender: Arc<dyn MergedHeartbeatSender>,
+    flushes: AtomicU64,
+    batches_sent: AtomicU64,
+    messages_sent: AtomicU64,
+}
+
+impl std::fmt::Debug for HeartbeatFlusher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeartbeatFlusher")
+            .field("flushes", &self.flushes.load(Ordering::Relaxed))
+            .field("batches_sent", &self.batches_sent.load(Ordering::Relaxed))
+            .field("messages_sent", &self.messages_sent.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+/// What a flusher has done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeartbeatFlushStats {
+    /// Flushes attempted, including ones that found nothing.
+    pub flushes: u64,
+    /// Batches handed to the sender. One per destination address per flush.
+    pub batches_sent: u64,
+    /// Heartbeats inside those batches. The ratio to `batches_sent` is what the
+    /// merging buys.
+    pub messages_sent: u64,
+    /// Still held, waiting for the next flush.
+    pub pending: usize,
+    pub merger: HeartbeatMergeStats,
+}
+
+impl HeartbeatFlusher {
+    pub fn new(merger: HeartbeatMerger, sender: Arc<dyn MergedHeartbeatSender>) -> Arc<Self> {
+        Arc::new(Self {
+            merger: Mutex::new(merger),
+            sender,
+            flushes: AtomicU64::new(0),
+            batches_sent: AtomicU64::new(0),
+            messages_sent: AtomicU64::new(0),
+        })
+    }
+
+    /// Offers a message to the merger.
+    ///
+    /// `None` means it was absorbed and will go out with the next flush.
+    /// `Some(message)` means it was not a heartbeat, or merging is off, and the
+    /// caller should send it itself.
+    pub fn maybe_merge<R>(
+        &self,
+        message: Message,
+        resolver: &R,
+    ) -> Result<Option<Message>, RaftError>
+    where
+        R: HeartbeatAddressResolver,
+    {
+        self.merger
+            .lock()
+            .expect("heartbeat merger mutex poisoned")
+            .maybe_merge(message, resolver)
+    }
+
+    /// Sends everything held, and reports how many batches went.
+    ///
+    /// The sender is called with the lock released, so a slow transport delays
+    /// the next flush rather than every group trying to queue a heartbeat.
+    pub fn flush_now(&self) -> usize {
+        let batches = {
+            let mut merger = self.merger.lock().expect("heartbeat merger mutex poisoned");
+            merger.flush()
+        };
+        self.flushes.fetch_add(1, Ordering::Relaxed);
+        if batches.is_empty() {
+            return 0;
+        }
+        let batch_count = batches.len();
+        let message_count: usize = batches.iter().map(|batch| batch.messages.len()).sum();
+        self.batches_sent
+            .fetch_add(batch_count as u64, Ordering::Relaxed);
+        self.messages_sent
+            .fetch_add(message_count as u64, Ordering::Relaxed);
+        self.sender.send_merged(batches);
+        batch_count
+    }
+
+    pub fn stats(&self) -> HeartbeatFlushStats {
+        let merger = self.merger.lock().expect("heartbeat merger mutex poisoned");
+        HeartbeatFlushStats {
+            flushes: self.flushes.load(Ordering::Relaxed),
+            batches_sent: self.batches_sent.load(Ordering::Relaxed),
+            messages_sent: self.messages_sent.load(Ordering::Relaxed),
+            pending: merger.pending_len(),
+            merger: merger.stats().clone(),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.merger
+            .lock()
+            .expect("heartbeat merger mutex poisoned")
+            .is_enabled()
+    }
+}
+
+impl DriverTickReceiver for HeartbeatFlusher {
+    fn fire_tick(&self) {
+        self.flush_now();
+    }
 }

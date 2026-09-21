@@ -4,15 +4,35 @@
 use matrixraft::{
     matrixraft_validate_read_index_response, matrixraft_validate_tcp_transport_request,
     matrixraft_validate_vote_request, AppendEntriesRequest, AppendEntriesResponse,
-    AuthenticatedRaftTransport, ClusterRaftTransport, HeartbeatMerger, InMemoryRaftTransport,
-    InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogId, Message, Peer, RaftCluster,
-    RaftError, ReadIndexRequest, ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata,
-    SnapshotState, StaticRaftAuthToken, TcpRaftTransport, TcpRaftTransportRequest,
-    TcpRaftTransportServer, Transport, VoteRequest, VoteResponse,
+    AuthenticatedRaftTransport, ClusterRaftTransport, Driver, DriverGroupKey, DriverOptions,
+    DriverTickReceiver, HeartbeatFlusher, HeartbeatMerger, InMemoryRaftTransport,
+    InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogId, MergedHeartbeatBatch,
+    MergedHeartbeatSender, Message, Peer, RaftCluster, RaftError, ReadIndexRequest,
+    ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState,
+    StaticRaftAuthToken, TcpRaftTransport, TcpRaftTransportRequest, TcpRaftTransportServer,
+    Transport, VoteRequest, VoteResponse,
 };
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Polls to a deadline, so an assertion is about behaviour and not about how
+/// busy the machine was.
+fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let settled = done();
+    if !settled {
+        eprintln!("wait_until({what}) gave up after {timeout:?}");
+    }
+    settled
+}
 
 fn peer(node_id: u64, role: ReplicaRole) -> Peer {
     Peer {
@@ -1003,4 +1023,216 @@ fn concurrent_callers_are_all_served() {
         worker.join().expect("no worker panics");
     }
     server.shutdown().expect("shutdown");
+}
+
+// ---------------------------------------------------------------------------
+// The heartbeat flusher: the driver's tick is what spends
+// merge_heartbeat_interval_milli.
+// ---------------------------------------------------------------------------
+
+/// Collects what a flush sends.
+#[derive(Debug, Default)]
+struct SentBatches {
+    batches: Mutex<Vec<MergedHeartbeatBatch>>,
+}
+
+impl SentBatches {
+    fn batch_count(&self) -> usize {
+        self.batches.lock().expect("sent mutex").len()
+    }
+    fn message_count(&self) -> usize {
+        self.batches
+            .lock()
+            .expect("sent mutex")
+            .iter()
+            .map(|b| b.messages.len())
+            .sum()
+    }
+    fn addresses(&self) -> Vec<String> {
+        let mut addrs: Vec<String> = self
+            .batches
+            .lock()
+            .expect("sent mutex")
+            .iter()
+            .map(|b| b.raft_addr.clone())
+            .collect();
+        addrs.sort();
+        addrs.dedup();
+        addrs
+    }
+}
+
+impl MergedHeartbeatSender for SentBatches {
+    fn send_merged(&self, batches: Vec<MergedHeartbeatBatch>) {
+        self.batches.lock().expect("sent mutex").extend(batches);
+    }
+}
+
+/// Every pair resolves to one address per target, so heartbeats from many
+/// groups to the same peer share a destination -- which is the case merging
+/// exists for.
+fn resolver() -> HashMap<(u64, u64), String> {
+    let mut map = HashMap::new();
+    for from in 1..=64_u64 {
+        for to in 1..=4_u64 {
+            map.insert((from, to), format!("10.0.0.{to}:9000"));
+        }
+    }
+    map
+}
+
+fn heartbeat(from: u64, to: u64) -> Message {
+    Message::AppendEntries {
+        target: to,
+        request: AppendEntriesRequest {
+            group_id: from,
+            term: 1,
+            leader_id: from,
+            prev_log_id: None,
+            entries: Vec::new(), // empty: that is what makes it a heartbeat
+            leader_commit: 0,
+            lease_epoch: 0,
+        },
+    }
+}
+
+#[test]
+fn many_groups_heartbeating_one_peer_send_one_batch() {
+    // The whole point of merging: 64 groups, 4 peers, and what goes out is 4
+    // batches rather than 256 messages.
+    let sent = Arc::new(SentBatches::default());
+    let flusher = HeartbeatFlusher::new(
+        HeartbeatMerger::enabled(),
+        Arc::clone(&sent) as Arc<dyn MergedHeartbeatSender>,
+    );
+    let resolver = resolver();
+
+    let mut absorbed = 0;
+    for from in 1..=64_u64 {
+        for to in 1..=4_u64 {
+            let outcome = flusher
+                .maybe_merge(heartbeat(from, to), &resolver)
+                .expect("merge");
+            if outcome.is_none() {
+                absorbed += 1;
+            }
+        }
+    }
+    assert_eq!(absorbed, 256, "every heartbeat should have been absorbed");
+    assert_eq!(
+        sent.batch_count(),
+        0,
+        "nothing goes out until a flush: that is what the interval is for"
+    );
+
+    let batches = flusher.flush_now();
+    assert_eq!(batches, 4, "one batch per destination address");
+    assert_eq!(sent.batch_count(), 4);
+    assert_eq!(
+        sent.message_count(),
+        256,
+        "every heartbeat must still arrive, just together"
+    );
+    assert_eq!(sent.addresses().len(), 4);
+
+    let stats = flusher.stats();
+    assert_eq!(stats.batches_sent, 4);
+    assert_eq!(stats.messages_sent, 256);
+    assert_eq!(stats.pending, 0, "a flush should leave nothing behind");
+}
+
+#[test]
+fn a_disabled_merger_absorbs_nothing() {
+    // The setting turns the behaviour off; the caller keeps the same call.
+    let sent = Arc::new(SentBatches::default());
+    let flusher = HeartbeatFlusher::new(
+        HeartbeatMerger::disabled(),
+        Arc::clone(&sent) as Arc<dyn MergedHeartbeatSender>,
+    );
+    let resolver = resolver();
+
+    for from in 1..=8_u64 {
+        let outcome = flusher
+            .maybe_merge(heartbeat(from, 1), &resolver)
+            .expect("merge");
+        assert!(
+            outcome.is_some(),
+            "a disabled merger must hand every message back"
+        );
+    }
+    assert_eq!(flusher.flush_now(), 0);
+    assert_eq!(sent.batch_count(), 0);
+    assert!(!flusher.is_enabled());
+}
+
+#[test]
+fn a_message_that_is_not_a_heartbeat_is_handed_back() {
+    // An AppendEntries carrying entries is replication, not a heartbeat, and
+    // must not be held back.
+    let sent = Arc::new(SentBatches::default());
+    let flusher = HeartbeatFlusher::new(
+        HeartbeatMerger::enabled(),
+        Arc::clone(&sent) as Arc<dyn MergedHeartbeatSender>,
+    );
+    let resolver = resolver();
+
+    let mut with_entries = heartbeat(1, 1);
+    if let Message::AppendEntries { request, .. } = &mut with_entries {
+        request.entries.push(LogEntry {
+            log_id: LogId { term: 1, index: 1 },
+            payload: vec![1, 2, 3],
+            is_command: false,
+        });
+    }
+    let outcome = flusher.maybe_merge(with_entries, &resolver).expect("merge");
+    assert!(
+        outcome.is_some(),
+        "an append carrying entries must not be held back as a heartbeat"
+    );
+    assert_eq!(flusher.stats().pending, 0);
+}
+
+#[test]
+fn the_drivers_tick_is_what_flushes() {
+    // merge_heartbeat_interval_milli is spent by registering the flusher with
+    // the driver at that interval. Nothing else in the crate has a timer.
+    let sent = Arc::new(SentBatches::default());
+    let flusher = HeartbeatFlusher::new(
+        HeartbeatMerger::enabled(),
+        Arc::clone(&sent) as Arc<dyn MergedHeartbeatSender>,
+    );
+    let resolver = resolver();
+    for from in 1..=16_u64 {
+        flusher
+            .maybe_merge(heartbeat(from, 2), &resolver)
+            .expect("merge");
+    }
+    assert_eq!(sent.batch_count(), 0, "held until the interval passes");
+
+    let driver = Driver::start(DriverOptions {
+        worker_num: 1,
+        tick_interval_ms: 2,
+        ..DriverOptions::default()
+    })
+    .expect("driver");
+    driver
+        .register_group_every(
+            DriverGroupKey::new(1, 1),
+            Arc::clone(&flusher) as Arc<dyn DriverTickReceiver>,
+            2,
+        )
+        .expect("register");
+
+    assert!(
+        wait_until("the tick flushes", Duration::from_secs(20), || {
+            sent.batch_count() >= 1
+        }),
+        "the driver's tick never flushed the merger"
+    );
+    assert_eq!(
+        sent.message_count(),
+        16,
+        "all sixteen heartbeats should arrive in the flush"
+    );
+    assert_eq!(sent.addresses(), vec!["10.0.0.2:9000".to_string()]);
 }

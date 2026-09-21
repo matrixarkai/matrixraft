@@ -410,8 +410,8 @@ rather than leaving them until the timeout.
 
 `MatrixRaftGroupContext` and `MatrixRaftRuntimeWiring` carry more of the pool
 and batching configuration a host store would use: `reader_num`,
-`executor_num`, the four `snapshot_*_num` counts, `heartbeat_merge` with
-`merge_heartbeat_interval_milli`, `watched_address_resolver` and `store_id`.
+`executor_num`, the four `snapshot_*_num` counts, `watched_address_resolver`
+and `store_id`.
 
 Those are recorded, planned over and reported on. Of them only `flexible_apply`
 reaches an implementation (in `fsm`).
@@ -430,11 +430,32 @@ let pool = DriverWorkerPool::start_with_mail_size(
 the pool cannot measure a `Mail` it knows nothing about. A mail larger than the
 whole budget is still delivered, on its own, rather than stranded.
 
-`HeartbeatMerger` is worth naming because it looks connected and is not. It
-buckets by destination address rather than by group, which is the right shape
-for coalescing heartbeats from many groups to a shared peer, and it carries
-contract tests — but no send path calls it. It is a component a host can use,
-not behaviour you get by setting `heartbeat_merge`.
+### Heartbeats from many groups to one peer, in one batch
+
+`HeartbeatMerger` buckets by destination address rather than by group, which is
+the shape that lets a store hosting many groups send one batch to a shared peer
+instead of one message per group. What it lacked was something to decide *when*
+to let the buckets go — which is what `merge_heartbeat_interval_milli` names,
+and what the driver's tick now spends:
+
+```rust
+let flusher = HeartbeatFlusher::new(HeartbeatMerger::enabled(), sender);
+driver.register_group_every(key, flusher.clone(), merge_heartbeat_interval_milli)?;
+
+// on the send path
+match flusher.maybe_merge(message, &resolver)? {
+    None => {}                       // absorbed; it goes with the next flush
+    Some(message) => transport.send(message)?,   // not a heartbeat, or merging is off
+}
+```
+
+Measured by its test: 64 groups heartbeating 4 peers queue 256 messages and
+flush **4 batches**, one per address, carrying all 256. A merger that is
+disabled absorbs nothing and hands every message straight back, so the call can
+stay in place and the setting turns the behaviour off.
+
+An `AppendEntries` carrying entries is replication, not a heartbeat, and is
+never held back.
 
 So treat the group context as a place to record the wiring a host should
 implement, not as a description of what happens when you set it. The benchmark

@@ -134,8 +134,9 @@ pub use fsm::{
     MatrixRaftStoreFsm, RaftApply, RaftStateMachine, StateMachine, MATRIXRAFT_NON_BATCH,
 };
 pub use heartbeat_merge::{
-    HeartbeatAddressResolver, HeartbeatMergeMessage, HeartbeatMergeStats, HeartbeatMerger,
-    MergedHeartbeatBatch, MATRIXRAFT_HEARTBEAT_MERGE_BUCKETS,
+    HeartbeatAddressResolver, HeartbeatFlushStats, HeartbeatFlusher, HeartbeatMergeMessage,
+    HeartbeatMergeStats, HeartbeatMerger, MergedHeartbeatBatch, MergedHeartbeatSender,
+    MATRIXRAFT_HEARTBEAT_MERGE_BUCKETS,
 };
 pub use lease::{FollowerLease, LeaderLease, LeaderLeaseStatus, LeaseEpochId, LeasePeer};
 pub use log_buffer::{LogBuffer, LogBufferFlush, LogBufferRelease};
