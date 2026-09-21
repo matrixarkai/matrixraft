@@ -290,8 +290,8 @@ pub trait MergedHeartbeatSender: Send + Sync {
 /// `HeartbeatMerger` buckets by destination address and can absorb a heartbeat,
 /// but something has to decide *when* to let the buckets go. That is the
 /// `merge_heartbeat_interval_milli` setting, and this is the piece that spends
-/// it: register a flusher with a [`Driver`] at that interval and every tick
-/// drains the merger.
+/// it: register a flusher with a [`crate::Driver`] at that interval and every
+/// tick drains the merger.
 ///
 /// ```ignore
 /// let flusher = HeartbeatFlusher::new(HeartbeatMerger::enabled(), sender);
