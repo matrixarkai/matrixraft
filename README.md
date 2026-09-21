@@ -370,12 +370,47 @@ rather than look thrifty.
 The driver is a component to build a host on; it does not replace `NodeRuntime`,
 and nothing in this crate wires the two together yet.
 
+### Applying, and a read that waits for its group
+
+Apply is the slow half of a group: it touches the state machine and the disk.
+`Applier` runs every registered group's apply work on the same pool —
+`applier_num` threads, batches bounded by `apply_max_batch_count`.
+
+```rust
+let applier = Applier::start(ApplierOptions { applier_num: 4,
+                                              apply_max_batch_count: 64,
+                                              ..ApplierOptions::default() })?;
+applier.register_group(key, handler)?;          // handler: impl ApplyHandler
+applier.submit(key, apply_task)?;               // the crate's own ApplyTask
+applier.progress(key);                          // applied_index, batches, tasks
+```
+
+`ApplyHandler::apply` returns the index the group reached, so the applier owns
+the scheduling and the waiting and nothing about the state machine. The applied
+index never moves backwards: a handler reporting an older index than the group
+already reached does not un-apply anything.
+
+**A read can wait for its group.** `docs/read_index_safety_review.md` notes that
+a follower read is served only when `applied_index >= read_index` and that
+apply-wait was a future enhancement. This is it:
+
+```rust
+match applier.wait_for_applied(key, read_index, Duration::from_millis(50))? {
+    ApplyWait::Reached { .. }   => serve_the_read(),
+    ApplyWait::TimedOut { .. }  => report_follower_apply_pending(),
+    ApplyWait::GroupGone { .. } => report_not_leader(),   // retrying will not help
+}
+```
+
+`Reached` is never reported early — the index it carries is read under the same
+lock the applier advances it with — and a cancelled group wakes its waiters
+rather than leaving them until the timeout.
+
 ### Settings this crate still only records
 
 `MatrixRaftGroupContext` and `MatrixRaftRuntimeWiring` carry more of the pool
 and batching configuration a host store would use: `reader_num`,
-`executor_num`, `applier_num`, the four `snapshot_*_num` counts,
-`apply_max_batch_count`, `driver_batch_bytes`, `heartbeat_merge` with
+`executor_num`, the four `snapshot_*_num` counts, `heartbeat_merge` with
 `merge_heartbeat_interval_milli`, `watched_address_resolver` and `store_id`.
 
 Those are recorded, planned over and reported on. Of them only `flexible_apply`
