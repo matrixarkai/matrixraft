@@ -4,6 +4,10 @@
 //! BaselineRaft-style byte quota and backpressure helpers.
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use crate::DriverTickReceiver;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RateLimitDecision {
@@ -198,5 +202,79 @@ impl RateLimiter for ByteQuotaLimiter {
 
     fn available_bytes(&self) -> u64 {
         self.available_bytes
+    }
+}
+
+/// Puts a limiter's quota back on a cycle, driven by the driver's tick.
+///
+/// A [`ByteQuotaLimiter`] hands out bytes and never gets them back on its own —
+/// `refill_bytes` is a method someone has to call. `check_cycle_sec` names how
+/// often, and this is what spends it: register a refiller with a
+/// [`crate::Driver`] at that interval and every tick tops the limiter back up to
+/// capacity.
+///
+/// Without one, a configured limiter throttles once and then stays empty, which
+/// looks like a snapshot that mysteriously stopped.
+pub struct RateLimiterRefiller {
+    limiter: Arc<Mutex<ByteQuotaLimiter>>,
+    refills: AtomicU64,
+    bytes_restored: AtomicU64,
+}
+
+impl std::fmt::Debug for RateLimiterRefiller {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RateLimiterRefiller")
+            .field("refills", &self.refills.load(Ordering::Relaxed))
+            .field(
+                "bytes_restored",
+                &self.bytes_restored.load(Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
+impl RateLimiterRefiller {
+    pub fn new(limiter: Arc<Mutex<ByteQuotaLimiter>>) -> Arc<Self> {
+        Arc::new(Self {
+            limiter,
+            refills: AtomicU64::new(0),
+            bytes_restored: AtomicU64::new(0),
+        })
+    }
+
+    /// The limiter being refilled, for the caller that also spends from it.
+    pub fn limiter(&self) -> Arc<Mutex<ByteQuotaLimiter>> {
+        Arc::clone(&self.limiter)
+    }
+
+    /// Tops the limiter back up to capacity and reports the bytes restored.
+    pub fn refill_now(&self) -> u64 {
+        let restored = {
+            let mut limiter = self.limiter.lock().expect("rate limiter mutex poisoned");
+            let missing = limiter
+                .capacity_bytes()
+                .saturating_sub(limiter.available_bytes());
+            if missing > 0 {
+                limiter.refill_bytes(missing);
+            }
+            missing
+        };
+        self.refills.fetch_add(1, Ordering::Relaxed);
+        self.bytes_restored.fetch_add(restored, Ordering::Relaxed);
+        restored
+    }
+
+    pub fn refills(&self) -> u64 {
+        self.refills.load(Ordering::Relaxed)
+    }
+
+    pub fn bytes_restored(&self) -> u64 {
+        self.bytes_restored.load(Ordering::Relaxed)
+    }
+}
+
+impl DriverTickReceiver for RateLimiterRefiller {
+    fn fire_tick(&self) {
+        self.refill_now();
     }
 }

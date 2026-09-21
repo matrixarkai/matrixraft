@@ -3,13 +3,33 @@
 
 use matrixraft::{
     matrixraft_snapshot_lifecycle_evidence, AdminCommand, ApplySnapshotFence, ByteQuotaLimiter,
-    InstallSnapshotResponse, LogEntry, LogId, Message, Peer, PersistentRaftSnapshotStore,
-    PersistentRaftSnapshotStoreOptions, RaftCluster, RaftSnapshot, RateLimiter, ReplicaRole,
-    SnapshotLifecycle, SnapshotLifecycleConfig, SnapshotMetadata, StepResult,
+    Driver, DriverGroupKey, DriverOptions, DriverTickReceiver, InstallSnapshotResponse, LogEntry,
+    LogId, MatrixRaftRateLimiterConfig, Message, Peer, PersistentRaftSnapshotStore,
+    PersistentRaftSnapshotStoreOptions, RaftCluster, RaftSnapshot, RateLimiter,
+    RateLimiterRefiller, ReplicaRole, SnapshotLifecycle, SnapshotLifecycleConfig, SnapshotMetadata,
+    StepResult,
 };
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Polls to a deadline instead of sleeping a fixed time, so an assertion is
+/// about behaviour and not about how busy the machine was.
+fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let settled = done();
+    if !settled {
+        eprintln!("wait_until({what}) gave up after {timeout:?}");
+    }
+    settled
+}
 
 fn temp_snapshot_dir(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -453,4 +473,152 @@ fn failed_replication_task_sends_snapshot_or_triggers_one() {
         .expect("broken replication triggers snapshot through step");
     assert_eq!(triggered, StepResult::Handled);
     assert!(trigger.snapshot_trigger_status().in_progress);
+}
+
+// ---------------------------------------------------------------------------
+// The recorded limiter config becomes the limiter the send path takes, and the
+// driver's tick is what refills it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_config_becomes_a_limiter_holding_one_cycle_of_bytes() {
+    let config = MatrixRaftRateLimiterConfig {
+        bytes_limit_per_sec: 1024,
+        check_cycle_sec: 3,
+    };
+    assert_eq!(config.cycle_capacity_bytes(), 3072);
+    assert_eq!(config.check_cycle(), Duration::from_secs(3));
+
+    let limiter = config.to_byte_quota_limiter().expect("limiter");
+    assert_eq!(limiter.capacity_bytes(), 3072);
+    assert_eq!(limiter.available_bytes(), 3072);
+}
+
+#[test]
+fn a_zero_in_the_config_is_refused_rather_than_silently_stopping_everything() {
+    // A limiter built from a zero grants nothing, so every transfer it gates
+    // stops. That must be an error, not a configuration someone can reach by
+    // leaving a field at its default.
+    let no_bytes = MatrixRaftRateLimiterConfig {
+        bytes_limit_per_sec: 0,
+        check_cycle_sec: 1,
+    };
+    let error = no_bytes.to_byte_quota_limiter().expect_err("must refuse");
+    assert!(
+        format!("{error:?}").contains("bytes_limit_per_sec"),
+        "the error should name the field: {error:?}"
+    );
+
+    let no_cycle = MatrixRaftRateLimiterConfig {
+        bytes_limit_per_sec: 1,
+        check_cycle_sec: 0,
+    };
+    assert!(no_cycle.to_byte_quota_limiter().is_err());
+}
+
+#[test]
+fn a_configured_limiter_actually_throttles_a_snapshot_send() {
+    // The point of the chain: a number on the config changes what the send path
+    // does. Without `to_byte_quota_limiter` a host built the limiter itself and
+    // the configured number reached nothing.
+    let config = MatrixRaftRateLimiterConfig {
+        bytes_limit_per_sec: 4,
+        check_cycle_sec: 1,
+    };
+    let mut limiter = config.to_byte_quota_limiter().expect("limiter");
+    assert_eq!(limiter.capacity_bytes(), 4);
+
+    let snap = snapshot(21, b"abcdefghijkl");
+    let mut lifecycle = SnapshotLifecycle::new(SnapshotLifecycleConfig {
+        chunk_size: 4,
+        max_chunks_per_tick: 8,
+        max_bytes_per_tick: 1024,
+        max_retry_attempts: 2,
+    })
+    .expect("lifecycle");
+
+    lifecycle.begin_send(&snap, 2, 1).expect("begin send");
+    let first = lifecycle
+        .poll_send_requests_with_limiter(&mut limiter)
+        .expect("first tick");
+    let first_bytes: usize = first.iter().map(|r| r.chunk.data.len()).sum();
+    assert!(
+        first_bytes <= 4,
+        "the configured 4 bytes per cycle must bound a tick; it sent {first_bytes}"
+    );
+    assert_eq!(limiter.available_bytes(), 0, "the quota should be spent");
+
+    // Spent: the next tick carries nothing until a refill.
+    let second = lifecycle
+        .poll_send_requests_with_limiter(&mut limiter)
+        .expect("second tick");
+    assert!(
+        second.is_empty(),
+        "with the quota spent the send should stall rather than continue: {} requests",
+        second.len()
+    );
+
+    // And a refill lets it move again -- which is what the driver tick does.
+    let refiller = RateLimiterRefiller::new(Arc::new(Mutex::new(limiter)));
+    assert_eq!(refiller.refill_now(), 4, "a spent 4-byte quota restores 4");
+    let mut limiter = refiller.limiter().lock().expect("limiter").clone();
+    let third = lifecycle
+        .poll_send_requests_with_limiter(&mut limiter)
+        .expect("third tick");
+    assert!(!third.is_empty(), "after a refill the send should continue");
+}
+
+#[test]
+fn the_drivers_tick_refills_the_limiter() {
+    // A limiter hands bytes out and never gets them back on its own, so a
+    // configured limit without a refill throttles once and stays empty -- which
+    // reads as a snapshot that mysteriously stopped.
+    let config = MatrixRaftRateLimiterConfig {
+        bytes_limit_per_sec: 16,
+        check_cycle_sec: 1,
+    };
+    let limiter = Arc::new(Mutex::new(config.to_byte_quota_limiter().expect("limiter")));
+
+    // Spend it.
+    {
+        let mut guard = limiter.lock().expect("limiter");
+        let decision = guard.reserve_bytes(16);
+        assert!(decision.allowed);
+        assert_eq!(guard.available_bytes(), 0);
+    }
+
+    let refiller = RateLimiterRefiller::new(Arc::clone(&limiter));
+    let driver = Driver::start(DriverOptions {
+        worker_num: 1,
+        tick_interval_ms: 2,
+        ..DriverOptions::default()
+    })
+    .expect("driver");
+    driver
+        .register_group_every(
+            DriverGroupKey::new(1, 1),
+            Arc::clone(&refiller) as Arc<dyn DriverTickReceiver>,
+            2,
+        )
+        .expect("register");
+
+    assert!(
+        wait_until("the tick refills", Duration::from_secs(20), || {
+            limiter.lock().expect("limiter").available_bytes() == 16
+        }),
+        "the driver's tick never refilled the limiter; available is {}",
+        limiter.lock().expect("limiter").available_bytes()
+    );
+    assert!(refiller.refills() >= 1);
+    assert!(refiller.bytes_restored() >= 16);
+}
+
+#[test]
+fn a_refill_on_a_full_limiter_restores_nothing() {
+    let limiter = Arc::new(Mutex::new(ByteQuotaLimiter::new(100)));
+    let refiller = RateLimiterRefiller::new(Arc::clone(&limiter));
+    assert_eq!(refiller.refill_now(), 0, "nothing to restore when full");
+    assert_eq!(refiller.refills(), 1, "the attempt still counts");
+    assert_eq!(refiller.bytes_restored(), 0);
+    assert_eq!(limiter.lock().expect("limiter").available_bytes(), 100);
 }
