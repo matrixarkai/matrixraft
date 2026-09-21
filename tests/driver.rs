@@ -8,10 +8,13 @@
 //! `a_busy_node_still_ticks` came to demand a rate no runner could supply.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use matrixraft::{Driver, DriverGroupKey, DriverOptions, DriverTickReceiver};
+use matrixraft::{
+    Driver, DriverGroupKey, DriverMailHandler, DriverOptions, DriverTickReceiver, DriverWorkerPool,
+    MailPriority,
+};
 
 /// Counts the ticks it is sent.
 #[derive(Debug, Default)]
@@ -254,4 +257,296 @@ fn stopping_a_driver_stops_its_ticker() {
     );
     // Idempotent, because Drop calls it again.
     driver.stop();
+}
+
+// ---------------------------------------------------------------------------
+// The worker half: many groups' mail on a fixed pool of threads.
+// ---------------------------------------------------------------------------
+
+/// Records the mail it is handed, so a test can ask what arrived and from where.
+#[derive(Debug, Default)]
+struct MailRecorder {
+    batches: AtomicU64,
+    mails: Mutex<Vec<u64>>,
+}
+
+impl MailRecorder {
+    fn received(&self) -> Vec<u64> {
+        self.mails.lock().expect("recorder mutex").clone()
+    }
+    fn count(&self) -> usize {
+        self.mails.lock().expect("recorder mutex").len()
+    }
+    fn batch_count(&self) -> u64 {
+        self.batches.load(Ordering::Relaxed)
+    }
+}
+
+impl DriverMailHandler<u64> for MailRecorder {
+    fn handle_mail(&self, mails: Vec<u64>) {
+        self.batches.fetch_add(1, Ordering::Relaxed);
+        self.mails.lock().expect("recorder mutex").extend(mails);
+    }
+}
+
+#[test]
+fn one_pool_carries_every_groups_mail() {
+    let pool: DriverWorkerPool<u64> = DriverWorkerPool::start(DriverOptions {
+        worker_num: 2,
+        max_messages_each_poll: 8,
+        ..DriverOptions::default()
+    })
+    .expect("pool");
+
+    let groups = 256_u64;
+    let recorders: Vec<Arc<MailRecorder>> = (0..groups)
+        .map(|_| Arc::new(MailRecorder::default()))
+        .collect();
+    for (index, recorder) in recorders.iter().enumerate() {
+        pool.register_group(
+            DriverGroupKey::new(index as u64 + 1, 1),
+            Arc::clone(recorder) as Arc<dyn DriverMailHandler<u64>>,
+        )
+        .expect("register");
+    }
+    assert_eq!(pool.group_count(), groups as usize);
+    assert_eq!(
+        pool.thread_count(),
+        2,
+        "two workers, whatever the group count"
+    );
+
+    for index in 0..groups {
+        pool.send(
+            DriverGroupKey::new(index + 1, 1),
+            MailPriority::Normal,
+            index + 1,
+        )
+        .expect("send");
+    }
+
+    assert!(
+        wait_until("every group gets its mail", Duration::from_secs(30), || {
+            recorders.iter().all(|recorder| recorder.count() >= 1)
+        }),
+        "two workers must carry all {groups} groups; {} had mail",
+        recorders.iter().filter(|r| r.count() >= 1).count()
+    );
+
+    let stats = pool.stats();
+    assert_eq!(
+        stats.mails_handled, groups,
+        "every mail sent should be handled exactly once"
+    );
+    assert_eq!(stats.mails_refused, 0);
+}
+
+#[test]
+fn mail_reaches_the_group_it_was_addressed_to() {
+    // The pool gives each group its own slot because two groups can share a
+    // node id. If that routing were wrong this is what would catch it.
+    let pool: DriverWorkerPool<u64> = DriverWorkerPool::start(DriverOptions {
+        worker_num: 3,
+        ..DriverOptions::default()
+    })
+    .expect("pool");
+
+    // Same node id in every group, deliberately.
+    let keys: Vec<DriverGroupKey> = (1..=8).map(|g| DriverGroupKey::new(g, 1)).collect();
+    let recorders: Vec<Arc<MailRecorder>> = keys
+        .iter()
+        .map(|key| {
+            let recorder = Arc::new(MailRecorder::default());
+            pool.register_group(
+                *key,
+                Arc::clone(&recorder) as Arc<dyn DriverMailHandler<u64>>,
+            )
+            .expect("register");
+            recorder
+        })
+        .collect();
+
+    // Group g gets exactly the mails g*1000 + 0..20.
+    for (index, key) in keys.iter().enumerate() {
+        let base = (index as u64 + 1) * 1000;
+        for n in 0..20 {
+            pool.send(*key, MailPriority::Normal, base + n)
+                .expect("send");
+        }
+    }
+
+    assert!(
+        wait_until("all mail arrives", Duration::from_secs(30), || {
+            recorders.iter().all(|recorder| recorder.count() == 20)
+        }),
+        "counts were {:?}",
+        recorders.iter().map(|r| r.count()).collect::<Vec<_>>()
+    );
+
+    for (index, recorder) in recorders.iter().enumerate() {
+        let base = (index as u64 + 1) * 1000;
+        let mut got = recorder.received();
+        got.sort_unstable();
+        let want: Vec<u64> = (0..20).map(|n| base + n).collect();
+        assert_eq!(
+            got,
+            want,
+            "group {} got mail addressed elsewhere",
+            index as u64 + 1
+        );
+    }
+}
+
+#[test]
+fn a_group_at_its_queue_depth_refuses_mail() {
+    // A queue bound is what stops one stuck group from growing without limit.
+    // No workers would mean nothing drains, but a pool needs at least one, so
+    // the handler blocks instead.
+    let pool: DriverWorkerPool<u64> = DriverWorkerPool::start(DriverOptions {
+        worker_num: 1,
+        max_queue_depth: 4,
+        ..DriverOptions::default()
+    })
+    .expect("pool");
+
+    let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    struct Blocker(Arc<(Mutex<bool>, std::sync::Condvar)>);
+    impl DriverMailHandler<u64> for Blocker {
+        fn handle_mail(&self, _mails: Vec<u64>) {
+            // Bounded, so a failing assertion below cannot leave this worker
+            // parked forever and turn a test failure into a hung suite.
+            let (lock, cv) = &*self.0;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut released = lock.lock().expect("gate mutex");
+            while !*released {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let (next, _) = cv
+                    .wait_timeout(released, deadline - now)
+                    .expect("gate mutex");
+                released = next;
+            }
+        }
+    }
+
+    let key = DriverGroupKey::new(1, 1);
+    pool.register_group(key, Arc::new(Blocker(Arc::clone(&gate))))
+        .expect("register");
+
+    // Fill past the depth. The first send may be taken by the worker before the
+    // rest queue, so refuse is asserted over the run and not on one call.
+    let mut refused = 0;
+    for n in 0..64 {
+        if pool.send(key, MailPriority::Normal, n).is_err() {
+            refused += 1;
+        }
+    }
+    assert!(
+        refused > 0,
+        "a depth of 4 must refuse some of 64 sends; it refused none"
+    );
+    assert_eq!(pool.stats().mails_refused, refused);
+
+    // Let the handler go so the pool can shut down.
+    {
+        let (lock, cv) = &*gate;
+        *lock.lock().expect("gate mutex") = true;
+        cv.notify_all();
+    }
+}
+
+#[test]
+fn a_cancelled_group_takes_no_more_mail() {
+    let pool: DriverWorkerPool<u64> =
+        DriverWorkerPool::start(DriverOptions::default()).expect("pool");
+    let key = DriverGroupKey::new(5, 1);
+    let recorder = Arc::new(MailRecorder::default());
+    pool.register_group(
+        key,
+        Arc::clone(&recorder) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register");
+    pool.send(key, MailPriority::Normal, 1).expect("send");
+    assert!(
+        wait_until("the mail arrives", Duration::from_secs(20), || recorder
+            .count()
+            >= 1),
+        "mail never arrived, so cancelling proves nothing"
+    );
+
+    assert!(pool.cancel_group(key));
+    assert!(!pool.cancel_group(key));
+    assert_eq!(pool.group_count(), 0);
+    assert!(
+        pool.send(key, MailPriority::Normal, 2).is_err(),
+        "a cancelled group must not accept mail"
+    );
+}
+
+#[test]
+fn stopping_the_pool_joins_its_workers() {
+    // Workers block on the selector rather than polling a timeout, so stop has
+    // to wake them. If the sentinel were wrong this test would hang, not fail.
+    let mut pool: DriverWorkerPool<u64> = DriverWorkerPool::start(DriverOptions {
+        worker_num: 4,
+        ..DriverOptions::default()
+    })
+    .expect("pool");
+    let recorder = Arc::new(MailRecorder::default());
+    let key = DriverGroupKey::new(1, 1);
+    pool.register_group(
+        key,
+        Arc::clone(&recorder) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register");
+    pool.send(key, MailPriority::Normal, 42).expect("send");
+    assert!(
+        wait_until("mail arrives", Duration::from_secs(20), || recorder.count()
+            >= 1),
+        "mail never arrived"
+    );
+
+    pool.stop();
+    pool.stop(); // idempotent, because Drop calls it too
+    assert!(recorder.batch_count() >= 1);
+}
+
+#[test]
+fn a_pool_batches_rather_than_handing_over_one_at_a_time() {
+    // max_messages_each_poll is a batch size; a pool that handed mail over one
+    // at a time would do the same work with far more handoffs.
+    let pool: DriverWorkerPool<u64> = DriverWorkerPool::start(DriverOptions {
+        worker_num: 1,
+        max_messages_each_poll: 32,
+        max_queue_depth: 8192,
+        ..DriverOptions::default()
+    })
+    .expect("pool");
+    let key = DriverGroupKey::new(1, 1);
+    let recorder = Arc::new(MailRecorder::default());
+    pool.register_group(
+        key,
+        Arc::clone(&recorder) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register");
+
+    let sent = 2000_u64;
+    for n in 0..sent {
+        pool.send(key, MailPriority::Normal, n).expect("send");
+    }
+    assert!(
+        wait_until("all mail arrives", Duration::from_secs(30), || {
+            recorder.count() as u64 >= sent
+        }),
+        "only {} of {sent} arrived",
+        recorder.count()
+    );
+
+    let batches = recorder.batch_count();
+    assert!(
+        batches < sent,
+        "mail should arrive in batches, not one call per mail: {batches} batches for {sent} mails"
+    );
 }

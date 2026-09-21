@@ -122,9 +122,17 @@ impl<Mail> MailChannel<Mail> {
         inner.selector_total_mail_count = selector.add_total_mail_count(diff);
         inner.size = 0;
 
-        let mut channels = std::array::from_fn(|_| VecDeque::new());
+        // Appended, not assigned. `fetch` is consume-then-drain under two
+        // separate lock holds, and a channel can be selected again in between
+        // when a sender fires it, so two workers can be inside `fetch` for the
+        // same channel at once. Assigning here made the second consume discard
+        // whatever the first had staged and not yet drained -- mail accepted by
+        // `send` and then silently dropped.
+        let mut channels: [VecDeque<Mail>; 3] = std::array::from_fn(|_| VecDeque::new());
         std::mem::swap(&mut inner.channels, &mut channels);
-        inner.buffered = channels;
+        for (buffered, taken) in inner.buffered.iter_mut().zip(channels.iter_mut()) {
+            buffered.extend(taken.drain(..));
+        }
     }
 
     fn overflow(&self, inner: &MailChannelInner<Mail>) -> bool {

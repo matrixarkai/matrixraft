@@ -108,3 +108,62 @@ fn channel_selector_group_count_drives_channel_overflow() {
         .try_send_to_channel(Arc::clone(&channel), MailPriority::Normal, 4)
         .is_err());
 }
+
+#[test]
+fn concurrent_fetches_on_one_channel_lose_no_mail() {
+    // `fetch` is consume-then-drain under two separate lock holds, and a sender
+    // firing the channel in between can hand it to a second worker, so two
+    // fetches for the same channel can overlap. While `consume` assigned to
+    // `buffered` rather than appending, the second one discarded whatever the
+    // first had staged and not yet drained: mail that `send` had accepted,
+    // gone, with no error anywhere.
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let selector = Arc::new(ChannelSelector::<u64>::new());
+    let channel = MailChannel::<u64>::new(1, usize::MAX);
+    let sent = 5_000_u64;
+
+    let received = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+
+    let fetchers: Vec<_> = (0..4)
+        .map(|_| {
+            let selector = Arc::clone(&selector);
+            let channel = Arc::clone(&channel);
+            let received = Arc::clone(&received);
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    let mails = channel.fetch(&selector);
+                    received.fetch_add(mails.len(), Ordering::Relaxed);
+                }
+                // Whatever is left after the sender stopped.
+                let mails = channel.fetch(&selector);
+                received.fetch_add(mails.len(), Ordering::Relaxed);
+            })
+        })
+        .collect();
+
+    for n in 0..sent {
+        channel.send(MailPriority::Normal, n);
+        selector.fire(Arc::clone(&channel));
+    }
+
+    // Let the fetchers drain, then stop them and take a last pass each.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while received.load(Ordering::Relaxed) < sent as usize && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    done.store(true, Ordering::Relaxed);
+    for fetcher in fetchers {
+        fetcher.join().expect("fetcher");
+    }
+
+    assert_eq!(
+        received.load(Ordering::Relaxed),
+        sent as usize,
+        "every mail accepted by send must come back out of fetch"
+    );
+    assert_eq!(channel.queued_len(), 0, "nothing should still be queued");
+}

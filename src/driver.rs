@@ -26,7 +26,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::{GroupId, NodeId, RaftError};
+use crate::{
+    ChannelSelector, ChannelSelectorPolicy, GroupId, MailChannel, MailPriority, NodeId, RaftError,
+    MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
+};
 
 /// The clock the ticker advances, in milliseconds per step.
 const DRIVER_CLOCK_STEP_MS: u64 = 1;
@@ -354,5 +357,329 @@ impl Driver {
 impl Drop for Driver {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// What the driver hands a group when its mail is ready.
+///
+/// Called from a worker thread, one batch at a time for a given group, so an
+/// implementation sees its own mail in order and never concurrently with
+/// itself.
+pub trait DriverMailHandler<Mail>: Send + Sync {
+    fn handle_mail(&self, mails: Vec<Mail>);
+}
+
+/// Wraps a host's mail so the pool has something of its own to send.
+///
+/// Shutdown needs to wake workers that are blocked on the selector, and a
+/// sentinel cannot be synthesised from an arbitrary `Mail`. Wrapping gives the
+/// pool one, which is why workers can block indefinitely instead of polling a
+/// timeout — an idle driver costs nothing.
+enum Envelope<Mail> {
+    Mail(Mail),
+    Stop,
+}
+
+struct PoolGroup<Mail> {
+    channel: Arc<MailChannel<Envelope<Mail>>>,
+    slot: NodeId,
+}
+
+struct PoolInner<Mail> {
+    options: DriverOptions,
+    selector: ChannelSelector<Envelope<Mail>>,
+    groups: Mutex<BTreeMap<DriverGroupKey, PoolGroup<Mail>>>,
+    handlers: Mutex<BTreeMap<NodeId, Arc<dyn DriverMailHandler<Mail>>>>,
+    next_slot: AtomicU64,
+    exit: AtomicBool,
+    batches_handled: AtomicU64,
+    mails_handled: AtomicU64,
+    mails_refused: AtomicU64,
+}
+
+/// What a worker pool is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriverWorkerStats {
+    pub registered_groups: usize,
+    /// Batches handed to a group. One batch can carry many mails.
+    pub batches_handled: u64,
+    pub mails_handled: u64,
+    /// Sends refused because a group's queue was at `max_queue_depth`.
+    pub mails_refused: u64,
+    pub queued_mails: i64,
+}
+
+/// Runs many groups' mail on a fixed pool of threads.
+///
+/// `NodeRuntime` gives each group a thread, so mail for a thousand groups needs
+/// a thousand threads. Here `worker_num` threads select across every registered
+/// group's channel and hand each group its mail in batches.
+///
+/// Dropping the pool stops its workers and joins them.
+pub struct DriverWorkerPool<Mail> {
+    inner: Arc<PoolInner<Mail>>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl<Mail> std::fmt::Debug for DriverWorkerPool<Mail> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DriverWorkerPool")
+            .field("worker_num", &self.inner.options.worker_num)
+            .field(
+                "registered_groups",
+                // Read directly rather than through group_count(), which lives
+                // on the `Mail: Send` impl; Debug carries no bounds.
+                &self
+                    .inner
+                    .groups
+                    .lock()
+                    .map(|groups| groups.len())
+                    .unwrap_or(0),
+            )
+            .finish()
+    }
+}
+
+impl<Mail: Send + 'static> DriverWorkerPool<Mail> {
+    pub fn start(options: DriverOptions) -> Result<Self, RaftError> {
+        options.validate()?;
+        let inner = Arc::new(PoolInner {
+            options,
+            selector: ChannelSelector::new(),
+            groups: Mutex::new(BTreeMap::new()),
+            handlers: Mutex::new(BTreeMap::new()),
+            next_slot: AtomicU64::new(1),
+            exit: AtomicBool::new(false),
+            batches_handled: AtomicU64::new(0),
+            mails_handled: AtomicU64::new(0),
+            mails_refused: AtomicU64::new(0),
+        });
+
+        let mut workers = Vec::with_capacity(options.worker_num);
+        for index in 0..options.worker_num {
+            let worker_inner = Arc::clone(&inner);
+            let handle = thread::Builder::new()
+                .name(format!("rustraft-driver-worker-{index}"))
+                .spawn(move || worker_inner.run_worker())
+                .map_err(|err| {
+                    RaftError::Transport(format!("failed to spawn driver worker: {err}"))
+                })?;
+            workers.push(handle);
+        }
+
+        Ok(Self { inner, workers })
+    }
+
+    /// Registers a group and returns nothing: mail goes in through `send`.
+    pub fn register_group(
+        &self,
+        key: DriverGroupKey,
+        handler: Arc<dyn DriverMailHandler<Mail>>,
+    ) -> Result<(), RaftError> {
+        let mut groups = self
+            .inner
+            .groups
+            .lock()
+            .expect("driver groups mutex poisoned");
+        if groups.contains_key(&key) {
+            return Err(RaftError::InvalidRequest(format!(
+                "driver already holds group {} node {}",
+                key.group_id, key.node_id
+            )));
+        }
+        // A channel is keyed by one id, and two replicas of different groups
+        // can share a node id, so the pool hands out its own dense slot rather
+        // than reusing the node id.
+        let slot = self.inner.next_slot.fetch_add(1, Ordering::Relaxed);
+        let channel = MailChannel::new(slot, self.inner.options.max_queue_depth);
+        groups.insert(key, PoolGroup { channel, slot });
+        self.inner
+            .handlers
+            .lock()
+            .expect("driver handlers mutex poisoned")
+            .insert(slot, handler);
+        Ok(())
+    }
+
+    pub fn cancel_group(&self, key: DriverGroupKey) -> bool {
+        let mut groups = self
+            .inner
+            .groups
+            .lock()
+            .expect("driver groups mutex poisoned");
+        let Some(group) = groups.remove(&key) else {
+            return false;
+        };
+        self.inner
+            .handlers
+            .lock()
+            .expect("driver handlers mutex poisoned")
+            .remove(&group.slot);
+        true
+    }
+
+    /// Queues mail for a group, refusing it when the group is at
+    /// `max_queue_depth` rather than letting one slow group grow without bound.
+    pub fn send(
+        &self,
+        key: DriverGroupKey,
+        priority: MailPriority,
+        mail: Mail,
+    ) -> Result<(), RaftError> {
+        let channel = {
+            let groups = self
+                .inner
+                .groups
+                .lock()
+                .expect("driver groups mutex poisoned");
+            let Some(group) = groups.get(&key) else {
+                return Err(RaftError::NodeNotFound(key.node_id));
+            };
+            Arc::clone(&group.channel)
+        };
+        // The depth is checked here rather than left to the channel. A
+        // channel's own limit is compared against a selector-wide count that is
+        // only refreshed when a worker fetches, so a group whose worker is busy
+        // -- exactly the group a depth bound is for -- would never be refused.
+        if channel.queued_len() >= self.inner.options.max_queue_depth {
+            self.inner.mails_refused.fetch_add(1, Ordering::Relaxed);
+            return Err(RaftError::InvalidRequest(format!(
+                "group {} node {} is at its queue depth of {}",
+                key.group_id, key.node_id, self.inner.options.max_queue_depth
+            )));
+        }
+        if self
+            .inner
+            .selector
+            .try_send_to_channel(channel, priority, Envelope::Mail(mail))
+            .is_err()
+        {
+            self.inner.mails_refused.fetch_add(1, Ordering::Relaxed);
+            return Err(RaftError::InvalidRequest(format!(
+                "group {} node {} is at its queue depth of {}",
+                key.group_id, key.node_id, self.inner.options.max_queue_depth
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn group_count(&self) -> usize {
+        self.inner
+            .groups
+            .lock()
+            .expect("driver groups mutex poisoned")
+            .len()
+    }
+
+    /// Threads this pool owns. A function of the options, not of the group
+    /// count — which is the whole point.
+    pub fn thread_count(&self) -> usize {
+        self.inner.options.worker_num
+    }
+
+    pub fn stats(&self) -> DriverWorkerStats {
+        DriverWorkerStats {
+            registered_groups: self.group_count(),
+            batches_handled: self.inner.batches_handled.load(Ordering::Relaxed),
+            mails_handled: self.inner.mails_handled.load(Ordering::Relaxed),
+            mails_refused: self.inner.mails_refused.load(Ordering::Relaxed),
+            queued_mails: self.inner.selector.total_mail_count(),
+        }
+    }
+
+    pub fn stop(&mut self) {
+        self.shutdown();
+    }
+}
+
+impl<Mail> DriverWorkerPool<Mail> {
+    /// Stops the workers and joins them. Idempotent.
+    ///
+    /// Lives on the unbounded impl so `Drop` can call it: `Drop` cannot carry
+    /// bounds the struct does not, and `stop` is public on the `Mail: Send`
+    /// impl where callers are.
+    fn shutdown(&mut self) {
+        if self.workers.is_empty() {
+            return;
+        }
+        self.inner.exit.store(true, Ordering::Relaxed);
+        // One is enough: whoever receives it relays it before returning.
+        self.inner.selector.send_global(Envelope::Stop);
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl<Mail> Drop for DriverWorkerPool<Mail> {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+impl<Mail: Send + 'static> PoolInner<Mail> {
+    fn run_worker(&self) {
+        let policy = ChannelSelectorPolicy {
+            limit: self.options.max_messages_each_poll.max(1),
+            timeout_ms: MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
+        };
+        while !self.exit.load(Ordering::Relaxed) {
+            let selection = self.selector.select(policy, &[]);
+            // Global mail is only ever the stop sentinel.
+            //
+            // `select` drains EVERY global mail, so one worker can take all the
+            // sentinels that were posted and leave its colleagues parked for
+            // good -- a join that never returns. Each worker relays one on its
+            // way out instead, so the wake-up walks the pool however the drain
+            // happened to split them.
+            if selection
+                .global_mails
+                .iter()
+                .any(|mail| matches!(mail, Envelope::Stop))
+            {
+                self.selector.send_global(Envelope::Stop);
+                return;
+            }
+            for channel in selection.channels {
+                if self.exit.load(Ordering::Relaxed) {
+                    return;
+                }
+                self.drain_channel(&channel);
+            }
+        }
+    }
+
+    fn drain_channel(&self, channel: &Arc<MailChannel<Envelope<Mail>>>) {
+        let slot = channel.replica_id();
+        let envelopes = channel.fetch(&self.selector);
+        if envelopes.is_empty() {
+            return;
+        }
+        let mut mails = Vec::with_capacity(envelopes.len());
+        for envelope in envelopes {
+            match envelope {
+                Envelope::Mail(mail) => mails.push(mail),
+                Envelope::Stop => return,
+            }
+        }
+        if mails.is_empty() {
+            return;
+        }
+        let handler = {
+            let handlers = self
+                .handlers
+                .lock()
+                .expect("driver handlers mutex poisoned");
+            handlers.get(&slot).map(Arc::clone)
+        };
+        // A group cancelled between selection and drain has no handler; its
+        // mail is dropped rather than held for a group that is gone.
+        let Some(handler) = handler else {
+            return;
+        };
+        let count = mails.len() as u64;
+        handler.handle_mail(mails);
+        self.batches_handled.fetch_add(1, Ordering::Relaxed);
+        self.mails_handled.fetch_add(count, Ordering::Relaxed);
     }
 }

@@ -114,7 +114,10 @@ pub use checksum::{
     ChecksumResult, ChecksumType, FileChecksumContext, FileChecksumResult,
 };
 pub use config::{Config, ConfigError};
-pub use driver::{Driver, DriverGroupKey, DriverOptions, DriverStats, DriverTickReceiver};
+pub use driver::{
+    Driver, DriverGroupKey, DriverMailHandler, DriverOptions, DriverStats, DriverTickReceiver,
+    DriverWorkerPool, DriverWorkerStats,
+};
 pub use durability::matrixraft_durability_parity_report;
 pub use fsm::{
     matrixraft_apply_entry, matrixraft_flexible_apply_with_store,
