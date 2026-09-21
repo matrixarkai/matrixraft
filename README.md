@@ -379,9 +379,21 @@ and batching configuration a host store would use: `reader_num`,
 `merge_heartbeat_interval_milli`, `watched_address_resolver` and `store_id`.
 
 Those are recorded, planned over and reported on. Of them only `flexible_apply`
-reaches an implementation (in `fsm`). `driver_batch_bytes` is in `DriverOptions`
-but unread: the pool would have to ask a host how many bytes a message is, and
-it has no way to.
+reaches an implementation (in `fsm`).
+
+`driver_batch_bytes` is the driver's, and it applies when a host says how big a
+mail is:
+
+```rust
+let pool = DriverWorkerPool::start_with_mail_size(
+    options,                                   // driver_batch_bytes: 64 * 1024
+    Arc::new(|mail: &MyMail| mail.encoded_len()),
+)?;
+```
+
+`start` without one bounds a batch by `max_messages_each_poll` alone, because
+the pool cannot measure a `Mail` it knows nothing about. A mail larger than the
+whole budget is still delivered, on its own, rather than stranded.
 
 `HeartbeatMerger` is worth naming because it looks connected and is not. It
 buckets by destination address rather than by group, which is the right shape

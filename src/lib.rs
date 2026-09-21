@@ -115,8 +115,8 @@ pub use checksum::{
 };
 pub use config::{Config, ConfigError};
 pub use driver::{
-    Driver, DriverGroupKey, DriverMailHandler, DriverOptions, DriverStats, DriverTickReceiver,
-    DriverWorkerPool, DriverWorkerStats,
+    Driver, DriverGroupKey, DriverMailHandler, DriverMailSize, DriverOptions, DriverStats,
+    DriverTickReceiver, DriverWorkerPool, DriverWorkerStats,
 };
 pub use durability::matrixraft_durability_parity_report;
 pub use fsm::{

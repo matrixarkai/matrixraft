@@ -385,8 +385,13 @@ struct PoolGroup<Mail> {
     slot: NodeId,
 }
 
+/// Tells the pool how many bytes a mail is, so `driver_batch_bytes` can bound a
+/// batch. Supplied by the host, because only the host knows.
+pub type DriverMailSize<Mail> = Arc<dyn Fn(&Mail) -> usize + Send + Sync>;
+
 struct PoolInner<Mail> {
     options: DriverOptions,
+    mail_size: Option<DriverMailSize<Mail>>,
     selector: ChannelSelector<Envelope<Mail>>,
     groups: Mutex<BTreeMap<DriverGroupKey, PoolGroup<Mail>>>,
     handlers: Mutex<BTreeMap<NodeId, Arc<dyn DriverMailHandler<Mail>>>>,
@@ -441,10 +446,33 @@ impl<Mail> std::fmt::Debug for DriverWorkerPool<Mail> {
 }
 
 impl<Mail: Send + 'static> DriverWorkerPool<Mail> {
+    /// Starts a pool whose batches are bounded by `max_messages_each_poll`
+    /// alone. `driver_batch_bytes` needs a size function; see
+    /// [`DriverWorkerPool::start_with_mail_size`].
     pub fn start(options: DriverOptions) -> Result<Self, RaftError> {
+        Self::start_inner(options, None)
+    }
+
+    /// Starts a pool that also bounds a batch by `driver_batch_bytes`, using
+    /// `mail_size` to measure each mail.
+    ///
+    /// The budget is a floor of one: a mail larger than the whole budget is
+    /// still delivered, on its own, rather than stalling its group forever.
+    pub fn start_with_mail_size(
+        options: DriverOptions,
+        mail_size: DriverMailSize<Mail>,
+    ) -> Result<Self, RaftError> {
+        Self::start_inner(options, Some(mail_size))
+    }
+
+    fn start_inner(
+        options: DriverOptions,
+        mail_size: Option<DriverMailSize<Mail>>,
+    ) -> Result<Self, RaftError> {
         options.validate()?;
         let inner = Arc::new(PoolInner {
             options,
+            mail_size,
             selector: ChannelSelector::new(),
             groups: Mutex::new(BTreeMap::new()),
             handlers: Mutex::new(BTreeMap::new()),
@@ -649,6 +677,34 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
         }
     }
 
+    /// Cuts a drained batch into pieces no larger than `driver_batch_bytes`.
+    ///
+    /// Without a size function there is nothing to measure, so the whole batch
+    /// goes as one and only the count bound applies.
+    fn split_on_byte_budget(&self, mails: Vec<Mail>) -> Vec<Vec<Mail>> {
+        let Some(mail_size) = self.mail_size.as_ref() else {
+            return vec![mails];
+        };
+        let budget = self.options.driver_batch_bytes.max(1);
+        let mut batches: Vec<Vec<Mail>> = Vec::new();
+        let mut current: Vec<Mail> = Vec::new();
+        let mut current_bytes = 0_usize;
+        for mail in mails {
+            let bytes = mail_size(&mail);
+            // A single oversized mail goes on its own rather than never.
+            if !current.is_empty() && current_bytes.saturating_add(bytes) > budget {
+                batches.push(std::mem::take(&mut current));
+                current_bytes = 0;
+            }
+            current_bytes = current_bytes.saturating_add(bytes);
+            current.push(mail);
+        }
+        if !current.is_empty() {
+            batches.push(current);
+        }
+        batches
+    }
+
     fn drain_channel(&self, channel: &Arc<MailChannel<Envelope<Mail>>>) {
         let slot = channel.replica_id();
         let envelopes = channel.fetch(&self.selector);
@@ -677,9 +733,11 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
         let Some(handler) = handler else {
             return;
         };
-        let count = mails.len() as u64;
-        handler.handle_mail(mails);
-        self.batches_handled.fetch_add(1, Ordering::Relaxed);
-        self.mails_handled.fetch_add(count, Ordering::Relaxed);
+        for batch in self.split_on_byte_budget(mails) {
+            let count = batch.len() as u64;
+            handler.handle_mail(batch);
+            self.batches_handled.fetch_add(1, Ordering::Relaxed);
+            self.mails_handled.fetch_add(count, Ordering::Relaxed);
+        }
     }
 }
