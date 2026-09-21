@@ -42,6 +42,17 @@ The Minimum Supported Rust Version (MSRV) is **1.82**. CI runs formatting, a
 warnings-as-errors build, the test suite, doc generation, the MSRV check, and
 `cargo-deny` (license + advisory) — all must pass.
 
+To run all of that in one command before you push:
+
+```bash
+scripts/verify_like_ci.sh          # or --quick to skip the MSRV check
+```
+
+It sets `RUSTFLAGS` and `RUSTDOCFLAGS` to `-D warnings` and passes `--locked`,
+as CI does, because a run without those can pass locally and fail on the branch.
+Add new files with `git add -N .` first: the vocabulary check reads the index,
+and the script will tell you which files it could not see.
+
 ## Pull requests
 
 1. Keep changes focused, and add tests for any behavior change.
