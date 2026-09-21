@@ -135,7 +135,6 @@ fn a_batch_respects_apply_max_batch_count() {
         applier_num: 1,
         apply_max_batch_count: 8,
         max_queue_depth: 8192,
-        ..ApplierOptions::default()
     })
     .expect("applier");
     let key = DriverGroupKey::new(1, 1);
