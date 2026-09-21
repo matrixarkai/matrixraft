@@ -317,20 +317,50 @@ Zero used to mean something worse than "unset": `to_raft_config` applies
 `tick_interval_ms.max(1)`, so a group that named no tick ran a **1 ms**
 heartbeat with an election timeout of `election_cycle_tick` milliseconds.
 
-### Settings this crate records but does not act on
+### Sharing threads between groups: the driver
 
-`MatrixRaftGroupContext` and `MatrixRaftRuntimeWiring` carry the pool and
-batching configuration a host store would use: `worker_num`, `reader_num`,
+`NodeRuntime` gives every group a thread, so the table above is 1.00 threads per
+group. `Driver` and `DriverWorkerPool` are the other shape: a fixed set of
+threads that many groups share.
+
+```rust
+let options = DriverOptions { worker_num: 4, max_messages_each_poll: 64,
+                              max_queue_depth: 4096, tick_interval_ms: 10,
+                              ..DriverOptions::default() };
+
+// Ticks: one thread, a due-time heap, any number of groups.
+let driver = Driver::start(options)?;
+driver.register_group(DriverGroupKey::new(group_id, node_id), tick_receiver)?;
+driver.register_group_every(key, receiver, 250)?;  // or an interval of its own
+
+// Mail: worker_num threads selecting across every group's channel.
+let pool: DriverWorkerPool<MyMail> = DriverWorkerPool::start(options)?;
+pool.register_group(key, handler)?;
+pool.send(key, MailPriority::Normal, mail)?;       // refused at max_queue_depth
+```
+
+`driver.thread_count()` is `worker_num + 1` and `pool.thread_count()` is
+`worker_num`, at one group or at a thousand. Each group keeps its own tick
+interval, and a group's mail arrives in batches of up to
+`max_messages_each_poll` rather than one call per message. A group whose handler
+is busy is refused new mail at `max_queue_depth` instead of queueing without
+bound.
+
+The driver is a component to build a host on; it does not replace `NodeRuntime`,
+and nothing in this crate wires the two together yet.
+
+### Settings this crate still only records
+
+`MatrixRaftGroupContext` and `MatrixRaftRuntimeWiring` carry more of the pool
+and batching configuration a host store would use: `reader_num`,
 `executor_num`, `applier_num`, the four `snapshot_*_num` counts,
-`apply_max_batch_count`, `driver_batch_bytes`, `max_messages_each_poll`,
-`max_queue_depth`, `heartbeat_merge` with `merge_heartbeat_interval_milli`,
-`watched_address_resolver` and `store_id`.
+`apply_max_batch_count`, `driver_batch_bytes`, `heartbeat_merge` with
+`merge_heartbeat_interval_milli`, `watched_address_resolver` and `store_id`.
 
-Those are recorded, planned over and reported on. Of them, only
-`flexible_apply` reaches an implementation in this crate (in `fsm`). Nothing
-here shares a worker pool between groups or coalesces messages across them —
-each group ticks its own runtime and calls `broadcast_heartbeat` on its own
-`RaftCluster`.
+Those are recorded, planned over and reported on. Of them only `flexible_apply`
+reaches an implementation (in `fsm`). `driver_batch_bytes` is in `DriverOptions`
+but unread: the pool would have to ask a host how many bytes a message is, and
+it has no way to.
 
 `HeartbeatMerger` is worth naming because it looks connected and is not. It
 buckets by destination address rather than by group, which is the right shape
