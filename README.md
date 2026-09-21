@@ -339,12 +339,33 @@ pool.register_group(key, handler)?;
 pool.send(key, MailPriority::Normal, mail)?;       // refused at max_queue_depth
 ```
 
-`driver.thread_count()` is `worker_num + 1` and `pool.thread_count()` is
-`worker_num`, at one group or at a thousand. Each group keeps its own tick
-interval, and a group's mail arrives in batches of up to
+Each group keeps its own tick interval, and a group's mail arrives in batches of up to
 `max_messages_each_poll` rather than one call per message. A group whose handler
 is busy is refused new mail at `max_queue_depth` instead of queueing without
 bound.
+
+`driver.thread_count()` is `worker_num + 1` and `pool.thread_count()` is
+`worker_num`, at one group or at ten thousand. Measured with
+`examples/driver_scaling.rs` against `examples/group_scaling.rs`, one group count
+per process, release build, four workers:
+
+| groups | a runtime per group | | sharing a driver | |
+|---|---|---|---|---|
+| | threads | per group | threads | per group |
+| 64 | 64 | 57 KiB | **6** | 2.0 KiB |
+| 256 | 256 | 47 KiB | **6** | 1.0 KiB |
+| 1024 | 1024 | 39 KiB | **6** | 612 B |
+| 4096 | — | — | **6** | 563 B |
+| 10000 | — | — | **10** (8 workers) | 560 B |
+
+At 1024 groups that is 1024 threads against 6, and 39 KiB per group against
+about 640 B — the memory figure held between 612 and 676 B over five runs, and
+10000 groups reported 560 B in three runs out of three. Registering a group
+costs about 800 ns rather than about 113 µs, because no thread is spawned.
+
+The probe sends every group a message and refuses to report until all of them
+have received it, so a registry that held groups and drove nothing would fail
+rather than look thrifty.
 
 The driver is a component to build a host on; it does not replace `NodeRuntime`,
 and nothing in this crate wires the two together yet.
