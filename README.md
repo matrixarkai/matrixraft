@@ -406,6 +406,36 @@ match applier.wait_for_applied(key, read_index, Duration::from_millis(50))? {
 lock the applier advances it with — and a cancelled group wakes its waiters
 rather than leaving them until the timeout.
 
+### A configured transfer limit that actually limits
+
+`SnapshotLifecycle::poll_send_requests_with_limiter` has always taken a
+`RateLimiter`, and `MatrixRaftRateLimiterConfig` has always recorded what a host
+wanted — on the group context, the node creator and the runtime wiring, with
+setters for both directions. Nothing joined them: the configured number reached
+no limiter.
+
+```rust
+let config = MatrixRaftRateLimiterConfig { bytes_limit_per_sec: 8 << 20,
+                                           check_cycle_sec: 1 };
+let limiter = Arc::new(Mutex::new(config.to_byte_quota_limiter()?));
+
+// A limiter hands bytes out and never gets them back on its own, so the
+// driver's tick puts the quota back every check cycle.
+let refiller = RateLimiterRefiller::new(Arc::clone(&limiter));
+driver.register_group_every(key, refiller, config.check_cycle_sec as u64 * 1000)?;
+
+lifecycle.poll_send_requests_with_limiter(&mut limiter.lock()?)?;
+```
+
+A group's own configuration is reachable from what it was built with:
+`wiring.snapshot_send_limiter()?` and `wiring.snapshot_download_limiter()?`
+return the limiters that group was configured with, or `None`.
+
+A zero in either field is refused rather than accepted. A limiter built from a
+zero grants nothing and stops every transfer it gates, which is not a state to
+reach by leaving a field at its default — leave the whole limiter unset to mean
+no limit.
+
 ### Settings this crate still only records
 
 `MatrixRaftGroupContext` and `MatrixRaftRuntimeWiring` carry more of the pool

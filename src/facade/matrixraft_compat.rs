@@ -2371,6 +2371,44 @@ pub struct MatrixRaftRateLimiterConfig {
     pub check_cycle_sec: u32,
 }
 
+impl MatrixRaftRateLimiterConfig {
+    /// Bytes this config allows between one refill and the next.
+    pub fn cycle_capacity_bytes(&self) -> u64 {
+        self.bytes_limit_per_sec
+            .saturating_mul(self.check_cycle_sec as u64)
+    }
+
+    /// The limiter this config describes, holding one cycle of bytes.
+    ///
+    /// Pair it with a `RateLimiterRefiller` on a driver tick every
+    /// `check_cycle_sec` seconds: a limiter hands bytes out and never gets them
+    /// back on its own, so without a refill it throttles once and stays empty.
+    ///
+    /// Both fields must be non-zero. A limiter built from a zero grants nothing
+    /// and stops every transfer it gates, which is not something to configure by
+    /// accident -- leave the limiter unset to mean no limit.
+    pub fn to_byte_quota_limiter(&self) -> Result<ByteQuotaLimiter, RaftError> {
+        if self.bytes_limit_per_sec == 0 {
+            return Err(RaftError::InvalidRequest(
+                "rate limiter bytes_limit_per_sec must be greater than zero; leave the \
+                 limiter unset for no limit"
+                    .to_string(),
+            ));
+        }
+        if self.check_cycle_sec == 0 {
+            return Err(RaftError::InvalidRequest(
+                "rate limiter check_cycle_sec must be at least one second".to_string(),
+            ));
+        }
+        Ok(ByteQuotaLimiter::new(self.cycle_capacity_bytes()))
+    }
+
+    /// How often the limiter this config describes should be refilled.
+    pub fn check_cycle(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.check_cycle_sec.max(1) as u64)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftNodeCreator {
     pub store_id: u64,
@@ -2780,6 +2818,26 @@ pub struct MatrixRaftRuntimeWiring {
 }
 
 impl MatrixRaftRuntimeWiring {
+    /// The send limiter this group was configured with, if any.
+    ///
+    /// `snapshot_send_rate_limiter` was recorded and read by nothing. This is
+    /// the route from the recorded number to
+    /// `SnapshotLifecycle::poll_send_requests_with_limiter`.
+    pub fn snapshot_send_limiter(&self) -> Result<Option<ByteQuotaLimiter>, RaftError> {
+        self.snapshot_send_rate_limiter
+            .as_ref()
+            .map(MatrixRaftRateLimiterConfig::to_byte_quota_limiter)
+            .transpose()
+    }
+
+    /// The download limiter this group was configured with, if any.
+    pub fn snapshot_download_limiter(&self) -> Result<Option<ByteQuotaLimiter>, RaftError> {
+        self.snapshot_download_rate_limiter
+            .as_ref()
+            .map(MatrixRaftRateLimiterConfig::to_byte_quota_limiter)
+            .transpose()
+    }
+
     fn from_context_and_creator(
         context: &MatrixRaftGroupContext,
         options: &MatrixRaftOptions,

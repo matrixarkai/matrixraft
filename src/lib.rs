@@ -182,7 +182,9 @@ pub use pipeline::{
     PipelineLimits, ProgressState, ReplicationPipeline, ReplicationPipelineEvidenceArtifact,
     ReplicationPipelineEvidenceValidationReport, SnapshotTransferState,
 };
-pub use rate_limit::{ByteQuotaLimiter, RateLimitDecision, RateLimiter, RateLimiterStats};
+pub use rate_limit::{
+    ByteQuotaLimiter, RateLimitDecision, RateLimiter, RateLimiterRefiller, RateLimiterStats,
+};
 pub use read_safety::{
     matrixraft_append_safety_decision, matrixraft_applied_index_fence_report,
     matrixraft_bounded_stale_read_report, matrixraft_lease_read_eligibility_report,
