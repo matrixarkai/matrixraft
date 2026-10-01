@@ -312,17 +312,24 @@ leadership, three repeats:
 
 | groups | threads | cores | ticks delivered | resident | per group |
 |---|---|---|---|---|---|
-| 1024 | 9 | 0.18–0.23 | ~100% | 25 MiB | 23 KiB |
-| 4096 | 17 | 0.77-0.93 | 100.0% | 89 MiB | 21 KiB |
+| 1024 | 9 | 0.18–0.25 | ~100% | 25 MiB | 23 KiB |
+| 4096 | 17 | 0.77–0.93 | 100.0% | 89 MiB | 21 KiB |
 | 16384 | 65 | 3.4–4.2 | ~100% | 342 MiB | 21 KiB |
 
 Sixteen thousand groups on four cores, at every tick the interval asked for, with
 `2 * worker_num + 1` threads rather than one per group.
 
-The box was carrying other work throughout -- about two of its sixteen cores --
-so the cores column is a range and a quiet machine should read at or below it.
-The probe takes its own CPU time from `/proc/self/stat`, so other processes
-cannot be charged to it, but they do compete for cache and for scheduling.
+The box was carrying other work throughout -- between two and seven of its
+sixteen cores across these runs -- so the cores column is a range and a quiet
+machine should read at or below it. The probe takes its own CPU time from
+`/proc/self/stat`, so other processes cannot be charged to it, but they do compete
+for cache and for scheduling: the 1024-group row read 0.18 to 0.23 at the lighter
+load and 0.25 at the heavier.
+
+Every row here was re-run against the current `main` after the changes that
+produced it, and reproduced: the same thread counts, the same resident figures to
+the megabyte, the same 21 to 23 KiB a group, and every tick the interval asked
+for.
 
 What it costs to bring such a store up and take it down, same runs:
 
