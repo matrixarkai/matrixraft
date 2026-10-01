@@ -186,7 +186,49 @@ fn the_per_tick_cluster_calls_allocate_nothing(cluster: &mut RaftCluster) {
                 std::hint::black_box(cluster.leader_id());
             }),
         ),
+        // The rest of what a tick calls. Added because the hosted tick measures
+        // 1.250 allocations and the driver's own per-wake list accounts for 1.000
+        // of that (`tests/alloc_driver.rs`): a quarter of an allocation a tick was
+        // being paid somewhere in this row and the four calls above are all zero,
+        // so the row was not the whole row.
+        (
+            "broadcast_heartbeat",
+            per_call(64, || {
+                let _ = cluster.broadcast_heartbeat();
+            }),
+        ),
+        (
+            "tick_snapshot_trigger",
+            per_call(64, || {
+                std::hint::black_box(cluster.tick_snapshot_trigger());
+            }),
+        ),
+        (
+            "broadcast_commit_index_to_old_paused_peers",
+            per_call(64, || {
+                let _ = cluster.broadcast_commit_index_to_old_paused_peers();
+            }),
+        ),
+        (
+            "step_down_leader_if_lost_quorum",
+            per_call(64, || {
+                std::hint::black_box(cluster.step_down_leader_if_lost_quorum());
+            }),
+        ),
+        (
+            "leader_transfer_state",
+            per_call(64, || {
+                std::hint::black_box(cluster.leader_transfer_state().is_some());
+            }),
+        ),
     ];
+
+    // Printed whether or not the assertion below fires: a zero is as much a
+    // measurement as a hit, and without the figures a later reader cannot tell a
+    // call that was checked from one that was never on the list.
+    for (name, per) in &calls {
+        println!("  {name:<44} {per:.4} allocations a call");
+    }
 
     let allocating: Vec<String> = calls
         .iter()
@@ -199,5 +241,14 @@ fn the_per_tick_cluster_calls_allocate_nothing(cluster: &mut RaftCluster) {
         allocating.join(", ")
     );
     // The control: an empty list of calls would also report nothing allocating.
-    assert_eq!(calls.len(), 4, "the list of per-tick calls changed size");
+    assert_eq!(calls.len(), 9, "the list of per-tick calls changed size");
+    // And the leadership the row was measured under is still the leadership it was
+    // asserted under. `step_down_leader_if_lost_quorum` is in the list and would
+    // have moved it if the single voter had somehow stopped being a quorum, which
+    // would make every figure above describe a different state than a tick's.
+    assert_eq!(
+        cluster.leader_id(),
+        Some(1),
+        "the row moved the leadership it was measuring"
+    );
 }
