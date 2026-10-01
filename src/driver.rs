@@ -119,6 +119,22 @@ pub struct DriverStats {
     /// and coming due. Expected during shutdown; a climbing count while groups
     /// are stable is not.
     pub ticks_dropped: u64,
+    /// Ticks the schedule owed a group and did not deliver.
+    ///
+    /// A group whose deadline is already more than one interval in the past has
+    /// been owed every interval in between. Those are not delivered -- see
+    /// `a_stalled_clock_fires_a_group_once_rather_than_storming_it`, which
+    /// refuses to hand a group five hundred ticks at once -- and until this
+    /// counter existed nothing recorded that they had been owed.
+    ///
+    /// It is the shortfall a host otherwise needs an external probe to see.
+    /// Measured with one: 1024 groups at a 1ms interval deliver 41.5% of the
+    /// ticks asked for on 4 shards and 71.5% on 16, with the worker pool idle
+    /// at 0.0% handed over throughout, because an in-place tick runs the raft
+    /// work on the ticker thread. See [`crate::SharedRuntimeStats::ticks_skipped`] for
+    /// the whole sweep. Heartbeats, leases and election timeouts are
+    /// counted in ticks, so a shortfall here lengthens all three.
+    pub ticks_skipped: u64,
     pub clock_ms: u64,
 }
 
@@ -161,6 +177,7 @@ struct DriverInner {
     exit: AtomicBool,
     ticks_fired: AtomicU64,
     ticks_dropped: AtomicU64,
+    ticks_skipped: AtomicU64,
 }
 
 impl DriverInner {
@@ -198,6 +215,15 @@ impl DriverInner {
                 };
                 due.push(Arc::clone(&registration.receiver));
                 let interval = registration.interval_ms.max(1);
+                // Every whole interval between the deadline and now is a tick
+                // this group was owed and will not get, because `max(now + 1)`
+                // below pulls the deadline forward instead of delivering the
+                // backlog. Counted rather than delivered, so the shortfall is
+                // visible without an external probe.
+                let owed = now.saturating_sub(entry.at_ms) / interval;
+                if owed > 0 {
+                    self.ticks_skipped.fetch_add(owed, Ordering::Relaxed);
+                }
                 // From the deadline rather than from now, so a group that fell
                 // behind catches up to its schedule instead of drifting.
                 let next_at = entry.at_ms.saturating_add(interval).max(now + 1);
@@ -246,6 +272,7 @@ impl Driver {
             exit: AtomicBool::new(false),
             ticks_fired: AtomicU64::new(0),
             ticks_dropped: AtomicU64::new(0),
+            ticks_skipped: AtomicU64::new(0),
         });
 
         let ticker_inner = Arc::clone(&inner);
@@ -357,6 +384,7 @@ impl Driver {
             registered_groups: state.groups.len(),
             ticks_fired: self.inner.ticks_fired.load(Ordering::Relaxed),
             ticks_dropped: self.inner.ticks_dropped.load(Ordering::Relaxed),
+            ticks_skipped: self.inner.ticks_skipped.load(Ordering::Relaxed),
             clock_ms: state.clock_ms,
         }
     }
@@ -864,6 +892,7 @@ mod tests {
             exit: AtomicBool::new(false),
             ticks_fired: AtomicU64::new(0),
             ticks_dropped: AtomicU64::new(0),
+            ticks_skipped: AtomicU64::new(0),
         };
         (inner, counter)
     }
@@ -956,8 +985,48 @@ mod tests {
             counter.count()
         );
 
+        assert_eq!(
+            inner.ticks_skipped.load(Ordering::Relaxed),
+            499,
+            "the five hundred ticks it was owed were refused but not recorded"
+        );
+
         inner.advance_to(5_001);
         assert_eq!(counter.count(), 2, "and then it resumes");
+        assert_eq!(
+            inner.ticks_skipped.load(Ordering::Relaxed),
+            499,
+            "an on-time tick added to the shortfall"
+        );
+    }
+
+    #[test]
+    fn a_clock_read_less_often_than_the_interval_skips_the_difference() {
+        // The machine-independent form of a measurement: 1024 groups at a 1ms
+        // interval deliver about 46% of the ticks asked for, because the ticker
+        // sleeps a millisecond and `thread::sleep` guarantees *at least* that.
+        // A clock that can only be read every 2ms with a 1ms interval is the
+        // same arithmetic with the overshoot made exact.
+        let (inner, counter) = hand_driven(&[(1, 1)]);
+
+        for ms in (2..=20).step_by(2) {
+            inner.advance_to(ms);
+        }
+
+        assert_eq!(
+            counter.count(),
+            10,
+            "ten readings delivered {} ticks",
+            counter.count()
+        );
+        assert_eq!(
+            inner.ticks_skipped.load(Ordering::Relaxed),
+            10,
+            "20ms at a 1ms interval owes twenty ticks and delivered ten, so ten              are missing: the counter says {}",
+            inner.ticks_skipped.load(Ordering::Relaxed)
+        );
+        // Not a dropped tick: nothing was unregistered.
+        assert_eq!(inner.ticks_dropped.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -986,6 +1055,11 @@ mod tests {
             inner.ticks_dropped.load(Ordering::Relaxed),
             0,
             "no group was unregistered, so nothing should have been dropped"
+        );
+        assert_eq!(
+            inner.ticks_skipped.load(Ordering::Relaxed),
+            0,
+            "the clock was read every millisecond, so no interval was missed"
         );
     }
 }

@@ -2158,6 +2158,31 @@ pub struct SharedRuntimeStats {
     /// Climbing steadily means groups are contended for longer than an
     /// interval, which is what too few workers looks like from outside.
     pub ticks_handed_over: u64,
+    /// Ticks the schedule owed a group and did not deliver, over every shard.
+    ///
+    /// Climbing means the tickers cannot hold the configured interval, and it
+    /// is not what `ticks_handed_over` shows. The pool is not involved: an
+    /// in-place tick runs the raft work on the ticker thread, and a ticker that
+    /// is merely slow never hands anything over. Measured, 1024 groups at a 1ms
+    /// interval:
+    ///
+    /// | shards | ticks delivered | cores | handed over |
+    /// |---|---|---|---|
+    /// | 4 | 41.5% / 46.1% | 1.97 / 2.02 | 0.0% |
+    /// | 8 | 54.3% / 61.0% | 2.87 / 2.78 | 0.0% |
+    /// | 16 | 71.5% / 71.9% | 3.67 / 3.62 | 0.0% |
+    /// | 32 | 77.8% / 74.7% | 5.07 / 5.08 | 0.0% |
+    ///
+    /// Two figures per row: the shard counts were swept up and then back down,
+    /// so a box drifting under other load shows as the two passes disagreeing
+    /// rather than as a trend in the shard count.
+    ///
+    /// Shards are the tick capacity; the worker pool is not, and sat idle
+    /// through all eight runs. Past sixteen shards on a sixteen-core box the
+    /// return flattens while the cost keeps climbing, which is the shape of a
+    /// box running out of cores rather than of a limit in here. Heartbeats, leases and election timeouts are counted
+    /// in ticks, so a shortfall here lengthens all three.
+    pub ticks_skipped: u64,
     /// Groups the runtime holds.
     pub groups: usize,
     /// Threads it uses, whatever the group count.
@@ -2368,6 +2393,11 @@ impl SharedGroupRuntime {
         SharedRuntimeStats {
             ticks_in_place: self.counters.in_place.load(Ordering::Relaxed),
             ticks_handed_over: self.counters.handed_over.load(Ordering::Relaxed),
+            ticks_skipped: self
+                .tickers
+                .iter()
+                .map(|ticker| ticker.stats().ticks_skipped)
+                .sum(),
             groups: self.group_count(),
             threads: self.thread_count(),
         }
