@@ -2492,16 +2492,35 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// In release the row does not appear at all: 10ms at 16,384 groups is served in
 /// full.
 ///
-/// On top of the per-tick cost there is a fixed cost that is not per tick at all.
+/// There is also a cost that is not per tick, and a correction to make about it.
 /// 33 threads with almost nothing to do -- 64 groups on a one-second interval --
-/// burn 0.196 cores in release and 0.156 in debug. That is the tickers waking
-/// every millisecond, a sleep rather than work, so the profile barely touches it
-/// and it follows the shard count rather than the group count.
+/// used to burn 0.196 cores and 14,500 context switches a second doing nothing
+/// but waking up. This note called that a fixed cost and put it in a sizing
+/// formula as a constant. **It was the cost of an idle driver, not a constant
+/// added to every configuration.**
 ///
-/// So, for sizing a release build: **cores is roughly 0.2 plus 3us per thousand
-/// ticks a millisecond** -- groups times 1000/`tick_interval_ms` ticks a second.
-/// That is a fit over the rows above, on one 16-core box that was carrying other
-/// work at the time, and it stops holding as a box approaches full.
+/// The tickers now wait until their earliest deadline rather than waking every
+/// millisecond, and the measurement shows where that mattered and where it did
+/// not:
+///
+/// | | cores before | after | switches/sec before | after |
+/// |---|---|---|---|---|
+/// | 64 groups, 1000ms | 0.188 | 0.012 | 14,550 | 402 |
+/// | 4096 groups, 100ms | 0.241 | 0.237 | ~7,000 | ~7,000 |
+/// | 16384 groups, 10ms | 3.6-4.5 | 3.8-3.9 | noisy | noisy |
+///
+/// Fifteen times cheaper when the deadlines are sparse, and unchanged when they
+/// are dense -- which is the useful half of the result. 4096 groups over 8 shards
+/// on a 100ms interval is 512 groups a shard, so something is due about every
+/// fifth of a millisecond and the ticker was never idle to begin with. A store
+/// with many groups was not paying the 0.196.
+///
+/// So, for sizing a release build: **about 3us per tick**, groups times
+/// 1000/`tick_interval_ms` ticks a second, plus a small amount for the threads
+/// themselves. The 0.2 is not added on top for a busy driver; it is what an idle
+/// one used to cost and now does not. This is a fit over the rows above, on one
+/// 16-core box carrying other work, and it stops holding as a box approaches
+/// full.
 ///
 /// # The next limit is file descriptors, not this runtime
 ///
