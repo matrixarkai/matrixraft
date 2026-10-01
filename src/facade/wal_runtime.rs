@@ -1127,8 +1127,22 @@ fn write_wal_segment_file(dir: &Path, segment: &WalSegment) -> Result<(), RaftEr
             .and_then(|_| file.write_all(b"\n"))
             .map_err(|err| RaftError::Storage(format!("failed to write WAL segment: {err}")))?;
     }
+    if segment.records.is_empty() {
+        // Nothing durable to protect, so no fsync. An empty segment is written
+        // exactly once per WAL, when it is first opened, which makes this an
+        // fsync paid once per group at creation for zero records -- and
+        // creating the groups is already the larger half of bringing a store
+        // up. A crash before the first append leaves either no file, which
+        // `open` writes again, or an empty one, which is what this call would
+        // have made durable. Either way the next open is in the same state.
+        //
+        // Not a weakening of the append path: `fsync_on_append` still fsyncs
+        // every record, and every other caller of this function passes a
+        // segment that has records in it.
+        return Ok(());
+    }
     file.sync_data()
-        .map_err(|err| RaftError::Storage(format!("failed to fsync WAL segment: {err}")))
+        .map_err(|err| wal_file_error("failed to fsync WAL segment", &err))
 }
 
 fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<WalSegment>, bool), RaftError> {

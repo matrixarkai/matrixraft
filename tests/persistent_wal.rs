@@ -967,3 +967,67 @@ fn a_log_recovers_exactly_after_repeated_compaction() {
     );
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_fresh_wal_can_lose_its_empty_segment_and_still_be_opened() {
+    // `write_wal_segment_file` no longer fsyncs a segment with no records in
+    // it. That is one fsync per group saved at creation -- creating the groups
+    // is the larger half of bringing a store up, and it measured 7.6s to 0.6s
+    // for 4096 groups -- and it rests on one claim: an unsynced empty segment
+    // file is worth nothing, because either state the file can be found in
+    // after a crash leads to the same place.
+    //
+    // This drives both states rather than arguing them.
+    let dir = temp_wal_dir("fresh-wal-empty-segment");
+    let _ = fs::remove_dir_all(&dir);
+
+    let wal = PersistentRaftWal::open(wal_options(dir.clone())).expect("a fresh WAL opens");
+    assert_eq!(
+        wal.fsync_count(),
+        0,
+        "opening a WAL fsynced {} times before anything was appended",
+        wal.fsync_count()
+    );
+    let segment = dir.join(format!("{:020}.wal", 0));
+    assert!(
+        segment.exists(),
+        "the first segment file was not written at all"
+    );
+    assert_eq!(
+        fs::metadata(&segment).expect("segment metadata").len(),
+        0,
+        "the first segment is not empty, so this test is not about an empty one"
+    );
+    drop(wal);
+
+    // State one: the file never reached the disk. Opening writes it again.
+    fs::remove_file(&segment).expect("remove the unsynced segment");
+    let mut wal = PersistentRaftWal::open(wal_options(dir.clone())).expect("opens without it");
+    assert!(
+        segment.exists(),
+        "the segment was not recreated, so losing it would lose the WAL"
+    );
+
+    // State two: the file is there and empty, which is what the fsync would
+    // have made durable. Either way the WAL takes records and gives them back.
+    wal.append(wal_record(1)).expect("append after the loss");
+    assert!(
+        wal.fsync_count() > 0,
+        "the append path stopped fsyncing, which is not what was changed"
+    );
+    drop(wal);
+
+    let mut reopened = PersistentRaftWal::open(wal_options(dir.clone())).expect("reopen");
+    let report = reopened.recover().expect("recover");
+    assert_eq!(
+        report
+            .recovered
+            .as_ref()
+            .and_then(|record| record.entries.last())
+            .map(|entry| entry.log_id.index),
+        Some(1),
+        "the record appended after losing the empty segment did not come back"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
