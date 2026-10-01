@@ -102,16 +102,17 @@ fn a_leader_lease_tick_allocates_and_this_is_how_much() {
          the wrong thing"
     );
 
-    // Recorded, not endorsed, and exact: three allocations a tick, the same on
-    // three consecutive runs, so the ceiling carries no slack. A fourth would
-    // otherwise arrive unremarked.
+    // Recorded, not endorsed, and exact: two allocations a tick, the same on
+    // consecutive runs, so the ceiling carries no slack. A third would otherwise
+    // arrive unremarked -- and a third is exactly what was there until
+    // `refresh_witness_commit_quorum_policy` stopped building a whole
+    // `Membership` to count roles that were already on its nodes.
     //
-    // `leader_lease_quorum_reached` builds a `Vec` for the acknowledgements and
-    // calls `membership()`, which collects the voters, learners and witnesses out
-    // of the node map; the empty two cost nothing, the rest is the three. At 8192
-    // groups on a 10ms interval that is about 2.46 million allocations a second
-    // spent deciding that a lease which has not changed is still held.
-    const CEILING_PER_TICK: f64 = 3.0;
+    // The two that remain are both in `leader_lease_quorum_reached`: a `Vec` for
+    // the acknowledgements, and `membership()` again. At 8192 groups on a 10ms
+    // interval they are 1.64 million allocations a second spent deciding that a
+    // lease which has not changed is still held.
+    const CEILING_PER_TICK: f64 = 2.0;
     assert!(
         per_tick <= CEILING_PER_TICK,
         "a lease tick now allocates {per_tick:.2} times, above the {CEILING_PER_TICK} \
