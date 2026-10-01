@@ -339,9 +339,20 @@ What it costs to bring such a store up and take it down, same runs:
 | 4096 | 0.56–0.66s | 0.07s | 0.08–0.10s |
 | 16384 | 2.4–3.5s | 0.49–0.56s | 0.48–0.56s |
 
-Creating the groups is the larger part, about 0.16ms each, and it does not
-parallelise: every group opens its own WAL and writes a first segment, in
-sequence.
+Creating the groups is the larger part, about 0.16ms each: every group opens its
+own WAL and writes a first segment, in sequence.
+
+**It is also almost entirely system time, which is worth knowing before trying to
+make it faster.** Sampled across a 16,384-group create, the process spent **0.05s
+in user code and 4.30s in the kernel** -- 99% of it. So creation is not computation
+that more threads would divide; it is syscalls, and the lever is fewer of them per
+group rather than more cores. That is the shape the last win had: removing an
+fsync of an empty segment took 16,384 groups from 35.0s to 2.33s, and a syscall
+trace of a whole run now shows no `fsync` or `fdatasync` at all.
+
+**It is therefore the least portable number on this page.** Being filesystem-bound,
+it will move with the storage under it far more than the memory or tick figures
+will. Measure it on your own before planning around it.
 
 Four things worth knowing before sizing a host:
 
@@ -406,7 +417,15 @@ descriptor a group at every size.** 65,536 groups is 1.3 GiB resident and 65,540
 descriptors, and the resident figure doubles cleanly -- 340, 676, 1348 MiB -- with
 no inflection. A group that has been created but not started is 15 KiB and **no**
 descriptor, so starting one costs about 6 KiB and its one file. Creating is still
-the slow half, about 0.2ms each, and still does not parallelise.
+the slow half, about 0.2ms each.
+
+One thing the `create` column does **not** include, in this table or the one above:
+the groups' directories. A store needs two a group and the probe lays them all out
+before it starts timing, which on a filesystem where `mkdir` is slow is the larger
+half of the wall clock -- about **36s** for 16,384 groups against the 3.6s of
+creating them, and 3.64s against 0.48s at 2,048. The probe now reports it as its own
+`dirs` column so it cannot be mistaken for the `create` figure being wrong, and so
+that a sweep taking far longer than its columns explain has somewhere to point.
 
 **What stops being linear is what happens when the tick rate no longer fits the
 box.** 65,536 groups on a 10ms interval asks for 6.55 million ticks a second,
