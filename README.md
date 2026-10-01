@@ -349,10 +349,32 @@ Four things worth knowing before sizing a host:
   16,384-group run — the groups plus the four a process starts with. Raise
   `RLIMIT_NOFILE` above the group count; 16,384 groups under a 10,240 limit fails
   on `PersistentRaftWal::open`, and the error says so.
-- **A tick costs about 3µs and the group count drops out of it.** Cores run
-  roughly `0.2 + 3µs × groups × 1000/tick_interval_ms`, measured across a
-  sixteen-fold range of group counts on one box. On a debug build it is about
-  double, so measure the profile you will run.
+- **Cores are not proportional to the tick rate, so do not size from one.** This
+  bullet used to give `0.2 + 3µs × groups × 1000/tick_interval_ms`, which says a
+  tenth of the interval costs very nearly ten times the cores. It does not. The
+  same 65,536 groups measured **2.68 cores at a 100ms interval and 14.5 at 10ms**
+  -- ten times the ticks for **5.4 times** the cores, not 9.9 -- and both pairs of
+  readings were tight (2.700/2.651 and 14.671/14.460). A large part of what a
+  hosted store costs is paid for holding the groups rather than for ticking them,
+  and the old formula had no term for it: it over-predicts 65,536 groups at 10ms
+  by a third and under-predicts the same groups at 100ms by a fifth, in opposite
+  directions, which no single constant fixes.
+
+  At a 100ms interval, where the runtime has headroom, cores do scale close to
+  linearly with the group count: 0.73, 1.27 and 2.68 for 16,384, 32,768 and
+  65,536. Size from a measurement at the interval you will run.
+
+  On a debug build it is about double, so measure the profile you will run.
+
+- **Treat one `cores` reading as indicative, not as a number.** On a 10ms interval
+  with a shared box, 16,384 groups read 2.295, 2.700, 2.810, 3.409 and 4.194 cores
+  across five runs -- a factor of 1.8 for the same configuration. The readings
+  tighten considerably when the runtime is not contending: every 100ms figure above
+  repeated to within 10%, and 65,536 at 10ms to within 1.5%, because a saturated
+  runtime sits near its ceiling. Repeat a run before believing a difference, and
+  especially before believing one between two shard counts: 32 shards against 14 at
+  16,384 groups differed by about a fifth, which is less than the spread of either
+  arm, so these runs cannot tell them apart.
 - **`worker_num` is the shard count, and shards are the tick capacity.** It reads
   like a count of workers; the worker pool is not what limits the tick rate.
 - **Watch `SharedRuntimeStats::ticks_skipped`, not `ticks_handed_over`.** A ticker
@@ -365,6 +387,50 @@ There is also a floor on `tick_interval_ms` that is not the 1ms `validate`
 accepts: the ticker advances its clock after a 1ms sleep, and `thread::sleep`
 guarantees at least the duration asked for, so a 1ms interval delivers about half
 the ticks it asks for. 10ms is held in full at every size above.
+
+#### Past sixteen thousand groups, the tick rate is the constraint
+
+Same probe and box, release, `arm=live`, but **one shard per 1,250 groups rather
+than the one per 512 the rows above used**. The shard count is itself a cost, so
+the two sets of `cores` figures are not comparable with each other:
+
+| groups | shards | threads | interval | cores | kept up | resident | per group | tearing down |
+|---|---|---|---|---|---|---|---|---|
+| 16384 | 14 | 29 | 10ms | 2.81 | 100.0% | 340 MiB | 21 KiB | 0.60s |
+| 32768 | 27 | 55 | 10ms | 6.79 | 100.0% | 676 MiB | 21 KiB | 1.10s |
+| 65536 | 53 | 107 | 10ms | 14.5 | 82-88% | 1348 MiB | 21 KiB | 4.07-50.69s |
+| 65536 | 53 | 107 | 100ms | 2.68 | ~100% | 1347 MiB | 21 KiB | 2.13-2.15s |
+
+**The envelope stays linear the whole way: 21 KiB a group and exactly one
+descriptor a group at every size.** 65,536 groups is 1.3 GiB resident and 65,540
+descriptors, and the resident figure doubles cleanly -- 340, 676, 1348 MiB -- with
+no inflection. A group that has been created but not started is 15 KiB and **no**
+descriptor, so starting one costs about 6 KiB and its one file. Creating is still
+the slow half, about 0.2ms each, and still does not parallelise.
+
+**What stops being linear is what happens when the tick rate no longer fits the
+box.** 65,536 groups on a 10ms interval asks for 6.55 million ticks a second,
+which measured 14.5 cores on a sixteen-core machine that was carrying other work.
+At that point two things give way:
+
+- `kept up` falls below 100% for the first time, to 82-88%.
+- **Tearing the store down stops being bounded.** Four runs of the same 65,536
+  groups at 10ms tore down in 4.07s, 6.73s, 13.48s and **50.69s**. The same groups
+  at 100ms tore down in 2.13s and 2.15s. A twelvefold spread against a hundredth
+  of one is not an algorithm getting slower with size; it is two things starving
+  each other.
+
+A server's `Drop` shuts its groups down in batches, and a group leaves the ticker
+only once its own shutdown has been answered -- so the teardown competes with the
+ticking of every group still waiting its turn. Given tick headroom that costs
+nothing measurable: 2.13s, against the 2.99s the same 65,536 groups take to tear
+down when they were never started and so never ticked at all. Without headroom the
+teardown and the ticking take turns starving, and the time stops being repeatable.
+
+So size the tick **rate**, not only the group count. `groups × 1000 /
+tick_interval_ms` is a rate, and it has to fit the cores you have with room left
+over for the work the groups are there to do. The same 65,536 groups in the same
+1.3 GiB are comfortable on a 100ms interval and marginal on a 10ms one.
 
 Run it on your own hardware:
 
