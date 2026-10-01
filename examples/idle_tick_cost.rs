@@ -304,6 +304,14 @@ struct ThreadEach {
     /// groups on four shards never finished starting, while the same groups
     /// on eight started and then ticked at 100% for a fraction of a core.
     started_in: Option<Duration>,
+    /// How long dropping the server took.
+    ///
+    /// The third part of a store's lifecycle and the last one to be measured.
+    /// `stop_all` and `shutdown_all` have the same shape `start_all` had before
+    /// it was pipelined -- a command sent to each group and its reply waited for
+    /// before the next is sent -- and dropping a server runs that path for every
+    /// group it holds.
+    torn_down_in: Duration,
     /// How long creating the groups took, before any of them started.
     ///
     /// This is the larger half of bringing a store up and it was invisible.
@@ -469,13 +477,16 @@ fn hosted(
     }
     // Held until here on purpose: the groups must be alive for the whole
     // window or the arm measures their teardown.
+    let tearing_down = Instant::now();
     drop(server);
+    let torn_down_in = tearing_down.elapsed();
     ThreadEach {
         sample,
         kept_up,
         handed_over,
         started_in,
         created_in,
+        torn_down_in,
         with_a_leader,
         leaders_asked,
     }
@@ -560,7 +571,7 @@ fn main() {
          groups are solo voters holding their own leadership\n"
     );
     println!(
-        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}",
+        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
         "hosting",
         "groups",
         "cores",
@@ -571,6 +582,7 @@ fn main() {
         "handed",
         "create",
         "start",
+        "teardown",
         "resident",
         "per group"
     );
@@ -606,7 +618,7 @@ fn main() {
             let root = probe_root();
             let seen = hosted(groups, interval_ms, seconds, live, shared, workers, &root);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
                 label,
                 groups,
                 seen.sample.cores,
@@ -631,6 +643,7 @@ fn main() {
                     Some(took) => format!("{:.2}s", took.as_secs_f64()),
                     None => "-".to_string(),
                 },
+                format!("{:.2}s", seen.torn_down_in.as_secs_f64()),
                 format!("{} MiB", seen.sample.resident_kib / 1024),
                 format!(
                     "{} KiB",
@@ -667,12 +680,13 @@ fn main() {
         if arm != "facade" && arm != "live" {
             let seen = shared_ticker(groups, interval_ms, seconds);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
                 "shared ticker",
                 groups,
                 seen.cores,
                 seen.switches_per_sec,
                 seen.threads,
+                "-",
                 "-",
                 "-",
                 "-",

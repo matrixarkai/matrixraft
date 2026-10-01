@@ -3201,6 +3201,20 @@ impl MatrixRaftNode {
         self.runtime.restart()
     }
 
+    /// `shutdown`, split the same way as `start_in_flight`.
+    fn shutdown_in_flight(
+        &mut self,
+    ) -> Result<Option<mpsc::Receiver<Result<(), RaftError>>>, RaftError> {
+        self.runtime.shutdown_in_flight()
+    }
+
+    fn finish_shutdown(
+        &mut self,
+        reply_rx: mpsc::Receiver<Result<(), RaftError>>,
+    ) -> Result<(), RaftError> {
+        self.runtime.finish_shutdown(reply_rx)
+    }
+
     /// `start`, split so a caller with many nodes can send them all before
     /// waiting on any. See `NodeRuntime::start_in_flight`.
     fn start_in_flight(
@@ -17467,6 +17481,20 @@ pub struct MatrixRaftMultiRaftServer {
     runtime_wiring: BTreeMap<MatrixRaftRouteKey, MatrixRaftRuntimeWiring>,
 }
 
+impl Drop for MatrixRaftMultiRaftServer {
+    fn drop(&mut self) {
+        // Without this, each `NodeRuntime`'s own `Drop` shuts its group down in
+        // turn, waiting for every reply before sending the next -- about 110us a
+        // group, 1.83s for 16,384. Sending them in batches here first leaves
+        // those drops with nothing to do, because `shutdown_in_flight` skips a
+        // group that has already shut down.
+        //
+        // Best effort: a `Drop` has nobody to return an error to, and the
+        // per-node drops still run afterwards either way.
+        let _ = self.shutdown_all();
+    }
+}
+
 impl MatrixRaftMultiRaftServer {
     pub fn new(context: MatrixRaftGroupContext) -> Self {
         Self {
@@ -26582,11 +26610,46 @@ impl MatrixRaftMultiRaftServer {
         Ok(counts)
     }
 
+    /// Shuts every group down, sending the commands before waiting on the
+    /// replies, in the same batches and for the same reason as `start_all`.
+    ///
+    /// Idempotent: a group that is already shut down is skipped, so calling this
+    /// and then dropping the server does the work once.
     pub fn shutdown_all(&mut self) -> Result<(), RaftError> {
-        for node in self.nodes.values_mut() {
-            node.shutdown()?;
+        const SHUTDOWN_BATCH: usize = 1024;
+        let keys: Vec<MatrixRaftRouteKey> = self.nodes.keys().copied().collect();
+        let mut first_error = None;
+        for batch in keys.chunks(SHUTDOWN_BATCH) {
+            let mut in_flight = Vec::with_capacity(batch.len());
+            for key in batch {
+                let Some(node) = self.nodes.get_mut(key) else {
+                    continue;
+                };
+                match node.shutdown_in_flight() {
+                    Ok(Some(reply_rx)) => in_flight.push((*key, reply_rx)),
+                    Ok(None) => {}
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+            for (key, reply_rx) in in_flight {
+                let Some(node) = self.nodes.get_mut(&key) else {
+                    continue;
+                };
+                if let Err(error) = node.finish_shutdown(reply_rx) {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     pub fn shutdown_group(&mut self, group_id: GroupId) -> Result<usize, RaftError> {
