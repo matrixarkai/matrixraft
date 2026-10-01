@@ -201,6 +201,18 @@ pub fn matrixraft_production_readiness_report_with_benchmark_artifacts(
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BenchmarkOptions {
     pub node_count: usize,
+    /// How many raft groups the workload runs across. `node_count` is replicas
+    /// within one group; this is the number of groups.
+    ///
+    /// It was absent, so every comparison this harness has produced describes a
+    /// single group -- which is the one axis a multi-raft store is built around.
+    /// One group remains the default, so an existing run is unchanged.
+    ///
+    /// Only the in-process runtime runner honours it. The external harness is
+    /// driven by command line flags that have no group count, so asking for more
+    /// than one group makes that runner report a blocker rather than quietly
+    /// measure a single group and let it be compared against many.
+    pub group_count: usize,
     pub iterations_per_workload: usize,
     pub batch_size: usize,
     pub payload_size_bytes: usize,
@@ -211,6 +223,7 @@ impl Default for BenchmarkOptions {
     fn default() -> Self {
         Self {
             node_count: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT,
+            group_count: 1,
             iterations_per_workload: 128,
             batch_size: 16,
             payload_size_bytes: MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES,
@@ -237,6 +250,11 @@ pub struct BenchmarkSample {
     #[serde(default)]
     pub harness_kind: BenchmarkHarnessKind,
     pub node_count: usize,
+    /// Groups the workload ran across. Zero when an older artifact is read, which
+    /// is how such a file says it does not know; a run of this harness always
+    /// records at least one.
+    #[serde(default)]
+    pub group_count: usize,
     #[serde(default)]
     pub iterations_per_workload: usize,
     #[serde(default)]
@@ -596,6 +614,24 @@ impl BenchmarkRunner for ExternalBaselineRaftRunner {
         workload: BenchmarkWorkload,
         options: &BenchmarkOptions,
     ) -> BenchmarkSample {
+        // This runner drives another harness through command line flags, and
+        // those flags have no group count. Running it anyway would measure one
+        // group and hand that back to be compared against however many the
+        // in-process runner was asked for -- a ratio between two different
+        // questions, which would read as a result. Refuse instead, with a
+        // blocker, so the comparison fails rather than lying.
+        if options.group_count > 1 {
+            return failed_real_baseline_raft_sample(
+                workload,
+                options,
+                self,
+                format!(
+                    "benchmark:external_harness_has_no_group_count:{}:{}",
+                    workload.id(),
+                    options.group_count
+                ),
+            );
+        }
         let state_dir = temp_benchmark_dir(&format!("baseline_raft-{}", workload.id()));
         let wal_dir = state_dir.join("wal");
         let snapshot_dir = state_dir.join("snapshot");
@@ -940,6 +976,7 @@ fn failed_real_baseline_raft_sample(
         build_profile: runner.build_profile(),
         harness_kind: BenchmarkHarnessKind::FullBaselineRaftHarness,
         node_count: options.node_count,
+        group_count: options.group_count.max(1),
         iterations_per_workload: options.iterations_per_workload,
         batch_size: options.batch_size,
         payload_size_bytes: options.payload_size_bytes,
@@ -3720,6 +3757,7 @@ fn run_same_machine_model_workload(
         build_profile: "model".to_string(),
         harness_kind: BenchmarkHarnessKind::Model,
         node_count: options.node_count,
+        group_count: options.group_count.max(1),
         iterations_per_workload: options.iterations_per_workload,
         batch_size: options.batch_size,
         payload_size_bytes: options.payload_size_bytes,
@@ -3746,15 +3784,30 @@ fn run_rustraft_runtime_workload(
         BenchmarkWorkload::SingleKeyWrites
         | BenchmarkWorkload::BatchedWrites
         | BenchmarkWorkload::ReplicationBatching => {
-            let mut cluster = benchmark_cluster(options.node_count);
+            let ids = benchmark_group_ids(options);
+            let mut clusters: Vec<RaftCluster> = ids
+                .iter()
+                .map(|group_id| benchmark_cluster(*group_id, options.node_count))
+                .collect();
             let payload = benchmark_payload(options);
-            cluster.start().is_ok()
-                && run_timed(options.iterations_per_workload, &mut latencies, |_| {
-                    for _ in 0..writes_per_iteration(workload, options) {
-                        cluster.propose(payload.clone())?;
-                    }
-                    Ok(())
-                })
+            // Every group is up before the window opens, or the first iterations
+            // would be measuring an election.
+            clusters.iter_mut().all(|cluster| cluster.start().is_ok())
+                && run_timed(
+                    options.iterations_per_workload,
+                    &mut latencies,
+                    |iteration| {
+                        // Round robin rather than all into one: the point of a
+                        // group count is that the work is spread over the groups,
+                        // and a run that piled every write onto the first would
+                        // report a group count while measuring one group.
+                        let cluster = &mut clusters[iteration % ids.len()];
+                        for _ in 0..writes_per_iteration(workload, options) {
+                            cluster.propose(payload.clone())?;
+                        }
+                        Ok(())
+                    },
+                )
                 .is_ok()
         }
         BenchmarkWorkload::WalFsync => {
@@ -3781,26 +3834,45 @@ fn run_rustraft_runtime_workload(
             ok
         }
         BenchmarkWorkload::ReadIndexReads | BenchmarkWorkload::LeaseReads => {
-            let mut cluster = benchmark_cluster(options.node_count);
-            let started = cluster.start().is_ok() && cluster.propose(b"seed".to_vec()).is_ok();
+            let ids = benchmark_group_ids(options);
+            let mut clusters: Vec<RaftCluster> = ids
+                .iter()
+                .map(|group_id| benchmark_cluster(*group_id, options.node_count))
+                .collect();
+            let started = clusters.iter_mut().all(|cluster| {
+                cluster.start().is_ok() && cluster.propose(b"seed".to_vec()).is_ok()
+            });
             started
-                && run_timed(options.iterations_per_workload, &mut latencies, |_| {
-                    let response = cluster.read_index(crate::ReadIndexRequest {
-                        group_id: 10,
-                        requester_id: 1,
-                        min_commit_index: 1,
-                        allow_lease_read: matches!(workload, BenchmarkWorkload::LeaseReads),
-                    })?;
-                    if !response.safe {
-                        return Err(RaftError::InvalidRequest(response.reason));
-                    }
-                    Ok(())
-                })
+                && run_timed(
+                    options.iterations_per_workload,
+                    &mut latencies,
+                    |iteration| {
+                        let index = iteration % ids.len();
+                        let group_id = ids[index];
+                        let cluster = &mut clusters[index];
+                        let response = cluster.read_index(crate::ReadIndexRequest {
+                            // Was the literal 10, the first group's id, which would
+                            // have asked group 10 about every other group's reads.
+                            group_id,
+                            requester_id: 1,
+                            min_commit_index: 1,
+                            allow_lease_read: matches!(workload, BenchmarkWorkload::LeaseReads),
+                        })?;
+                        if !response.safe {
+                            return Err(RaftError::InvalidRequest(response.reason));
+                        }
+                        Ok(())
+                    },
+                )
                 .is_ok()
         }
         BenchmarkWorkload::SnapshotInstallCatchup | BenchmarkWorkload::SnapshotStreaming => {
-            let mut cluster = benchmark_cluster(options.node_count);
-            let started = cluster.start().is_ok();
+            let ids = benchmark_group_ids(options);
+            let mut clusters: Vec<RaftCluster> = ids
+                .iter()
+                .map(|group_id| benchmark_cluster(*group_id, options.node_count))
+                .collect();
+            let started = clusters.iter_mut().all(|cluster| cluster.start().is_ok());
             let payload = benchmark_payload(options);
             started
                 && run_timed(
@@ -3808,10 +3880,15 @@ fn run_rustraft_runtime_workload(
                     &mut latencies,
                     |iteration| {
                         let index = iteration as u64 + 1;
+                        let at = iteration % ids.len();
+                        let group_id = ids[at];
+                        let cluster = &mut clusters[at];
                         cluster.install_snapshot_with_tail_to(
                             2,
                             crate::RaftSnapshot {
-                                group_id: 10,
+                                // Was the literal 10, so every group's snapshot
+                                // would have claimed to belong to the first one.
+                                group_id,
                                 meta: SnapshotMetadata {
                                     snapshot_id: format!("bench-snap-{index}"),
                                     last_log_id: LogId { term: 1, index },
@@ -3834,16 +3911,25 @@ fn run_rustraft_runtime_workload(
                 .is_ok()
         }
         BenchmarkWorkload::LeaderTransferUnderLoad => {
-            let mut cluster = benchmark_cluster(options.node_count);
-            let started = cluster.start().is_ok();
+            let ids = benchmark_group_ids(options);
+            let mut clusters: Vec<RaftCluster> = ids
+                .iter()
+                .map(|group_id| benchmark_cluster(*group_id, options.node_count))
+                .collect();
+            let started = clusters.iter_mut().all(|cluster| cluster.start().is_ok());
             let payload = benchmark_payload(options);
             started
-                && run_timed(options.iterations_per_workload, &mut latencies, |_| {
-                    cluster.propose(payload.clone())?;
-                    let target = if cluster.leader_id() == Some(1) { 2 } else { 1 };
-                    cluster.transfer_leader(target)?;
-                    Ok(())
-                })
+                && run_timed(
+                    options.iterations_per_workload,
+                    &mut latencies,
+                    |iteration| {
+                        let cluster = &mut clusters[iteration % ids.len()];
+                        cluster.propose(payload.clone())?;
+                        let target = if cluster.leader_id() == Some(1) { 2 } else { 1 };
+                        cluster.transfer_leader(target)?;
+                        Ok(())
+                    },
+                )
                 .is_ok()
         }
     };
@@ -3860,6 +3946,7 @@ fn run_rustraft_runtime_workload(
         build_profile: runner.build_profile(),
         harness_kind: BenchmarkHarnessKind::RustRaftRuntime,
         node_count: options.node_count,
+        group_count: options.group_count.max(1),
         iterations_per_workload: options.iterations_per_workload,
         batch_size: options.batch_size,
         payload_size_bytes: options.payload_size_bytes,
@@ -3910,9 +3997,9 @@ fn benchmark_payload(options: &BenchmarkOptions) -> Vec<u8> {
     vec![42; options.payload_size_bytes.max(1)]
 }
 
-fn benchmark_cluster(node_count: usize) -> RaftCluster {
+fn benchmark_cluster(group_id: crate::GroupId, node_count: usize) -> RaftCluster {
     RaftCluster::new(
-        10,
+        group_id,
         Config::default(),
         benchmark_voters(node_count.max(3))
             .into_iter()
@@ -3920,6 +4007,15 @@ fn benchmark_cluster(node_count: usize) -> RaftCluster {
             .collect(),
     )
     .expect("benchmark cluster")
+}
+
+/// The group ids a run uses. Group 10 first, because that is the id this harness
+/// has always used, and a single-group run has to keep producing the numbers it
+/// produced before there was a choice.
+fn benchmark_group_ids(options: &BenchmarkOptions) -> Vec<crate::GroupId> {
+    (0..options.group_count.max(1) as u64)
+        .map(|offset| 10 + offset)
+        .collect()
 }
 
 fn benchmark_voters(node_count: usize) -> Vec<u64> {

@@ -575,6 +575,7 @@ mod tests {
                 }
             },
             node_count: crate::benchmark::MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_NODE_COUNT,
+            group_count: 1,
             iterations_per_workload: 128,
             batch_size: 16,
             payload_size_bytes: crate::benchmark::MATRIXRAFT_BENCHMARK_MIN_PRODUCTION_PAYLOAD_SIZE_BYTES,
