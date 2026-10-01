@@ -33,9 +33,18 @@
 //! would be measuring a broken cluster rather than a steady one, so the
 //! leaders column is reported and a shortfall is called out.
 //!
-//! Reported per arm: CPU cores burned, context switches per second, and
-//! threads. Cores burned is the number to trust; it comes from
-//! `/proc/self/stat` and counts the whole process.
+//! Reported per arm: CPU cores burned, context switches per second, threads,
+//! how many sampled groups hold leadership, the share of ticks delivered
+//! against the interval's rate, the share handed to a worker, and the two
+//! halves of bringing the store up -- creating the groups and starting them.
+//! Cores burned is the number to trust; it comes from `/proc/self/stat` and
+//! counts the whole process.
+//!
+//! The two start-up halves are separate because one of them is almost all of
+//! it. At 16384 groups `start_all` takes a few seconds and creating the groups
+//! takes about half a minute: each one opens its own WAL, writes a first
+//! segment and fsyncs it, in sequence. Only the second number was reported
+//! before, which made the smaller half look like the cost.
 //!
 //! # What it found
 //!
@@ -49,8 +58,11 @@
 //!     2048         2.720                   -           0.030     91x
 //! ```
 //!
-//! Every live row reached full leadership (64 of 64, 256 of 256, 1024 of
-//! 1024), so those are steady states and not groups still campaigning.
+//! Every live row reached leadership on every group that was sampled, so those
+//! are steady states and not groups still campaigning. Sampled, not counted:
+//! the leaders column asks at most 64 groups, because a status is a round trip
+//! through the runtime being measured. It cannot say "1024 of 1024", and this
+//! note used to.
 //!
 //! **Being live costs 14-19% on top of merely existing.** The switch counts of
 //! the two thread-each arms are indistinguishable -- 25,357 against 25,360 at
@@ -267,10 +279,14 @@ struct ThreadEach {
     /// Share of ticks the tickers could not run in place and handed to a
     /// worker, for the hosted arms.
     ///
-    /// This is the early warning. It rises before `kept up` falls, because
-    /// a ticker that is merely close to its capacity still delivers every
-    /// tick -- it just pays a worker hand-off for more and more of them,
-    /// and each hand-off costs more than the tick it replaced.
+    /// It was described here as the early warning, rising before `kept up`
+    /// falls. **It is not, and that reading is the wrong thing to watch.** A
+    /// hand-off happens only when the group's lock is *held*; a ticker that is
+    /// simply too slow holds nothing and hands over nothing. Measured: this
+    /// column read 0.0% while `kept up` fell to 37% at 1024 groups on a 1ms
+    /// interval, and 0.0% again at 16384 groups on a 10ms one. The column that
+    /// answers "am I keeping up" is `kept up`, and inside a process it is
+    /// `SharedRuntimeStats::ticks_skipped`.
     handed_over: Option<f64>,
     /// How long `start_all` took, for the arms that start.
     ///
@@ -278,6 +294,15 @@ struct ThreadEach {
     /// groups on four shards never finished starting, while the same groups
     /// on eight started and then ticked at 100% for a fraction of a core.
     started_in: Option<Duration>,
+    /// How long creating the groups took, before any of them started.
+    ///
+    /// This is the larger half of bringing a store up and it was invisible.
+    /// `start_all` reports 4.84s for 16384 groups; creating them took about
+    /// 32s, measured by watching the descriptor count climb from outside the
+    /// process. Each group opens its own WAL, writes a first segment and
+    /// fsyncs it, one after another, so the cost is roughly 2ms a group and
+    /// nothing about it is parallel.
+    created_in: Duration,
     /// How many groups actually hold leadership. Zero on the unstarted arm by
     /// definition; on the live arm anything short of every group means the
     /// sample is of groups still campaigning, not of a steady state.
@@ -324,6 +349,7 @@ fn hosted(
         .expect("group context");
     let mut server = MatrixRaftMultiRaftServer::new(context);
 
+    let creating = Instant::now();
     for (index, (wal, snapshot)) in dirs.iter().enumerate() {
         server
             .create_node(
@@ -332,6 +358,9 @@ fn hosted(
             )
             .expect("create node");
     }
+    // Before `start_all`, so the two halves of bringing a store up are
+    // separate numbers rather than one.
+    let created_in = creating.elapsed();
     let handover_before = server.shared_stats();
     let started_in = live.then(|| {
         let began = Instant::now();
@@ -436,6 +465,7 @@ fn hosted(
         kept_up,
         handed_over,
         started_in,
+        created_in,
         with_a_leader,
         leaders_asked,
     }
@@ -515,7 +545,7 @@ fn main() {
          groups are solo voters holding their own leadership\n"
     );
     println!(
-        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}",
+        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}",
         "hosting",
         "groups",
         "cores",
@@ -524,6 +554,7 @@ fn main() {
         "leaders",
         "kept up",
         "handed",
+        "create",
         "start"
     );
 
@@ -553,7 +584,7 @@ fn main() {
             let root = probe_root();
             let seen = hosted(groups, interval_ms, seconds, live, shared, workers, &root);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}",
                 label,
                 groups,
                 seen.sample.cores,
@@ -573,6 +604,7 @@ fn main() {
                     Some(share) => format!("{:.1}%", share * 100.0),
                     None => "-".to_string(),
                 },
+                format!("{:.2}s", seen.created_in.as_secs_f64()),
                 match seen.started_in {
                     Some(took) => format!("{:.2}s", took.as_secs_f64()),
                     None => "-".to_string(),
@@ -608,12 +640,13 @@ fn main() {
         if arm != "facade" {
             let seen = shared_ticker(groups, interval_ms, seconds);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}",
                 "shared ticker",
                 groups,
                 seen.cores,
                 seen.switches_per_sec,
                 seen.threads,
+                "-",
                 "-",
                 "-",
                 "-",

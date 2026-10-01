@@ -2313,12 +2313,47 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// `max_queue_depth` latched their mailboxes shut. Fixed, and 4096 groups
 /// over 4 shards now deliver every tick where 3 of them used to elect.
 ///
+/// # What it costs to bring a store up, and where it stops keeping up
+///
+/// Measured on a 16-core box at a 10ms interval, one shard per 512 groups,
+/// every group a live single voter:
+///
+/// | groups | shards | cores | ticks delivered | creating | starting |
+/// |---|---|---|---|---|---|
+/// | 1024 | 4 | 0.61 | 97.9% | 1.97s | 0.11s |
+/// | 4096 | 8 | 2.81 | 99.9% | 7.08s | 0.43s |
+/// | 8192 | 16 | 7.04 | 100.3% | 16.93s | 1.24s |
+/// | 16384 | 32 | 13.68 | 79.2% | 35.00s | 7.34s |
+///
+/// Two things to take from it.
+///
+/// **Creating the groups is the larger half of starting up, by five to eighteen
+/// times.** It is about 2ms a group and it does not parallelise: each group
+/// opens its own WAL, writes a first segment and fsyncs it, in sequence. Ten
+/// thousand groups is half a minute before anything has started. `start_all` is
+/// the smaller half and was the only half reported.
+///
+/// **Eight thousand groups at a 10ms interval is served in full on sixteen
+/// cores; sixteen thousand is not.** Past that the box runs out of cores rather
+/// than the runtime running out of anything, and adding shards makes it worse:
+/// 16,384 groups delivered 82.1% on 16 shards and 79.2% on 32, where the second
+/// is 65 threads on 16 cores. Shards up to about the core count, not beyond.
+///
 /// # The next limit is file descriptors, not this runtime
 ///
-/// Every group holds its own WAL open, so a process pays about **one file
-/// descriptor per group**: measured at 3,076 for 3072 groups and 4,119 for
-/// 4096. A host wanting ten thousand groups needs `RLIMIT_NOFILE` above ten
-/// thousand, and the default on many systems is lower than that.
+/// Every group holds its own WAL open, so a process pays **one file descriptor
+/// per group**, and the figure is exact rather than approximate: 16,388 held at
+/// the peak of a 16,384-group run, which is the groups plus the four a process
+/// starts with. Earlier readings of 3,076 at 3072 groups and 4,119 at 4096 said
+/// the same thing less precisely. A host wanting ten thousand groups needs
+/// `RLIMIT_NOFILE` above ten thousand, and the default on many systems is lower:
+/// 16,384 groups under a 10,240 limit fails, which is how that was checked
+/// rather than assumed.
+///
+/// Count it over the whole run and take the maximum. Groups are created one
+/// after another, so a single reading taken while that is still going is a lower
+/// bound and nothing more -- one sample 30 seconds into a 16,384-group run read
+/// 5,536 and looked like a refutation of this paragraph.
 ///
 /// The failure is reported, but not as a ceiling. Creating the group returns
 /// `Storage("failed to read WAL directory: Too many open files (os error
