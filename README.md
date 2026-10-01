@@ -505,12 +505,29 @@ assertion.
 
 ### Settings this crate still only records
 
-`MatrixRaftGroupContext` and `MatrixRaftRuntimeWiring` carry a little more
-configuration a host store would use: `reader_num`, `executor_num`,
-`watched_address_resolver` and `store_id`.
+Three settings on `MatrixRaftGroupContext` are recorded, reported in
+`MatrixRaftRuntimeWiring`, and reach nothing that runs:
 
-Those are recorded, planned over and reported on. Of them only `flexible_apply`
-reaches an implementation (in `fsm`).
+<!-- inert-settings: reader_num, executor_num, watched_address_resolver -->
+
+- `reader_num`
+- `executor_num`
+- `watched_address_resolver`
+
+`store_id` belongs to `MatrixRaftNodeCreator` rather than the context. It is
+resolved into the wiring report — a group with no creator takes its `peer_id`
+— and no further.
+
+Everything else the context carries now reaches something. `worker_num`,
+`max_messages_each_poll`, `max_queue_depth`, `driver_batch_bytes` and
+`tick_interval_ms` became live when a server gained the option to host its
+groups on a shared runtime; they are that runtime's `DriverOptions`.
+
+`tests/settings_contract.rs` checks this list against the source in both
+directions, because a list like it is otherwise the first thing to go stale:
+a setting gets wired up and the prose still calls it inert, or one is added
+and never listed. The second is the worse way round — a host sets a knob and
+expects something to happen.
 
 `driver_batch_bytes` is the driver's, and it applies when a host says how big a
 mail is:
