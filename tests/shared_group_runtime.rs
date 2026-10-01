@@ -334,6 +334,22 @@ fn a_shared_runtime_holds_its_groups_and_lets_them_go() {
     );
 
     server.stop_all().expect("stop");
+
+    // The second half of this test's name, which it did not check. Stopping a
+    // group does not release it; shutting it down does, and a group that stays
+    // in the runtime is one the tickers go on ticking after it has shut down.
+    //
+    // Found by mutation: deleting the `runtime.release(key)` from the shutdown
+    // path left every test in this file green, including this one.
+    let held = server.shared_stats().expect("a shared runtime").groups;
+    assert_eq!(held, 3, "the runtime is holding {held} of three groups");
+    server.shutdown_all().expect("shutdown");
+    let left = server.shared_stats().expect("a shared runtime").groups;
+    assert_eq!(
+        left, 0,
+        "{left} groups are still in the runtime after shutting them down"
+    );
+
     let _ = std::fs::remove_dir_all(&root);
 }
 

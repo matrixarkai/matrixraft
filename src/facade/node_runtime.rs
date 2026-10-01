@@ -208,9 +208,35 @@ impl NodeRuntime {
         self.start()
     }
 
+    /// Shuts the group down: send, wait, join a thread if there is one, and
+    /// leave the ticker and the pool.
+    ///
+    /// Delegates to the two halves rather than holding its own copy of them.
+    /// It did hold a copy, and the copy was not covered by anything: when the
+    /// drop path moved to `shutdown_in_flight` plus `finish_shutdown`, deleting
+    /// the `release` from the one here left every test green, because nothing
+    /// reached it any more.
     pub fn shutdown(&mut self) -> Result<(), RaftError> {
+        match self.shutdown_in_flight()? {
+            Some(reply_rx) => self.finish_shutdown(reply_rx),
+            None => Ok(()),
+        }
+    }
+
+    /// Sends `Shutdown` and hands back the channel its reply will arrive on,
+    /// without waiting for it. `None` when the group is already shut down.
+    ///
+    /// Dropping a server shuts its groups down one at a time, each waiting for
+    /// its reply before the next is sent: measured at about 110us a group, 1.83s
+    /// for 16,384 of them, the same shape and the same cost `start_all` had.
+    /// Everything after the reply -- joining a thread, leaving the ticker and
+    /// the pool -- stays in `finish_shutdown`, because only the waiting is worth
+    /// overlapping.
+    fn shutdown_in_flight(
+        &mut self,
+    ) -> Result<Option<mpsc::Receiver<Result<(), RaftError>>>, RaftError> {
         if self.state == NodeRuntimeState::Shutdown {
-            return Ok(());
+            return Ok(None);
         }
         let sender = self.command_tx.take().ok_or_else(|| {
             RaftError::InvalidRequest("raft node runtime channel is closed".to_string())
@@ -219,15 +245,24 @@ impl NodeRuntime {
         sender
             .send(NodeRuntimeOp::Shutdown(reply_tx))
             .map_err(|err| RaftError::Transport(format!("failed to shutdown raft node: {err}")))?;
+        Ok(Some(reply_rx))
+    }
+
+    /// Finishes a shutdown begun by `shutdown_in_flight`, doing everything
+    /// `shutdown` does after its own wait.
+    fn finish_shutdown(
+        &mut self,
+        reply_rx: mpsc::Receiver<Result<(), RaftError>>,
+    ) -> Result<(), RaftError> {
         let result = recv_runtime_reply(reply_rx)?;
         if let Some(worker) = self.worker.take() {
             worker.join().map_err(|_| {
                 RaftError::Transport("raft node worker panicked during shutdown".to_string())
             })?;
         }
-        // A hosted group has no thread to join. It has to leave the ticker
-        // and the pool instead, or the runtime goes on ticking a group that
-        // has shut down.
+        // A hosted group has no thread to join. It has to leave the ticker and
+        // the pool instead, or the runtime goes on ticking a group that has
+        // shut down.
         if let Some((runtime, key)) = self.shared.take() {
             runtime.release(key);
         }
