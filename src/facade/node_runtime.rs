@@ -2118,13 +2118,25 @@ impl PooledGroup {
             // firing its whole backlog at it.
             core.tick();
         }
+        let mut more = true;
         for _ in 0..max_commands.max(1) {
             let Some(command) = core.next_command() else {
-                return false;
+                more = false;
+                break;
             };
             if core.handle(command).is_break() {
-                return false;
+                more = false;
+                break;
             }
+        }
+        // Re-read before releasing. The ticker does not post mail for a
+        // group it found busy, so a tick that arrived after the read above
+        // has no other way in than this.
+        if self.ticks_due.swap(0, Ordering::AcqRel) > 0 {
+            core.tick();
+        }
+        if !more {
+            return false;
         }
         // Whether anything is actually left is only knowable by taking one,
         // so a spare visit is possible. That is far cheaper than the
@@ -2180,6 +2192,13 @@ impl DriverTickReceiver for PooledGroupTicker {
         self.counters.handed_over.fetch_add(1, Ordering::Relaxed);
         // Busy: hand it over rather than wait. Best effort, because a
         // refused send means a wake is already queued, and one is enough.
+        //
+        // Do NOT remove this as redundant on the grounds that the lock
+        // holder reads `ticks_due` before releasing. It is also, by
+        // accident, the thing that re-arms a group every interval -- and
+        // the pool's send path loses a wake-up often enough that without it
+        // the runtime wedges: a command sent, every worker parked, and
+        // nothing left to rouse them. Tried, measured, reverted.
         let _ = self.pool.send(self.key, MailPriority::Normal, ());
     }
 }
@@ -2230,14 +2249,17 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 ///     4096       4       -   never finished starting
 /// ```
 ///
-/// So **256 groups per shard is known good and 512 is too**; four shards for
-/// four thousand groups is not. No formula is offered, because the run that
-/// gave way did not give way where one would predict: it never reached the
-/// measurement window at all, having stalled while *starting* the groups.
-/// Steady-state ticking looks far cheaper than that failure suggests -- a
-/// shard carrying 512 live groups costs well under an eighth of a core --
-/// so the start path, not the tick, is what to watch when raising the group
-/// count, and it has not been characterised yet.
+/// So **256 groups per shard is known good and 512 is too**, and a shard
+/// carrying 512 live groups costs well under an eighth of a core.
+///
+/// Starting the groups is not the thing to watch, though an earlier reading
+/// here said it was. Timed directly it is fast and linear -- about 83us a
+/// group, 0.05s for 512 and 0.17s for 2048, no slower than giving each group
+/// its own thread. The run that produced that earlier guess simply never
+/// reached its measurement window on a machine that was heavily loaded at
+/// the time.
+///
+/// No formula is offered. What is known is the table above.
 ///
 /// Undersizing does not fail loudly. The tickers fall behind, the groups are
 /// ticked more slowly than they were configured for, and because heartbeats,
