@@ -268,12 +268,44 @@ pub struct BenchmarkSample {
     #[serde(default)]
     pub total_duration_micros: u64,
     pub operation_count: usize,
+    /// Median latency of a timed iteration, in whole microseconds.
+    ///
+    /// Whole microseconds is a floor, and some workloads sit on it. An operation
+    /// faster than a microsecond is recorded as one, so a workload of such
+    /// operations reports `p50 == p99 == 1` and a throughput that is the
+    /// reciprocal of a microsecond -- exactly 1,000,000 operations a second --
+    /// whatever it really did. Ask [`BenchmarkSample::latency_at_timer_resolution`]
+    /// before reading either number as a measurement.
     pub p50_latency_micros: u64,
     pub p99_latency_micros: u64,
     pub throughput_ops_per_sec: f64,
     pub correctness_passed: bool,
     #[serde(default)]
     pub blockers: Vec<String>,
+}
+
+impl BenchmarkSample {
+    /// Whether this sample's latencies sat on the timer's floor, which makes its
+    /// latency and throughput figures artefacts rather than measurements.
+    ///
+    /// Latency is recorded in whole microseconds. An operation faster than that
+    /// is recorded as one microsecond, so every iteration measures the same thing
+    /// and the throughput becomes the reciprocal of a microsecond. Measured on
+    /// the read workloads, which do exactly this: `p50` and `p99` of 1us and
+    /// exactly 1,000,000 operations a second, unchanged at 1, 8, 64 and 256
+    /// groups -- four configurations that cannot all have the same throughput.
+    ///
+    /// Derived rather than stored, so it is the same question for a sample this
+    /// crate produced and for one parsed out of another harness's artifact, and
+    /// so it cannot go stale against the numbers it describes.
+    ///
+    /// A ratio between two such samples is not evidence: both sides report the
+    /// reciprocal of the timer and the ratio is 1.00 whatever the two
+    /// implementations do. Worse, a ratio between one such sample and one
+    /// measured finer is an artefact of the timers rather than of the engines.
+    pub fn latency_at_timer_resolution(&self) -> bool {
+        self.p50_latency_micros <= 1 && self.p99_latency_micros <= 1
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -286,6 +318,22 @@ pub struct BenchmarkComparison {
     pub throughput_ratio: f64,
     pub passed: bool,
     pub blockers: Vec<String>,
+}
+
+impl BenchmarkComparison {
+    /// Whether either side of this comparison sat on the timer's floor, which
+    /// makes the three ratios above unreadable.
+    ///
+    /// Deliberately not a blocker. Every workload is in
+    /// `matrixraft_baseline_raft_benchmark_required_workloads`, so making this
+    /// fail a comparison would fail the production readiness gate on every read
+    /// workload -- a decision about what the gate demands, which is not the same
+    /// decision as recording that a number cannot be read. This reports; what to
+    /// do about it is for whoever owns the gate.
+    pub fn latency_at_timer_resolution(&self) -> bool {
+        self.baseline_raft.latency_at_timer_resolution()
+            || self.rustraft.latency_at_timer_resolution()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
