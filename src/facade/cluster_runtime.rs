@@ -5529,19 +5529,33 @@ impl RaftCluster {
     }
 
     fn has_live_quorum(&self) -> bool {
-        let live_voters = self
-            .nodes
-            .values()
-            .filter(|node| {
-                node.healthy
-                    && node.replica_role.participates_in_quorum()
-                    && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness)
-            })
-            .count();
-        live_voters
-            >= self
-                .membership()
-                .quorum_size_with_witness_policy(self.ignore_witness)
+        // Counted in the pass that was already here, rather than building a
+        // `Membership` afterwards to ask how large a quorum is. It is on the tick
+        // path -- `step_down_leader_if_lost_quorum` calls it -- and measured at one
+        // allocation a call, which is one a tick for every group whose lease is not
+        // currently valid.
+        //
+        // The third of these. `refresh_witness_commit_quorum_policy` and
+        // `leader_lease_quorum_reached` were the same shape: a count that already
+        // walks the nodes, followed by a `Membership` built from the same nodes to
+        // get a number derivable from the walk.
+        let mut live = 0usize;
+        let mut voters = 0usize;
+        let mut witnesses = 0usize;
+        for node in self.nodes.values() {
+            match node.replica_role {
+                ReplicaRole::Voter => voters += 1,
+                ReplicaRole::Witness => witnesses += 1,
+                _ => {}
+            }
+            if node.healthy
+                && node.replica_role.participates_in_quorum()
+                && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness)
+            {
+                live += 1;
+            }
+        }
+        live >= matrixraft_quorum_size(voters, witnesses, self.ignore_witness)
     }
 
     fn reset_replication_pipelines_for_leader(&mut self, leader_id: NodeId) {
@@ -5922,6 +5936,97 @@ mod lease_quorum_rewrite_tests {
         assert!(
             cluster.leader_lease_quorum_reached(),
             "a leader and two confirming voters is a quorum of three and was refused"
+        );
+    }
+}
+
+#[cfg(test)]
+mod live_quorum_tests {
+    use super::*;
+
+    fn peer_with(node_id: NodeId, role: ReplicaRole) -> Peer {
+        Peer {
+            node_id,
+            raft_addr: format!("127.0.0.1:{}", 62_000 + node_id),
+            snapshot_addr: format!("127.0.0.1:{}", 63_000 + node_id),
+            role,
+            auto_promote: false,
+        }
+    }
+
+    /// A cluster with the given roles, every node healthy unless `healthy` says
+    /// otherwise, and a leader if the first node is a voter.
+    fn cluster_with(roles: &[ReplicaRole], healthy: &[bool], ignore_witness: bool) -> RaftCluster {
+        let peers: Vec<Peer> = roles
+            .iter()
+            .enumerate()
+            .map(|(index, role)| peer_with(index as NodeId + 1, *role))
+            .collect();
+        let mut cluster = RaftCluster::new(21, Config::default(), peers).expect("cluster");
+        let _ = cluster.start();
+        cluster.ignore_witness = ignore_witness;
+        let ids: Vec<NodeId> = cluster.nodes.keys().copied().collect();
+        for (index, id) in ids.iter().enumerate() {
+            if let Some(node) = cluster.nodes.get_mut(id) {
+                node.healthy = healthy.get(index).copied().unwrap_or(true);
+            }
+        }
+        cluster
+    }
+
+    #[test]
+    fn a_live_quorum_counts_witnesses_exactly_when_the_policy_says_to() {
+        use ReplicaRole::{Voter, Witness};
+
+        // Two voters and two witnesses. Counting the witnesses, a quorum is three
+        // of the four participants; ignoring them it is two of the two voters.
+        //
+        // The state that tells the policies apart for the *size* is two live
+        // participants: three is needed when witnesses count, two when they do not.
+        // That is the case nothing covered -- planting the wrong policy into
+        // `has_live_quorum` left 180 tests green, and this is what fails now.
+        let roles = [Voter, Voter, Witness, Witness];
+
+        // One voter and one witness healthy: two live of a quorum of three.
+        let two_live = cluster_with(&roles, &[true, false, true, false], false);
+        assert!(
+            !two_live.has_live_quorum(),
+            "two live participants is not a quorum of three"
+        );
+
+        // A third one healthy makes it three, which is the quorum.
+        let three_live = cluster_with(&roles, &[true, true, true, false], false);
+        assert!(
+            three_live.has_live_quorum(),
+            "three live participants is a quorum of three"
+        );
+
+        // And the policy changes the answer on one single state, which is what
+        // makes it a policy rather than a constant: one healthy voter and both
+        // witnesses healthy is three live of three when witnesses count, and one
+        // live of two when they do not.
+        let health = [true, false, true, true];
+        assert!(
+            cluster_with(&roles, &health, false).has_live_quorum(),
+            "counting witnesses, three live of a quorum of three is a quorum"
+        );
+        assert!(
+            !cluster_with(&roles, &health, true).has_live_quorum(),
+            "ignoring witnesses, one live voter is not a quorum of two"
+        );
+    }
+
+    #[test]
+    fn a_live_quorum_needs_the_nodes_to_be_healthy() {
+        use ReplicaRole::Voter;
+        let roles = [Voter, Voter, Voter];
+        assert!(
+            cluster_with(&roles, &[true, true, false], false).has_live_quorum(),
+            "two healthy voters of three is a quorum"
+        );
+        assert!(
+            !cluster_with(&roles, &[true, false, false], false).has_live_quorum(),
+            "one healthy voter of three is not a quorum"
         );
     }
 }

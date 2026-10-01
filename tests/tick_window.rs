@@ -148,15 +148,17 @@ fn how_much_a_hosted_group_allocates_while_only_ticking() {
     let per_tick = allocations as f64 / ticks;
     println!("window: {allocations} allocations over {ticks:.0} ticks actually run = {per_tick:.3} per tick");
 
-    // 2.250 on this box, twice, to three decimals. The ceiling carries a quarter
-    // of an allocation of slack rather than none, because the figure is not a
-    // whole number: this group runs a four-tick election cycle, so a quarter of
+    // 1.250 on this box, three times, to three decimals. The ceiling carries a
+    // quarter of an allocation of slack rather than none, because the figure is not
+    // a whole number: this group runs a four-tick election cycle, so a quarter of
     // the ticks do extra work and a machine that times them differently can land
     // slightly either side. A whole allocation arriving still fails it.
     //
-    // It was 3.499 before `last_tick_reason` stopped turning a literal into a
-    // `String` on every tick.
-    const CEILING_PER_TICK: f64 = 2.5;
+    // The history, because each step was found by this instrument: 3.499 before
+    // `last_tick_reason` stopped turning a literal into a `String` every tick,
+    // 2.250 before `has_live_quorum` stopped building a `Membership` to ask how
+    // large a quorum is, 1.250 now.
+    const CEILING_PER_TICK: f64 = 1.5;
     assert!(
         per_tick <= CEILING_PER_TICK,
         "a hosted group now allocates {per_tick:.3} times a tick, above the          {CEILING_PER_TICK} recorded here. Every group pays this on every interval,          so if it is deliberate, move the ceiling and say what needs the heap."
