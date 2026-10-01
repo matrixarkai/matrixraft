@@ -2178,7 +2178,26 @@ pub struct SharedRuntimeStats {
     /// rather than as a trend in the shard count.
     ///
     /// Shards are the tick capacity; the worker pool is not, and sat idle
-    /// through all eight runs. Past sixteen shards on a sixteen-core box the
+    /// through all eight runs.
+    ///
+    /// Handing the late ticks to that idle pool is the obvious next thought,
+    /// and it is worse. Measured with a `fire_late_tick` that posted a past-due
+    /// group's tick to the pool instead of running it on the ticker -- the
+    /// hand-over rate went to 94%, so the change certainly took effect:
+    ///
+    /// | | ticks delivered | cores | switches/sec |
+    /// |---|---|---|---|
+    /// | 1024 groups, 1ms, 4 shards | 46.2% -> 44.3% | 2.02 -> 5.26 | 1,892 -> 13,030 |
+    /// | 1024 groups, 1ms, 8 shards | 59.7% -> 37.0% | 2.89 -> 7.61 | 4,816 -> 65,231 |
+    /// | 4096 groups, 10ms, 4 shards | 100.1% -> 99.8% | 2.02 -> 2.19 | 1,899 -> 1,830 |
+    ///
+    /// Two passes each way. Two and a half times the CPU and seven times the
+    /// context switches to deliver no more ticks, and *fewer* of them at eight
+    /// shards. A pool worker is not spare capacity -- it is the same core, and
+    /// a mail round trip costs more than the tick it carries. The third row is
+    /// the control: at a 10ms interval almost nothing is late, so almost
+    /// nothing changed, which is what says the other two rows are the effect
+    /// and not a broken arm. Reverted rather than shipped. Past sixteen shards on a sixteen-core box the
     /// return flattens while the cost keeps climbing, which is the shape of a
     /// box running out of cores rather than of a limit in here. Heartbeats, leases and election timeouts are counted
     /// in ticks, so a shortfall here lengthens all three.
