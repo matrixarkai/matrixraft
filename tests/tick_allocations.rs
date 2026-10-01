@@ -94,30 +94,23 @@ fn a_leader_lease_tick_allocates_and_this_is_how_much() {
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
     let per_tick = allocations as f64 / ticks as f64;
 
-    // The control: a tick has to allocate at least something, or the measurement
-    // is of nothing and the ceiling below would hold for a broken build.
-    assert!(
-        allocations > 0,
-        "{ticks} lease ticks allocated nothing at all, so this test is measuring \
-         the wrong thing"
-    );
-
-    // Recorded, not endorsed, and exact: two allocations a tick, the same on
-    // consecutive runs, so the ceiling carries no slack. A third would otherwise
-    // arrive unremarked -- and a third is exactly what was there until
-    // `refresh_witness_commit_quorum_policy` stopped building a whole
-    // `Membership` to count roles that were already on its nodes.
+    // None at all, which is a stronger claim than a ceiling and so is asserted as
+    // an equality. It was three when this test was written: a `Vec` for the
+    // acknowledgements, a `Membership` built to look them up in, and a second
+    // `Membership` built by `refresh_witness_commit_quorum_policy` to count roles
+    // that were already on its nodes. All three are gone, and at 8192 groups on a
+    // 10ms interval that is 2.46 million allocations a second that no longer
+    // happen.
     //
-    // The two that remain are both in `leader_lease_quorum_reached`: a `Vec` for
-    // the acknowledgements, and `membership()` again. At 8192 groups on a 10ms
-    // interval they are 1.64 million allocations a second spent deciding that a
-    // lease which has not changed is still held.
-    const CEILING_PER_TICK: f64 = 2.0;
-    assert!(
-        per_tick <= CEILING_PER_TICK,
-        "a lease tick now allocates {per_tick:.2} times, above the {CEILING_PER_TICK} \
-         this recorded. If that is a deliberate change, move the ceiling and say \
-         why; if it is not, something on the tick path started allocating."
+    // An equality is also its own control. The ceiling this replaced needed a
+    // separate assertion that the tick allocated *something*, or it would have
+    // held for a build that did nothing at all -- and that assertion is what
+    // caught the moment this reached zero.
+    assert_eq!(
+        allocations, 0,
+        "a lease tick allocated {per_tick:.2} times ({allocations} over {ticks} \
+         ticks). It allocates nothing; if that has changed deliberately, say what \
+         now needs the heap on a path every group walks every interval."
     );
 
     println!("lease tick allocations: {per_tick:.2} per tick over {ticks} ticks");

@@ -998,20 +998,50 @@ impl RaftCluster {
         {
             return false;
         }
-        let mut acknowledgements = vec![leader_id];
-        acknowledgements.extend(self.leader_lease_confirmations.iter().filter_map(
-            |(node_id, confirmation)| {
-                let node = self.nodes.get(node_id)?;
-                (confirmation.epoch == self.leader_lease_epoch
-                    && confirmation.role == node.replica_role
-                    && confirmation.elapsed_ms < confirmation.duration_ms
-                    && node.replica_role.participates_in_quorum()
-                    && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness))
-                    .then_some(*node_id)
-            },
-        ));
-        self.membership()
-            .quorum_reached_with_witness_policy(acknowledgements, self.ignore_witness)
+        // One pass over the nodes, counting. This used to collect the
+        // acknowledgements into a `Vec` and then build a whole `Membership` to
+        // look them up in, which was the last two of the three allocations a
+        // leader-lease tick made -- 1.64 million a second at 8192 groups on a
+        // 10ms interval, to decide that an unchanged lease is still held.
+        //
+        // The two filter terms that are gone were already implied. The
+        // acknowledgement filter asked `participates_in_quorum()` and excluded
+        // witnesses under `ignore_witness`; this loop only counts voters, and
+        // witnesses when they are not ignored, which is the same set. The
+        // reference implementation in the tests below is the version this
+        // replaced, and they are asserted to agree across the role, health and
+        // confirmation states.
+        let mut voters = 0usize;
+        let mut witnesses = 0usize;
+        let mut votes = 0usize;
+        for node in self.nodes.values() {
+            let counts_towards_quorum = match node.replica_role {
+                ReplicaRole::Voter => {
+                    voters += 1;
+                    true
+                }
+                ReplicaRole::Witness => {
+                    witnesses += 1;
+                    !self.ignore_witness
+                }
+                _ => false,
+            };
+            if !counts_towards_quorum {
+                continue;
+            }
+            let acknowledged = node.id == leader_id
+                || self
+                    .leader_lease_confirmations
+                    .get(&node.id)
+                    .map(|confirmation| {
+                        confirmation.epoch == self.leader_lease_epoch
+                            && confirmation.role == node.replica_role
+                            && confirmation.elapsed_ms < confirmation.duration_ms
+                    })
+                    .unwrap_or(false);
+            votes += usize::from(acknowledged);
+        }
+        votes >= matrixraft_quorum_size(voters, witnesses, self.ignore_witness)
     }
 
     pub fn set_ignore_witness(&mut self, ignore_witness: bool) {
@@ -5664,5 +5694,234 @@ impl Consensus for RaftCluster {
 
     fn complete_snapshot_trigger(&mut self, snapshot_id: &str) -> Result<(), RaftError> {
         RaftCluster::complete_snapshot_trigger(self, snapshot_id)
+    }
+}
+
+#[cfg(test)]
+mod lease_quorum_rewrite_tests {
+    use super::*;
+
+    /// The quorum check exactly as it was before it stopped allocating, kept here
+    /// to compare against rather than trusting a reading of the rewrite.
+    ///
+    /// It collects the acknowledgements and builds a `Membership` to look them up
+    /// in, which is what the rewrite removed; what it decides must not have
+    /// changed.
+    fn as_it_was(cluster: &RaftCluster) -> bool {
+        let Some(leader_id) = cluster.leader_id else {
+            return false;
+        };
+        if !cluster
+            .nodes
+            .get(&leader_id)
+            .map(|node| {
+                node.healthy
+                    && node.replica_role.can_be_leader()
+                    && cluster.leader_lease_elapsed_ms < cluster.config.leader_lease_ms
+            })
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let mut acknowledgements = vec![leader_id];
+        acknowledgements.extend(cluster.leader_lease_confirmations.iter().filter_map(
+            |(node_id, confirmation)| {
+                let node = cluster.nodes.get(node_id)?;
+                (confirmation.epoch == cluster.leader_lease_epoch
+                    && confirmation.role == node.replica_role
+                    && confirmation.elapsed_ms < confirmation.duration_ms
+                    && node.replica_role.participates_in_quorum()
+                    && !(cluster.ignore_witness && node.replica_role == ReplicaRole::Witness))
+                    .then_some(*node_id)
+            },
+        ));
+        cluster
+            .membership()
+            .quorum_reached_with_witness_policy(acknowledgements, cluster.ignore_witness)
+    }
+
+    fn peer_with(node_id: NodeId, role: ReplicaRole) -> Peer {
+        Peer {
+            node_id,
+            raft_addr: format!("127.0.0.1:{}", 60_000 + node_id),
+            snapshot_addr: format!("127.0.0.1:{}", 61_000 + node_id),
+            role,
+            auto_promote: false,
+        }
+    }
+
+    #[test]
+    fn the_rewritten_quorum_check_agrees_with_the_one_it_replaced() {
+        use ReplicaRole::{Learner, Voter, Witness};
+        let shapes: Vec<Vec<ReplicaRole>> = vec![
+            vec![Voter],
+            vec![Voter, Voter, Voter],
+            vec![Voter, Voter, Voter, Witness],
+            vec![Voter, Witness, Witness],
+            vec![Voter, Voter, Learner, Witness],
+            vec![Voter, Voter, Voter, Witness, Witness],
+            vec![Voter, Learner, Learner],
+            // Two voters need two votes, so a witness is the difference between
+            // reaching quorum and not. Without this shape, mutating the witness
+            // policy in the rewrite changed no answer in any of the 720 states
+            // the matrix held, and the mutant survived.
+            vec![Voter, Voter, Witness],
+        ];
+        let mut compared = 0usize;
+        let mut disagreements = Vec::new();
+        for shape in &shapes {
+            for health_mask in 0..(1u32 << shape.len()) {
+                for ignore_witness in [false, true] {
+                    for confirmations in 0..5u8 {
+                        let peers: Vec<Peer> = shape
+                            .iter()
+                            .enumerate()
+                            .map(|(index, role)| peer_with(index as NodeId + 1, *role))
+                            .collect();
+                        let mut cluster =
+                            RaftCluster::new(11, Config::default(), peers).expect("cluster");
+                        let _ = cluster.start();
+                        cluster.ignore_witness = ignore_witness;
+                        let ids: Vec<NodeId> = cluster.nodes.keys().copied().collect();
+                        for (index, id) in ids.iter().enumerate() {
+                            let role = cluster.nodes[id].replica_role;
+                            if let Some(node) = cluster.nodes.get_mut(id) {
+                                node.healthy = health_mask & (1 << index) != 0;
+                            }
+                            // Four confirmation shapes: none, all good, all stale
+                            // by epoch, and every other one expired by elapsed.
+                            let confirmation = match confirmations {
+                                0 => None,
+                                1 => Some(LeaderLeaseConfirmation {
+                                    role,
+                                    epoch: cluster.leader_lease_epoch,
+                                    confirmation_epoch: cluster.leader_lease_epoch,
+                                    duration_ms: 500,
+                                    elapsed_ms: 1,
+                                }),
+                                2 => Some(LeaderLeaseConfirmation {
+                                    role,
+                                    epoch: cluster.leader_lease_epoch.wrapping_add(7),
+                                    confirmation_epoch: cluster.leader_lease_epoch,
+                                    duration_ms: 500,
+                                    elapsed_ms: 1,
+                                }),
+                                3 => Some(LeaderLeaseConfirmation {
+                                    role,
+                                    epoch: cluster.leader_lease_epoch,
+                                    confirmation_epoch: cluster.leader_lease_epoch,
+                                    duration_ms: 500,
+                                    elapsed_ms: if index % 2 == 0 { 1 } else { 500 },
+                                }),
+                                // Only the witnesses confirm. With the voters
+                                // silent, a witness vote is the only one beyond
+                                // the leader's, so whether it counts decides the
+                                // answer -- which is what makes a mutation of the
+                                // witness policy visible.
+                                _ => (role == Witness).then_some(LeaderLeaseConfirmation {
+                                    role,
+                                    epoch: cluster.leader_lease_epoch,
+                                    confirmation_epoch: cluster.leader_lease_epoch,
+                                    duration_ms: 500,
+                                    elapsed_ms: 1,
+                                }),
+                            };
+                            match confirmation {
+                                Some(confirmation) => {
+                                    cluster
+                                        .leader_lease_confirmations
+                                        .insert(*id, confirmation);
+                                }
+                                None => {
+                                    cluster.leader_lease_confirmations.remove(id);
+                                }
+                            }
+                        }
+                        let rewritten = cluster.leader_lease_quorum_reached();
+                        let reference = as_it_was(&cluster);
+                        compared += 1;
+                        if rewritten != reference {
+                            disagreements.push(format!(
+                                "{shape:?} health={health_mask:#b} ignore_witness={ignore_witness} \
+                                 confirmations={confirmations}: rewritten={rewritten} \
+                                 reference={reference}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "{} of {compared} states disagree, first few:\n  {}",
+            disagreements.len(),
+            disagreements
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+        // The control: a comparison that never ran would also report no
+        // disagreements. Exact rather than a lower bound, because the number is
+        // derived -- every health mask of every shape, under both witness
+        // policies, with four confirmation shapes:
+        //
+        //   (2 + 8 + 16 + 8 + 16 + 32 + 8 + 8) * 2 * 5 = 980
+        //
+        // A shape added or removed changes it, which is the point: the count has
+        // to be re-derived rather than drifting quietly. I first guessed 1,000
+        // here and the control fired on its own arithmetic; the matrix then grew
+        // from 720 to 980 because a mutation survived the smaller one.
+        assert_eq!(
+            compared, 980,
+            "the state matrix is no longer the size its derivation says"
+        );
+    }
+
+    #[test]
+    fn the_states_compared_are_not_all_the_same_answer() {
+        // If every state in the matrix above answered the same way, the agreement
+        // would be worth nothing. This asserts the matrix reaches both answers.
+        use ReplicaRole::{Voter, Witness};
+        let peers = vec![
+            peer_with(1, Voter),
+            peer_with(2, Voter),
+            peer_with(3, Voter),
+            peer_with(4, Witness),
+        ];
+        let mut cluster = RaftCluster::new(12, Config::default(), peers).expect("cluster");
+        let _ = cluster.start();
+
+        // A healthy leader alone is not a quorum of three voters.
+        for id in cluster.nodes.keys().copied().collect::<Vec<_>>() {
+            if let Some(node) = cluster.nodes.get_mut(&id) {
+                node.healthy = true;
+            }
+        }
+        cluster.leader_lease_confirmations.clear();
+        assert!(
+            !cluster.leader_lease_quorum_reached(),
+            "one acknowledgement out of three voters was counted as a quorum"
+        );
+
+        // With the other voters confirming, it is.
+        let epoch = cluster.leader_lease_epoch;
+        for id in [2, 3] {
+            cluster.leader_lease_confirmations.insert(
+                id,
+                LeaderLeaseConfirmation {
+                    role: ReplicaRole::Voter,
+                    epoch,
+                    confirmation_epoch: epoch,
+                    duration_ms: 500,
+                    elapsed_ms: 1,
+                },
+            );
+        }
+        assert!(
+            cluster.leader_lease_quorum_reached(),
+            "a leader and two confirming voters is a quorum of three and was refused"
+        );
     }
 }
