@@ -1045,7 +1045,9 @@ fn wal_file_error(context: &str, err: &std::io::Error) -> RaftError {
         return RaftError::Storage(format!("{context}: {err}"));
     }
     RaftError::Storage(format!(
-        "{context}: {err}. Every raft group holds its own WAL open, so this          process pays about one file descriptor per group: raise RLIMIT_NOFILE          above the number of groups it hosts."
+        "{context}: {err}. Every raft group holds its own WAL open, so this \
+         process pays about one file descriptor per group: raise RLIMIT_NOFILE \
+         above the number of groups it hosts."
     ))
 }
 
@@ -1092,6 +1094,15 @@ mod wal_file_error_tests {
             assert!(
                 message.contains("RLIMIT_NOFILE"),
                 "os error {code} does not name the knob: {message}"
+            );
+            // A host reads this. It shipped with ten literal spaces in the
+            // middle of it, because the line continuations in the format
+            // string were eaten before they reached the source -- and every
+            // assertion above passed anyway, since each only asks whether a
+            // phrase is present.
+            assert!(
+                !message.contains("  "),
+                "the message has a run of spaces in it: {message:?}"
             );
         }
     }
