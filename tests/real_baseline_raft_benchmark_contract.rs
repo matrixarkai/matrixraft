@@ -3142,16 +3142,34 @@ fn a_sample_says_when_its_latencies_sat_on_the_timers_floor() {
          of everything and so say nothing"
     );
 
-    // And the relationship that makes the floor worth flagging at all: a sample on
-    // it reports the reciprocal of the timer rather than a throughput. This holds
-    // whatever the build, because it is arithmetic and not a measurement.
+    // And the relationship that makes the floor worth flagging at all: the rate a
+    // floored sample reports is not a measurement but a ceiling the timer sets.
+    // Each latency is recorded as `max(1)` microsecond and the duration is their
+    // sum, so a run of n timed iterations is credited at least n microseconds and
+    // the reported rate cannot exceed a million operations a second per operation
+    // an iteration -- however fast the box underneath is.
+    //
+    // That is arithmetic rather than a measurement, so it is asserted for whatever
+    // sample comes back, floored or not.
     let on_the_floor = BenchmarkWorkload::ReadIndexReads;
     let floored = runner.run_workload(on_the_floor, &options);
-    if floored.latency_at_timer_resolution() {
-        assert!(
-            (floored.throughput_ops_per_sec - 1_000_000.0).abs() < 1.0,
-            "a sample on the floor reported {} ops/sec rather than the timer's reciprocal",
-            floored.throughput_ops_per_sec
-        );
-    }
+    let ceiling = 1_000_000.0 * floored.operations_per_timed_iteration as f64;
+    assert!(
+        floored.throughput_ops_per_sec <= ceiling,
+        "{} ops/sec from {} operations over {}us is above the {ceiling} the timer          allows, so the duration is under one microsecond an iteration and the          recorded latencies cannot all have been",
+        floored.throughput_ops_per_sec,
+        floored.operation_count,
+        floored.total_duration_micros
+    );
+
+    // What is NOT asserted, because it is not true: that a floored sample sits *at*
+    // that ceiling. An earlier version of this test required the rate within one
+    // part in a million of it, reasoning that if p50 and p99 are both one
+    // microsecond then every latency is. They are not: p99 reads index
+    // `ceil(0.99 * 127) == 126` of 128 sorted samples, so the single slowest one
+    // sits above it and is unbounded. One read of two microseconds among 128 is
+    // therefore a floored sample whose duration is 129us, and it reported
+    // 992,248.06 ops/sec -- which failed the suite. One scheduling hiccup would
+    // put it far lower. The flag's claim is about the two percentiles it reads,
+    // and the ceiling above; the equality was never part of it.
 }
