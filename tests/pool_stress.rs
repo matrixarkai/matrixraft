@@ -31,7 +31,7 @@
 //! writes a test they think covers it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use matrixraft::{
@@ -186,5 +186,114 @@ fn a_group_written_to_while_it_is_being_drained_loses_nothing() {
         arrived,
         "one group accepted {sent} mails and handled {handled}, short by {}",
         sent - handled
+    );
+}
+
+/// Takes a lock and costs time, the way the real handler does.
+///
+/// `PooledGroupWorker` locks the group and runs raft work inside it, so the
+/// worker is away from its selector for a while and senders queue behind it.
+/// A handler that returns instantly never leaves that window open.
+#[derive(Debug, Default)]
+struct SlowCounted {
+    handled: AtomicU64,
+    /// One lock for every group, as a group's own lock is: held across the
+    /// whole of its handler and contended only by work for that group.
+    busy: Mutex<()>,
+}
+
+impl DriverMailHandler<u64> for SlowCounted {
+    fn handle_mail(&self, mails: Vec<u64>) {
+        let _held = self
+            .busy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Long enough that senders arrive while the worker is inside here,
+        // short enough that the test is not a soak.
+        std::thread::sleep(Duration::from_micros(200));
+        self.handled
+            .fetch_add(mails.len() as u64, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn mail_arriving_while_a_slow_handler_runs_is_not_lost() {
+    // The case the other two miss. Their handler returns at once, so the
+    // worker is never away from its selector while a sender is writing --
+    // and that window is where a wake-up would go missing.
+    //
+    // It passes, and it did not reproduce the wedge it was written to chase:
+    // a four-thousand-group store where a command was sent, every worker
+    // parked, and nothing left to rouse them. Worth saying, so the next
+    // person does not read this file as proof the pool cannot lose a
+    // wake-up. It proves only that these patterns do not make it.
+    //
+    // Note also that mail reaches a handler in batches, so the sleep below
+    // is paid per batch and not per mail -- the window it opens is smaller
+    // than the arithmetic suggests.
+    let groups = 32_u64;
+    let per_group = 20_u64;
+    let pool: DriverWorkerPool<u64> = DriverWorkerPool::start(DriverOptions {
+        worker_num: 2,
+        max_messages_each_poll: 4,
+        ..DriverOptions::default()
+    })
+    .expect("pool");
+
+    let handlers: Vec<Arc<SlowCounted>> = (0..groups)
+        .map(|_| Arc::new(SlowCounted::default()))
+        .collect();
+    for (index, handler) in handlers.iter().enumerate() {
+        pool.register_group(
+            DriverGroupKey::new(index as u64 + 1, 1),
+            Arc::clone(handler) as Arc<dyn DriverMailHandler<u64>>,
+        )
+        .expect("register");
+    }
+
+    let senders = 3;
+    let ready = Arc::new(Barrier::new(senders));
+    let accepted = Arc::new(AtomicU64::new(0));
+    std::thread::scope(|scope| {
+        for _ in 0..senders {
+            let pool = &pool;
+            let ready = Arc::clone(&ready);
+            let accepted = Arc::clone(&accepted);
+            scope.spawn(move || {
+                ready.wait();
+                for round in 0..per_group {
+                    for group_id in 1..=groups {
+                        let key = DriverGroupKey::new(group_id, 1);
+                        if pool.send(key, MailPriority::Normal, round).is_ok() {
+                            accepted.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    let sent = accepted.load(Ordering::Relaxed);
+    assert!(
+        sent > 0,
+        "the pool refused everything, so this proves nothing"
+    );
+    let total = || -> u64 {
+        handlers
+            .iter()
+            .map(|handler| handler.handled.load(Ordering::Relaxed))
+            .sum()
+    };
+    let arrived = settle(
+        "a slow handler to catch up with its senders",
+        Duration::from_secs(60),
+        || total() >= sent,
+    );
+    assert!(
+        arrived,
+        "the pool accepted {sent} mails and slow handlers took {}; {} never arrived, \
+         so a mail was dropped or a worker is parked over work it was given",
+        total(),
+        sent - total()
     );
 }
