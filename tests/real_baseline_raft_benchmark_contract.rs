@@ -3103,3 +3103,55 @@ fn a_group_count_spreads_the_work_and_is_recorded() {
         reads.blockers
     );
 }
+
+#[test]
+fn a_sample_says_when_its_latencies_sat_on_the_timers_floor() {
+    // Latency is recorded in whole microseconds, so an operation faster than one
+    // is recorded as one. Measured in release: the read workloads report p50 and
+    // p99 of 1us and exactly 1,000,000 operations a second, unchanged at 1, 8, 64
+    // and 256 groups -- four configurations that cannot all have one throughput.
+    //
+    // Whether a read is that fast depends on the build, which is why this does
+    // not assert that it is. A first version of this test asserted the read
+    // sample was on the floor; that held in release and failed in debug, where a
+    // read is slower than a microsecond. It was measuring how fast the box is.
+    // The flag's contract is what is asserted here instead.
+    let options = BenchmarkOptions::default();
+    let mut runner = RuntimeBenchmarkRunner::new("debug");
+    let mut sample = runner.run_workload(BenchmarkWorkload::ReadIndexReads, &options);
+
+    sample.p50_latency_micros = 1;
+    sample.p99_latency_micros = 1;
+    assert!(
+        sample.latency_at_timer_resolution(),
+        "p50 and p99 both at the floor is the condition, and it was not recognised"
+    );
+
+    // One side above the floor is enough to be measuring something.
+    sample.p99_latency_micros = 2;
+    assert!(
+        !sample.latency_at_timer_resolution(),
+        "a p99 above the floor still counted as being on it"
+    );
+
+    sample.p50_latency_micros = 7;
+    sample.p99_latency_micros = 41;
+    assert!(
+        !sample.latency_at_timer_resolution(),
+        "an ordinary measured sample was flagged, which would make the flag true \
+         of everything and so say nothing"
+    );
+
+    // And the relationship that makes the floor worth flagging at all: a sample on
+    // it reports the reciprocal of the timer rather than a throughput. This holds
+    // whatever the build, because it is arithmetic and not a measurement.
+    let on_the_floor = BenchmarkWorkload::ReadIndexReads;
+    let floored = runner.run_workload(on_the_floor, &options);
+    if floored.latency_at_timer_resolution() {
+        assert!(
+            (floored.throughput_ops_per_sec - 1_000_000.0).abs() < 1.0,
+            "a sample on the floor reported {} ops/sec rather than the timer's reciprocal",
+            floored.throughput_ops_per_sec
+        );
+    }
+}
