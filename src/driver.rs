@@ -79,6 +79,21 @@ pub struct DriverOptions {
     /// Byte budget for one worker pass over a group.
     pub driver_batch_bytes: usize,
     /// Default tick interval for a group that registers without one.
+    ///
+    /// There is a floor, and it is not the 1ms that `validate` accepts. The
+    /// ticker advances its clock after sleeping `DRIVER_CLOCK_STEP_MS`, and
+    /// `thread::sleep` guarantees *at least* the duration asked for, so a
+    /// reading lands every two milliseconds or so. A group is fired at most
+    /// once per reading -- a backlog is deliberately not replayed, see
+    /// `a_stalled_clock_fires_a_group_once_rather_than_storming_it` -- so an
+    /// interval near the step cannot be held. Measured: 1024 groups on a 1ms
+    /// interval deliver about 46% of the ticks the interval asks for, and
+    /// [`DriverStats::ticks_skipped`] counts the rest.
+    ///
+    /// Heartbeats, leader leases and election timeouts are all counted in
+    /// ticks, so an interval that cannot be held makes all three last longer
+    /// than they were configured to. Read 1ms as "as fast as this will go"
+    /// rather than as a rate; 10ms is held in full at every size measured.
     pub tick_interval_ms: u64,
 }
 
