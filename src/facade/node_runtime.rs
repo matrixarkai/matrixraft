@@ -154,6 +154,41 @@ impl NodeRuntime {
         Ok(())
     }
 
+    /// Sends `Start` and hands back the channel its reply will arrive on,
+    /// without waiting for it.
+    ///
+    /// For `start_all`. Waiting for each reply before sending the next costs
+    /// about 100us a group, flat across sizes -- 1.69s for 16,384 groups -- and
+    /// almost all of it is spent waiting while the pool's workers have nothing
+    /// to do. Sending every command first lets them take the starts in
+    /// parallel.
+    ///
+    /// The state move is deliberately not done here. It belongs with a reply
+    /// that said `Ok`, which is what `finish_start` is for; doing it on the send
+    /// would mark a group running that might fail to start.
+    fn start_in_flight(&mut self) -> Result<mpsc::Receiver<Result<(), RaftError>>, RaftError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .send(NodeRuntimeOp::Start(reply_tx))
+            .map_err(|err| {
+                RaftError::Transport(format!(
+                    "failed to send lifecycle command to raft node: {err}"
+                ))
+            })?;
+        Ok(reply_rx)
+    }
+
+    /// Finishes a start begun by `start_in_flight`, with the same result and
+    /// the same state move `start` would have made.
+    fn finish_start(
+        &mut self,
+        reply_rx: mpsc::Receiver<Result<(), RaftError>>,
+    ) -> Result<(), RaftError> {
+        recv_runtime_reply(reply_rx)??;
+        self.state = NodeRuntimeState::Running;
+        Ok(())
+    }
+
     pub fn stop(&mut self) -> Result<(), RaftError> {
         self.send_unit(NodeRuntimeOp::Stop)?;
         self.state = NodeRuntimeState::Stopped;

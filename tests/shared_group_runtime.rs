@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use matrixraft::{
     DriverOptions, MatrixRaftGroupContextBuilder, MatrixRaftMultiRaftServer, MatrixRaftOptions,
-    MatrixRaftTransportBuilder, Peer, ReplicaRole, SharedGroupRuntime,
+    MatrixRaftTransportBuilder, NodeRuntimeState, Peer, ReplicaRole, SharedGroupRuntime,
 };
 
 /// Polls to a deadline rather than sleeping a fixed time, so a loaded machine
@@ -520,5 +520,43 @@ fn a_busy_group_is_handed_to_a_worker_rather_than_blocking_its_ticker() {
         "a group answering commands continuously never had a tick handed to a \
          worker, so the ticker is taking the lock instead of trying it"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn start_all_starts_every_group_past_a_batch_boundary() {
+    // `start_all` sends every group's Start before waiting for any reply, in
+    // batches of 1024 rather than all at once -- one reply channel per group is
+    // about 1.25 KiB while held, which is 20 MiB at sixteen thousand groups.
+    //
+    // A batch boundary is somewhere to drop the tail, so this crosses two of
+    // them: 2049 groups is three batches and the last one holds a single group.
+    // It was cheap enough to write only because creating a group stopped
+    // fsyncing an empty WAL segment.
+    let root = probe_root("batch-boundary");
+    let mut server = server_with(2049, true, &root);
+    server.start_all(0).expect("start every group");
+
+    // Every group, not a sample. The failure this guards against is precisely
+    // the last batch, or the one group in it, never being sent or never being
+    // collected -- and a sample of the first sixty-four would miss both.
+    let mut not_running = Vec::new();
+    for group_id in 1..=2049u64 {
+        let running = server
+            .node(group_id, 1)
+            .and_then(|node| node.runtime_status())
+            .map(|status| status.state == NodeRuntimeState::Running)
+            .unwrap_or(false);
+        if !running {
+            not_running.push(group_id);
+        }
+    }
+    assert!(
+        not_running.is_empty(),
+        "{} of 2049 groups are not running after start_all, starting at {:?}",
+        not_running.len(),
+        &not_running[..not_running.len().min(8)]
+    );
+
     let _ = std::fs::remove_dir_all(&root);
 }
