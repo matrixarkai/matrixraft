@@ -40,11 +40,14 @@
 //! Cores burned is the number to trust; it comes from `/proc/self/stat` and
 //! counts the whole process.
 //!
-//! The two start-up halves are separate because one of them is almost all of
-//! it. At 16384 groups `start_all` takes a few seconds and creating the groups
-//! takes about half a minute: each one opens its own WAL, writes a first
-//! segment and fsyncs it, in sequence. Only the second number was reported
-//! before, which made the smaller half look like the cost.
+//! The two start-up halves are separate because one of them used to be almost
+//! all of it. At 16384 groups creating the groups took about half a minute
+//! against a few seconds to start them, because each one opened its own WAL and
+//! fsynced a first segment in sequence. Only the second number was reported
+//! before, which made the smaller half look like the cost. Creating 16384 groups
+//! is now 3.50s, after the fsync of an empty segment came out, and starting them
+//! is 0.39s -- so the halves are nearer each other, and creating is still the
+//! larger.
 //!
 //! # What it found
 //!
@@ -82,12 +85,18 @@
 //! and it stays linear. The shared ticker is flat and was separately measured
 //! holding five million ticks a second on one thread (`tick_scaling`).
 //!
-//! The catch is that nothing in `src/` constructs a [`Driver`]: the shared
-//! model is exported and exercised by tests and examples, while the server a
-//! user actually reaches for is the thread-each one. This probe is the
-//! measurement that quantifies the difference; closing it is a separate piece
-//! of work, and not a small one, because every `NodeRuntime` operation is a
-//! synchronous request and reply bound to that group's own thread.
+//! This note used to end by saying that nothing in `src/` constructed a
+//! [`Driver`] -- that the shared model was exercised only by tests and examples
+//! while the server a user reaches for was the thread-each one. That is no longer
+//! true and the probe is why: `MatrixRaftGroupContextBuilder::shared_runtime`
+//! turns it on, `matrixraft_compat.rs` starts the `SharedGroupRuntime` lazily on
+//! the first group, and `node_runtime.rs` starts its sharded tickers. The
+//! `shared runtime` arms below go through that same public path, so what they
+//! measure is what a user gets.
+//!
+//! A thread per group is still the default, which is the right default for a
+//! handful of groups: it is simpler, and it is not the thing that falls over
+//! first.
 //!
 //! Linux only, for `/proc/self/stat` and `/proc/self/status`.
 //!
@@ -152,6 +161,15 @@ fn status_field(name: &str) -> u64 {
 /// that way the count is zero in both arms, which would say the thread-each
 /// model switches no more than the shared one -- the opposite of the truth.
 /// The per-thread files have to be summed.
+/// Voluntary and involuntary switches summed over the threads that exist *now*.
+///
+/// Per-thread counters, so the sum is only a rate across a window in which the
+/// thread set did not change. A thread present at the close but not at the open
+/// contributes its whole lifetime to the delta; one that exited during the window
+/// takes its whole lifetime out of it, which can make the second reading smaller
+/// than the first. `switches_per_sec` therefore reports whether the count of
+/// threads moved, and subtracts saturatingly so an exiting thread can never wrap
+/// the delta into something near u64::MAX.
 fn context_switches() -> u64 {
     let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
         return 0;
@@ -176,6 +194,10 @@ fn context_switches() -> u64 {
 struct Sample {
     cores: f64,
     switches_per_sec: f64,
+    /// Whether the thread set changed across the window, which makes
+    /// `switches_per_sec` a difference between two different sums rather than a
+    /// rate. Reported rather than hidden: the figure is printed with a `?`.
+    threads_moved: bool,
     threads: u64,
     /// Resident memory at the close of the window, in KiB, from
     /// `/proc/self/status`.
@@ -198,15 +220,18 @@ fn open_window(seconds: u64) -> impl FnOnce() -> Sample {
     std::thread::sleep(Duration::from_millis(500));
     let cpu_at_start = cpu_seconds();
     let switches_at_start = context_switches();
+    let threads_at_start = status_field("Threads:");
     let started = Instant::now();
     move || {
         std::thread::sleep(Duration::from_secs(seconds));
         let elapsed = started.elapsed().as_secs_f64();
+        let threads = status_field("Threads:");
         Sample {
             cores: (cpu_seconds() - cpu_at_start) / elapsed,
-            switches_per_sec: (context_switches() - switches_at_start) as f64 / elapsed,
+            switches_per_sec: context_switches().saturating_sub(switches_at_start) as f64 / elapsed,
+            threads_moved: threads != threads_at_start,
             resident_kib: status_field("VmRSS:"),
-            threads: status_field("Threads:"),
+            threads,
         }
     }
 }
@@ -311,6 +336,16 @@ struct ThreadEach {
     /// it was pipelined -- a command sent to each group and its reply waited for
     /// before the next is sent -- and dropping a server runs that path for every
     /// group it holds.
+    ///
+    /// **This is the column that stops being reproducible when the tick rate does
+    /// not fit the box**, so read it together with `cores` and `kept up` rather
+    /// than on its own. Four runs of 65,536 groups on a 10ms interval tore down in
+    /// 4.07s, 6.73s, 13.48s and 50.69s; the same groups on a 100ms interval took
+    /// 2.13s and 2.15s. The reason is that a group leaves the ticker only once its
+    /// own shutdown has been answered, so a teardown competes with the ticking of
+    /// every group still waiting its turn. Given headroom that costs nothing
+    /// measurable -- 2.13s against the 2.99s the same groups take on the unstarted
+    /// arm, which never ticked at all. Without headroom the two starve each other.
     torn_down_in: Duration,
     /// How long creating the groups took, before any of them started.
     ///
@@ -618,11 +653,16 @@ fn main() {
             let root = probe_root();
             let seen = hosted(groups, interval_ms, seconds, live, shared, workers, &root);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
                 label,
                 groups,
                 seen.sample.cores,
-                seen.sample.switches_per_sec,
+                match seen.sample.threads_moved {
+                    // A `?` rather than a silent number: the delta spans two
+                    // different sets of threads and so is not a rate.
+                    true => format!("{:.0}?", seen.sample.switches_per_sec),
+                    false => format!("{:.0}", seen.sample.switches_per_sec),
+                },
                 seen.sample.threads,
                 seen.with_a_leader,
                 match seen.kept_up {
@@ -680,11 +720,16 @@ fn main() {
         if arm != "facade" && arm != "live" {
             let seen = shared_ticker(groups, interval_ms, seconds);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
                 "shared ticker",
                 groups,
                 seen.cores,
-                seen.switches_per_sec,
+                match seen.threads_moved {
+                    // A `?` rather than a silent number: the delta spans two
+                    // different sets of threads and so is not a rate.
+                    true => format!("{:.0}?", seen.switches_per_sec),
+                    false => format!("{:.0}", seen.switches_per_sec),
+                },
                 seen.threads,
                 "-",
                 "-",
