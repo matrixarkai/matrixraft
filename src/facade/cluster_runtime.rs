@@ -1039,32 +1039,38 @@ impl RaftCluster {
     }
 
     pub fn refresh_witness_commit_quorum_policy(&mut self) -> bool {
-        let membership = self.membership();
-        let live_voters = membership
-            .voters
-            .iter()
-            .filter(|node_id| {
-                self.nodes
-                    .get(node_id)
-                    .map(|node| node.healthy)
-                    .unwrap_or(false)
-            })
-            .count();
-        let normal_voter_quorum = membership.voters.len() / 2 + 1;
+        // Counted straight off the node map. This built a whole `Membership` --
+        // three collected `Vec`s, of which it read two -- to count roles that are
+        // already on the nodes, and it runs on every leader-lease tick of every
+        // group: one of the three allocations a tick used to make, which at 8192
+        // groups on a 10ms interval is 819,200 of them a second.
+        //
+        // The ids were only ever used to look the same nodes back up, so walking
+        // the nodes once and counting by role is the same question asked without
+        // the detour. `matrixraft_quorum_size` is where the arithmetic lives, so
+        // this does not carry a second copy of what a quorum is.
+        let mut voters = 0usize;
+        let mut live_voters = 0usize;
+        let mut witnesses = 0usize;
+        let mut live_witnesses = 0usize;
+        for node in self.nodes.values() {
+            match node.replica_role {
+                ReplicaRole::Voter => {
+                    voters += 1;
+                    live_voters += usize::from(node.healthy);
+                }
+                ReplicaRole::Witness => {
+                    witnesses += 1;
+                    live_witnesses += usize::from(node.healthy);
+                }
+                _ => {}
+            }
+        }
+        let normal_voter_quorum = matrixraft_quorum_size(voters, witnesses, true);
         let should_count_witness = if self.ignore_witness || live_voters >= normal_voter_quorum {
             false
         } else {
-            let live_witnesses = membership
-                .witnesses
-                .iter()
-                .filter(|node_id| {
-                    self.nodes
-                        .get(node_id)
-                        .map(|node| node.healthy)
-                        .unwrap_or(false)
-                })
-                .count();
-            live_voters + live_witnesses >= membership.quorum_size_with_witness_policy(false)
+            live_voters + live_witnesses >= matrixraft_quorum_size(voters, witnesses, false)
         };
         let changed = self.count_witness_in_commit_quorum != should_count_witness;
         self.count_witness_in_commit_quorum = should_count_witness;

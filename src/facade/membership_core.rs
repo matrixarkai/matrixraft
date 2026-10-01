@@ -160,6 +160,20 @@ pub struct Peer {
     pub auto_promote: bool,
 }
 
+/// How many acknowledgements a quorum needs, from the counts alone.
+///
+/// Held here rather than inline at each caller because a second caller arrived:
+/// `RaftCluster::refresh_witness_commit_quorum_policy` runs on every leader-lease
+/// tick and used to build a whole `Membership` to ask this question about roles
+/// that are already on its nodes. It counts them itself now, and asks here, so
+/// there is still one definition of what a quorum is.
+fn matrixraft_quorum_size(voters: usize, witnesses: usize, ignore_witness: bool) -> usize {
+    if ignore_witness {
+        return voters / 2 + 1;
+    }
+    (voters + witnesses) / 2 + 1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Membership {
     pub group_id: GroupId,
@@ -189,11 +203,7 @@ impl Membership {
     }
 
     pub fn quorum_size_with_witness_policy(&self, ignore_witness: bool) -> usize {
-        if ignore_witness {
-            return self.voters.len() / 2 + 1;
-        }
-        let participants = self.voters.len() + self.witnesses.len();
-        participants / 2 + 1
+        matrixraft_quorum_size(self.voters.len(), self.witnesses.len(), ignore_witness)
     }
 
     pub fn quorum_reached<I>(&self, acknowledgements: I) -> bool
