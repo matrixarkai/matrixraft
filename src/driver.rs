@@ -26,7 +26,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{
     ChannelSelector, ChannelSelectorPolicy, GroupId, MailChannel, MailPriority, NodeId, RaftError,
@@ -164,12 +164,23 @@ struct DriverInner {
 }
 
 impl DriverInner {
-    /// One step of the clock: take what is due, reschedule it, then fire it
-    /// with the lock dropped.
-    fn advance_once(&self) {
+    /// Advances the clock to `now_ms`, then takes what is due, reschedules it,
+    /// and fires it with the lock dropped.
+    ///
+    /// The caller passes elapsed wall time rather than this counting its own
+    /// sleeps. `thread::sleep` guarantees *at least* the duration asked for, so
+    /// a clock that added a millisecond per iteration fell behind by the
+    /// overshoot -- 7.7% at 100 groups, where there is no capacity pressure at
+    /// all. Leases and election timeouts are counted in these ticks, so the
+    /// drift lengthened both.
+    fn advance_to(&self, now_ms: u64) {
         let due = {
             let mut state = self.state.lock().expect("driver state mutex poisoned");
-            state.clock_ms = state.clock_ms.saturating_add(DRIVER_CLOCK_STEP_MS);
+            // Never goes backwards, and a late wake-up catches up instead of
+            // losing the time for good.
+            if now_ms > state.clock_ms {
+                state.clock_ms = now_ms;
+            }
             let now = state.clock_ms;
 
             let mut due: Vec<Arc<dyn DriverTickReceiver>> = Vec::new();
@@ -241,9 +252,11 @@ impl Driver {
         let ticker = thread::Builder::new()
             .name("rustraft-driver-ticker".to_string())
             .spawn(move || {
+                let started = Instant::now();
                 while !ticker_inner.exit.load(Ordering::Relaxed) {
                     thread::sleep(Duration::from_millis(DRIVER_CLOCK_STEP_MS));
-                    ticker_inner.advance_once();
+                    // Elapsed, not a count of iterations: see `advance_to`.
+                    ticker_inner.advance_to(started.elapsed().as_millis() as u64);
                 }
             })
             .map_err(|err| RaftError::Transport(format!("failed to spawn driver ticker: {err}")))?;
@@ -791,5 +804,188 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
             self.batches_handled.fetch_add(1, Ordering::Relaxed);
             self.mails_handled.fetch_add(count, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Counts the ticks it is sent, so a test can say exactly how many a given
+    /// clock move produced.
+    #[derive(Debug, Default)]
+    struct Counter(AtomicU64);
+
+    impl Counter {
+        fn count(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    impl DriverTickReceiver for Counter {
+        fn fire_tick(&self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A driver's insides with **no ticker thread**, so the clock is driven by
+    /// hand.
+    ///
+    /// `tests/driver.rs` exercises the running driver and must poll to a
+    /// deadline to stay green on a loaded machine. That makes it the wrong
+    /// place to assert a tick *rate*: a slow clock and a busy box look the
+    /// same from outside. Driving the clock makes the counts exact and the
+    /// assertions independent of the machine.
+    fn hand_driven(groups: &[(u64, u64)]) -> (DriverInner, Arc<Counter>) {
+        let counter = Arc::new(Counter::default());
+        let mut queue = BinaryHeap::new();
+        let mut registered = BTreeMap::new();
+        for &(group_id, interval_ms) in groups {
+            let key = DriverGroupKey::new(group_id, 1);
+            registered.insert(
+                key,
+                Registration {
+                    receiver: Arc::clone(&counter) as Arc<dyn DriverTickReceiver>,
+                    interval_ms,
+                },
+            );
+            queue.push(Reverse(Deadline {
+                at_ms: interval_ms,
+                key,
+            }));
+        }
+        let inner = DriverInner {
+            options: DriverOptions::default(),
+            state: Mutex::new(TickState {
+                clock_ms: 0,
+                queue,
+                groups: registered,
+            }),
+            exit: AtomicBool::new(false),
+            ticks_fired: AtomicU64::new(0),
+            ticks_dropped: AtomicU64::new(0),
+        };
+        (inner, counter)
+    }
+
+    impl DriverInner {
+        /// The logical clock, for tests that assert on it directly rather
+        /// than inferring it from which groups came due.
+        fn clock(&self) -> u64 {
+            self.state
+                .lock()
+                .expect("driver state mutex poisoned")
+                .clock_ms
+        }
+    }
+
+    #[test]
+    fn a_tick_follows_the_clocks_value_not_how_often_it_is_asked() {
+        // The ticker used to count its own sleeps, adding a millisecond to the
+        // logical clock per loop. `thread::sleep` guarantees *at least* the
+        // duration asked for, so every iteration overshot and the clock fell
+        // behind wall time -- measured at 7.7% with 100 groups registered,
+        // which is nowhere near any capacity limit.
+        //
+        // Heartbeats, leader leases and election timeouts are all counted in
+        // these ticks, so the drift made leases last longer than they were
+        // configured to, which is the dangerous direction.
+        //
+        // Asking five times at the same instant must therefore answer once.
+        let (inner, counter) = hand_driven(&[(1, 10)]);
+
+        for _ in 0..5 {
+            inner.advance_to(10);
+        }
+        assert_eq!(
+            counter.count(),
+            1,
+            "five calls at one instant fired {} ticks, so the clock is being \
+             advanced by the call and not read from it",
+            counter.count()
+        );
+
+        inner.advance_to(20);
+        assert_eq!(counter.count(), 2, "the next interval is due at 20ms");
+    }
+
+    #[test]
+    fn the_clock_does_not_run_backwards() {
+        // Wall time is read rather than accumulated, so this guards against a
+        // reading that goes backwards.
+        //
+        // The clock is read directly instead of being inferred from ticks. An
+        // earlier version of this test watched the tick count alone and a
+        // mutant that dropped the guard outright survived it: the group's next
+        // deadline sat beyond both the forward and the backward reading, so
+        // neither delivered a tick and the test passed on broken code.
+        let (inner, counter) = hand_driven(&[(1, 10)]);
+
+        inner.advance_to(100);
+        assert_eq!(counter.count(), 1, "the group was due and fired once");
+        assert_eq!(inner.clock(), 100, "the clock took the reading");
+
+        inner.advance_to(50);
+        assert_eq!(
+            inner.clock(),
+            100,
+            "a backwards reading moved the clock back to {}",
+            inner.clock()
+        );
+        assert_eq!(counter.count(), 1, "and nothing came due again");
+
+        // Visible in ticks too: a group registered now is scheduled off the
+        // clock, so a clock that went back would make it due early.
+        inner.advance_to(101);
+        assert_eq!(counter.count(), 2, "the schedule resumes from where it was");
+    }
+
+    #[test]
+    fn a_stalled_clock_fires_a_group_once_rather_than_storming_it() {
+        // Five seconds of a ten-millisecond interval is five hundred missed
+        // ticks. Delivering them all would hand every group its whole backlog
+        // at once, on the single ticker thread. The deadline is pulled forward
+        // instead: one tick, then the ordinary cadence.
+        let (inner, counter) = hand_driven(&[(1, 10)]);
+
+        inner.advance_to(5_000);
+        assert_eq!(
+            counter.count(),
+            1,
+            "a five-second stall delivered {} ticks to one group",
+            counter.count()
+        );
+
+        inner.advance_to(5_001);
+        assert_eq!(counter.count(), 2, "and then it resumes");
+    }
+
+    #[test]
+    fn every_group_is_ticked_once_per_interval_of_the_clock() {
+        // The exact-count version of `one_ticker_carries_every_group`: that
+        // test polls to a deadline because a real thread is ticking, so it can
+        // only assert "enough". Here the arithmetic is closed.
+        let groups: Vec<(u64, u64)> = (1..=50).map(|group_id| (group_id, 10)).collect();
+        let (inner, counter) = hand_driven(&groups);
+
+        for ms in 1..=100 {
+            inner.advance_to(ms);
+        }
+
+        assert_eq!(
+            counter.count(),
+            50 * 10,
+            "100ms at a 10ms interval is ten ticks for each of fifty groups"
+        );
+        assert_eq!(
+            inner.ticks_fired.load(Ordering::Relaxed),
+            counter.count(),
+            "the driver's own count disagrees with what the groups received"
+        );
+        assert_eq!(
+            inner.ticks_dropped.load(Ordering::Relaxed),
+            0,
+            "no group was unregistered, so nothing should have been dropped"
+        );
     }
 }
