@@ -2075,11 +2075,36 @@ impl std::fmt::Debug for PooledGroup {
 }
 
 impl PooledGroup {
+    /// Runs the tick here if the group is free, and says whether it did.
+    ///
+    /// `try_lock`, never `lock`: this is called on a ticker thread, and a
+    /// ticker that blocked on one group would stop ticking every other group
+    /// in its shard. A refusal is not a dropped tick -- `ticks_due` is
+    /// already incremented, and the caller hands the group to a worker.
+    ///
+    /// Only the tick, never the mail. A tick is bounded work; a proposal is
+    /// an fsync, and serving one here would stall the shard.
+    fn try_run_tick(&self) -> bool {
+        let Ok(mut core) = self.core.try_lock() else {
+            return false;
+        };
+        if self.ticks_due.swap(0, Ordering::AcqRel) > 0 {
+            core.tick();
+        }
+        true
+    }
+
     /// Runs whatever the group has waiting: the tick first, then its mail.
     ///
     /// The tick goes first so a command is never served against a lease this
     /// interval should already have expired.
-    fn run_pending(&self) {
+    ///
+    /// Serves at most `max_commands` of them and answers whether more were
+    /// left. On a thread of its own a group may drain its mailbox dry,
+    /// because the thread is its own and has nothing else owed; on a shared
+    /// worker that would let one busy group hold the worker while every
+    /// other group it serves waits.
+    fn run_pending(&self, max_commands: usize) -> bool {
         // A worker that panicked mid-command leaves the group poisoned. The
         // alternative to carrying on is a group that never ticks again, which
         // is worse than one whose counters are suspect.
@@ -2093,27 +2118,68 @@ impl PooledGroup {
             // firing its whole backlog at it.
             core.tick();
         }
-        while let Some(command) = core.next_command() {
+        for _ in 0..max_commands.max(1) {
+            let Some(command) = core.next_command() else {
+                return false;
+            };
             if core.handle(command).is_break() {
-                break;
+                return false;
             }
         }
+        // Whether anything is actually left is only knowable by taking one,
+        // so a spare visit is possible. That is far cheaper than the
+        // alternative it replaces.
+        true
     }
 }
 
-/// Hands a group to a worker when its interval comes round.
+/// How a shared runtime's ticks were served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedRuntimeStats {
+    /// Ticks run on the ticker thread, because the group was free.
+    ///
+    /// This is the cheap path and should be nearly all of them: it costs no
+    /// mail, and no worker wake-up.
+    pub ticks_in_place: u64,
+    /// Ticks handed to a worker, because the group's lock was held.
+    ///
+    /// Climbing steadily means groups are contended for longer than an
+    /// interval, which is what too few workers looks like from outside.
+    pub ticks_handed_over: u64,
+    /// Groups the runtime holds.
+    pub groups: usize,
+    /// Threads it uses, whatever the group count.
+    pub threads: usize,
+}
+
+#[derive(Debug, Default)]
+struct TickCounters {
+    in_place: AtomicU64,
+    handed_over: AtomicU64,
+}
+
+/// Ticks a group, on this thread when it can.
 struct PooledGroupTicker {
     group: Arc<PooledGroup>,
     pool: Arc<DriverWorkerPool<()>>,
+    counters: Arc<TickCounters>,
     key: DriverGroupKey,
 }
 
 impl DriverTickReceiver for PooledGroupTicker {
     fn fire_tick(&self) {
         self.group.ticks_due.fetch_add(1, Ordering::Relaxed);
-        // Best effort on purpose. A refused send means a wake is already
-        // queued for this group, and one wake is enough: the worker drains
-        // everything the group has, however much arrived since.
+        // Do it here when the group is free, which is the common case and
+        // costs nothing beyond this thread. Posting a mail for every group
+        // every interval is what kept the switch count at half the
+        // thread-per-group model instead of near zero.
+        if self.group.try_run_tick() {
+            self.counters.in_place.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.counters.handed_over.fetch_add(1, Ordering::Relaxed);
+        // Busy: hand it over rather than wait. Best effort, because a
+        // refused send means a wake is already queued, and one is enough.
         let _ = self.pool.send(self.key, MailPriority::Normal, ());
     }
 }
@@ -2121,46 +2187,128 @@ impl DriverTickReceiver for PooledGroupTicker {
 /// Runs a group when a worker picks its wake-up out of the pool.
 struct PooledGroupWorker {
     group: Arc<PooledGroup>,
+    pool: Arc<DriverWorkerPool<()>>,
+    key: DriverGroupKey,
+    /// Most commands to serve for this group in one visit.
+    max_each_visit: usize,
 }
 
 impl DriverMailHandler<()> for PooledGroupWorker {
     fn handle_mail(&self, _wakes: Vec<()>) {
         // The wakes carry nothing; how much there is to do is in the group.
-        self.group.run_pending();
+        if self.group.run_pending(self.max_each_visit) {
+            // Still more waiting. Go to the back of the queue rather than
+            // hold the worker: the other groups it serves are owed a turn.
+            let _ = self.pool.send(self.key, MailPriority::Normal, ());
+        }
     }
 }
 
-/// Hosts many raft groups on one ticker and a fixed pool of workers.
+/// Hosts many raft groups on a few tickers and a fixed pool of workers.
 ///
 /// The alternative, and still the default, is a thread for each group parked
 /// in `recv_timeout`. That costs one context switch per group per heartbeat
 /// interval -- about one core per thousand groups, measured by
 /// `examples/idle_tick_cost.rs`, of which roughly 85% is the wake-up rather
-/// than raft work. Here the ticking is one thread's due-time heap and the
-/// work lands on `worker_num` threads however many groups there are.
+/// than raft work. Here the switching is a function of the shard count
+/// rather than the group count: measured at about 3,400 a second whether the
+/// runtime holds a thousand groups or four thousand.
+///
+/// # Sizing `worker_num`
+///
+/// It decides the shard count, and the shards carry every group's tick, so
+/// this is no longer only a tuning preference -- it is what decides whether
+/// the groups are ticked at all.
+///
+/// What has actually been measured, at a 10ms interval, every group a live
+/// leader (`examples/idle_tick_cost.rs`):
+///
+/// ```text
+///   groups  shards   cores   ticks delivered
+///     1024       4   0.279            100.0%
+///     4096       8   1.098            100.0%
+///     4096       4       -   never finished starting
+/// ```
+///
+/// So **256 groups per shard is known good and 512 is too**; four shards for
+/// four thousand groups is not. No formula is offered, because the run that
+/// gave way did not give way where one would predict: it never reached the
+/// measurement window at all, having stalled while *starting* the groups.
+/// Steady-state ticking looks far cheaper than that failure suggests -- a
+/// shard carrying 512 live groups costs well under an eighth of a core --
+/// so the start path, not the tick, is what to watch when raising the group
+/// count, and it has not been characterised yet.
+///
+/// Undersizing does not fail loudly. The tickers fall behind, the groups are
+/// ticked more slowly than they were configured for, and because heartbeats,
+/// leases and election timeouts are all counted in those ticks, leases begin
+/// to outlive their configuration. Watch the `kept up` column of
+/// `examples/idle_tick_cost.rs`, or [`SharedRuntimeStats::ticks_handed_over`]
+/// on a running store.
 pub struct SharedGroupRuntime {
-    driver: Driver,
+    /// One ticker per shard, with groups hashed across them.
+    ///
+    /// A tick now runs on the ticker that owns the group rather than being
+    /// posted to the pool, so a single ticker would carry every group's raft
+    /// work -- about 2.3us a tick measured, which saturates one thread near
+    /// four thousand groups at a 10ms interval. Sharding moves that out by
+    /// the shard count, and keeps each due-time heap smaller as well.
+    tickers: Vec<Driver>,
     pool: Arc<DriverWorkerPool<()>>,
+    /// `max_messages_each_poll`, which bounds one group's turn on a worker.
+    max_each_visit: usize,
+    counters: Arc<TickCounters>,
     groups: Mutex<BTreeMap<DriverGroupKey, Arc<PooledGroup>>>,
 }
 
 impl std::fmt::Debug for SharedGroupRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharedGroupRuntime")
-            .field("options", self.driver.options())
+            .field("tickers", &self.tickers.len())
             .field("hosted_groups", &self.group_count())
             .finish()
     }
 }
 
 impl SharedGroupRuntime {
-    /// Starts the ticker and the worker pool.
+    /// Starts the tickers and the worker pool.
+    ///
+    /// One ticker per worker: the tickers do the tick work now, so their
+    /// number is what bounds how many groups can be ticked, and tying it to
+    /// `worker_num` means one setting still describes the whole runtime.
     pub fn start(options: DriverOptions) -> Result<Self, RaftError> {
+        let shards = options.worker_num.max(1);
+        let mut tickers = Vec::with_capacity(shards);
+        for _ in 0..shards {
+            // One worker each: a ticker's own pool is never used, because
+            // every group registers its mail with the shared pool below.
+            tickers.push(Driver::start(DriverOptions {
+                worker_num: 1,
+                ..options
+            })?);
+        }
         Ok(Self {
-            driver: Driver::start(options)?,
+            tickers,
             pool: Arc::new(DriverWorkerPool::start(options)?),
+            max_each_visit: options.max_messages_each_poll.max(1),
+            counters: Arc::new(TickCounters::default()),
             groups: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// Which ticker owns a group.
+    ///
+    /// Hashed rather than taken modulo the group id.
+    ///
+    /// Consecutive ids would spread perfectly well under `%` -- it is a
+    /// stride that defeats it. A store numbering its groups 4, 8, 12 with
+    /// four shards puts every one of them on shard zero, and the runtime
+    /// would look fixed-size while ticking on a single thread. Hashing has
+    /// no such pattern to fall into.
+    fn ticker_for(&self, key: DriverGroupKey) -> &Driver {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        &self.tickers[(hasher.finish() % self.tickers.len() as u64) as usize]
     }
 
     /// How many groups this runtime hosts.
@@ -2171,9 +2319,34 @@ impl SharedGroupRuntime {
             .unwrap_or(0)
     }
 
+    /// How the runtime's ticks have been served, and what it holds.
+    pub fn stats(&self) -> SharedRuntimeStats {
+        SharedRuntimeStats {
+            ticks_in_place: self.counters.in_place.load(Ordering::Relaxed),
+            ticks_handed_over: self.counters.handed_over.load(Ordering::Relaxed),
+            groups: self.group_count(),
+            threads: self.thread_count(),
+        }
+    }
+
+    /// How many tickers the groups are spread across.
+    pub fn ticker_count(&self) -> usize {
+        self.tickers.len()
+    }
+
+    /// Groups held by each ticker, in shard order.
+    ///
+    /// Exposed because an uneven spread is the failure this sharding can
+    /// have and nothing else would show it: every group on one shard still
+    /// works, just at one shard's ceiling.
+    pub fn groups_per_ticker(&self) -> Vec<usize> {
+        self.tickers.iter().map(Driver::group_count).collect()
+    }
+
     /// Threads the whole runtime uses, whatever the group count.
     pub fn thread_count(&self) -> usize {
-        self.driver.thread_count() + self.pool.thread_count()
+        let tickers: usize = self.tickers.iter().map(Driver::thread_count).sum();
+        tickers + self.pool.thread_count()
     }
 
     fn host(
@@ -2203,13 +2376,17 @@ impl SharedGroupRuntime {
             key,
             Arc::new(PooledGroupWorker {
                 group: Arc::clone(&group),
+                pool: Arc::clone(&self.pool),
+                key,
+                max_each_visit: self.max_each_visit,
             }),
         )?;
-        self.driver.register_group_every(
+        self.ticker_for(key).register_group_every(
             key,
             Arc::new(PooledGroupTicker {
                 group: Arc::clone(&group),
                 pool: Arc::clone(&self.pool),
+                counters: Arc::clone(&self.counters),
                 key,
             }),
             tick_interval_ms,
@@ -2218,7 +2395,7 @@ impl SharedGroupRuntime {
     }
 
     fn release(&self, key: DriverGroupKey) {
-        self.driver.cancel_group(key);
+        self.ticker_for(key).cancel_group(key);
         self.pool.cancel_group(key);
         if let Ok(mut groups) = self.groups.lock() {
             groups.remove(&key);

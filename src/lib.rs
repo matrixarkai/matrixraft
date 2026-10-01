@@ -56,8 +56,10 @@
 //!   alert rules, which is a breaking operational change, not a tidy-up.
 
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::marker::PhantomData;
 use std::net::{TcpListener, TcpStream};
