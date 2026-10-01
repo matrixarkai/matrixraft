@@ -377,6 +377,14 @@ Four things worth knowing before sizing a host:
 
   On a debug build it is about double, so measure the profile you will run.
 
+- **The raft work is not what a tick costs, so do not look for it there.** An idle
+  hosted group's tick runs about 2,200ns, and the dozen calls it makes into the
+  cluster cost about **48ns together** -- roughly **2%** of it. Timed with
+  `cargo test --release --test tick_call_cost -- --nocapture`, which prints the row
+  dearest first. The cost is the hosting around those calls: the wake, the lock, the
+  scheduling, and the parts of the tick that are not calls into the cluster. Three
+  separate reductions have been found by measuring there rather than in raft.
+
 - **Treat one `cores` reading as indicative, not as a number.** On a 10ms interval
   with a shared box, 16,384 groups read 2.295, 2.700, 2.810, 3.409 and 4.194 cores
   across five runs -- a factor of 1.8 for the same configuration. The readings
