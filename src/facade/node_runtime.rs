@@ -2262,10 +2262,26 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// afterwards. Each `NodeRuntime::status` waits up to five seconds, and
 /// sixty-four of them that do not answer is five minutes of nothing.
 ///
-/// So what is actually unexplained is narrower and worth stating as such: at
-/// 1024 live groups per shard, a status command can take longer than five
-/// seconds to come back. Ticking is fine; answering is not. That is where to
-/// look next, and no formula is offered until it is understood.
+/// There used to be a wall at 1024 live groups per shard, where groups
+/// stopped electing and stopped answering. That was not a capacity limit at
+/// all: `MailChannel::overflow` compared a selector-wide mail count against
+/// one channel's limit, so a worker holding more groups than
+/// `max_queue_depth` latched their mailboxes shut. Fixed, and 4096 groups
+/// over 4 shards now deliver every tick where 3 of them used to elect.
+///
+/// # The next limit is file descriptors, not this runtime
+///
+/// Every group holds its own WAL open, so a process pays about **one file
+/// descriptor per group**: measured at 3,076 for 3072 groups and 4,119 for
+/// 4096. A host wanting ten thousand groups needs `RLIMIT_NOFILE` above ten
+/// thousand, and the default on many systems is lower than that.
+///
+/// The failure is reported, but not as a ceiling. Creating the group returns
+/// `Storage("failed to read WAL directory: Too many open files (os error
+/// 24)")` -- measured at 300 groups under a 150-descriptor limit - which
+/// names the OS condition and says nothing about how many groups are already
+/// holding a descriptor. Raise `RLIMIT_NOFILE` before raising the group
+/// count.
 ///
 /// Undersizing does not fail loudly. The tickers fall behind, the groups are
 /// ticked more slowly than they were configured for, and because heartbeats,
