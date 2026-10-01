@@ -223,6 +223,32 @@ impl NodeRuntime {
         }
     }
 
+    /// Sends `Stop` and hands back the channel its reply will arrive on, without
+    /// waiting for it. The third of these, for the same reason as the other two:
+    /// `stop_all` cost 349ms on 4096 groups, about 85us each, nearly all of it
+    /// waiting.
+    fn stop_in_flight(&mut self) -> Result<mpsc::Receiver<Result<(), RaftError>>, RaftError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .send(NodeRuntimeOp::Stop(reply_tx))
+            .map_err(|err| {
+                RaftError::Transport(format!(
+                    "failed to send lifecycle command to raft node: {err}"
+                ))
+            })?;
+        Ok(reply_rx)
+    }
+
+    /// Finishes a stop begun by `stop_in_flight`.
+    fn finish_stop(
+        &mut self,
+        reply_rx: mpsc::Receiver<Result<(), RaftError>>,
+    ) -> Result<(), RaftError> {
+        recv_runtime_reply(reply_rx)??;
+        self.state = NodeRuntimeState::Stopped;
+        Ok(())
+    }
+
     /// Sends `Shutdown` and hands back the channel its reply will arrive on,
     /// without waiting for it. `None` when the group is already shut down.
     ///
