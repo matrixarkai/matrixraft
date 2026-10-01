@@ -1241,3 +1241,50 @@ fn assert_single_pass_agrees_after(label: &str, records: u64, damage: impl Fn(&P
         let _ = fs::remove_dir_all(dir);
     }
 }
+
+#[test]
+fn a_wal_created_and_never_appended_to_reopens_empty_and_usable() {
+    // The empty first segment is no longer written eagerly when the WAL is opened:
+    // the append handle carries `O_CREAT` and makes the file itself, which is one
+    // open of that path instead of two, on the path that creates a store's groups.
+    //
+    // So this is the case that would break if anything depended on the file being
+    // there before a record was ever appended -- including a crash between creating
+    // a group and its first append, which is the state the removed write existed to
+    // make durable. Three opens with nothing appended between them, because the
+    // first reopen is the one that would find a missing file and the second is the
+    // one that would find whatever the first left.
+    let dir = temp_wal_dir("never-appended");
+    for round in 0..3 {
+        let wal = PersistentRaftWal::open(wal_options(dir.clone())).expect("open");
+        assert_eq!(
+            wal.status().total_records,
+            0,
+            "round {round}: an untouched WAL holds no records"
+        );
+    }
+
+    let (mut reopened, report) =
+        PersistentRaftWal::open_recovered(wal_options(dir.clone())).expect("reopen");
+    assert_eq!(report.surviving_records, 0);
+    assert!(
+        !report.truncated_corrupt_tail,
+        "an empty WAL is not a corrupt one, and reporting it as one would make          every freshly created group look damaged"
+    );
+    assert!(report.recovered.is_none());
+
+    // And it still takes a record, which is what usable means.
+    reopened.append(wal_record(1)).expect("append after reopen");
+    assert_eq!(reopened.status().last_log_index, 1);
+    assert_eq!(reopened.status().total_records, 1);
+
+    // Then survives a restart carrying that record, so the file the append handle
+    // created is a real segment and not something only this process could read.
+    drop(reopened);
+    let (restarted, report) =
+        PersistentRaftWal::open_recovered(wal_options(dir.clone())).expect("restart");
+    assert_eq!(report.surviving_records, 1);
+    assert_eq!(restarted.status().last_log_index, 1);
+
+    let _ = fs::remove_dir_all(dir);
+}

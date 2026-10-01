@@ -333,7 +333,16 @@ impl PersistentRaftWal {
                 record_count: 0,
                 sealed: false,
             });
-            write_wal_segment_file(&options.dir, &segments[0])?;
+            // Deliberately not `write_wal_segment_file` here. For a segment with no
+            // records that call creates an empty file, writes nothing and skips the
+            // fsync -- and the `open_segment_for_append` below opens the same path
+            // with `O_CREAT`, so it creates the file anyway. Two opens of one path
+            // where one will do, on the hot path of creating a store's groups.
+            //
+            // Nothing depended on the file existing first. That function's own note
+            // says so: a crash before the first append leaves either no file, which
+            // the next open writes again, or an empty one, which is the same state.
+            // `O_CREAT` reaches the second of those without the extra open.
         }
         let active_id = segments
             .last()
