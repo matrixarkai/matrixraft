@@ -64,7 +64,7 @@ use std::net::{TcpListener, TcpStream};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::thread;

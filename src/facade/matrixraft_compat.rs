@@ -2636,6 +2636,14 @@ pub struct MatrixRaftGroupContext {
     pub flexible_apply: bool,
     pub heartbeat_merge: bool,
     pub watched_address_resolver: bool,
+    /// Host every group on one shared ticker and worker pool, rather than
+    /// giving each its own OS thread.
+    ///
+    /// Off by default, because it changes how a group is driven. A thread
+    /// each costs one context switch per group per tick interval -- about a
+    /// core per thousand groups, measured by `examples/idle_tick_cost.rs` --
+    /// and this is what that measurement was taken to justify.
+    pub shared_runtime: bool,
     pub transport: Option<MatrixRaftTransportOptions>,
     pub node_creators: Vec<MatrixRaftNodeCreator>,
     pub snapshot_send_rate_limiter: Option<MatrixRaftRateLimiterConfig>,
@@ -2661,6 +2669,7 @@ impl Default for MatrixRaftGroupContext {
             flexible_apply: false,
             heartbeat_merge: false,
             watched_address_resolver: false,
+            shared_runtime: false,
             transport: None,
             node_creators: Vec::new(),
             snapshot_send_rate_limiter: None,
@@ -2708,6 +2717,13 @@ impl MatrixRaftGroupContextBuilder {
 
     pub fn worker_num(mut self, num: usize) -> Self {
         self.context.worker_num = num.max(1);
+        self
+    }
+
+    /// Hosts every group on one shared ticker and worker pool instead of a
+    /// thread each. See [`MatrixRaftGroupContext::shared_runtime`].
+    pub fn shared_runtime(mut self, shared: bool) -> Self {
+        self.context.shared_runtime = shared;
         self
     }
 
@@ -3097,6 +3113,15 @@ impl MatrixRaftOptions {
     pub fn create_node(&self, start_index: LogIndex) -> Result<MatrixRaftNode, RaftError> {
         MatrixRaftNode::create(self.to_node_options(), start_index)
     }
+
+    /// Creates the node on a shared runtime rather than a thread of its own.
+    pub fn create_node_on(
+        &self,
+        start_index: LogIndex,
+        runtime: Arc<SharedGroupRuntime>,
+    ) -> Result<MatrixRaftNode, RaftError> {
+        MatrixRaftNode::create_on(self.to_node_options(), start_index, runtime)
+    }
 }
 
 #[derive(Debug)]
@@ -3110,9 +3135,23 @@ pub struct MatrixRaftNode {
 }
 
 impl MatrixRaftNode {
-    pub fn create(
+    pub fn create(options: NodeOptions, start_index: LogIndex) -> Result<Self, RaftError> {
+        Self::create_hosted(options, start_index, None)
+    }
+
+    /// Creates the node on a shared runtime rather than a thread of its own.
+    pub fn create_on(
         options: NodeOptions,
         start_index: LogIndex,
+        runtime: Arc<SharedGroupRuntime>,
+    ) -> Result<Self, RaftError> {
+        Self::create_hosted(options, start_index, Some(runtime))
+    }
+
+    fn create_hosted(
+        options: NodeOptions,
+        start_index: LogIndex,
+        runtime: Option<Arc<SharedGroupRuntime>>,
     ) -> Result<Self, RaftError> {
         let mut peers: BTreeMap<_, _> = options
             .peers
@@ -3127,8 +3166,12 @@ impl MatrixRaftNode {
             role: options.role,
             auto_promote: false,
         });
+        let runtime = match runtime {
+            Some(shared) => NodeRuntime::create_on(options, shared)?,
+            None => NodeRuntime::create(options)?,
+        };
         Ok(Self {
-            runtime: NodeRuntime::create(options)?,
+            runtime,
             peers,
             start_index,
             recover_fsm_from_snapshot: false,
@@ -17390,6 +17433,9 @@ impl MatrixRaftRouteResult {
 #[derive(Debug)]
 pub struct MatrixRaftMultiRaftServer {
     context: MatrixRaftGroupContext,
+    /// Started on the first group when the context asks for it, so that a
+    /// server which never creates a group never starts threads either.
+    shared: Option<Arc<SharedGroupRuntime>>,
     nodes: BTreeMap<MatrixRaftRouteKey, MatrixRaftNode>,
     snapshot_routes: BTreeMap<MatrixRaftRouteKey, MatrixRaftSnapshotDesc>,
     runtime_wiring: BTreeMap<MatrixRaftRouteKey, MatrixRaftRuntimeWiring>,
@@ -17399,6 +17445,7 @@ impl MatrixRaftMultiRaftServer {
     pub fn new(context: MatrixRaftGroupContext) -> Self {
         Self {
             context,
+            shared: None,
             nodes: BTreeMap::new(),
             snapshot_routes: BTreeMap::new(),
             runtime_wiring: BTreeMap::new(),
@@ -17407,6 +17454,32 @@ impl MatrixRaftMultiRaftServer {
 
     pub fn context(&self) -> &MatrixRaftGroupContext {
         &self.context
+    }
+
+    /// The shared runtime, starting it if the context asked for one.
+    ///
+    /// Started lazily so that a server which never creates a group never
+    /// starts a ticker and a worker pool for nothing.
+    fn shared_runtime(&mut self) -> Result<Option<Arc<SharedGroupRuntime>>, RaftError> {
+        if !self.context.shared_runtime {
+            return Ok(None);
+        }
+        if self.shared.is_none() {
+            self.shared = Some(Arc::new(SharedGroupRuntime::start(DriverOptions {
+                worker_num: self.context.worker_num.max(1),
+                max_messages_each_poll: self.context.max_messages_each_poll.max(1) as usize,
+                max_queue_depth: self.context.max_queue_depth.max(1) as usize,
+                driver_batch_bytes: self.context.driver_batch_bytes.max(1),
+                tick_interval_ms: self.context.tick_interval_ms.max(1),
+            })?));
+        }
+        Ok(self.shared.clone())
+    }
+
+    /// Threads this server uses for the groups it hosts, or `None` when each
+    /// group has its own and the count is simply the group count.
+    pub fn shared_thread_count(&self) -> Option<usize> {
+        self.shared.as_ref().map(|runtime| runtime.thread_count())
     }
 
     pub fn register_node(&mut self, node: MatrixRaftNode) -> Result<(), RaftError> {
@@ -17573,7 +17646,10 @@ impl MatrixRaftMultiRaftServer {
             bound_creator_index,
             creator,
         )?;
-        let node = options.create_node(start_index)?;
+        let node = match self.shared_runtime()? {
+            Some(runtime) => options.create_node_on(start_index, runtime)?,
+            None => options.create_node(start_index)?,
+        };
         self.nodes.insert(key, node);
         self.runtime_wiring.insert(key, wiring);
         Ok(())

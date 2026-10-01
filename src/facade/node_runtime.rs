@@ -81,8 +81,11 @@ enum NodeRuntimeOp {
 pub struct NodeRuntime {
     node_id: NodeId,
     group_id: GroupId,
-    command_tx: Option<mpsc::Sender<NodeRuntimeOp>>,
+    command_tx: Option<CommandSender>,
+    /// The group's own thread, when it has one.
     worker: Option<thread::JoinHandle<()>>,
+    /// Where the group is hosted, when it is not on a thread of its own.
+    shared: Option<(Arc<SharedGroupRuntime>, DriverGroupKey)>,
     restart_count: u64,
     state: NodeRuntimeState,
 }
@@ -99,8 +102,47 @@ impl NodeRuntime {
         Ok(Self {
             node_id,
             group_id,
-            command_tx: Some(command_tx),
+            command_tx: Some(CommandSender {
+                tx: command_tx,
+                shared: None,
+            }),
             worker: Some(worker),
+            shared: None,
+            restart_count: 0,
+            state: NodeRuntimeState::Created,
+        })
+    }
+
+    /// Hosts this group on a shared runtime instead of a thread of its own.
+    ///
+    /// The group keeps its own mailbox and answers exactly the same commands;
+    /// what changes is that its ticking comes from one shared ticker and its
+    /// work runs on a fixed pool, so the process stops paying a thread and a
+    /// context switch per interval for every group it holds. See
+    /// [`SharedGroupRuntime`].
+    pub fn create_on(
+        options: NodeOptions,
+        runtime: Arc<SharedGroupRuntime>,
+    ) -> Result<Self, RaftError> {
+        let node_id = options.node_id;
+        let group_id = options.group_id;
+        let tick_interval_ms = options.config.heartbeat_interval_ms.max(1);
+        let key = DriverGroupKey::new(group_id, node_id);
+        let (command_tx, command_rx) = mpsc::channel();
+        // The error is reported rather than answered into the channel: no
+        // command can have been sent yet, because this is what hands the
+        // sender out.
+        let core = NodeCore::new(options, command_rx).map_err(|(error, _rx)| error)?;
+        runtime.host(key, core, tick_interval_ms)?;
+        Ok(Self {
+            node_id,
+            group_id,
+            command_tx: Some(CommandSender {
+                tx: command_tx,
+                shared: Some((Arc::clone(&runtime), key)),
+            }),
+            worker: None,
+            shared: Some((runtime, key)),
             restart_count: 0,
             state: NodeRuntimeState::Created,
         })
@@ -147,6 +189,12 @@ impl NodeRuntime {
             worker.join().map_err(|_| {
                 RaftError::Transport("raft node worker panicked during shutdown".to_string())
             })?;
+        }
+        // A hosted group has no thread to join. It has to leave the ticker
+        // and the pool instead, or the runtime goes on ticking a group that
+        // has shut down.
+        if let Some((runtime, key)) = self.shared.take() {
+            runtime.release(key);
         }
         self.state = NodeRuntimeState::Shutdown;
         result
@@ -1059,7 +1107,7 @@ impl NodeRuntime {
         recv_runtime_reply(reply_rx)?
     }
 
-    fn sender(&self) -> Result<&mpsc::Sender<NodeRuntimeOp>, RaftError> {
+    fn sender(&self) -> Result<&CommandSender, RaftError> {
         self.command_tx
             .as_ref()
             .ok_or_else(|| RaftError::InvalidRequest("raft node runtime is shut down".to_string()))
@@ -1276,6 +1324,11 @@ struct NodeCore {
     /// A command drained by proposal coalescing that turned out not to be a
     /// proposal; processed first next time round, untouched.
     carried_command: Option<NodeRuntimeOp>,
+    /// The group's mailbox.
+    ///
+    /// The core owns it rather than the thread, which is what lets a pool
+    /// worker drain the group without one.
+    command_rx: mpsc::Receiver<NodeRuntimeOp>,
 }
 
 impl NodeCore {
@@ -1284,7 +1337,17 @@ impl NodeCore {
     /// The caller answers outstanding commands with the error: a runtime that
     /// failed to open its WAL must say so to whoever asks, rather than drop
     /// the channel and look like a node that merely went quiet.
-    fn new(options: NodeOptions) -> Result<Self, RaftError> {
+    /// Hands the receiver back on failure rather than draining it here.
+    ///
+    /// Draining inside this function would deadlock the pooled constructor:
+    /// its sender is still alive in the caller's scope, so `recv` would never
+    /// see a disconnect and would block forever. Only the thread-backed
+    /// caller, which parks on that channel anyway, should answer the queue.
+    #[allow(clippy::result_large_err)]
+    fn new(
+        options: NodeOptions,
+        command_rx: mpsc::Receiver<NodeRuntimeOp>,
+    ) -> Result<Self, (RaftError, mpsc::Receiver<NodeRuntimeOp>)> {
     let node_id = options.node_id;
     let group_id = options.group_id;
     let mut peers = options.peers.clone();
@@ -1300,7 +1363,7 @@ impl NodeCore {
     let mut cluster = match RaftCluster::new(group_id, options.config.clone(), peers) {
         Ok(cluster) => cluster,
         Err(error) => {
-            return Err(error);
+            return Err((error, command_rx));
         }
     };
     let mut last_wal_recovery_report = None;
@@ -1323,7 +1386,7 @@ impl NodeCore {
             Some(wal)
         }
         Err(error) => {
-            return Err(error);
+            return Err((error, command_rx));
         }
     };
     let state = NodeRuntimeState::Created;
@@ -1372,6 +1435,7 @@ impl NodeCore {
             fatal_blockers,
             membership_executor,
             carried_command,
+            command_rx,
         })
     }
 
@@ -1519,17 +1583,25 @@ impl NodeCore {
                 }
     }
 
+    /// The next command waiting, if any, without blocking.
+    ///
+    /// A command carried over from proposal coalescing comes first: it was
+    /// taken out of the channel already and would otherwise be served out of
+    /// order, behind commands that arrived after it.
+    fn next_command(&mut self) -> Option<NodeRuntimeOp> {
+        match self.carried_command.take() {
+            Some(command) => Some(command),
+            None => self.command_rx.try_recv().ok(),
+        }
+    }
+
     /// Handles one command, answering its reply channel.
     ///
     /// Takes the receiver because proposal coalescing drains whatever else is
     /// already queued and commits it under one fsync.
     ///
     /// `Break` means the runtime has shut down and must not be driven again.
-    fn handle(
-        &mut self,
-        command_rx: &mpsc::Receiver<NodeRuntimeOp>,
-        command: NodeRuntimeOp,
-    ) -> ControlFlow<()> {
+    fn handle(&mut self, command: NodeRuntimeOp) -> ControlFlow<()> {
         let Self {
             node_id,
             group_id,
@@ -1551,6 +1623,7 @@ impl NodeCore {
             fatal_blockers,
             membership_executor,
             carried_command,
+            command_rx,
             ..
         } = self;
         let node_id = *node_id;
@@ -1966,19 +2039,244 @@ impl NodeCore {
     }
 }
 
+/// Answers every queued command with the reason the runtime does not exist.
+///
+/// Dropping the receiver instead would make a node that failed to open its
+/// WAL indistinguishable from one that merely went quiet.
+fn drain_with_error(command_rx: &mpsc::Receiver<NodeRuntimeOp>, error: &RaftError) {
+    while let Ok(command) = command_rx.recv() {
+        if respond_runtime_error(command, error.clone()) {
+            break;
+        }
+    }
+}
+
+/// One group hosted on the shared runtime instead of on a thread.
+struct PooledGroup {
+    /// The group's whole runtime.
+    ///
+    /// One lock, not several: a worker running a command and a worker running
+    /// a tick must not interleave inside raft.
+    core: Mutex<NodeCore>,
+    /// Heartbeat intervals that have come due and not yet been served.
+    ///
+    /// The ticker only ever increments this. It must not take `core`: a
+    /// single ticker blocked on one slow group would stop ticking every other
+    /// group in the process.
+    ticks_due: AtomicU64,
+}
+
+impl std::fmt::Debug for PooledGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledGroup")
+            .field("ticks_due", &self.ticks_due.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl PooledGroup {
+    /// Runs whatever the group has waiting: the tick first, then its mail.
+    ///
+    /// The tick goes first so a command is never served against a lease this
+    /// interval should already have expired.
+    fn run_pending(&self) {
+        // A worker that panicked mid-command leaves the group poisoned. The
+        // alternative to carrying on is a group that never ticks again, which
+        // is worse than one whose counters are suspect.
+        let mut core = match self.core.lock() {
+            Ok(core) => core,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if self.ticks_due.swap(0, Ordering::AcqRel) > 0 {
+            // Coalesced to one however far behind the group fell, the same
+            // way the driver's heap pulls a late group forward rather than
+            // firing its whole backlog at it.
+            core.tick();
+        }
+        while let Some(command) = core.next_command() {
+            if core.handle(command).is_break() {
+                break;
+            }
+        }
+    }
+}
+
+/// Hands a group to a worker when its interval comes round.
+struct PooledGroupTicker {
+    group: Arc<PooledGroup>,
+    pool: Arc<DriverWorkerPool<()>>,
+    key: DriverGroupKey,
+}
+
+impl DriverTickReceiver for PooledGroupTicker {
+    fn fire_tick(&self) {
+        self.group.ticks_due.fetch_add(1, Ordering::Relaxed);
+        // Best effort on purpose. A refused send means a wake is already
+        // queued for this group, and one wake is enough: the worker drains
+        // everything the group has, however much arrived since.
+        let _ = self.pool.send(self.key, MailPriority::Normal, ());
+    }
+}
+
+/// Runs a group when a worker picks its wake-up out of the pool.
+struct PooledGroupWorker {
+    group: Arc<PooledGroup>,
+}
+
+impl DriverMailHandler<()> for PooledGroupWorker {
+    fn handle_mail(&self, _wakes: Vec<()>) {
+        // The wakes carry nothing; how much there is to do is in the group.
+        self.group.run_pending();
+    }
+}
+
+/// Hosts many raft groups on one ticker and a fixed pool of workers.
+///
+/// The alternative, and still the default, is a thread for each group parked
+/// in `recv_timeout`. That costs one context switch per group per heartbeat
+/// interval -- about one core per thousand groups, measured by
+/// `examples/idle_tick_cost.rs`, of which roughly 85% is the wake-up rather
+/// than raft work. Here the ticking is one thread's due-time heap and the
+/// work lands on `worker_num` threads however many groups there are.
+pub struct SharedGroupRuntime {
+    driver: Driver,
+    pool: Arc<DriverWorkerPool<()>>,
+    groups: Mutex<BTreeMap<DriverGroupKey, Arc<PooledGroup>>>,
+}
+
+impl std::fmt::Debug for SharedGroupRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedGroupRuntime")
+            .field("options", self.driver.options())
+            .field("hosted_groups", &self.group_count())
+            .finish()
+    }
+}
+
+impl SharedGroupRuntime {
+    /// Starts the ticker and the worker pool.
+    pub fn start(options: DriverOptions) -> Result<Self, RaftError> {
+        Ok(Self {
+            driver: Driver::start(options)?,
+            pool: Arc::new(DriverWorkerPool::start(options)?),
+            groups: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// How many groups this runtime hosts.
+    pub fn group_count(&self) -> usize {
+        self.groups
+            .lock()
+            .map(|groups| groups.len())
+            .unwrap_or(0)
+    }
+
+    /// Threads the whole runtime uses, whatever the group count.
+    pub fn thread_count(&self) -> usize {
+        self.driver.thread_count() + self.pool.thread_count()
+    }
+
+    fn host(
+        &self,
+        key: DriverGroupKey,
+        core: NodeCore,
+        tick_interval_ms: u64,
+    ) -> Result<Arc<PooledGroup>, RaftError> {
+        let group = Arc::new(PooledGroup {
+            core: Mutex::new(core),
+            ticks_due: AtomicU64::new(0),
+        });
+        {
+            let mut groups = self.groups.lock().expect("hosted groups mutex poisoned");
+            if groups.contains_key(&key) {
+                return Err(RaftError::InvalidRequest(format!(
+                    "shared runtime already hosts group {} node {}",
+                    key.group_id, key.node_id
+                )));
+            }
+            groups.insert(key, Arc::clone(&group));
+        }
+        // The worker first. Registering the ticker first would let a tick
+        // arrive for a group the pool does not yet know, and the wake would
+        // be dropped.
+        self.pool.register_group(
+            key,
+            Arc::new(PooledGroupWorker {
+                group: Arc::clone(&group),
+            }),
+        )?;
+        self.driver.register_group_every(
+            key,
+            Arc::new(PooledGroupTicker {
+                group: Arc::clone(&group),
+                pool: Arc::clone(&self.pool),
+                key,
+            }),
+            tick_interval_ms,
+        )?;
+        Ok(group)
+    }
+
+    fn release(&self, key: DriverGroupKey) {
+        self.driver.cancel_group(key);
+        self.pool.cancel_group(key);
+        if let Ok(mut groups) = self.groups.lock() {
+            groups.remove(&key);
+        }
+    }
+
+    /// Hands a group to a worker, for a command that has just been queued.
+    fn wake(&self, key: DriverGroupKey) {
+        let _ = self.pool.send(key, MailPriority::Normal, ());
+    }
+}
+
+/// A group's command channel, and whatever has to happen after a send.
+///
+/// On a thread of its own the thread is already waiting on the receiver and
+/// the send wakes it. On the shared runtime nothing is waiting, so the send
+/// has to hand the group to a worker as well. Doing that here rather than at
+/// the sixteen call sites means a command path added later cannot forget to.
+#[derive(Clone)]
+struct CommandSender {
+    tx: mpsc::Sender<NodeRuntimeOp>,
+    shared: Option<(Arc<SharedGroupRuntime>, DriverGroupKey)>,
+}
+
+impl std::fmt::Debug for CommandSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandSender")
+            .field("hosting", &if self.shared.is_some() { "shared" } else { "own thread" })
+            .finish()
+    }
+}
+
+impl CommandSender {
+    // Deliberately the same signature as `mpsc::Sender::send`, which is the
+    // whole point: it is what lets the sixteen call sites stay untouched.
+    // `SendError` hands the undelivered command back, so it is large by
+    // design, and std is not linted for the same shape only because it is
+    // std. Boxing it here would allocate on the error path and make this no
+    // longer a drop-in.
+    #[allow(clippy::result_large_err)]
+    fn send(&self, command: NodeRuntimeOp) -> Result<(), mpsc::SendError<NodeRuntimeOp>> {
+        self.tx.send(command)?;
+        if let Some((runtime, key)) = &self.shared {
+            runtime.wake(*key);
+        }
+        Ok(())
+    }
+}
+
 /// Drives one group's runtime on a thread of its own.
 ///
 /// See [`NodeCore`] for what this costs at scale. The scheduling lives here
 /// rather than in the core so that something else can schedule it instead.
 fn raft_node_runtime_loop(options: NodeOptions, command_rx: mpsc::Receiver<NodeRuntimeOp>) {
-    let mut core = match NodeCore::new(options) {
+    let mut core = match NodeCore::new(options, command_rx) {
         Ok(core) => core,
-        Err(error) => {
-            while let Ok(command) = command_rx.recv() {
-                if respond_runtime_error(command, error.clone()) {
-                    break;
-                }
-            }
+        Err((error, command_rx)) => {
+            drain_with_error(&command_rx, &error);
             return;
         }
     };
@@ -2000,7 +2298,7 @@ fn raft_node_runtime_loop(options: NodeOptions, command_rx: mpsc::Receiver<NodeR
             let received = if now >= next_tick {
                 Err(mpsc::RecvTimeoutError::Timeout)
             } else {
-                command_rx.recv_timeout(next_tick - now)
+                core.command_rx.recv_timeout(next_tick - now)
             };
             match received {
                 Ok(command) => command,
@@ -2015,7 +2313,7 @@ fn raft_node_runtime_loop(options: NodeOptions, command_rx: mpsc::Receiver<NodeR
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         };
-        if core.handle(&command_rx, command).is_break() {
+        if core.handle(command).is_break() {
             break;
         }
     }
