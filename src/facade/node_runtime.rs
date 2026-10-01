@@ -1240,10 +1240,51 @@ fn runtime_step_message(
     }
 }
 
-fn raft_node_runtime_loop(
-    options: NodeOptions,
-    command_rx: mpsc::Receiver<NodeRuntimeOp>,
-) {
+/// Everything one raft group's runtime owns.
+///
+/// This was twenty-odd locals inside `raft_node_runtime_loop`. State shaped
+/// that way can only live on a thread dedicated to the group, which is why
+/// each group costs one: a thread parked in `recv_timeout`, waking once every
+/// heartbeat interval whether or not there is anything to do.
+/// `examples/idle_tick_cost.rs` puts that at roughly one core per thousand
+/// groups, of which about 85% is the wake-up rather than raft work.
+///
+/// Holding it in a struct does not by itself change any of that -- the loop
+/// below still drives it exactly as before. What it changes is that the loop
+/// is no longer the only thing that *could*.
+struct NodeCore {
+    node_id: NodeId,
+    group_id: GroupId,
+    cluster: RaftCluster,
+    wal: Option<PersistentRaftWal>,
+    last_wal_recovery_report: Option<WalRecoveryReport>,
+    state: NodeRuntimeState,
+    heartbeat_interval_ms: u64,
+    election_timeout_ms: u64,
+    leader_lease_timeout_ms: u64,
+    heartbeat_interval: Duration,
+    heartbeat_ticks: u64,
+    election_ticks: u64,
+    election_elapsed_ms: u64,
+    pre_vote_executions: u64,
+    campaign_executions: u64,
+    leader_transfer_executions: u64,
+    last_tick_reason: String,
+    blockers: Vec<String>,
+    fatal_blockers: Vec<String>,
+    membership_executor: MembershipExecutor,
+    /// A command drained by proposal coalescing that turned out not to be a
+    /// proposal; processed first next time round, untouched.
+    carried_command: Option<NodeRuntimeOp>,
+}
+
+impl NodeCore {
+    /// Builds the group's runtime, or reports why it cannot be built.
+    ///
+    /// The caller answers outstanding commands with the error: a runtime that
+    /// failed to open its WAL must say so to whoever asks, rather than drop
+    /// the channel and look like a node that merely went quiet.
+    fn new(options: NodeOptions) -> Result<Self, RaftError> {
     let node_id = options.node_id;
     let group_id = options.group_id;
     let mut peers = options.peers.clone();
@@ -1259,16 +1300,11 @@ fn raft_node_runtime_loop(
     let mut cluster = match RaftCluster::new(group_id, options.config.clone(), peers) {
         Ok(cluster) => cluster,
         Err(error) => {
-            while let Ok(command) = command_rx.recv() {
-                if respond_runtime_error(command, error.clone()) {
-                    break;
-                }
-            }
-            return;
+            return Err(error);
         }
     };
     let mut last_wal_recovery_report = None;
-    let mut wal = match PersistentRaftWal::open(PersistentRaftWalOptions {
+    let wal = match PersistentRaftWal::open(PersistentRaftWalOptions {
         dir: PathBuf::from(&options.wal_dir),
         // See `PersistentRaftWalOptions::new`: this is now just how much the
         // node holds in memory, and smaller is strictly cheaper.
@@ -1287,15 +1323,10 @@ fn raft_node_runtime_loop(
             Some(wal)
         }
         Err(error) => {
-            while let Ok(command) = command_rx.recv() {
-                if respond_runtime_error(command, error.clone()) {
-                    break;
-                }
-            }
-            return;
+            return Err(error);
         }
     };
-    let mut state = NodeRuntimeState::Created;
+    let state = NodeRuntimeState::Created;
     let heartbeat_interval_ms = options.config.heartbeat_interval_ms.max(1);
     let election_timeout_ms = options
         .config
@@ -1303,49 +1334,76 @@ fn raft_node_runtime_loop(
         .max(heartbeat_interval_ms);
     let leader_lease_timeout_ms = options.config.leader_lease_ms.max(1);
     let heartbeat_interval = Duration::from_millis(heartbeat_interval_ms);
-    let mut heartbeat_ticks = 0;
-    let mut election_ticks = 0;
-    let mut election_elapsed_ms: u64 = 0;
-    let mut pre_vote_executions = 0;
-    let mut campaign_executions = 0;
-    let mut leader_transfer_executions = 0_u64;
-    let mut last_tick_reason = "runtime_created".to_string();
-    let mut blockers = Vec::<String>::new();
-    let mut fatal_blockers = Vec::<String>::new();
-    let mut membership_executor = MembershipExecutor::new();
+    let heartbeat_ticks = 0;
+    let election_ticks = 0;
+    let election_elapsed_ms: u64 = 0;
+    let pre_vote_executions = 0;
+    let campaign_executions = 0;
+    let leader_transfer_executions = 0_u64;
+    let last_tick_reason = "runtime_created".to_string();
+    let blockers = Vec::<String>::new();
+    let fatal_blockers = Vec::<String>::new();
+    let membership_executor = MembershipExecutor::new();
     // A command drained by proposal coalescing that turned out not to be a
     // proposal; processed first on the next iteration, untouched.
-    let mut carried_command: Option<NodeRuntimeOp> = None;
+    let carried_command: Option<NodeRuntimeOp> = None;
     // When the next tick is due. The loop waits for what is left of the
     // interval rather than starting a fresh one per receive, so arriving
     // commands cannot hold the tick off indefinitely.
-    let mut next_tick = Instant::now() + heartbeat_interval;
-    loop {
-        let command = if let Some(command) = carried_command.take() {
-            command
-        } else {
-            // An elapsed deadline counts as a tick even when commands are
-            // queued. Waiting on the channel here instead would let a steady
-            // stream of commands restart the wait forever, and the heartbeat,
-            // the peer liveness check, the leader lease and the election clock
-            // all hang off this tick -- so a busy node would quietly stop
-            // doing all four.
-            let now = Instant::now();
-            let received = if now >= next_tick {
-                Err(mpsc::RecvTimeoutError::Timeout)
-            } else {
-                command_rx.recv_timeout(next_tick - now)
-            };
-            match received {
-            Ok(command) => command,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Set from now rather than by adding an interval, so a loop
-                // that fell behind ticks once and resynchronises instead of
-                // firing a burst of catch-up heartbeats.
-                next_tick = Instant::now() + heartbeat_interval;
-                if state == NodeRuntimeState::Running {
-                    heartbeat_ticks += 1;
-                    election_elapsed_ms = election_elapsed_ms.saturating_add(heartbeat_interval_ms);
+        Ok(Self {
+            node_id,
+            group_id,
+            cluster,
+            wal,
+            last_wal_recovery_report,
+            state,
+            heartbeat_interval_ms,
+            election_timeout_ms,
+            leader_lease_timeout_ms,
+            heartbeat_interval,
+            heartbeat_ticks,
+            election_ticks,
+            election_elapsed_ms,
+            pre_vote_executions,
+            campaign_executions,
+            leader_transfer_executions,
+            last_tick_reason,
+            blockers,
+            fatal_blockers,
+            membership_executor,
+            carried_command,
+        })
+    }
+
+    /// One heartbeat interval of work: leases, peer liveness, the snapshot
+    /// trigger, catch-up and the election clock.
+    ///
+    /// Gated on the running state exactly as it was in the loop, so a created
+    /// or stopped node does no raft work when its interval comes round.
+    fn tick(&mut self) {
+        let Self {
+            node_id,
+            cluster,
+            state,
+            heartbeat_interval_ms,
+            election_timeout_ms,
+            heartbeat_ticks,
+            election_ticks,
+            election_elapsed_ms,
+            pre_vote_executions,
+            campaign_executions,
+            leader_transfer_executions,
+            last_tick_reason,
+            blockers,
+            fatal_blockers,
+            ..
+        } = self;
+        let node_id = *node_id;
+        let heartbeat_interval_ms = *heartbeat_interval_ms;
+        let election_timeout_ms = *election_timeout_ms;
+                if *state == NodeRuntimeState::Running {
+                    *heartbeat_ticks += 1;
+                    *election_elapsed_ms = election_elapsed_ms.saturating_add(heartbeat_interval_ms);
                     let _ = cluster.tick_leader_lease(heartbeat_interval_ms);
                     cluster.tick_follower_lease(heartbeat_interval_ms);
                     let _ = cluster.mark_peer_active(node_id);
@@ -1372,12 +1430,12 @@ fn raft_node_runtime_loop(
                         blockers.push(format!("broadcast_heartbeat:{error}"));
                     }
                     if received_live_leader_heartbeat {
-                        election_elapsed_ms = 0;
+                        *election_elapsed_ms = 0;
                     }
                     if !cluster.leader_lease_valid && cluster.step_down_leader_if_lost_quorum() {
                         blockers.push("lost_quorum_step_down".to_string());
                     }
-                    last_tick_reason = "heartbeat_tick".to_string();
+                    *last_tick_reason = "heartbeat_tick".to_string();
                     if cluster.tick_snapshot_trigger() {
                         let snapshot_id = cluster
                             .snapshot_trigger_status()
@@ -1407,7 +1465,7 @@ fn raft_node_runtime_loop(
                     if cluster.leader_transfer_state().is_some() {
                         match cluster.try_complete_leader_transfer() {
                             Ok(true) => {
-                                leader_transfer_executions =
+                                *leader_transfer_executions =
                                     leader_transfer_executions.saturating_add(1);
                             }
                             Ok(false) => {
@@ -1418,10 +1476,10 @@ fn raft_node_runtime_loop(
                             Err(error) => blockers.push(format!("leader_transfer:{error}")),
                         }
                     }
-                    if election_elapsed_ms >= election_timeout_ms {
-                        election_ticks += 1;
-                        election_elapsed_ms = 0;
-                        last_tick_reason = "election_tick".to_string();
+                    if *election_elapsed_ms >= election_timeout_ms {
+                        *election_ticks += 1;
+                        *election_elapsed_ms = 0;
+                        *last_tick_reason = "election_tick".to_string();
                         let local_replica_role =
                             cluster.nodes.get(&node_id).map(|node| node.replica_role);
                         let lease_expired = !cluster.is_follower_lease_valid();
@@ -1434,15 +1492,15 @@ fn raft_node_runtime_loop(
                                 .unwrap_or(false)
                             && !cluster.prohibits_election();
                         if lease_expired && local_can_campaign {
-                            pre_vote_executions += 1;
+                            *pre_vote_executions += 1;
                             match cluster.pre_vote(node_id) {
                                 Ok(vote) if vote.vote_granted => {
-                                    campaign_executions += 1;
+                                    *campaign_executions += 1;
                                     let result = record_runtime_result(
                                         "election_tick_campaign",
                                         cluster.campaign(node_id, false),
-                                        &mut blockers,
-                                        &mut fatal_blockers,
+                                        blockers,
+                                        fatal_blockers,
                                         false,
                                     );
                                     let _ = result;
@@ -1459,11 +1517,47 @@ fn raft_node_runtime_loop(
                         }
                     }
                 }
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        };
+    }
+
+    /// Handles one command, answering its reply channel.
+    ///
+    /// Takes the receiver because proposal coalescing drains whatever else is
+    /// already queued and commits it under one fsync.
+    ///
+    /// `Break` means the runtime has shut down and must not be driven again.
+    fn handle(
+        &mut self,
+        command_rx: &mpsc::Receiver<NodeRuntimeOp>,
+        command: NodeRuntimeOp,
+    ) -> ControlFlow<()> {
+        let Self {
+            node_id,
+            group_id,
+            cluster,
+            wal,
+            last_wal_recovery_report,
+            state,
+            heartbeat_interval_ms,
+            election_timeout_ms,
+            leader_lease_timeout_ms,
+            heartbeat_ticks,
+            election_ticks,
+            election_elapsed_ms,
+            pre_vote_executions,
+            campaign_executions,
+            leader_transfer_executions,
+            last_tick_reason,
+            blockers,
+            fatal_blockers,
+            membership_executor,
+            carried_command,
+            ..
+        } = self;
+        let node_id = *node_id;
+        let group_id = *group_id;
+        let heartbeat_interval_ms = *heartbeat_interval_ms;
+        let election_timeout_ms = *election_timeout_ms;
+        let leader_lease_timeout_ms = *leader_lease_timeout_ms;
         // Auto group commit. A durable proposal is its fsync and very little
         // else, so a node answering concurrent proposers one at a time is
         // capped at a few hundred per second whatever else it does. While one
@@ -1474,7 +1568,7 @@ fn raft_node_runtime_loop(
         // not to be a proposal is carried into the next iteration.
         let command = match command {
             NodeRuntimeOp::Step(message @ Message::Propose { .. }, reply)
-                if state == NodeRuntimeState::Running =>
+                if *state == NodeRuntimeState::Running =>
             {
                 let mut pending = vec![(message, reply)];
                 // Bounded so a saturated queue cannot starve ticks and other
@@ -1485,7 +1579,7 @@ fn raft_node_runtime_loop(
                             pending.push((next, next_reply));
                         }
                         Ok(other) => {
-                            carried_command = Some(other);
+                            *carried_command = Some(other);
                             break;
                         }
                         Err(_) => break,
@@ -1500,9 +1594,9 @@ fn raft_node_runtime_loop(
                     let mut any_applied = false;
                     for (message, reply) in pending {
                         let result = runtime_step_message(
-                            &mut cluster,
-                            &mut wal,
-                            &mut membership_executor,
+                            cluster,
+                            wal,
+                            membership_executor,
                             node_id,
                             message,
                             false,
@@ -1536,12 +1630,12 @@ fn raft_node_runtime_loop(
                         let _ = reply.send(record_runtime_result(
                             "propose",
                             result,
-                            &mut blockers,
-                            &mut fatal_blockers,
+                            blockers,
+                            fatal_blockers,
                             true,
                         ));
                     }
-                    continue;
+                    return ControlFlow::Continue(());
                 }
             }
             other => other,
@@ -1550,27 +1644,27 @@ fn raft_node_runtime_loop(
             NodeRuntimeOp::Start(reply) => {
                 let result = cluster.start();
                 if result.is_ok() {
-                    state = NodeRuntimeState::Running;
-                    election_elapsed_ms = 0;
+                    *state = NodeRuntimeState::Running;
+                    *election_elapsed_ms = 0;
                 }
                 let _ = reply.send(record_runtime_result(
                     "start",
                     result,
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     false,
                 ));
             }
             NodeRuntimeOp::Stop(reply) => {
                 let result = cluster.stop();
                 if result.is_ok() {
-                    state = NodeRuntimeState::Stopped;
+                    *state = NodeRuntimeState::Stopped;
                 }
                 let _ = reply.send(record_runtime_result(
                     "stop",
                     result,
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     false,
                 ));
             }
@@ -1578,9 +1672,9 @@ fn raft_node_runtime_loop(
                 let status = NodeRuntimeStatus {
                     node_id,
                     group_id,
-                    state,
+                    state: *state,
                     restart_count: 0,
-                    worker_running: state != NodeRuntimeState::Shutdown,
+                    worker_running: *state != NodeRuntimeState::Shutdown,
                     cluster_status: cluster.cluster_status_report().ok(),
                     wal_lifecycle_status: wal.as_ref().map(PersistentRaftWal::status),
                     wal_recovery_report: last_wal_recovery_report.clone(),
@@ -1591,18 +1685,18 @@ fn raft_node_runtime_loop(
                         leader_lease_timeout_ms,
                         leader_lease_elapsed_ms: cluster.leader_lease_elapsed_ms,
                         leader_lease_valid: cluster.leader_lease_valid,
-                        heartbeat_ticks,
-                        election_ticks,
-                        pre_vote_executions,
-                        campaign_executions,
-                        leader_transfer_executions,
+                        heartbeat_ticks: *heartbeat_ticks,
+                        election_ticks: *election_ticks,
+                        pre_vote_executions: *pre_vote_executions,
+                        campaign_executions: *campaign_executions,
+                        leader_transfer_executions: *leader_transfer_executions,
                         last_tick_reason: last_tick_reason.clone(),
                     },
                     peer_runtime: raft_peer_runtime_states(
-                        &cluster,
-                        election_elapsed_ms,
-                        heartbeat_ticks > 0,
-                        pre_vote_executions > 0,
+                        cluster,
+                        *election_elapsed_ms,
+                        *heartbeat_ticks > 0,
+                        *pre_vote_executions > 0,
                     ),
                     fatal_blocker_report: matrixraft_fatal_blocker_report(
                         "raft_node_runtime",
@@ -1625,13 +1719,13 @@ fn raft_node_runtime_loop(
             NodeRuntimeOp::Step(message, reply) => {
                 let operation_name = runtime_step_operation_name(&message);
                 if matches!(&message, Message::PreVote { .. }) {
-                    pre_vote_executions += 1;
+                    *pre_vote_executions += 1;
                 }
                 if is_leader_transfer_step_message(&message) {
-                    leader_transfer_executions = leader_transfer_executions.saturating_add(1);
+                    *leader_transfer_executions = leader_transfer_executions.saturating_add(1);
                 }
                 if matches!(&message, Message::TimeoutNow { .. }) {
-                    campaign_executions = campaign_executions.saturating_add(1);
+                    *campaign_executions = campaign_executions.saturating_add(1);
                 }
                 let campaign_message = matches!(
                     &message,
@@ -1640,7 +1734,7 @@ fn raft_node_runtime_loop(
                     }
                 );
                 if campaign_message {
-                    campaign_executions = campaign_executions.saturating_add(1);
+                    *campaign_executions = campaign_executions.saturating_add(1);
                 }
                 let fatal_event = match &message {
                     Message::Admin {
@@ -1660,9 +1754,9 @@ fn raft_node_runtime_loop(
                         | Message::Membership { .. }
                 );
                 let result = runtime_step_message(
-                    &mut cluster,
-                    &mut wal,
-                    &mut membership_executor,
+                    cluster,
+                    wal,
+                    membership_executor,
                     node_id,
                     message,
                     true,
@@ -1672,28 +1766,28 @@ fn raft_node_runtime_loop(
                     .map(|step| matches!(step, StepResult::FatalEvent(Some(_))))
                     .unwrap_or(false)
                 {
-                    leader_transfer_executions = leader_transfer_executions.saturating_add(1);
+                    *leader_transfer_executions = leader_transfer_executions.saturating_add(1);
                 }
                 let _ = reply.send(record_runtime_result(
                     operation_name,
                     result,
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     fatal_on_step_error,
                 ));
             }
             NodeRuntimeOp::StepBatch(messages, reply) => {
-                pre_vote_executions += messages
+                *pre_vote_executions += messages
                     .iter()
                     .filter(|message| matches!(message, Message::PreVote { .. }))
                     .count() as u64;
-                leader_transfer_executions = leader_transfer_executions.saturating_add(
+                *leader_transfer_executions = leader_transfer_executions.saturating_add(
                     messages
                         .iter()
                         .filter(|message| is_leader_transfer_step_message(message))
                         .count() as u64,
                 );
-                campaign_executions = campaign_executions.saturating_add(
+                *campaign_executions = campaign_executions.saturating_add(
                     messages
                         .iter()
                         .filter(|message| matches!(message, Message::TimeoutNow { .. }))
@@ -1710,7 +1804,7 @@ fn raft_node_runtime_loop(
                         )
                     })
                     .count() as u64;
-                campaign_executions = campaign_executions.saturating_add(campaign_message_count);
+                *campaign_executions = campaign_executions.saturating_add(campaign_message_count);
                 // A WAL record describes the log as it stands, so one record
                 // covers every proposal in the batch. Persisting per proposal
                 // made a batch of N cost N fsyncs, and an fsync is essentially
@@ -1722,9 +1816,9 @@ fn raft_node_runtime_loop(
                     .into_iter()
                     .map(|message| {
                         runtime_step_message(
-                            &mut cluster,
-                            &mut wal,
-                            &mut membership_executor,
+                            cluster,
+                            wal,
+                            membership_executor,
                             node_id,
                             message,
                             false,
@@ -1753,8 +1847,8 @@ fn raft_node_runtime_loop(
                 let _ = reply.send(record_runtime_result(
                     "step_batch",
                     result,
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     true,
                 ));
             }
@@ -1775,8 +1869,8 @@ fn raft_node_runtime_loop(
                 let _ = reply.send(record_runtime_result(
                     "read_index",
                     result,
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     false,
                 ));
             }
@@ -1794,17 +1888,17 @@ fn raft_node_runtime_loop(
                 let _ = reply.send(record_runtime_result(
                     "bounded_stale_read_index",
                     cluster.read_path_report(request, max_stale_index_lag),
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     false,
                 ));
             }
             NodeRuntimeOp::MembershipWorkflowWithRollback(operations, reply) => {
                 let _ = reply.send(record_runtime_result(
                     "membership_workflow_with_rollback",
-                    membership_executor.execute_all_with_rollback(&mut cluster, operations),
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    membership_executor.execute_all_with_rollback(cluster, operations),
+                    blockers,
+                    fatal_blockers,
                     false,
                 ));
             }
@@ -1815,8 +1909,8 @@ fn raft_node_runtime_loop(
                 let _ = reply.send(record_runtime_result(
                     "install_snapshot",
                     cluster.install_snapshot_to(target, snapshot, fence),
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     false,
                 ));
             }
@@ -1824,8 +1918,8 @@ fn raft_node_runtime_loop(
                 let _ = reply.send(record_runtime_result(
                     "peer_pipeline_status",
                     cluster.peer_pipeline_status(peer_id),
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     false,
                 ));
             }
@@ -1833,8 +1927,8 @@ fn raft_node_runtime_loop(
                 let _ = reply.send(record_runtime_result(
                     "peer_pipeline_statuses",
                     Ok(cluster.peer_pipeline_statuses()),
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     false,
                 ));
             }
@@ -1842,8 +1936,8 @@ fn raft_node_runtime_loop(
                 let _ = reply.send(record_runtime_result(
                     "is_busy",
                     Ok(cluster.is_busy()),
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     false,
                 ));
             }
@@ -1861,12 +1955,68 @@ fn raft_node_runtime_loop(
                 let _ = reply.send(record_runtime_result(
                     "shutdown",
                     result,
-                    &mut blockers,
-                    &mut fatal_blockers,
+                    blockers,
+                    fatal_blockers,
                     false,
                 ));
-                break;
+                return ControlFlow::Break(());
             }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Drives one group's runtime on a thread of its own.
+///
+/// See [`NodeCore`] for what this costs at scale. The scheduling lives here
+/// rather than in the core so that something else can schedule it instead.
+fn raft_node_runtime_loop(options: NodeOptions, command_rx: mpsc::Receiver<NodeRuntimeOp>) {
+    let mut core = match NodeCore::new(options) {
+        Ok(core) => core,
+        Err(error) => {
+            while let Ok(command) = command_rx.recv() {
+                if respond_runtime_error(command, error.clone()) {
+                    break;
+                }
+            }
+            return;
+        }
+    };
+    // When the next tick is due. The loop waits for what is left of the
+    // interval rather than starting a fresh one per receive, so arriving
+    // commands cannot hold the tick off indefinitely.
+    let mut next_tick = Instant::now() + core.heartbeat_interval;
+    loop {
+        let command = if let Some(command) = core.carried_command.take() {
+            command
+        } else {
+            // An elapsed deadline counts as a tick even when commands are
+            // queued. Waiting on the channel here instead would let a steady
+            // stream of commands restart the wait forever, and the heartbeat,
+            // the peer liveness check, the leader lease and the election clock
+            // all hang off this tick -- so a busy node would quietly stop
+            // doing all four.
+            let now = Instant::now();
+            let received = if now >= next_tick {
+                Err(mpsc::RecvTimeoutError::Timeout)
+            } else {
+                command_rx.recv_timeout(next_tick - now)
+            };
+            match received {
+                Ok(command) => command,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Set from now rather than by adding an interval, so a
+                    // loop that fell behind ticks once and resynchronises
+                    // instead of firing a burst of catch-up heartbeats.
+                    next_tick = Instant::now() + core.heartbeat_interval;
+                    core.tick();
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        };
+        if core.handle(&command_rx, command).is_break() {
+            break;
         }
     }
 }
