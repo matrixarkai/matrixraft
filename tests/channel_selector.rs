@@ -82,7 +82,24 @@ fn channel_selector_delivers_global_mails_and_rearranged_inputs() {
 }
 
 #[test]
-fn channel_selector_group_count_drives_channel_overflow() {
+fn a_channels_depth_is_its_own_queue_not_the_selectors_total() {
+    // RETARGETED. This was `channel_selector_group_count_drives_channel_overflow`,
+    // and it asserted that a channel with a depth of 2 accepts a third mail
+    // "before selector observes overflow" -- that the bound is the whole
+    // selector's mail count, lagging, rather than this channel's own queue.
+    //
+    // That is what the code did, and it is wrong in both directions. It let
+    // a channel exceed its depth, as the old assertion recorded. It also
+    // refused mail to a channel whose queue was EMPTY whenever the other
+    // groups on the same worker were busy -- and because the count each
+    // channel compares against is a copy refreshed only when that channel is
+    // drained, a channel that refused everything was never drained and never
+    // corrected itself. It stayed shut for good.
+    //
+    // A store of 4096 groups over 4 workers ran into exactly that: more
+    // groups on a worker than `max_queue_depth`, every worker then parked
+    // with nothing to do, and the groups they owned unticked and unanswering.
+    // `tests/channel_depth.rs` reproduces both halves directly.
     let selector = ChannelSelector::new();
     let channel = MailChannel::new(5, 2);
 
@@ -92,9 +109,12 @@ fn channel_selector_group_count_drives_channel_overflow() {
     selector
         .try_send_to_channel(Arc::clone(&channel), MailPriority::Normal, 2)
         .expect("send two");
-    selector
-        .try_send_to_channel(Arc::clone(&channel), MailPriority::Normal, 3)
-        .expect("send three before selector observes overflow");
+    assert!(
+        selector
+            .try_send_to_channel(Arc::clone(&channel), MailPriority::Normal, 3)
+            .is_err(),
+        "a channel at its depth of 2 took a third mail"
+    );
 
     let selection = selector.select(
         ChannelSelectorPolicy {
@@ -103,10 +123,12 @@ fn channel_selector_group_count_drives_channel_overflow() {
         },
         &[],
     );
-    assert_eq!(selection.channels[0].fetch(&selector), vec![1, 2, 3]);
-    assert!(selector
+    assert_eq!(selection.channels[0].fetch(&selector), vec![1, 2]);
+
+    // Drained, so it has room again.
+    selector
         .try_send_to_channel(Arc::clone(&channel), MailPriority::Normal, 4)
-        .is_err());
+        .expect("a drained channel has room");
 }
 
 #[test]

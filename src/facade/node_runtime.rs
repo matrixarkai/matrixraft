@@ -2243,23 +2243,29 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// leader (`examples/idle_tick_cost.rs`):
 ///
 /// ```text
-///   groups  shards   cores   ticks delivered
-///     1024       4   0.279            100.0%
-///     4096       8   1.098            100.0%
-///     4096       4       -   never finished starting
+///   groups  shards  per shard   cores   ticks delivered
+///     1024       4        256   0.244            100.0%
+///     1536       4        384   0.314            100.1%
+///     2048       4        512   0.444            100.0%
+///     3072       4        768   0.579            100.0%
+///     4096       8        512   1.098            100.0%
 /// ```
 ///
-/// So **256 groups per shard is known good and 512 is too**, and a shard
-/// carrying 512 live groups costs well under an eighth of a core.
+/// Cores rise linearly with the group count and the ticks all arrive, so
+/// there is no sign of a ceiling in any of it. Starting is linear too, about
+/// 83us a group, and no slower than giving each group a thread of its own.
 ///
-/// Starting the groups is not the thing to watch, though an earlier reading
-/// here said it was. Timed directly it is fast and linear -- about 83us a
-/// group, 0.05s for 512 and 0.17s for 2048, no slower than giving each group
-/// its own thread. The run that produced that earlier guess simply never
-/// reached its measurement window on a machine that was heavily loaded at
-/// the time.
+/// **4096 groups on 4 shards is not in the table, and an earlier version of
+/// this note said they "never finished starting". That was wrong.** A
+/// backtrace of the stalled run shows `start_all` had completed and all 4096
+/// nodes existed; what had stalled was the probe, sampling group statuses
+/// afterwards. Each `NodeRuntime::status` waits up to five seconds, and
+/// sixty-four of them that do not answer is five minutes of nothing.
 ///
-/// No formula is offered. What is known is the table above.
+/// So what is actually unexplained is narrower and worth stating as such: at
+/// 1024 live groups per shard, a status command can take longer than five
+/// seconds to come back. Ticking is fine; answering is not. That is where to
+/// look next, and no formula is offered until it is understood.
 ///
 /// Undersizing does not fail loudly. The tickers fall behind, the groups are
 /// ticked more slowly than they were configured for, and because heartbeats,

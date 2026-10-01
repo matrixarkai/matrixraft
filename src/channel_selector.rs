@@ -135,8 +135,28 @@ impl<Mail> MailChannel<Mail> {
         }
     }
 
+    /// Whether this channel is at its depth.
+    ///
+    /// Its OWN queue against its own limit. It used to ask whether the
+    /// *selector's* total mail count exceeded this channel's limit, and that
+    /// is wrong in both directions.
+    ///
+    /// It refused mail for an empty channel whenever the other groups on the
+    /// same worker were busy -- and `selector_total_mail_count` is a copy
+    /// refreshed only when this channel is drained, so once it was stale and
+    /// high the channel refused everything, received nothing, was never
+    /// drained, and never corrected itself. It stayed shut. A store of 4096
+    /// groups over 4 workers hit exactly that: a worker serving more than
+    /// `max_queue_depth` groups crosses the total, and in the failing runs
+    /// all four workers sat parked with nothing to do while the groups they
+    /// owned went unticked and stopped answering.
+    ///
+    /// It also let a channel that really was at its depth take more, because
+    /// one busy group on a quiet worker never moves a selector-wide count
+    /// far. `DriverWorkerPool::send` had grown its own `queued_len` check to
+    /// work around that; this is the bound that check was standing in for.
     fn overflow(&self, inner: &MailChannelInner<Mail>) -> bool {
-        inner.selector_total_mail_count as usize > self.num_mail_limit
+        inner.size >= self.num_mail_limit
     }
 }
 
