@@ -114,4 +114,90 @@ fn a_leader_lease_tick_allocates_and_this_is_how_much() {
     );
 
     println!("lease tick allocations: {per_tick:.2} per tick over {ticks} ticks");
+
+    // The rest of the row, in this test for the reason given at its definition.
+    the_per_tick_cluster_calls_allocate_nothing(&mut cluster);
+}
+
+/// Counts allocations over `times` calls, after warming whatever allocates once.
+fn per_call<F: FnMut()>(times: usize, mut body: F) -> f64 {
+    for _ in 0..8 {
+        body();
+    }
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    for _ in 0..times {
+        body();
+    }
+    (ALLOCATIONS.load(Ordering::Relaxed) - before) as f64 / times as f64
+}
+
+// Deliberately part of the test above rather than a second `#[test]`.
+//
+// The counter is the process's, so it cannot tell whose allocation it just saw.
+// Split across two tests, each one's delta picked up whatever the harness was
+// doing on its own threads while the other started and finished: a lease tick came
+// out at 0.01 allocations, `leader_id` at 0.08, `tick_peer_liveness` at 0.02, none
+// of which is a thing those functions do, and the attribution moved between runs.
+// A mutex around each measurement did not help, because the threads contaminating
+// the count were never the other test's.
+//
+// A `--test-threads=1` on a command line would have hidden it. The gate runs
+// `cargo test` with its own thread count, so the arrangement has to be right here.
+fn the_per_tick_cluster_calls_allocate_nothing(cluster: &mut RaftCluster) {
+    // A group's tick calls these in turn, so each is paid by every group on every
+    // interval. The lease one was three allocations and is now none; this is the
+    // rest of the row, so that a later change cannot move the cost from the part
+    // that is measured into a part that is not.
+    //
+    // The state is a single voter holding its own leadership, which is what the
+    // hosting probe runs and what a store of idle groups looks like. One honest
+    // limit on it: `tick_peer_liveness` returns the peers it found offline, so in
+    // a state where a peer times out it allocates for the list and should. There
+    // are no peers here to go offline.
+    assert_eq!(
+        cluster.leader_id(),
+        Some(1),
+        "no leader, so these calls take different paths than a tick does"
+    );
+
+    let calls: Vec<(&str, f64)> = vec![
+        (
+            "tick_leader_lease",
+            per_call(64, || {
+                cluster.tick_leader_lease(1);
+            }),
+        ),
+        (
+            "tick_follower_lease",
+            per_call(64, || {
+                cluster.tick_follower_lease(1);
+            }),
+        ),
+        (
+            "tick_peer_liveness",
+            per_call(64, || {
+                let offline = cluster.tick_peer_liveness(1);
+                std::hint::black_box(&offline);
+            }),
+        ),
+        (
+            "leader_id",
+            per_call(64, || {
+                std::hint::black_box(cluster.leader_id());
+            }),
+        ),
+    ];
+
+    let allocating: Vec<String> = calls
+        .iter()
+        .filter(|(_, per)| *per > 0.0)
+        .map(|(name, per)| format!("{name} at {per:.2} a call"))
+        .collect();
+    assert!(
+        allocating.is_empty(),
+        "these per-tick calls allocate: {}",
+        allocating.join(", ")
+    );
+    // The control: an empty list of calls would also report nothing allocating.
+    assert_eq!(calls.len(), 4, "the list of per-tick calls changed size");
 }
