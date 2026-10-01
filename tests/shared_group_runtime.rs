@@ -1,0 +1,365 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 MatrixArkAI
+
+//! Many groups, a fixed number of threads.
+//!
+//! A group on its own thread costs that thread and one context switch per
+//! heartbeat interval, whether or not anything happened -- about a core per
+//! thousand groups, which `examples/idle_tick_cost.rs` measures. The shared
+//! runtime answers exactly the same commands from one ticker and a fixed
+//! pool.
+//!
+//! The control matters more than the rest here. A flag that quietly did
+//! nothing would still let every "the hosted group works" test pass, because
+//! a group on its own thread works too. So each test that asserts the shared
+//! runtime holds threads flat is paired with one asserting the default does
+//! not.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use matrixraft::{
+    DriverOptions, MatrixRaftGroupContextBuilder, MatrixRaftMultiRaftServer, MatrixRaftOptions,
+    MatrixRaftTransportBuilder, Peer, ReplicaRole, SharedGroupRuntime,
+};
+
+/// Polls to a deadline rather than sleeping a fixed time, so a loaded machine
+/// does not turn an assertion about behaviour into one about scheduling.
+fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let answer = done();
+    if !answer {
+        eprintln!("timed out waiting for {what}");
+    }
+    answer
+}
+
+fn probe_root(label: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "matrixraft-shared-{label}-{}-{nonce}",
+        std::process::id()
+    ))
+}
+
+fn peer(group_id: u64) -> Peer {
+    Peer {
+        node_id: 1,
+        // Nothing dials these: no transport is started.
+        raft_addr: format!("127.0.0.1:{}", 31_000 + (group_id % 1_000)),
+        snapshot_addr: format!("127.0.0.1:{}", 41_000 + (group_id % 1_000)),
+        role: ReplicaRole::Voter,
+        auto_promote: false,
+    }
+}
+
+fn options(group_id: u64, interval_ms: u64, wal: &Path, snapshot: &Path) -> MatrixRaftOptions {
+    MatrixRaftOptions {
+        group_id,
+        peer_id: 1,
+        raft_addr: peer(group_id).raft_addr,
+        snapshot_addr: peer(group_id).snapshot_addr,
+        wal_dir: wal.display().to_string(),
+        snapshot_dir: snapshot.display().to_string(),
+        // A single voter is its own quorum, so it reaches leadership without
+        // a transport and the test is about hosting, not about elections.
+        peers: vec![peer(group_id)],
+        role: ReplicaRole::Voter,
+        wal_sync: false,
+        election_cycle_tick: 4,
+        transfer_timeout_tick: 3,
+        offline_timeout_tick: 10,
+        tick_interval_ms: interval_ms,
+        lease_duration_ms: 20,
+        last_lease_duration_ms: 10,
+        assume_lease_when_start: false,
+        max_memory_replicate_log_bytes: 64 * 1024,
+        max_disk_replicate_log_num: 64,
+        max_cache_memory_bytes: 1024 * 1024,
+        max_apply_batch_bytes: 64 * 1024,
+        enable_reorder_queue: true,
+        reorder_timeout_us: 3_000,
+        reorder_window_size: 128,
+        max_inflights_apply_task: 5,
+        max_inflights_replicate: 128,
+        enable_pre_vote: true,
+        max_segment_bytes: 4 * 1024 * 1024,
+        min_keep_segment_num: 2,
+        can_trigger_snapshot: true,
+        max_applied_log_bytes: u64::MAX,
+        send_snapshot_timeout_ms: 60_000,
+    }
+}
+
+/// A server, its groups' directories, and whether it shares a runtime.
+fn server_with(groups: u64, shared: bool, root: &Path) -> MatrixRaftMultiRaftServer {
+    server_with_interval(groups, shared, 5, root)
+}
+
+fn server_with_interval(
+    groups: u64,
+    shared: bool,
+    interval_ms: u64,
+    root: &Path,
+) -> MatrixRaftMultiRaftServer {
+    let transport = MatrixRaftTransportBuilder::new()
+        .set_cluster_id(1)
+        .set_num_connection_group(1)
+        .bind_address_resolver()
+        .build()
+        .expect("transport");
+    let context = MatrixRaftGroupContextBuilder::new()
+        .transport(transport)
+        .tick_interval(interval_ms)
+        .worker_num(2)
+        .shared_runtime(shared)
+        .build()
+        .expect("group context");
+    let mut server = MatrixRaftMultiRaftServer::new(context);
+    for group_id in 1..=groups {
+        let wal = root.join(format!("g{group_id}/wal"));
+        let snapshot = root.join(format!("g{group_id}/snapshot"));
+        std::fs::create_dir_all(&wal).expect("wal dir");
+        std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+        server
+            .create_node(options(group_id, interval_ms, &wal, &snapshot), 0)
+            .expect("create node");
+    }
+    server
+}
+
+#[cfg(target_os = "linux")]
+fn process_threads() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Threads:") {
+            return rest.trim().parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+#[test]
+fn a_hosted_group_reaches_leadership_without_a_thread_of_its_own() {
+    let root = probe_root("leader");
+    let mut server = server_with(1, true, &root);
+    server.start_all(0).expect("start");
+
+    assert!(
+        wait_until(
+            "the hosted group to take leadership",
+            Duration::from_secs(5),
+            || {
+                matches!(
+                    server.node(1, 1).and_then(|node| node.leader()),
+                    Ok(Some(_))
+                )
+            }
+        ),
+        "a group hosted on the shared runtime never became leader, so the pool is \
+         not driving it"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_hosted_group_answers_commands() {
+    let root = probe_root("commands");
+    let mut server = server_with(1, true, &root);
+    server.start_all(0).expect("start");
+
+    let status = server
+        .node(1, 1)
+        .expect("node")
+        .runtime_status()
+        .expect("status");
+    assert_eq!(status.group_id, 1, "the status came from the wrong group");
+    assert!(
+        status.worker_running,
+        "a hosted group reports no worker, so a command reached nothing"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_hosted_group_ticks() {
+    let root = probe_root("ticks");
+    let mut server = server_with(1, true, &root);
+    server.start_all(0).expect("start");
+
+    // The tick is what the shared ticker exists to deliver, and it is the
+    // part that does not go through a command, so nothing else proves it.
+    assert!(
+        wait_until(
+            "the shared ticker to tick the group",
+            Duration::from_secs(5),
+            || {
+                server
+                    .node(1, 1)
+                    .and_then(|node| node.runtime_status())
+                    .map(|status| status.timer_status.heartbeat_ticks > 0)
+                    .unwrap_or(false)
+            }
+        ),
+        "a hosted group never counted a heartbeat tick, so the shared ticker is not \
+         reaching it"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn hosting_is_opt_in_and_the_default_gives_each_group_its_own_thread() {
+    // The control. Without this a flag that did nothing would pass every
+    // other test in this file, because a group on its own thread works too.
+    let root = probe_root("default");
+    let server = server_with(2, false, &root);
+    assert_eq!(
+        server.shared_thread_count(),
+        None,
+        "the default started a shared runtime, so hosting is not opt-in"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+
+    let root = probe_root("optin");
+    let server = server_with(2, true, &root);
+    assert!(
+        server.shared_thread_count().is_some(),
+        "asking for a shared runtime did not start one"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_fixed_pool_carries_any_number_of_groups() {
+    // Asserted against the runtime's own count rather than the process's.
+    //
+    // An earlier version read `/proc/self/status` before and after building
+    // the server and subtracted. That overflowed in the real suite: the other
+    // tests in this binary run at the same time and spawn threads of their
+    // own, so "after" can be below "before". Saturating the subtraction would
+    // have hidden it rather than fixed it -- a process-global count simply
+    // cannot answer a question about one server, because a sibling test's
+    // threads land in the number.
+    //
+    // This is also the sharper claim. Not "fewer threads than groups", but
+    // that the count does not move with the group count at all.
+    let few = probe_root("few");
+    let server_few = server_with(4, true, &few);
+    let many = probe_root("many");
+    let server_many = server_with(32, true, &many);
+
+    let with_four = server_few.shared_thread_count().expect("a shared runtime");
+    let with_thirty_two = server_many.shared_thread_count().expect("a shared runtime");
+    assert_eq!(
+        with_four, with_thirty_two,
+        "4 groups took {with_four} threads and 32 took {with_thirty_two}, so the \
+         pool is not fixed"
+    );
+    assert!(
+        with_thirty_two < 32,
+        "32 groups took {with_thirty_two} threads, which is not a pool"
+    );
+
+    drop(server_few);
+    drop(server_many);
+    let _ = std::fs::remove_dir_all(&few);
+    let _ = std::fs::remove_dir_all(&many);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_thread_each_is_what_the_default_actually_costs() {
+    // The measured control for the test above, and the reason it is measured
+    // from /proc rather than from an accessor: the claim is about what the
+    // default really spends, and an accessor would just be the code agreeing
+    // with itself.
+    //
+    // A `>=` bound is sound here even with sibling tests running, because
+    // their threads can only add to the count. Noise cannot make this pass.
+    let root = probe_root("cost");
+    let before = process_threads();
+    let server = server_with(16, false, &root);
+    let spent = process_threads().saturating_sub(before);
+    assert!(
+        spent >= 16,
+        "16 groups on their own threads took only {spent} threads, so the control \
+         is not measuring what it claims"
+    );
+    drop(server);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_shared_runtime_holds_its_groups_and_lets_them_go() {
+    let runtime = Arc::new(
+        SharedGroupRuntime::start(DriverOptions {
+            worker_num: 2,
+            tick_interval_ms: 5,
+            ..DriverOptions::default()
+        })
+        .expect("shared runtime"),
+    );
+    assert_eq!(runtime.group_count(), 0, "a fresh runtime holds nothing");
+    let threads = runtime.thread_count();
+    assert!(threads > 0, "a started runtime has threads");
+
+    let root = probe_root("hold");
+    let mut server = server_with(3, true, &root);
+    server.start_all(0).expect("start");
+    // The server's own runtime, not the one above: what is asserted is that
+    // hosting three groups did not cost three threads.
+    let hosted = server.shared_thread_count().expect("a shared runtime");
+    assert!(
+        hosted <= 8,
+        "three hosted groups took {hosted} threads, which is not a fixed pool"
+    );
+
+    server.stop_all().expect("stop");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_command_is_answered_without_waiting_for_the_next_tick() {
+    // This exists because a mutant that dropped the wake-up from the send
+    // path survived every other test in this file. Nothing broke: the ticker
+    // hands the group to a worker each interval anyway, and the worker drains
+    // whatever is queued when it arrives. Correctness is fine. Latency is
+    // not -- a command waits up to a whole interval, which at the default
+    // 100ms makes a propose unusable while the suite stays green.
+    //
+    // So the interval here is long on purpose. Half a second is far longer
+    // than answering a status takes, and a command that waited for the tick
+    // cannot hide inside it.
+    let interval_ms = 500;
+    let root = probe_root("latency");
+    let mut server = server_with_interval(1, true, interval_ms, &root);
+    server.start_all(0).expect("start");
+    // Settle, so this measures a steady-state command and not registration.
+    std::thread::sleep(Duration::from_millis(50));
+
+    let started = Instant::now();
+    let status = server
+        .node(1, 1)
+        .expect("node")
+        .runtime_status()
+        .expect("status");
+    let waited = started.elapsed();
+
+    assert_eq!(status.group_id, 1, "the answer came from the wrong group");
+    assert!(
+        waited < Duration::from_millis(interval_ms / 2),
+        "a command took {waited:?} against a {interval_ms}ms tick interval, so it \
+         waited for the tick rather than waking a worker"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

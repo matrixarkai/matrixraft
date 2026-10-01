@@ -13,7 +13,10 @@
 //!   the node was ever started, because only the tick *work* is gated on the
 //!   running state, not the wake-up itself.
 //! - **a shared ticker.** [`Driver`] holds every group on a due-time heap and
-//!   visits them all from one thread.
+//!   visits them all from one thread. The server reaches this through
+//!   `shared_runtime(true)` on its context, which is the arm to read: same
+//!   public API, same groups, same commands, only the hosting differs. The
+//!   bare `Driver` row underneath it is the floor that hosting cannot beat.
 //!
 //! `group_scaling` already reports what a group costs at rest: threads and
 //! resident bytes. It cannot report this one, because it deliberately sets
@@ -252,7 +255,14 @@ struct ThreadEach {
     with_a_leader: u64,
 }
 
-fn thread_each(groups: u64, interval_ms: u64, seconds: u64, live: bool, root: &Path) -> ThreadEach {
+fn hosted(
+    groups: u64,
+    interval_ms: u64,
+    seconds: u64,
+    live: bool,
+    shared: bool,
+    root: &Path,
+) -> ThreadEach {
     // Every directory first, so the sweep does not measure directory creation
     // as though it were the cost of a raft group.
     let dirs: Vec<(PathBuf, PathBuf)> = (1..=groups)
@@ -274,6 +284,10 @@ fn thread_each(groups: u64, interval_ms: u64, seconds: u64, live: bool, root: &P
     let context = MatrixRaftGroupContextBuilder::new()
         .transport(transport)
         .tick_interval(interval_ms)
+        // Only meaningful to the shared arm, and deliberately a small number:
+        // the claim is that a fixed pool carries any number of groups.
+        .worker_num(4)
+        .shared_runtime(shared)
         .build()
         .expect("group context");
     let mut server = MatrixRaftMultiRaftServer::new(context);
@@ -381,7 +395,7 @@ fn main() {
          holding their own leadership\n"
     );
     println!(
-        "  {:>16}  {:>8}  {:>12}  {:>14}  {:>8}  {:>9}",
+        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>9}",
         "hosting", "groups", "cores", "switches/sec", "threads", "leaders"
     );
 
@@ -391,14 +405,20 @@ fn main() {
     };
 
     for groups in counts {
-        for (label, live) in [("thread each", false), ("thread each, live", true)] {
+        let facade = [
+            ("thread each", false, false),
+            ("thread each, live", true, false),
+            ("shared runtime", false, true),
+            ("shared runtime, live", true, true),
+        ];
+        for (label, live, shared) in facade {
             if arm == "driver" {
                 continue;
             }
             let root = probe_root();
-            let seen = thread_each(groups, interval_ms, seconds, live, &root);
+            let seen = hosted(groups, interval_ms, seconds, live, shared, &root);
             println!(
-                "  {:>16}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}",
                 label,
                 groups,
                 seen.sample.cores,
@@ -408,7 +428,7 @@ fn main() {
             );
             if live && seen.with_a_leader < groups {
                 println!(
-                    "  {:>16}  only {} of {groups} groups reached leadership, so this row is \
+                    "  {:>21}  only {} of {groups} groups reached leadership, so this row is \
                      groups still campaigning rather than a steady state",
                     "WARNING", seen.with_a_leader
                 );
@@ -418,7 +438,7 @@ fn main() {
         if arm != "facade" {
             let seen = shared_ticker(groups, interval_ms, seconds);
             println!(
-                "  {:>16}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}",
                 "shared ticker", groups, seen.cores, seen.switches_per_sec, seen.threads, "-"
             );
         }
