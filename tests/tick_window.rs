@@ -135,7 +135,7 @@ fn how_much_a_hosted_group_allocates_while_only_ticking() {
     // the real thing.
     let ticks_before = server.shared_stats().expect("shared runtime");
     let before = ALLOCATIONS.load(Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(2_000));
+    std::thread::sleep(Duration::from_millis(600));
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
     let ticks_after = server.shared_stats().expect("shared runtime");
     let ticks = (ticks_after.ticks_in_place + ticks_after.ticks_handed_over)
@@ -158,6 +158,12 @@ fn how_much_a_hosted_group_allocates_while_only_ticking() {
     // `last_tick_reason` stopped turning a literal into a `String` every tick,
     // 2.250 before `has_live_quorum` stopped building a `Membership` to ask how
     // large a quorum is, 1.250 now.
+    //
+    // A whole allocation of that 1.250 is not per group at all. The ticker builds
+    // one list of what came due per wake-up, and this test runs a single group, so
+    // a per-wake cost reads here as a per-tick one. `tests/alloc_driver.rs`
+    // measures it dividing away -- 1.0000 a tick at one group, 0.0273 at 256 -- so
+    // the per-group cost of a tick is the quarter, not the one and a quarter.
     const CEILING_PER_TICK: f64 = 1.5;
     assert!(
         per_tick <= CEILING_PER_TICK,
