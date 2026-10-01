@@ -20,6 +20,12 @@ fn main() {
             std::process::exit(2);
         });
     }
+    if let Ok(group_count) = std::env::var("RUSTRAFT_BENCHMARK_GROUP_COUNT") {
+        options.group_count = group_count.parse().unwrap_or_else(|error| {
+            eprintln!("invalid RUSTRAFT_BENCHMARK_GROUP_COUNT={group_count}: {error}");
+            std::process::exit(2);
+        });
+    }
     if let Ok(iterations) = std::env::var("RUSTRAFT_BENCHMARK_ITERATIONS") {
         options.iterations_per_workload = iterations.parse().unwrap_or_else(|error| {
             eprintln!("invalid RUSTRAFT_BENCHMARK_ITERATIONS={iterations}: {error}");

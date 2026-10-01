@@ -614,6 +614,7 @@ fn benchmark_artifact_verifier_script_rejects_non_file_artifacts() {
 fn production_benchmark_options_validator_rejects_non_release_scale_inputs() {
     let options = BenchmarkOptions {
         node_count: 3,
+        group_count: 1,
         iterations_per_workload: 0,
         batch_size: 1,
         payload_size_bytes: 1024,
@@ -3047,4 +3048,58 @@ fn native_baseline_raft_probe_reports_runnable_partial_workloads_when_kv_binarie
         .contains(&"benchmark:baseline_raft_native_kvbench_partial".to_string()));
 
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_group_count_spreads_the_work_and_is_recorded() {
+    // `BenchmarkOptions` had no group count, so every comparison this harness
+    // produced described a single raft group -- the one axis a multi-raft store
+    // is built around. One group stays the default.
+    let one = BenchmarkOptions::default();
+    assert_eq!(
+        one.group_count, 1,
+        "the default changed, which changes every recorded run"
+    );
+
+    let mut runner = RuntimeBenchmarkRunner::new("debug");
+    let single = runner.run_workload(BenchmarkWorkload::SingleKeyWrites, &one);
+    assert_eq!(
+        single.group_count, 1,
+        "a sample has to say how many groups it ran"
+    );
+    assert!(
+        single.correctness_passed,
+        "the single-group run failed: {:?}",
+        single.blockers
+    );
+
+    let many = BenchmarkOptions {
+        group_count: 8,
+        ..BenchmarkOptions::default()
+    };
+    let spread = runner.run_workload(BenchmarkWorkload::SingleKeyWrites, &many);
+    assert_eq!(spread.group_count, 8);
+    assert!(
+        spread.correctness_passed,
+        "the eight-group run failed: {:?}",
+        spread.blockers
+    );
+
+    // The same number of operations either way, so the two are comparable: a
+    // group count spreads the work, it does not multiply it.
+    assert_eq!(
+        spread.operation_count, single.operation_count,
+        "eight groups did {} operations against one group's {}",
+        spread.operation_count, single.operation_count
+    );
+
+    // And a read workload, because its group id was a literal 10 and would have
+    // asked the first group about every other group's reads.
+    let reads = runner.run_workload(BenchmarkWorkload::ReadIndexReads, &many);
+    assert_eq!(reads.group_count, 8);
+    assert!(
+        reads.correctness_passed,
+        "eight groups of reads failed: {:?}",
+        reads.blockers
+    );
 }
