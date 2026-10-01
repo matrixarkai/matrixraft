@@ -2339,6 +2339,25 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// 16,384 groups delivered 82.1% on 16 shards and 79.2% on 32, where the second
 /// is 65 threads on 16 cores. Shards up to about the core count, not beyond.
 ///
+/// # How much memory a group costs
+///
+/// About **21 KiB of resident memory per group**, and it is flat as the group
+/// count grows: 90 MiB for 4096 groups and 342 MiB for 16,384, both measured
+/// with the measuring binary's own 13 MiB taken off. A hundred thousand groups
+/// is a little over 2 GiB for the groups themselves.
+///
+/// Measure it with `examples/idle_tick_cost.rs` under `arm=live`, which runs one
+/// row in one process. Every other arm setting builds and drops other stores
+/// first, and a dropped store's pages return to the allocator rather than to
+/// the kernel, so the figure reads as the high-water mark of the run instead of
+/// the cost of the store being measured.
+///
+/// One observation this makes, offered as an observation: the cost of a
+/// delivered tick is not flat as groups multiply -- 6.1us at 1024 groups, 6.9us
+/// at 4096, about 10.4us at 16,384. A 342 MiB working set is far past any cache
+/// on this box, which is consistent with that, but nothing here has measured a
+/// cache miss, so it is not a cause.
+///
 /// # The next limit is file descriptors, not this runtime
 ///
 /// Every group holds its own WAL open, so a process pays **one file descriptor

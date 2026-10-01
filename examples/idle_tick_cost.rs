@@ -177,6 +177,15 @@ struct Sample {
     cores: f64,
     switches_per_sec: f64,
     threads: u64,
+    /// Resident memory at the close of the window, in KiB, from
+    /// `/proc/self/status`.
+    ///
+    /// This is the whole process, so it only divides cleanly by the group count
+    /// on a run with one arm -- `arm=live`. The other arm settings build and
+    /// drop several stores in one process, and a dropped store's pages are
+    /// returned to the allocator rather than to the kernel, so the second arm
+    /// reads the first one's high-water mark.
+    resident_kib: u64,
 }
 
 /// Opens a measurement window now; the returned closure closes it.
@@ -196,6 +205,7 @@ fn open_window(seconds: u64) -> impl FnOnce() -> Sample {
         Sample {
             cores: (cpu_seconds() - cpu_at_start) / elapsed,
             switches_per_sec: (context_switches() - switches_at_start) as f64 / elapsed,
+            resident_kib: status_field("VmRSS:"),
             threads: status_field("Threads:"),
         }
     }
@@ -540,12 +550,17 @@ fn main() {
         return;
     }
 
+    // Before any store exists. Without it the per-group figure is mostly this
+    // binary: 128 groups read 114 KiB each on a process that was already 13 MiB
+    // resident before a single group had been created.
+    let baseline_kib = status_field("VmRSS:");
+
     println!(
         "interval={interval_ms}ms window={seconds}s worker_num={workers}; live \
          groups are solo voters holding their own leadership\n"
     );
     println!(
-        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}",
+        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}",
         "hosting",
         "groups",
         "cores",
@@ -555,7 +570,9 @@ fn main() {
         "kept up",
         "handed",
         "create",
-        "start"
+        "start",
+        "resident",
+        "per group"
     );
 
     let counts: Vec<u64> = match only {
@@ -581,10 +598,15 @@ fn main() {
             if arm == "shared" && !shared {
                 continue;
             }
+            // One row, one process: the only way the resident figure divides by
+            // the group count and means anything.
+            if arm == "live" && !(shared && live) {
+                continue;
+            }
             let root = probe_root();
             let seen = hosted(groups, interval_ms, seconds, live, shared, workers, &root);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}",
                 label,
                 groups,
                 seen.sample.cores,
@@ -608,7 +630,12 @@ fn main() {
                 match seen.started_in {
                     Some(took) => format!("{:.2}s", took.as_secs_f64()),
                     None => "-".to_string(),
-                }
+                },
+                format!("{} MiB", seen.sample.resident_kib / 1024),
+                format!(
+                    "{} KiB",
+                    seen.sample.resident_kib.saturating_sub(baseline_kib) / groups.max(1)
+                )
             );
             if let Some((share, answered, asked)) = seen.kept_up {
                 if answered < asked {
@@ -637,10 +664,10 @@ fn main() {
             }
             let _ = std::fs::remove_dir_all(&root);
         }
-        if arm != "facade" {
+        if arm != "facade" && arm != "live" {
             let seen = shared_ticker(groups, interval_ms, seconds);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}",
                 "shared ticker",
                 groups,
                 seen.cores,
@@ -650,7 +677,12 @@ fn main() {
                 "-",
                 "-",
                 "-",
-                "-"
+                "-",
+                format!("{} MiB", seen.resident_kib / 1024),
+                format!(
+                    "{} KiB",
+                    seen.resident_kib.saturating_sub(baseline_kib) / groups.max(1)
+                )
             );
         }
     }
