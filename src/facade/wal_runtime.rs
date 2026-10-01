@@ -254,6 +254,48 @@ pub struct PersistentRaftWal {
 
 impl PersistentRaftWal {
     pub fn open(options: PersistentRaftWalOptions) -> Result<Self, RaftError> {
+        Ok(Self::open_inner(options, false)?.0)
+    }
+
+    /// Opens the WAL and hands back what [`Self::recover`] would have reported,
+    /// having read the directory once instead of twice.
+    ///
+    /// `open` then `recover` reads the segment directory, decides which segment is
+    /// active and opens it for appending -- and then does all three again, because
+    /// `recover` repeats every step `open` just took and adds only the fold over
+    /// the records it re-read. Traced, creating one group opened its WAL file four
+    /// times and scanned the directory twice.
+    ///
+    /// That is worth removing because creating groups is **system** time, not
+    /// computation: sampled over 16,384 of them the process spent 0.05s in user
+    /// code and 4.30s in the kernel, so the cost is the syscalls themselves and the
+    /// lever is making fewer of them. At 65,536 groups creation is most of a
+    /// bring-up.
+    ///
+    /// This is not a fast path with a condition attached, which is the version of
+    /// this change that could lose data: a flag saying "nothing to recover" is
+    /// wrong the moment something clears it late. It is the same work done once, so
+    /// `single_pass_open_tests` can assert the two routes agree field for field on
+    /// a populated and a corrupt directory, not only on an empty one.
+    pub fn open_recovered(
+        options: PersistentRaftWalOptions,
+    ) -> Result<(Self, WalRecoveryReport), RaftError> {
+        let (wal, report) = Self::open_inner(options, true)?;
+        match report {
+            Some(report) => Ok((wal, report)),
+            // Unreachable: `want_report` was true. Not an `expect`, because a
+            // panic in a WAL open is a worse outcome than an error a caller can
+            // see and act on.
+            None => Err(RaftError::Storage(
+                "WAL opened without the recovery report it was asked for".to_string(),
+            )),
+        }
+    }
+
+    fn open_inner(
+        options: PersistentRaftWalOptions,
+        want_report: bool,
+    ) -> Result<(Self, Option<WalRecoveryReport>), RaftError> {
         options.validate()?;
         fs::create_dir_all(&options.dir).map_err(|err| {
             RaftError::Storage(format!(
@@ -262,6 +304,26 @@ impl PersistentRaftWal {
             ))
         })?;
         let (mut segments, truncated_corrupt_tail) = read_wal_segments_from_dir(&options.dir)?;
+        // Read off here, before the empty-segment push and before sealing drops
+        // any records out of memory: this is what the directory held. `recover`
+        // takes its `original_len` from `record_count`, which releasing does not
+        // touch, so the two agree.
+        let (original_len, stored) = if want_report {
+            (
+                segments
+                    .iter()
+                    .map(|segment| segment.record_count)
+                    .sum::<u64>() as usize,
+                segments
+                    .iter()
+                    .flat_map(|segment| segment.records.iter().cloned())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            // Not paid by a caller that did not ask: `open` on a large WAL would
+            // otherwise clone every record to build a report nobody reads.
+            (0, Vec::new())
+        };
         if segments.is_empty() {
             segments.push(WalSegment {
                 segment_id: 0,
@@ -302,7 +364,19 @@ impl PersistentRaftWal {
         // Coverage has been folded, so the sealed segments have served their
         // purpose in memory.
         wal.release_sealed_segment_records();
-        Ok(wal)
+        let report = want_report.then(|| {
+            let (surviving_records, recovered) = matrixraft_recover_from_wal_records(&stored);
+            WalRecoveryReport {
+                recovered,
+                truncated_corrupt_tail: wal.truncated_corrupt_tail,
+                surviving_records,
+                removed_records: original_len.saturating_sub(surviving_records),
+                segments_scanned: wal.segments.len() as u64,
+                checksum_format: Some(matrixraft_wal_checksum_format()),
+                retained_range: Some(wal_retained_range(&wal.segments)),
+            }
+        });
+        Ok((wal, report))
     }
 
     /// Advances coverage using the record just appended. The whole-log case

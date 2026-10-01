@@ -1470,24 +1470,36 @@ impl NodeCore {
             return Err((error, command_rx));
         }
     };
-    let mut last_wal_recovery_report = None;
-    let wal = match PersistentRaftWal::open(PersistentRaftWalOptions {
-        dir: PathBuf::from(&options.wal_dir),
-        // See `PersistentRaftWalOptions::new`: this is now just how much the
-        // node holds in memory, and smaller is strictly cheaper.
-        max_records_per_segment: 1_000,
-        max_segment_bytes: options.config.max_segment_bytes,
-        min_keep_segments: options.config.min_keep_segment_num as usize,
-        fsync_on_append: true,
-    }) {
-        Ok(mut wal) => {
-            if let Ok(report) = wal.recover() {
-                if let Some(record) = report.recovered.clone() {
-                    let _ = cluster.restore_wal_record(record);
-                }
-                last_wal_recovery_report = Some(report);
+    // One pass rather than two. `open` followed by `recover` scanned the segment
+    // directory, chose the active segment and opened it for appending -- and then
+    // did all three again, because `recover` repeated every step `open` had just
+    // taken. Traced, creating one group opened its WAL file four times and scanned
+    // the directory twice; creating groups is 99% system time, so that is the
+    // cost, and at tens of thousands of groups it is most of a bring-up.
+    //
+    // A recovery failure is fatal here, where it used to be swallowed by an
+    // `if let Ok(report)` that left the node running with nothing restored. That
+    // is not a new risk being taken: every error `recover` could raise, the `open`
+    // on the line above could raise from the same directory read and the same
+    // append-open, and those were already fatal to creating a node. Failing is
+    // also the safer of the two, since the alternative is a node that quietly did
+    // not restore its last record.
+    let (wal, last_wal_recovery_report) = match PersistentRaftWal::open_recovered(
+        PersistentRaftWalOptions {
+            dir: PathBuf::from(&options.wal_dir),
+            // See `PersistentRaftWalOptions::new`: this is now just how much the
+            // node holds in memory, and smaller is strictly cheaper.
+            max_records_per_segment: 1_000,
+            max_segment_bytes: options.config.max_segment_bytes,
+            min_keep_segments: options.config.min_keep_segment_num as usize,
+            fsync_on_append: true,
+        },
+    ) {
+        Ok((wal, report)) => {
+            if let Some(record) = report.recovered.clone() {
+                let _ = cluster.restore_wal_record(record);
             }
-            Some(wal)
+            (Some(wal), Some(report))
         }
         Err(error) => {
             return Err((error, command_rx));
