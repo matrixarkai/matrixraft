@@ -22,9 +22,13 @@
 //! realistic interval, what does the wake-up cost, multiplied by the number of
 //! groups?
 //!
-//! Both arms are measured idle and unstarted, so neither pays for raft work.
-//! What is left is the price of the hosting model alone -- which makes this a
-//! floor for the thread-each arm, not a worst case.
+//! Three arms. Two are idle and unstarted, so neither pays for raft work and
+//! what is left is the price of the hosting model alone. The third starts its
+//! groups as single voters, so each wins its own election at once and then
+//! heartbeats alone -- a live idle group, which is what a real store holds.
+//! Three peers and no transport would campaign forever instead, and the probe
+//! would be measuring a broken cluster rather than a steady one, so the
+//! leaders column is reported and a shortfall is called out.
 //!
 //! Reported per arm: CPU cores burned, context switches per second, and
 //! threads. Cores burned is the number to trust; it comes from
@@ -32,14 +36,24 @@
 //!
 //! # What it found
 //!
-//! On a 16-core box at a 10ms interval, idle and unstarted:
+//! On a 16-core box at a 10ms interval, cores burned:
 //!
 //! ```text
-//!   groups   thread each            shared ticker        ratio
-//!       64   0.097 cores,   65 thr  0.013 cores, 2 thr      7x
-//!     1024   1.09  cores, 1025 thr  0.020 cores, 2 thr     55x
-//!     2048   2.72  cores, 2049 thr  0.030 cores, 2 thr     91x
+//!   groups   thread each   thread each, live   shared ticker   ratio
+//!       64         0.087               0.093           0.013      7x
+//!      256         0.270               0.307           0.013     24x
+//!     1024         1.180               1.410           0.023     61x
+//!     2048         2.720                   -           0.030     91x
 //! ```
+//!
+//! Every live row reached full leadership (64 of 64, 256 of 256, 1024 of
+//! 1024), so those are steady states and not groups still campaigning.
+//!
+//! **Being live costs 14-19% on top of merely existing.** The switch counts of
+//! the two thread-each arms are indistinguishable -- 25,357 against 25,360 at
+//! 256 groups, 102,981 against 103,382 at 1024 -- so the raft work is the
+//! small part and the wake-up is about 85% of the bill. That is the part a
+//! shared ticker removes outright.
 //!
 //! The context-switch column shows the mechanism rather than just the cost:
 //! the thread-each arm switches almost exactly `groups / interval` times a
@@ -175,7 +189,22 @@ fn peer(group_id: u64, node_id: u64) -> Peer {
     }
 }
 
-fn options(group_id: u64, interval_ms: u64, wal: &Path, snapshot: &Path) -> MatrixRaftOptions {
+fn options(
+    group_id: u64,
+    interval_ms: u64,
+    solo: bool,
+    wal: &Path,
+    snapshot: &Path,
+) -> MatrixRaftOptions {
+    // A solo group is its own quorum, so it wins an election immediately and
+    // then heartbeats with nobody to send to. That is a live idle group. With
+    // three peers and no transport it would campaign forever instead, and the
+    // probe would be measuring a broken cluster.
+    let peers = if solo {
+        vec![peer(group_id, 1)]
+    } else {
+        vec![peer(group_id, 1), peer(group_id, 2), peer(group_id, 3)]
+    };
     MatrixRaftOptions {
         group_id,
         peer_id: 1,
@@ -183,7 +212,7 @@ fn options(group_id: u64, interval_ms: u64, wal: &Path, snapshot: &Path) -> Matr
         snapshot_addr: peer(group_id, 1).snapshot_addr,
         wal_dir: wal.display().to_string(),
         snapshot_dir: snapshot.display().to_string(),
-        peers: vec![peer(group_id, 1), peer(group_id, 2), peer(group_id, 3)],
+        peers,
         role: ReplicaRole::Voter,
         // Idle and undurable on purpose: the question is what the hosting
         // model costs, not what raft costs.
@@ -215,7 +244,15 @@ fn options(group_id: u64, interval_ms: u64, wal: &Path, snapshot: &Path) -> Matr
     }
 }
 
-fn thread_each(groups: u64, interval_ms: u64, seconds: u64, root: &Path) -> Sample {
+struct ThreadEach {
+    sample: Sample,
+    /// How many groups actually hold leadership. Zero on the unstarted arm by
+    /// definition; on the live arm anything short of every group means the
+    /// sample is of groups still campaigning, not of a steady state.
+    with_a_leader: u64,
+}
+
+fn thread_each(groups: u64, interval_ms: u64, seconds: u64, live: bool, root: &Path) -> ThreadEach {
     // Every directory first, so the sweep does not measure directory creation
     // as though it were the cost of a raft group.
     let dirs: Vec<(PathBuf, PathBuf)> = (1..=groups)
@@ -243,16 +280,35 @@ fn thread_each(groups: u64, interval_ms: u64, seconds: u64, root: &Path) -> Samp
 
     for (index, (wal, snapshot)) in dirs.iter().enumerate() {
         server
-            .create_node(options(index as u64 + 1, interval_ms, wal, snapshot), 0)
+            .create_node(
+                options(index as u64 + 1, interval_ms, live, wal, snapshot),
+                0,
+            )
             .expect("create node");
+    }
+    if live {
+        server.start_all(0).expect("start every group");
     }
 
     let close_window = open_window(seconds);
     let sample = close_window();
+    // Asked after the window closes: each call is a round trip to that
+    // group's own thread, which would otherwise be measured as its cost.
+    let with_a_leader = (1..=groups)
+        .filter(|group_id| {
+            matches!(
+                server.node(*group_id, 1).and_then(|node| node.leader()),
+                Ok(Some(_))
+            )
+        })
+        .count() as u64;
     // Held until here on purpose: the groups must be alive for the whole
     // window or the arm measures their teardown.
     drop(server);
-    sample
+    ThreadEach {
+        sample,
+        with_a_leader,
+    }
 }
 
 // ---- the shared-ticker arm -----------------------------------------------
@@ -320,10 +376,13 @@ fn main() {
         return;
     }
 
-    println!("interval={interval_ms}ms window={seconds}s, idle and unstarted groups\n");
     println!(
-        "  {:>14}  {:>8}  {:>12}  {:>14}  {:>8}",
-        "hosting", "groups", "cores", "switches/sec", "threads"
+        "interval={interval_ms}ms window={seconds}s; live groups are solo voters \
+         holding their own leadership\n"
+    );
+    println!(
+        "  {:>16}  {:>8}  {:>12}  {:>14}  {:>8}  {:>9}",
+        "hosting", "groups", "cores", "switches/sec", "threads", "leaders"
     );
 
     let counts: Vec<u64> = match only {
@@ -332,26 +391,43 @@ fn main() {
     };
 
     for groups in counts {
-        if arm != "driver" {
+        for (label, live) in [("thread each", false), ("thread each, live", true)] {
+            if arm == "driver" {
+                continue;
+            }
             let root = probe_root();
-            let seen = thread_each(groups, interval_ms, seconds, &root);
+            let seen = thread_each(groups, interval_ms, seconds, live, &root);
             println!(
-                "  {:>14}  {:>8}  {:>12.3}  {:>14.0}  {:>8}",
-                "thread each", groups, seen.cores, seen.switches_per_sec, seen.threads
+                "  {:>16}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}",
+                label,
+                groups,
+                seen.sample.cores,
+                seen.sample.switches_per_sec,
+                seen.sample.threads,
+                seen.with_a_leader
             );
+            if live && seen.with_a_leader < groups {
+                println!(
+                    "  {:>16}  only {} of {groups} groups reached leadership, so this row is \
+                     groups still campaigning rather than a steady state",
+                    "WARNING", seen.with_a_leader
+                );
+            }
             let _ = std::fs::remove_dir_all(&root);
         }
         if arm != "facade" {
             let seen = shared_ticker(groups, interval_ms, seconds);
             println!(
-                "  {:>14}  {:>8}  {:>12.3}  {:>14.0}  {:>8}",
-                "shared ticker", groups, seen.cores, seen.switches_per_sec, seen.threads
+                "  {:>16}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}",
+                "shared ticker", groups, seen.cores, seen.switches_per_sec, seen.threads, "-"
             );
         }
     }
 
     println!(
-        "\n  Both arms are idle and unstarted, so neither is doing raft work. What\n  \
-         separates them is what the hosting model costs to hold a group at all."
+        "\n  The unstarted rows do no raft work at all, so what separates them from\n  \
+         the shared ticker is purely what the hosting model costs to hold a\n  \
+         group. The live rows add the raft work a real store does, and add\n  \
+         little: the wake-up is the bill."
     );
 }
