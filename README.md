@@ -367,6 +367,42 @@ The probe sends every group a message and refuses to report until all of them
 have received it, so a registry that held groups and drove nothing would fail
 rather than look thrifty.
 
+### And the work goes faster when the pool grows
+
+Holding groups cheaply is worth little if the work does not speed up with
+threads. `examples/driver_throughput.rs` sweeps `worker_num` at a fixed group
+count. 256 groups, 200k messages, a group receiving a run of 64:
+
+| workers | msgs/sec | |
+|---|---|---|
+| 1 | 3,054,219 | |
+| 2 | 4,719,665 | 1.55x |
+| 4 | 4,945,662 | 1.62x |
+| 8 | 4,641,568 | 1.52x |
+
+**Throughput is near flat in the group count**, which is the property a store
+hosting many groups needs. Measured interleaved across counts, so a drift in
+machine load cannot masquerade as a group-count effect — 8 workers, four rounds:
+
+| groups | 8 | 1,024 | 10,000 | 50,000 |
+|---|---|---|---|---|
+| msgs/sec | 4.8–6.0M | 4.9–5.2M | 4.5–4.9M | 4.4–4.9M |
+
+Fifty thousand groups costs about **13%** against eight — a 6,250-fold increase
+in groups for an eighth of the rate.
+
+**Read the access pattern before the number.** The probe takes a `burst`: at
+`burst=1` it sends one message per group in turn, so every message lands on a
+different worker and wakes a different thread, and throughput *falls* with more
+workers (0.06x at eight). That is a wake-up storm, and it is a property of the
+sender rather than the pool — a group under load receives a run. Both regimes
+are reported because the answers differ:
+
+```bash
+cargo run --release --example driver_throughput -- 256 200000 64   # a run per group
+cargo run --release --example driver_throughput -- 256 200000 1    # round robin
+```
+
 The driver is a component to build a host on; it does not replace `NodeRuntime`,
 and nothing in this crate wires the two together yet.
 
