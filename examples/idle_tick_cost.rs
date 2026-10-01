@@ -82,7 +82,18 @@
 //! ```bash
 //! cargo run --release --example idle_tick_cost            # sweep
 //! cargo run --release --example idle_tick_cost -- 256 10 3
+//! cargo run --release --example idle_tick_cost -- 8192 10 3 shared 8
 //! ```
+//!
+//! The fifth argument is `worker_num`, which is the shard count and so the
+//! tick capacity: the runtime documents roughly one shard per 1,250 groups
+//! at a 10ms interval, and this is how to check that.
+//!
+//! The fourth argument selects arms: `both` (the default), `driver` for the
+//! bare `Driver` alone, `facade` to leave that out, or `shared` for only the
+//! hosted arms -- which is what to use past a thousand or so groups, where
+//! building two thread-each arms at the same size costs more than the whole
+//! rest of the run.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -249,6 +260,10 @@ fn options(
 
 struct ThreadEach {
     sample: Sample,
+    /// Ticks delivered as a share of the interval's rate, over a sample of
+    /// groups, or `None` when the groups were never started and so were
+    /// never meant to tick.
+    kept_up: Option<f64>,
     /// How many groups actually hold leadership. Zero on the unstarted arm by
     /// definition; on the live arm anything short of every group means the
     /// sample is of groups still campaigning, not of a steady state.
@@ -261,6 +276,7 @@ fn hosted(
     seconds: u64,
     live: bool,
     shared: bool,
+    workers: usize,
     root: &Path,
 ) -> ThreadEach {
     // Every directory first, so the sweep does not measure directory creation
@@ -284,9 +300,10 @@ fn hosted(
     let context = MatrixRaftGroupContextBuilder::new()
         .transport(transport)
         .tick_interval(interval_ms)
-        // Only meaningful to the shared arm, and deliberately a small number:
-        // the claim is that a fixed pool carries any number of groups.
-        .worker_num(4)
+        // Only meaningful to the shared arms, where it is the shard count
+        // and so the tick capacity. See the sizing rule on
+        // `MatrixRaftGroupContext::shared_runtime`.
+        .worker_num(workers)
         .shared_runtime(shared)
         .build()
         .expect("group context");
@@ -304,8 +321,46 @@ fn hosted(
         server.start_all(0).expect("start every group");
     }
 
+    // A spread of groups rather than all of them: a status is a round trip
+    // through the runtime being measured, and asking thousands of times
+    // would perturb the very number being read.
+    let watched: Vec<u64> = (0..64.min(groups))
+        .map(|n| 1 + n * (groups / 64).max(1))
+        .filter(|group_id| *group_id <= groups)
+        .collect();
+    let ticks_of = |server: &MatrixRaftMultiRaftServer| -> u64 {
+        watched
+            .iter()
+            .filter_map(|group_id| {
+                server
+                    .node(*group_id, 1)
+                    .and_then(|node| node.runtime_status())
+                    .ok()
+            })
+            .map(|status| status.timer_status.heartbeat_ticks)
+            .sum()
+    };
+
+    // After `open_window`, not before: it sleeps to let construction settle
+    // and only then starts its own clock. Reading the baseline first counted
+    // that settle in the ticks and not in the span, which is how this came
+    // out at 117% of a rate nothing can exceed.
     let close_window = open_window(seconds);
+    let ticks_before = if live { ticks_of(&server) } else { 0 };
+    let tick_window = Instant::now();
     let sample = close_window();
+    let delivered = if live {
+        ticks_of(&server).saturating_sub(ticks_before)
+    } else {
+        0
+    };
+    // Taken after the closing read, so the round trips it costs sit inside
+    // the span they are counted against rather than inflating the rate.
+    let watched_for = tick_window.elapsed().as_secs_f64();
+    let kept_up = live.then(|| {
+        let wanted = watched.len() as f64 * watched_for * 1000.0 / interval_ms as f64;
+        delivered as f64 / wanted.max(1.0)
+    });
     // Asked after the window closes: each call is a round trip to that
     // group's own thread, which would otherwise be measured as its cost.
     let with_a_leader = (1..=groups)
@@ -321,6 +376,7 @@ fn hosted(
     drop(server);
     ThreadEach {
         sample,
+        kept_up,
         with_a_leader,
     }
 }
@@ -384,6 +440,10 @@ fn main() {
     let arm = std::env::args()
         .nth(4)
         .unwrap_or_else(|| "both".to_string());
+    let workers: usize = std::env::args()
+        .nth(5)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(4);
 
     if status_field("Threads:") == 0 {
         println!("/proc/self/status unavailable: this probe needs Linux");
@@ -391,12 +451,12 @@ fn main() {
     }
 
     println!(
-        "interval={interval_ms}ms window={seconds}s; live groups are solo voters \
-         holding their own leadership\n"
+        "interval={interval_ms}ms window={seconds}s worker_num={workers}; live \
+         groups are solo voters holding their own leadership\n"
     );
     println!(
-        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>9}",
-        "hosting", "groups", "cores", "switches/sec", "threads", "leaders"
+        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>9}  {:>8}",
+        "hosting", "groups", "cores", "switches/sec", "threads", "leaders", "kept up"
     );
 
     let counts: Vec<u64> = match only {
@@ -415,17 +475,38 @@ fn main() {
             if arm == "driver" {
                 continue;
             }
+            // At a few thousand groups the thread-each arms are the whole
+            // cost of the run: two of them, each spawning a thread per
+            // group. `shared` skips them so the hosted arms can be measured
+            // at a size where a thread each is no longer the point.
+            if arm == "shared" && !shared {
+                continue;
+            }
             let root = probe_root();
-            let seen = hosted(groups, interval_ms, seconds, live, shared, &root);
+            let seen = hosted(groups, interval_ms, seconds, live, shared, workers, &root);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}  {:>7}",
                 label,
                 groups,
                 seen.sample.cores,
                 seen.sample.switches_per_sec,
                 seen.sample.threads,
-                seen.with_a_leader
+                seen.with_a_leader,
+                match seen.kept_up {
+                    Some(share) => format!("{:.1}%", share * 100.0),
+                    None => "-".to_string(),
+                }
             );
+            if let Some(share) = seen.kept_up {
+                if share < 0.95 {
+                    println!(
+                        "  {:>21}  delivered {:.1}% of the ticks the interval asks \
+                         for, so leases on these groups outlive their configuration",
+                        "WARNING",
+                        share * 100.0
+                    );
+                }
+            }
             if live && seen.with_a_leader < groups {
                 println!(
                     "  {:>21}  only {} of {groups} groups reached leadership, so this row is \
@@ -438,8 +519,8 @@ fn main() {
         if arm != "facade" {
             let seen = shared_ticker(groups, interval_ms, seconds);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}",
-                "shared ticker", groups, seen.cores, seen.switches_per_sec, seen.threads, "-"
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}  {:>8}",
+                "shared ticker", groups, seen.cores, seen.switches_per_sec, seen.threads, "-", "-"
             );
         }
     }

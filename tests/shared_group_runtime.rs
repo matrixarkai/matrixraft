@@ -112,6 +112,15 @@ fn server_with_interval(
     interval_ms: u64,
     root: &Path,
 ) -> MatrixRaftMultiRaftServer {
+    server_with_ids(&(1..=groups).collect::<Vec<_>>(), shared, interval_ms, root)
+}
+
+fn server_with_ids(
+    ids: &[u64],
+    shared: bool,
+    interval_ms: u64,
+    root: &Path,
+) -> MatrixRaftMultiRaftServer {
     let transport = MatrixRaftTransportBuilder::new()
         .set_cluster_id(1)
         .set_num_connection_group(1)
@@ -126,7 +135,7 @@ fn server_with_interval(
         .build()
         .expect("group context");
     let mut server = MatrixRaftMultiRaftServer::new(context);
-    for group_id in 1..=groups {
+    for group_id in ids.iter().copied() {
         let wal = root.join(format!("g{group_id}/wal"));
         let snapshot = root.join(format!("g{group_id}/snapshot"));
         std::fs::create_dir_all(&wal).expect("wal dir");
@@ -337,10 +346,13 @@ fn a_command_is_answered_without_waiting_for_the_next_tick() {
     // not -- a command waits up to a whole interval, which at the default
     // 100ms makes a propose unusable while the suite stays green.
     //
-    // So the interval here is long on purpose. Half a second is far longer
-    // than answering a status takes, and a command that waited for the tick
-    // cannot hide inside it.
-    let interval_ms = 500;
+    // The interval is long on purpose, and the margin wide on purpose. A
+    // command served promptly takes a millisecond or two; one that waited
+    // for the tick waits up to the whole interval and averages half of it.
+    // Two seconds against a quarter-second bound separates those by enough
+    // that a loaded machine cannot turn one into the other -- this box has
+    // been seen at a load average of 50 with other work on it.
+    let interval_ms = 2_000;
     let root = probe_root("latency");
     let mut server = server_with_interval(1, true, interval_ms, &root);
     server.start_all(0).expect("start");
@@ -357,9 +369,156 @@ fn a_command_is_answered_without_waiting_for_the_next_tick() {
 
     assert_eq!(status.group_id, 1, "the answer came from the wrong group");
     assert!(
-        waited < Duration::from_millis(interval_ms / 2),
+        waited < Duration::from_millis(interval_ms / 8),
         "a command took {waited:?} against a {interval_ms}ms tick interval, so it \
          waited for the tick rather than waking a worker"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_tick_runs_on_the_ticker_when_the_group_is_free() {
+    // Nothing about behaviour can see this. A tick posted to the pool and a
+    // tick run on the ticker do identical work, so removing the in-place
+    // path leaves every other test in this file green -- it only shows up as
+    // a context switch per group per interval, which is a measurement and
+    // not a guard. Hence the counter, and hence this.
+    let root = probe_root("inplace");
+    let runtime = Arc::new(
+        SharedGroupRuntime::start(DriverOptions {
+            worker_num: 2,
+            tick_interval_ms: 5,
+            ..DriverOptions::default()
+        })
+        .expect("shared runtime"),
+    );
+    let before = runtime.stats();
+    assert_eq!(before.ticks_in_place, 0, "nothing has ticked yet");
+
+    let mut server = server_with(4, true, &root);
+    server.start_all(0).expect("start");
+    assert!(
+        wait_until(
+            "ticks to be served in place",
+            Duration::from_secs(5),
+            || {
+                server
+                    .node(1, 1)
+                    .and_then(|node| node.runtime_status())
+                    .map(|status| status.timer_status.heartbeat_ticks > 2)
+                    .unwrap_or(false)
+            }
+        ),
+        "the groups never ticked"
+    );
+
+    // The server has its own runtime; the one above is only the control that
+    // an untouched runtime counts nothing.
+    let stats = server.shared_stats().expect("a shared runtime");
+    assert!(
+        stats.ticks_in_place > 0,
+        "every tick was handed to a worker ({} of them), so the in-place path \
+         is not being taken",
+        stats.ticks_handed_over
+    );
+    assert!(
+        stats.ticks_in_place > stats.ticks_handed_over,
+        "{} ticks went in place against {} handed over; idle groups are not \
+         contended and should almost all take the cheap path",
+        stats.ticks_in_place,
+        stats.ticks_handed_over
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn groups_are_spread_across_the_tickers() {
+    // A ticker runs its own groups' work now, so one shard holding all of
+    // them still behaves correctly and simply ticks at one thread's ceiling.
+    // Only the spread shows it, which is why it is reported.
+    let root = probe_root("spread");
+    let server = server_with(64, true, &root);
+    let per_ticker = server.shared_groups_per_ticker().expect("a shared runtime");
+
+    assert!(
+        per_ticker.len() > 1,
+        "there is only one ticker, so nothing is sharded"
+    );
+    assert_eq!(
+        per_ticker.iter().sum::<usize>(),
+        64,
+        "the shards hold {:?}, which is not the 64 groups created",
+        per_ticker
+    );
+    assert!(
+        per_ticker.iter().all(|held| *held > 0),
+        "shard counts {per_ticker:?}: a shard holds nothing, so the hash is not \
+         spreading consecutive group ids"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn group_ids_with_a_stride_still_spread_across_the_tickers() {
+    // The case hashing exists for, and the one the other spread test cannot
+    // see. Consecutive ids spread perfectly well under a plain
+    // `group_id % shards`; a stride does not. A store numbering its groups
+    // 4, 8, 12, 16 against four shards would land every one of them on
+    // shard zero -- and it would still report a fixed thread count while
+    // ticking on a single thread, which is the worst kind of wrong: cheap
+    // looking and not working.
+    let root = probe_root("stride");
+    let ids: Vec<u64> = (1..=32).map(|n| n * 4).collect();
+    let server = server_with_ids(&ids, true, 5, &root);
+    let per_ticker = server.shared_groups_per_ticker().expect("a shared runtime");
+
+    assert_eq!(
+        per_ticker.iter().sum::<usize>(),
+        ids.len(),
+        "the shards hold {per_ticker:?}, which is not the {} groups created",
+        ids.len()
+    );
+    let busiest = per_ticker.iter().max().copied().unwrap_or(0);
+    assert!(
+        busiest < ids.len(),
+        "every strided group landed on one shard ({per_ticker:?}), so the ids are \
+         being taken modulo rather than hashed"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_busy_group_is_handed_to_a_worker_rather_than_blocking_its_ticker() {
+    // `try_lock`, not `lock`. Swapping them leaves every other test green --
+    // in-place ticks would simply become all of them -- while a ticker would
+    // once again stall its entire shard on one busy group, which is the
+    // thing sharding and the hand-off were both for.
+    //
+    // Contention is made rather than waited for: a group answering a stream
+    // of commands holds its lock often enough that some tick finds it taken.
+    let root = probe_root("busy");
+    let mut server = server_with_interval(1, true, 1, &root);
+    server.start_all(0).expect("start");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut handed_over = 0;
+    while Instant::now() < deadline {
+        for _ in 0..200 {
+            let _ = server.node(1, 1).and_then(|node| node.runtime_status());
+        }
+        handed_over = server
+            .shared_stats()
+            .expect("a shared runtime")
+            .ticks_handed_over;
+        if handed_over > 0 {
+            break;
+        }
+    }
+
+    assert!(
+        handed_over > 0,
+        "a group answering commands continuously never had a tick handed to a \
+         worker, so the ticker is taking the lock instead of trying it"
     );
     let _ = std::fs::remove_dir_all(&root);
 }

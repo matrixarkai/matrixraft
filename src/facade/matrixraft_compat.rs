@@ -2636,13 +2636,20 @@ pub struct MatrixRaftGroupContext {
     pub flexible_apply: bool,
     pub heartbeat_merge: bool,
     pub watched_address_resolver: bool,
-    /// Host every group on one shared ticker and worker pool, rather than
+    /// Host every group on shared tickers and a worker pool, rather than
     /// giving each its own OS thread.
     ///
     /// Off by default, because it changes how a group is driven. A thread
     /// each costs one context switch per group per tick interval -- about a
     /// core per thousand groups, measured by `examples/idle_tick_cost.rs` --
     /// and this is what that measurement was taken to justify.
+    ///
+    /// **Size `worker_num` with it.** It sets the shard count, and the shards
+    /// carry the ticking. Measured at a 10ms interval with every group a live
+    /// leader: 1024 groups on 4 shards and 4096 on 8 both deliver 100% of
+    /// their ticks, while 4096 on 4 never finished starting. Too few does not
+    /// fail loudly -- the groups simply tick more slowly than configured, and
+    /// leases are counted in those ticks. See [`SharedGroupRuntime`].
     pub shared_runtime: bool,
     pub transport: Option<MatrixRaftTransportOptions>,
     pub node_creators: Vec<MatrixRaftNodeCreator>,
@@ -17480,6 +17487,26 @@ impl MatrixRaftMultiRaftServer {
     /// group has its own and the count is simply the group count.
     pub fn shared_thread_count(&self) -> Option<usize> {
         self.shared.as_ref().map(|runtime| runtime.thread_count())
+    }
+
+    /// How the shared runtime is serving its ticks, if there is one.
+    ///
+    /// A host that turns hosting on has no other view of it: the groups
+    /// behave the same either way, so `ticks_handed_over` climbing is the
+    /// signal that `worker_num` is too low for the load.
+    pub fn shared_stats(&self) -> Option<SharedRuntimeStats> {
+        self.shared.as_ref().map(|runtime| runtime.stats())
+    }
+
+    /// Groups held by each ticker, if the server hosts them.
+    ///
+    /// An uneven spread is the failure sharding can have that nothing else
+    /// would show: every group on one shard still ticks correctly, just at
+    /// one thread's ceiling.
+    pub fn shared_groups_per_ticker(&self) -> Option<Vec<usize>> {
+        self.shared
+            .as_ref()
+            .map(|runtime| runtime.groups_per_ticker())
     }
 
     pub fn register_node(&mut self, node: MatrixRaftNode) -> Result<(), RaftError> {
