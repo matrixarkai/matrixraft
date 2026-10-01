@@ -307,6 +307,15 @@ fn options(
 
 struct ThreadEach {
     sample: Sample,
+    /// How long making the groups' directories took, before anything raft was
+    /// built.
+    ///
+    /// Not a MatrixRaft cost and not counted as one -- it is this probe laying out
+    /// two directories a group. It is reported because it is the larger half of
+    /// the wall clock on a slow filesystem and would otherwise look like the
+    /// `create` column being wrong. A store really does need those directories, so
+    /// it is not fictional work either; it is just not raft's.
+    scaffolded_in: Duration,
     /// Ticks delivered as a share of the interval's rate, over a sample of
     /// groups, or `None` when the groups were never started and so were
     /// never meant to tick.
@@ -372,8 +381,14 @@ fn hosted(
     workers: usize,
     root: &Path,
 ) -> ThreadEach {
-    // Every directory first, so the sweep does not measure directory creation
-    // as though it were the cost of a raft group.
+    // Every directory first, so the sweep does not measure directory creation as
+    // though it were the cost of a raft group -- but timed and reported, because
+    // excluding a cost from a column is not the same as the cost not being paid.
+    // It is two directories a group, and on a filesystem where `mkdir` is slow it
+    // is most of the run: 16,384 groups spent about 36s here against 3.6s actually
+    // creating the groups, which is why a sweep takes so much longer than its
+    // `create` column explains.
+    let scaffolding = Instant::now();
     let dirs: Vec<(PathBuf, PathBuf)> = (1..=groups)
         .map(|group_id| {
             let wal = root.join(format!("g{group_id}/wal"));
@@ -383,6 +398,7 @@ fn hosted(
             (wal, snapshot)
         })
         .collect();
+    let scaffolded_in = scaffolding.elapsed();
 
     let transport = MatrixRaftTransportBuilder::new()
         .set_cluster_id(1)
@@ -517,6 +533,7 @@ fn hosted(
     let torn_down_in = tearing_down.elapsed();
     ThreadEach {
         sample,
+        scaffolded_in,
         kept_up,
         handed_over,
         started_in,
@@ -606,7 +623,7 @@ fn main() {
          groups are solo voters holding their own leadership\n"
     );
     println!(
-        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
+        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
         "hosting",
         "groups",
         "cores",
@@ -615,6 +632,7 @@ fn main() {
         "leaders",
         "kept up",
         "handed",
+        "dirs",
         "create",
         "start",
         "teardown",
@@ -653,7 +671,7 @@ fn main() {
             let root = probe_root();
             let seen = hosted(groups, interval_ms, seconds, live, shared, workers, &root);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
                 label,
                 groups,
                 seen.sample.cores,
@@ -678,6 +696,7 @@ fn main() {
                     Some(share) => format!("{:.1}%", share * 100.0),
                     None => "-".to_string(),
                 },
+                format!("{:.2}s", seen.scaffolded_in.as_secs_f64()),
                 format!("{:.2}s", seen.created_in.as_secs_f64()),
                 match seen.started_in {
                     Some(took) => format!("{:.2}s", took.as_secs_f64()),
@@ -720,7 +739,7 @@ fn main() {
         if arm != "facade" && arm != "live" {
             let seen = shared_ticker(groups, interval_ms, seconds);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
                 "shared ticker",
                 groups,
                 seen.cores,
@@ -731,6 +750,7 @@ fn main() {
                     false => format!("{:.0}", seen.switches_per_sec),
                 },
                 seen.threads,
+                "-",
                 "-",
                 "-",
                 "-",
