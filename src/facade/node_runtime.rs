@@ -1413,7 +1413,15 @@ struct NodeCore {
     pre_vote_executions: u64,
     campaign_executions: u64,
     leader_transfer_executions: u64,
-    last_tick_reason: String,
+    /// Why the last tick happened, as one of a handful of literals.
+    ///
+    /// `&'static str` rather than `String` because it is only ever assigned a
+    /// literal, and it is assigned on every tick of every group: as a `String`
+    /// that was a heap allocation per tick, 819,200 a second at 8192 groups on a
+    /// 10ms interval, to store a word the binary already contains. The one place
+    /// that needs an owned copy is `RuntimeTimerStatus`, which is built when
+    /// somebody asks for status rather than on a tick.
+    last_tick_reason: &'static str,
     blockers: Vec<String>,
     fatal_blockers: Vec<String>,
     membership_executor: MembershipExecutor,
@@ -1499,7 +1507,7 @@ impl NodeCore {
     let pre_vote_executions = 0;
     let campaign_executions = 0;
     let leader_transfer_executions = 0_u64;
-    let last_tick_reason = "runtime_created".to_string();
+    let last_tick_reason = "runtime_created";
     let blockers = Vec::<String>::new();
     let fatal_blockers = Vec::<String>::new();
     let membership_executor = MembershipExecutor::new();
@@ -1595,7 +1603,7 @@ impl NodeCore {
                     if !cluster.leader_lease_valid && cluster.step_down_leader_if_lost_quorum() {
                         blockers.push("lost_quorum_step_down".to_string());
                     }
-                    *last_tick_reason = "heartbeat_tick".to_string();
+                    *last_tick_reason = "heartbeat_tick";
                     if cluster.tick_snapshot_trigger() {
                         let snapshot_id = cluster
                             .snapshot_trigger_status()
@@ -1639,7 +1647,7 @@ impl NodeCore {
                     if *election_elapsed_ms >= election_timeout_ms {
                         *election_ticks += 1;
                         *election_elapsed_ms = 0;
-                        *last_tick_reason = "election_tick".to_string();
+                        *last_tick_reason = "election_tick";
                         let local_replica_role =
                             cluster.nodes.get(&node_id).map(|node| node.replica_role);
                         let lease_expired = !cluster.is_follower_lease_valid();
@@ -1859,7 +1867,7 @@ impl NodeCore {
                         pre_vote_executions: *pre_vote_executions,
                         campaign_executions: *campaign_executions,
                         leader_transfer_executions: *leader_transfer_executions,
-                        last_tick_reason: last_tick_reason.clone(),
+                        last_tick_reason: last_tick_reason.to_string(),
                     },
                     peer_runtime: raft_peer_runtime_states(
                         cluster,
