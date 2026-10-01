@@ -282,15 +282,91 @@ release build, one group count per process:
 
 One thread per group at every size, and per-group memory settling near 39 KiB —
 the larger figures at small counts are fixed startup cost divided by a small
-denominator, not a group being more expensive. Plan accordingly: ten thousand
-groups in one process is ten thousand threads, and the memory is the smaller
-part of that bill.
+denominator, not a group being more expensive. Plan accordingly: on this default,
+ten thousand groups in one process is ten thousand threads, and the memory is the
+smaller part of that bill.
 
 Run it on your own hardware rather than taking these numbers:
 
 ```bash
 cargo run --release --example group_scaling -- 1024
 ```
+
+### Or host them on a shared runtime
+
+A thread per group is the default, not the only choice. One line on the context
+puts every group the server creates onto a fixed set of threads instead:
+
+```rust
+let context = MatrixRaftGroupContextBuilder::new()
+    .transport(transport)
+    .tick_interval(10)
+    .worker_num(8)          // shards, and so the tick capacity
+    .shared_runtime(true)
+    .build()?;
+```
+
+Measured with `examples/idle_tick_cost.rs` on a 16-core Linux box, release build,
+one shard per 512 groups, every group a live single voter holding its own
+leadership, three repeats:
+
+| groups | threads | cores | ticks delivered | resident | per group |
+|---|---|---|---|---|---|
+| 1024 | 9 | 0.18–0.23 | ~100% | 25 MiB | 23 KiB |
+| 4096 | 17 | 0.77-0.93 | 100.0% | 89 MiB | 21 KiB |
+| 16384 | 65 | 3.4–4.2 | ~100% | 342 MiB | 21 KiB |
+
+Sixteen thousand groups on four cores, at every tick the interval asked for, with
+`2 * worker_num + 1` threads rather than one per group.
+
+The box was carrying other work throughout -- about two of its sixteen cores --
+so the cores column is a range and a quiet machine should read at or below it.
+The probe takes its own CPU time from `/proc/self/stat`, so other processes
+cannot be charged to it, but they do compete for cache and for scheduling.
+
+What it costs to bring such a store up and take it down, same runs:
+
+| groups | creating | starting | tearing down |
+|---|---|---|---|
+| 1024 | 0.26s | 0.02s | 0.02s |
+| 4096 | 0.56–0.66s | 0.07s | 0.08–0.10s |
+| 16384 | 2.4–3.5s | 0.49–0.56s | 0.48–0.56s |
+
+Creating the groups is the larger part, about 0.16ms each, and it does not
+parallelise: every group opens its own WAL and writes a first segment, in
+sequence.
+
+Four things worth knowing before sizing a host:
+
+- **One file descriptor per group, exactly.** 16,388 held at the peak of a
+  16,384-group run — the groups plus the four a process starts with. Raise
+  `RLIMIT_NOFILE` above the group count; 16,384 groups under a 10,240 limit fails
+  on `PersistentRaftWal::open`, and the error says so.
+- **A tick costs about 3µs and the group count drops out of it.** Cores run
+  roughly `0.2 + 3µs × groups × 1000/tick_interval_ms`, measured across a
+  sixteen-fold range of group counts on one box. On a debug build it is about
+  double, so measure the profile you will run.
+- **`worker_num` is the shard count, and shards are the tick capacity.** It reads
+  like a count of workers; the worker pool is not what limits the tick rate.
+- **Watch `SharedRuntimeStats::ticks_skipped`, not `ticks_handed_over`.** A ticker
+  that is merely too slow hands nothing over, because a hand-off only happens
+  when a group's lock is held — `ticks_handed_over` sat at 0.0% through a 58%
+  tick shortfall. `ticks_skipped` counts the ticks the schedule owed and did not
+  deliver.
+
+There is also a floor on `tick_interval_ms` that is not the 1ms `validate`
+accepts: the ticker advances its clock after a 1ms sleep, and `thread::sleep`
+guarantees at least the duration asked for, so a 1ms interval delivers about half
+the ticks it asks for. 10ms is held in full at every size above.
+
+Run it on your own hardware:
+
+```bash
+cargo run --release --example idle_tick_cost -- 4096 10 3 live 8
+```
+
+`live` runs one row in one process, which is the only way the resident figure
+divides by the group count and means anything.
 
 ### One setting the server does apply: the tick
 

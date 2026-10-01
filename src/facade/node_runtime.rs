@@ -2411,35 +2411,43 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 ///
 /// # What it costs to bring a store up, and where it stops keeping up
 ///
-/// Measured on a 16-core box at a 10ms interval, one shard per 512 groups,
-/// every group a live single voter:
+/// Measured on a 16-core box at a 10ms interval, one shard per 512 groups, every
+/// group a live single voter, **release build**, three repeats:
 ///
-/// | groups | shards | cores | ticks delivered | creating | starting |
-/// |---|---|---|---|---|---|
-/// | 1024 | 4 | 0.61 | 97.9% | 1.97s | 0.11s |
-/// | 4096 | 8 | 2.81 | 99.9% | 7.08s | 0.43s |
-/// | 8192 | 16 | 7.04 | 100.3% | 16.93s | 1.24s |
-/// | 16384 | 32 | 13.68 | 79.2% | 35.00s | 7.34s |
+/// | groups | shards | cores | ticks delivered | creating | starting | tearing down |
+/// |---|---|---|---|---|---|---|
+/// | 1024 | 4 | 0.18-0.23 | ~100% | 0.26s | 0.02s | 0.02s |
+/// | 4096 | 8 | 0.77 | 100.0% | 0.56-0.66s | 0.07s | 0.08-0.10s |
+/// | 16384 | 32 | 3.4-4.2 | ~100% | 2.4-3.5s | 0.49-0.56s | 0.48-0.56s |
 ///
-/// Two things to take from it.
+/// **The profile matters, and it was missed the first time this table was
+/// written.** Every figure here was first measured on a debug build and published
+/// without saying so. For the same rows debug reads 0.61, 2.81 and 13.68 cores,
+/// and at 16,384 groups it delivers only 79% of the ticks -- which this note then
+/// reported as sixteen thousand groups not fitting on sixteen cores. In release
+/// it fits with four fifths of the box to spare. What does *not* move with the
+/// profile is memory per group, descriptors per group, and the lifecycle timings
+/// below: those are bound by io and by round trips rather than by generated code.
 ///
-/// **Creating the groups is the larger half of starting up, by five to eighteen
-/// times.** It is about 2ms a group and it does not parallelise: each group
-/// opens its own WAL, writes a first segment and fsyncs it, in sequence. Ten
-/// thousand groups is half a minute before anything has started. `start_all` is
-/// the smaller half and was the only half reported.
+/// **Creating the groups is the larger half of starting up.** About 0.16ms a
+/// group, and it does not parallelise: each group opens its own WAL and writes a
+/// first segment, in sequence. It used to fsync that empty segment as well, which
+/// cost 2ms a group -- 35s for 16,384 of them -- until that was removed.
+/// `start_all` and teardown were each a serial round trip per group until they
+/// were pipelined.
 ///
-/// **Eight thousand groups at a 10ms interval is served in full on sixteen
-/// cores; sixteen thousand is not.** Past that the box runs out of cores rather
-/// than the runtime running out of anything, and adding shards makes it worse:
-/// 16,384 groups delivered 82.1% on 16 shards and 79.2% on 32, where the second
-/// is 65 threads on 16 cores. Shards up to about the core count, not beyond.
+/// **Sixteen thousand groups at a 10ms interval is served in full on sixteen
+/// cores**, at three to four of them. Where a box does run out of cores the
+/// shortfall shows up in `ticks_skipped` and in the `kept up` column of
+/// `examples/idle_tick_cost.rs`.
 ///
 /// # How much memory a group costs
 ///
 /// About **21 KiB of resident memory per group**, and it is flat as the group
-/// count grows: 90 MiB for 4096 groups and 342 MiB for 16,384, both measured
-/// with the measuring binary's own 13 MiB taken off. A hundred thousand groups
+/// count grows: 89 MiB for 4096 groups and 341 MiB for 16,384, both measured with
+/// the measuring binary's own resident size taken off. The same in debug and in
+/// release, within a kilobyte a group -- an allocation is the size it is
+/// whichever profile asked for it. A hundred thousand groups
 /// is a little over 2 GiB for the groups themselves.
 ///
 /// Measure it with `examples/idle_tick_cost.rs` under `arm=live`, which runs one
@@ -2457,43 +2465,43 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// the group count and the total tick rate together, because the interval was
 /// the same in all of them.
 ///
-/// Holding the group count at 16,384, so the working set stays at 342 MiB, and
-/// lowering the rate instead:
+/// Holding the group count at 16,384, so the working set stays at 341 MiB, and
+/// lowering the rate instead -- **release build**, two repeats:
 ///
 /// | interval | delivered ticks/sec | cores |
 /// |---|---|---|
-/// | 100ms | 164,004 | 1.32 |
-/// | 50ms | 327,680 | 2.30 |
-/// | 25ms | 655,360 | 4.54 |
-/// | 10ms | 1,376,256 | 13.88 |
+/// | 100ms | 164,004 | 0.68 / 0.92 |
+/// | 50ms | 327,680 | 1.41 / 1.12 |
+/// | 25ms | 655,360 | 2.00 / 2.27 |
+/// | 10ms | ~1,638,000 | 5.12 / 4.83 |
 ///
 /// The marginal cost of a tick, taken between two rates at one group count so
-/// the fixed cost cancels:
+/// the fixed cost cancels, is **2.7 to 3.0us**: 2.70 and 2.75us over 100ms to
+/// 25ms, 3.02 and 2.65us over 100ms to 10ms. The same arithmetic on a debug build
+/// gives 5.3 to 6.6us, roughly double, and that is what this note reported first
+/// without saying which profile it had measured.
 ///
-/// | groups | rates | per tick |
-/// |---|---|---|
-/// | 1024 | 100ms to 10ms | 5.40us |
-/// | 4096 | 100ms to 10ms | 5.34us |
-/// | 16384 | 100ms to 50ms | 5.95us |
-/// | 16384 | 100ms to 25ms | 6.55us |
-/// | 16384 | 25ms to 10ms | 12.96us |
+/// The group count drops out of it either way. Debug figures, over a sixteen-fold
+/// range of group counts: 5.40us at 1024 groups, 5.34us at 4096, 5.95us at
+/// 16,384.
 ///
-/// A tick costs **about 5.4 to 6.6us, and the group count drops out of it** over
-/// a sixteen-fold range. The same 342 MiB working set costs 6.55us a tick at
-/// 25ms and 12.96us at 10ms, which is what rules the cache out: the memory did
-/// not change between those two rows, and the box went from a third loaded to
-/// 13.9 of its 16 cores. The last row is saturation, not a property of the
-/// runtime.
+/// Debug had one row that did not fit that -- 12.96us between 25ms and 10ms at
+/// 16,384 groups -- and it was worth understanding rather than averaging away.
+/// The memory is identical in both of those rows and the box went from a third
+/// loaded to 13.9 of its 16 cores, so it was saturation and not the working set.
+/// In release the row does not appear at all: 10ms at 16,384 groups is served in
+/// full.
 ///
-/// On top of that there is a fixed cost that is not per tick at all: 33 threads
-/// with almost nothing to do -- 64 groups on a 1-second interval -- burn 0.156
-/// cores. It is the tickers' own millisecond wake-up, so it scales with the
-/// shard count and not with the groups.
+/// On top of the per-tick cost there is a fixed cost that is not per tick at all.
+/// 33 threads with almost nothing to do -- 64 groups on a one-second interval --
+/// burn 0.196 cores in release and 0.156 in debug. That is the tickers waking
+/// every millisecond, a sleep rather than work, so the profile barely touches it
+/// and it follows the shard count rather than the group count.
 ///
-/// So, for sizing: **cores is roughly 0.16 plus 6us per thousand ticks a
-/// millisecond** -- groups times 1000/`tick_interval_ms` ticks a second -- until
-/// the box passes about 80% busy, where the figure stops holding. That is a fit
-/// over the rows above on one 16-core box, not a law.
+/// So, for sizing a release build: **cores is roughly 0.2 plus 3us per thousand
+/// ticks a millisecond** -- groups times 1000/`tick_interval_ms` ticks a second.
+/// That is a fit over the rows above, on one 16-core box that was carrying other
+/// work at the time, and it stops holding as a box approaches full.
 ///
 /// # The next limit is file descriptors, not this runtime
 ///
