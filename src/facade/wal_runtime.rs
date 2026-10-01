@@ -1022,18 +1022,93 @@ fn wal_segment_index(dir: &Path, segments: &[WalSegment]) -> Vec<WalSegmentIndex
         .collect()
 }
 
+/// Turns a WAL file error into a `RaftError`, saying what descriptor
+/// exhaustion means to a store that hosts many groups.
+///
+/// Every group holds its own WAL open, so a process pays about one file
+/// descriptor per group and meets `EMFILE` on an ordinary open once it passes
+/// `RLIMIT_NOFILE`. The OS message -- "Too many open files" -- is true and
+/// unhelpful: it names the symptom, on whichever group happened to be the one
+/// over the line, and says nothing about the group count being the cause.
+/// Measured before this existed: 300 groups under a 150-descriptor limit fail
+/// with `failed to read WAL directory: Too many open files (os error 24)`,
+/// which is all a host was given.
+///
+/// Nothing is read from `/proc` to enrich it. The soft limit and the current
+/// descriptor count both sit behind an `open`, so the clause that would want
+/// them is exactly the one that could never obtain them.
+fn wal_file_error(context: &str, err: &std::io::Error) -> RaftError {
+    // EMFILE (this process is out of descriptors) and ENFILE (the host is).
+    // Matched on the raw code because `io::ErrorKind` has no stable variant
+    // for either.
+    if !matches!(err.raw_os_error(), Some(23) | Some(24)) {
+        return RaftError::Storage(format!("{context}: {err}"));
+    }
+    RaftError::Storage(format!(
+        "{context}: {err}. Every raft group holds its own WAL open, so this          process pays about one file descriptor per group: raise RLIMIT_NOFILE          above the number of groups it hosts."
+    ))
+}
+
+#[cfg(test)]
+mod wal_file_error_tests {
+    // This file is `include!`d into the crate root, so it carries no imports of
+    // its own: the names it uses are the including file's. A nested module is
+    // the one place that stops being true.
+    use super::RaftError;
+
+    #[test]
+    fn an_ordinary_io_error_keeps_its_own_message() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let RaftError::Storage(message) = super::wal_file_error("failed to open WAL segment", &err)
+        else {
+            panic!("expected a storage error");
+        };
+        assert_eq!(message, "failed to open WAL segment: no such file");
+        // The explanation is for descriptor exhaustion only. Without this the
+        // integration test would pass against a suffix glued on every error.
+        assert!(
+            !message.contains("file descriptor per group"),
+            "an unrelated error was given the descriptor explanation: {message}"
+        );
+    }
+
+    #[test]
+    fn descriptor_exhaustion_names_the_group_count_as_the_cause() {
+        for code in [23, 24] {
+            let err = std::io::Error::from_raw_os_error(code);
+            let RaftError::Storage(message) =
+                super::wal_file_error("failed to read WAL directory", &err)
+            else {
+                panic!("expected a storage error");
+            };
+            assert!(
+                message.starts_with("failed to read WAL directory: "),
+                "os error {code} lost its context: {message}"
+            );
+            assert!(
+                message.contains("one file descriptor per group"),
+                "os error {code} was not explained: {message}"
+            );
+            assert!(
+                message.contains("RLIMIT_NOFILE"),
+                "os error {code} does not name the knob: {message}"
+            );
+        }
+    }
+}
+
 fn open_segment_for_append(dir: &Path, segment_id: u64) -> Result<File, RaftError> {
     OpenOptions::new()
         .create(true)
         .append(true)
         .read(true)
         .open(wal_segment_path(dir, segment_id))
-        .map_err(|err| RaftError::Storage(format!("failed to open WAL segment: {err}")))
+        .map_err(|err| wal_file_error("failed to open WAL segment", &err))
 }
 
 fn write_wal_segment_file(dir: &Path, segment: &WalSegment) -> Result<(), RaftError> {
     let mut file = File::create(wal_segment_path(dir, segment.segment_id))
-        .map_err(|err| RaftError::Storage(format!("failed to create WAL segment: {err}")))?;
+        .map_err(|err| wal_file_error("failed to create WAL segment", &err))?;
     for record in &segment.records {
         let encoded = serde_json::to_string(record)
             .map_err(|err| RaftError::Storage(format!("failed to encode WAL segment: {err}")))?;
@@ -1047,7 +1122,7 @@ fn write_wal_segment_file(dir: &Path, segment: &WalSegment) -> Result<(), RaftEr
 
 fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<WalSegment>, bool), RaftError> {
     let mut files = fs::read_dir(dir)
-        .map_err(|err| RaftError::Storage(format!("failed to read WAL directory: {err}")))?
+        .map_err(|err| wal_file_error("failed to read WAL directory", &err))?
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             let path = entry.path();
@@ -1083,7 +1158,7 @@ fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<WalSegment>, bool), Raf
 
 fn read_wal_segment_file(path: &Path) -> Result<(Vec<WalRecord>, bool), RaftError> {
     let file = File::open(path)
-        .map_err(|err| RaftError::Storage(format!("failed to open WAL segment: {err}")))?;
+        .map_err(|err| wal_file_error("failed to open WAL segment", &err))?;
     let reader = BufReader::new(file);
     let mut records = Vec::new();
     let mut valid_end_offset = 0u64;
@@ -1116,7 +1191,7 @@ fn read_wal_segment_file(path: &Path) -> Result<(Vec<WalRecord>, bool), RaftErro
         let file = OpenOptions::new()
             .write(true)
             .open(path)
-            .map_err(|err| RaftError::Storage(format!("failed to reopen WAL segment: {err}")))?;
+            .map_err(|err| wal_file_error("failed to reopen WAL segment", &err))?;
         file.set_len(valid_end_offset)
             .map_err(|err| RaftError::Storage(format!("failed to truncate WAL segment: {err}")))?;
         file.sync_data()
