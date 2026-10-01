@@ -1022,7 +1022,8 @@ mod tests {
         assert_eq!(
             inner.ticks_skipped.load(Ordering::Relaxed),
             10,
-            "20ms at a 1ms interval owes twenty ticks and delivered ten, so ten              are missing: the counter says {}",
+            "20ms at a 1ms interval owes twenty ticks and delivered ten, so ten \
+             are missing: the counter says {}",
             inner.ticks_skipped.load(Ordering::Relaxed)
         );
         // Not a dropped tick: nothing was unregistered.
