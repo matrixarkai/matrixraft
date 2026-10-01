@@ -2646,10 +2646,12 @@ pub struct MatrixRaftGroupContext {
     ///
     /// **Size `worker_num` with it.** It sets the shard count, and the shards
     /// carry the ticking. Measured at a 10ms interval with every group a live
-    /// leader: 1024 groups on 4 shards and 4096 on 8 both deliver 100% of
-    /// their ticks, while 4096 on 4 never finished starting. Too few does not
-    /// fail loudly -- the groups simply tick more slowly than configured, and
-    /// leases are counted in those ticks. See [`SharedGroupRuntime`].
+    /// leader, every size from 1024 groups on 4 shards up to 4096 on 8
+    /// delivers 100% of its ticks, with cores rising linearly and no sign of
+    /// a ceiling. Too few does not fail loudly -- the groups simply tick more
+    /// slowly than configured, and leases are counted in those ticks. See
+    /// [`SharedGroupRuntime`], which also records what is still unexplained
+    /// at 1024 live groups per shard.
     pub shared_runtime: bool,
     pub transport: Option<MatrixRaftTransportOptions>,
     pub node_creators: Vec<MatrixRaftNodeCreator>,

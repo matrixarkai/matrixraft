@@ -263,7 +263,7 @@ struct ThreadEach {
     /// Ticks delivered as a share of the interval's rate, over a sample of
     /// groups, or `None` when the groups were never started and so were
     /// never meant to tick.
-    kept_up: Option<f64>,
+    kept_up: Option<(f64, usize, usize)>,
     /// Share of ticks the tickers could not run in place and handed to a
     /// worker, for the hosted arms.
     ///
@@ -282,6 +282,7 @@ struct ThreadEach {
     /// definition; on the live arm anything short of every group means the
     /// sample is of groups still campaigning, not of a steady state.
     with_a_leader: u64,
+    leaders_asked: u64,
 }
 
 fn hosted(
@@ -345,17 +346,30 @@ fn hosted(
         .map(|n| 1 + n * (groups / 64).max(1))
         .filter(|group_id| *group_id <= groups)
         .collect();
-    let ticks_of = |server: &MatrixRaftMultiRaftServer| -> u64 {
-        watched
-            .iter()
-            .filter_map(|group_id| {
-                server
-                    .node(*group_id, 1)
-                    .and_then(|node| node.runtime_status())
-                    .ok()
-            })
-            .map(|status| status.timer_status.heartbeat_ticks)
-            .sum()
+    // Answers a sum and how many groups actually answered.
+    //
+    // Time-boxed, because `NodeRuntime::status` waits up to five seconds and
+    // sixty-four unanswered ones is five minutes of apparent hang. A run
+    // that did exactly that was read as a runtime unable to host the groups,
+    // and that reading reached the sizing note before a backtrace showed the
+    // groups were all up and it was this sampling that had stalled.
+    let ticks_of = |server: &MatrixRaftMultiRaftServer| -> (u64, usize) {
+        let give_up_at = Instant::now() + Duration::from_secs(10);
+        let mut total = 0;
+        let mut answered = 0;
+        for group_id in &watched {
+            if Instant::now() >= give_up_at {
+                break;
+            }
+            if let Ok(status) = server
+                .node(*group_id, 1)
+                .and_then(|node| node.runtime_status())
+            {
+                total += status.timer_status.heartbeat_ticks;
+                answered += 1;
+            }
+        }
+        (total, answered)
     };
 
     // After `open_window`, not before: it sleeps to let construction settle
@@ -363,20 +377,22 @@ fn hosted(
     // that settle in the ticks and not in the span, which is how this came
     // out at 117% of a rate nothing can exceed.
     let close_window = open_window(seconds);
-    let ticks_before = if live { ticks_of(&server) } else { 0 };
+    let (ticks_before, answered_before) = if live { ticks_of(&server) } else { (0, 0) };
     let tick_window = Instant::now();
     let sample = close_window();
-    let delivered = if live {
-        ticks_of(&server).saturating_sub(ticks_before)
-    } else {
-        0
-    };
+    let (ticks_after, answered_after) = if live { ticks_of(&server) } else { (0, 0) };
+    let delivered = ticks_after.saturating_sub(ticks_before);
+    // Only the groups that answered both times are comparable.
+    let answered = answered_before.min(answered_after);
     // Taken after the closing read, so the round trips it costs sit inside
     // the span they are counted against rather than inflating the rate.
     let watched_for = tick_window.elapsed().as_secs_f64();
     let kept_up = live.then(|| {
-        let wanted = watched.len() as f64 * watched_for * 1000.0 / interval_ms as f64;
-        delivered as f64 / wanted.max(1.0)
+        // Divided by what answered, not by what was asked: a group that did
+        // not answer contributed no ticks either, and counting it would
+        // report a shortfall that is the sampling's and not the runtime's.
+        let wanted = answered as f64 * watched_for * 1000.0 / interval_ms as f64;
+        (delivered as f64 / wanted.max(1.0), answered, watched.len())
     });
     let handed_over = match (handover_before, server.shared_stats()) {
         (Some(before), Some(after)) => {
@@ -391,14 +407,27 @@ fn hosted(
     };
     // Asked after the window closes: each call is a round trip to that
     // group's own thread, which would otherwise be measured as its cost.
-    let with_a_leader = (1..=groups)
-        .filter(|group_id| {
-            matches!(
-                server.node(*group_id, 1).and_then(|node| node.leader()),
-                Ok(Some(_))
-            )
-        })
-        .count() as u64;
+    //
+    // Sampled, and time-boxed, for the same reason as the tick count above:
+    // sweeping every group means one round trip each, `NodeRuntime::leader`
+    // waits up to five seconds, and a few thousand of those is an hour of
+    // apparent hang. This is a control -- it only has to show the groups
+    // reached leadership -- and a sample shows that as well as a sweep.
+    let leader_deadline = Instant::now() + Duration::from_secs(10);
+    let mut with_a_leader = 0_u64;
+    let mut leaders_asked = 0_u64;
+    for group_id in &watched {
+        if Instant::now() >= leader_deadline {
+            break;
+        }
+        leaders_asked += 1;
+        if matches!(
+            server.node(*group_id, 1).and_then(|node| node.leader()),
+            Ok(Some(_))
+        ) {
+            with_a_leader += 1;
+        }
+    }
     // Held until here on purpose: the groups must be alive for the whole
     // window or the arm measures their teardown.
     drop(server);
@@ -408,6 +437,7 @@ fn hosted(
         handed_over,
         started_in,
         with_a_leader,
+        leaders_asked,
     }
 }
 
@@ -531,7 +561,12 @@ fn main() {
                 seen.sample.threads,
                 seen.with_a_leader,
                 match seen.kept_up {
-                    Some(share) => format!("{:.1}%", share * 100.0),
+                    // `(n/m)` when some groups did not answer in time, so a
+                    // thin sample is never mistaken for a confident number.
+                    Some((share, answered, asked)) if answered < asked => {
+                        format!("{:.0}%({answered}/{asked})", share * 100.0)
+                    }
+                    Some((share, _, _)) => format!("{:.1}%", share * 100.0),
                     None => "-".to_string(),
                 },
                 match seen.handed_over {
@@ -543,7 +578,15 @@ fn main() {
                     None => "-".to_string(),
                 }
             );
-            if let Some(share) = seen.kept_up {
+            if let Some((share, answered, asked)) = seen.kept_up {
+                if answered < asked {
+                    println!(
+                        "  {:>21}  only {answered} of {asked} sampled groups answered \
+                         within the time allowed, so `kept up` is from a thin sample \
+                         -- the slow part is answering, not ticking",
+                        "NOTE"
+                    );
+                }
                 if share < 0.95 {
                     println!(
                         "  {:>21}  delivered {:.1}% of the ticks the interval asks \
@@ -553,11 +596,11 @@ fn main() {
                     );
                 }
             }
-            if live && seen.with_a_leader < groups {
+            if live && seen.with_a_leader < seen.leaders_asked {
                 println!(
-                    "  {:>21}  only {} of {groups} groups reached leadership, so this row is \
+                    "  {:>21}  only {} of {} sampled groups reached leadership, so this row is \
                      groups still campaigning rather than a steady state",
-                    "WARNING", seen.with_a_leader
+                    "WARNING", seen.with_a_leader, seen.leaders_asked
                 );
             }
             let _ = std::fs::remove_dir_all(&root);

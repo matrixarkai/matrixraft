@@ -297,3 +297,81 @@ fn mail_arriving_while_a_slow_handler_runs_is_not_lost() {
         sent - total()
     );
 }
+
+/// Blocks until the test lets go, so mail stays queued.
+#[derive(Debug)]
+struct Blocking {
+    gate: Arc<Mutex<()>>,
+}
+
+impl DriverMailHandler<u64> for Blocking {
+    fn handle_mail(&self, _mails: Vec<u64>) {
+        let _held = self
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+}
+
+#[test]
+fn many_groups_on_one_worker_can_each_hold_one_mail() {
+    // `MailChannel::overflow` compares a SELECTOR-WIDE mail count against a
+    // PER-CHANNEL limit:
+    //
+    //     inner.selector_total_mail_count as usize > self.num_mail_limit
+    //
+    // so a selector carrying more groups than `max_queue_depth` starts
+    // refusing sends for every group on it, however empty that group's own
+    // channel is. With the default depth of 1024 that is 1024 groups on one
+    // worker -- and `DriverWorkerPool::send` drops the refusal, so the group
+    // is never woken.
+    //
+    // It matches every size measured: 3072 groups on 4 shards (768 each)
+    // works, 4096 on 4 (1024 each) does not, 4096 on 8 (512 each) works,
+    // 8192 on 8 (1024 each) does not.
+    //
+    // One worker and a depth of 8 here, so the shape shows at a size a test
+    // can run: nine groups, one mail each, none of them anywhere near their
+    // own limit.
+    let depth = 8;
+    let groups = (depth + 1) as u64;
+    let pool: DriverWorkerPool<u64> = DriverWorkerPool::start(DriverOptions {
+        worker_num: 1,
+        max_queue_depth: depth,
+        ..DriverOptions::default()
+    })
+    .expect("pool");
+
+    // A handler that never finishes, so nothing is drained and the mails
+    // stay queued. Otherwise a worker empties them faster than they arrive
+    // and the selector-wide count never builds up.
+    let gate = Arc::new(Mutex::new(()));
+    let held = gate.lock().expect("gate");
+    let blocked = Arc::new(Blocking {
+        gate: Arc::clone(&gate),
+    });
+    for group_id in 1..=groups {
+        pool.register_group(
+            DriverGroupKey::new(group_id, 1),
+            Arc::clone(&blocked) as Arc<dyn DriverMailHandler<u64>>,
+        )
+        .expect("register");
+    }
+
+    let mut refused = Vec::new();
+    for group_id in 1..=groups {
+        let key = DriverGroupKey::new(group_id, 1);
+        if pool.send(key, MailPriority::Normal, group_id).is_err() {
+            refused.push(group_id);
+        }
+    }
+    drop(held);
+
+    assert!(
+        refused.is_empty(),
+        "with a queue depth of {depth}, {} of {groups} groups were refused their \
+         FIRST mail ({refused:?}). A group's depth is its own, so a selector \
+         holding many groups must not start refusing them all.",
+        refused.len()
+    );
+}
