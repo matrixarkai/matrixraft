@@ -2352,11 +2352,52 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// the kernel, so the figure reads as the high-water mark of the run instead of
 /// the cost of the store being measured.
 ///
-/// One observation this makes, offered as an observation: the cost of a
-/// delivered tick is not flat as groups multiply -- 6.1us at 1024 groups, 6.9us
-/// at 4096, about 10.4us at 16,384. A 342 MiB working set is far past any cache
-/// on this box, which is consistent with that, but nothing here has measured a
-/// cache miss, so it is not a cause.
+/// # What a tick costs, and what the group count has to do with it
+///
+/// The note here used to say the cost of a delivered tick grows as groups
+/// multiply -- 6.1us at 1024, 6.9us at 4096, 10.4us at 16,384 -- and that a
+/// 342 MiB working set past every cache was consistent with it. **It was a
+/// confound, and separating it refutes that reading.** Those three runs changed
+/// the group count and the total tick rate together, because the interval was
+/// the same in all of them.
+///
+/// Holding the group count at 16,384, so the working set stays at 342 MiB, and
+/// lowering the rate instead:
+///
+/// | interval | delivered ticks/sec | cores |
+/// |---|---|---|
+/// | 100ms | 164,004 | 1.32 |
+/// | 50ms | 327,680 | 2.30 |
+/// | 25ms | 655,360 | 4.54 |
+/// | 10ms | 1,376,256 | 13.88 |
+///
+/// The marginal cost of a tick, taken between two rates at one group count so
+/// the fixed cost cancels:
+///
+/// | groups | rates | per tick |
+/// |---|---|---|
+/// | 1024 | 100ms to 10ms | 5.40us |
+/// | 4096 | 100ms to 10ms | 5.34us |
+/// | 16384 | 100ms to 50ms | 5.95us |
+/// | 16384 | 100ms to 25ms | 6.55us |
+/// | 16384 | 25ms to 10ms | 12.96us |
+///
+/// A tick costs **about 5.4 to 6.6us, and the group count drops out of it** over
+/// a sixteen-fold range. The same 342 MiB working set costs 6.55us a tick at
+/// 25ms and 12.96us at 10ms, which is what rules the cache out: the memory did
+/// not change between those two rows, and the box went from a third loaded to
+/// 13.9 of its 16 cores. The last row is saturation, not a property of the
+/// runtime.
+///
+/// On top of that there is a fixed cost that is not per tick at all: 33 threads
+/// with almost nothing to do -- 64 groups on a 1-second interval -- burn 0.156
+/// cores. It is the tickers' own millisecond wake-up, so it scales with the
+/// shard count and not with the groups.
+///
+/// So, for sizing: **cores is roughly 0.16 plus 6us per thousand ticks a
+/// millisecond** -- groups times 1000/`tick_interval_ms` ticks a second -- until
+/// the box passes about 80% busy, where the figure stops holding. That is a fit
+/// over the rows above on one 16-core box, not a law.
 ///
 /// # The next limit is file descriptors, not this runtime
 ///
