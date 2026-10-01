@@ -1031,3 +1031,213 @@ fn a_fresh_wal_can_lose_its_empty_segment_and_still_be_opened() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Copies a WAL directory's segment files, so two open routes can be run against
+/// identical bytes rather than against each other's leftovers.
+fn copy_wal_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("copy target");
+    for entry in fs::read_dir(from).expect("read source") {
+        let entry = entry.expect("entry");
+        if entry.file_type().expect("file type").is_file() {
+            fs::copy(entry.path(), to.join(entry.file_name())).expect("copy segment");
+        }
+    }
+}
+
+/// Breaks one record's checksum in place, leaving the line valid JSON.
+///
+/// A different kind of damage from `corrupt_tail_for_test`, which appends
+/// unparseable garbage: that is discarded as an unreadable tail and the records
+/// before it all still count, so it never makes `removed_records` non-zero. A
+/// record that parses and then fails its checksum does, and without a state like
+/// this the comparison below cannot tell `removed_records` from a constant zero --
+/// which is how it was first written, and a mutation planting exactly that survived.
+fn break_checksum_of_record(dir: &Path, segment_id: u64, record_index: usize) {
+    let path = dir.join(format!("{segment_id:020}.wal"));
+    let text = fs::read_to_string(&path).expect("read the segment");
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    assert!(
+        record_index < lines.len(),
+        "segment {segment_id} holds {} records, so there is no record {record_index}          to damage and this state would silently be the undamaged one",
+        lines.len()
+    );
+    let line = &mut lines[record_index];
+    let marker = "\"checksum\":\"";
+    let start = line.find(marker).expect("a checksum field") + marker.len();
+    let end = start
+        + line[start..]
+            .find('"')
+            .expect("the checksum's closing quote");
+    line.replace_range(start..end, "not-the-right-checksum");
+    fs::write(
+        &path,
+        format!(
+            "{}
+",
+            lines.join(
+                "
+"
+            )
+        ),
+    )
+    .expect("write the segment back");
+}
+
+/// `open` then `recover` against `open_recovered`, on the same bytes.
+///
+/// `open_recovered` exists because the two-call route read the segment directory,
+/// chose the active segment and opened it for appending twice over -- `recover`
+/// repeated every step `open` had just taken. Creating a group is system time
+/// rather than computation, so that second pass is the cost, and at tens of
+/// thousands of groups it is most of a bring-up.
+///
+/// The risk in removing it is the version of this change that keeps both passes and
+/// skips the second one behind a flag: a flag saying "nothing to recover" is a
+/// silent loss the moment something fails to clear it. Doing the work once instead
+/// is checkable, which is what this does -- on a populated and a corrupted
+/// directory, not only on an empty one, because an empty one is the case where
+/// every route trivially agrees.
+fn assert_single_pass_agrees(label: &str, build: impl Fn(&mut PersistentRaftWal)) {
+    let source = temp_wal_dir(&format!("single-pass-source-{label}"));
+    {
+        let mut wal =
+            PersistentRaftWal::open(wal_options(source.clone())).expect("build the state");
+        build(&mut wal);
+    }
+
+    let two_dir = temp_wal_dir(&format!("single-pass-two-{label}"));
+    let one_dir = temp_wal_dir(&format!("single-pass-one-{label}"));
+    copy_wal_dir(&source, &two_dir);
+    copy_wal_dir(&source, &one_dir);
+
+    let mut two_pass = PersistentRaftWal::open(wal_options(two_dir.clone())).expect("open");
+    let two_report = two_pass.recover().expect("recover");
+    let (one_pass, one_report) =
+        PersistentRaftWal::open_recovered(wal_options(one_dir.clone())).expect("open_recovered");
+
+    assert_eq!(
+        one_report, two_report,
+        "{label}: one pass and two passes reported different recoveries"
+    );
+    // Compared through `Debug` rather than field by field, so a field added to the
+    // status later is covered without this test being edited to know about it.
+    assert_eq!(
+        format!("{:?}", one_pass.status()),
+        format!("{:?}", two_pass.status()),
+        "{label}: one pass and two passes left the WAL in different states"
+    );
+
+    for dir in [source, two_dir, one_dir] {
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn opening_a_wal_in_one_pass_recovers_what_two_passes_did() {
+    // `wal_options` rolls at two records a segment, so these span one partial
+    // segment, an exactly-full one, a rolled pair and several sealed ones.
+    assert_single_pass_agrees("empty", |_| {});
+    assert_single_pass_agrees("one-record", |wal| {
+        wal.append(wal_record(1)).expect("append 1");
+    });
+    assert_single_pass_agrees("full-segment", |wal| {
+        for index in 1..=2 {
+            wal.append(wal_record(index)).expect("append");
+        }
+    });
+    assert_single_pass_agrees("rolled", |wal| {
+        for index in 1..=3 {
+            wal.append(wal_record(index)).expect("append");
+        }
+    });
+    assert_single_pass_agrees("several-sealed", |wal| {
+        for index in 1..=7 {
+            wal.append(wal_record(index)).expect("append");
+        }
+    });
+    // The case the whole change has to survive: a tail that does not checksum, so
+    // the routes have to agree about what was thrown away as well as what was kept.
+    assert_single_pass_agrees("corrupt-tail", |wal| {
+        for index in 1..=2 {
+            wal.append(wal_record(index)).expect("append");
+        }
+        wal.corrupt_tail_for_test().expect("corrupt tail");
+    });
+    assert_single_pass_agrees("corrupt-tail-after-rolling", |wal| {
+        for index in 1..=5 {
+            wal.append(wal_record(index)).expect("append");
+        }
+        wal.corrupt_tail_for_test().expect("corrupt tail");
+    });
+    // And a record that parses but does not checksum, with good records after it,
+    // which is the only shape that makes anything count as removed.
+    assert_single_pass_agrees_after("broken-checksum-first-of-two", 3, |dir| {
+        break_checksum_of_record(dir, 0, 0);
+    });
+    assert_single_pass_agrees_after("broken-checksum-mid-segment", 5, |dir| {
+        break_checksum_of_record(dir, 1, 0);
+    });
+}
+
+/// As `assert_single_pass_agrees`, but the state is made by appending `records`
+/// and then damaging the closed files, which is the only way to reach a record
+/// that parses and fails its checksum.
+///
+/// Two things this deliberately does not try to pin, because in this path they
+/// cannot vary. `read_wal_segments_from_dir` prunes a record that fails its
+/// checksum before either route counts anything, and flags the tail -- so
+/// `original_len` never exceeds what survived and `removed_records` is always
+/// zero, while `stored` only ever holds records that already checksum. Planting
+/// `removed_records: 0` and `surviving_records = stored.len()` both survive this
+/// test, and they survive because they are equivalent on this path, not because
+/// nothing is looking: a third plant, taking the records from the
+/// sealed-and-released segments instead of as they were read, is caught. Do not
+/// chase the first two with a state where a pruned record still counts; there
+/// isn't one.
+fn assert_single_pass_agrees_after(label: &str, records: u64, damage: impl Fn(&Path)) {
+    let source = temp_wal_dir(&format!("single-pass-source-{label}"));
+    {
+        let mut wal =
+            PersistentRaftWal::open(wal_options(source.clone())).expect("build the state");
+        for index in 1..=records {
+            wal.append(wal_record(index)).expect("append");
+        }
+    }
+    damage(&source);
+
+    let two_dir = temp_wal_dir(&format!("single-pass-two-{label}"));
+    let one_dir = temp_wal_dir(&format!("single-pass-one-{label}"));
+    copy_wal_dir(&source, &two_dir);
+    copy_wal_dir(&source, &one_dir);
+
+    let mut two_pass = PersistentRaftWal::open(wal_options(two_dir.clone())).expect("open");
+    let two_report = two_pass.recover().expect("recover");
+    let (one_pass, one_report) =
+        PersistentRaftWal::open_recovered(wal_options(one_dir.clone())).expect("open_recovered");
+
+    assert_eq!(
+        one_report, two_report,
+        "{label}: one pass and two passes reported different recoveries"
+    );
+    assert_eq!(
+        format!("{:?}", one_pass.status()),
+        format!("{:?}", two_pass.status()),
+        "{label}: one pass and two passes left the WAL in different states"
+    );
+    // The state has to be the damaged one, or both routes agree about nothing. Two
+    // separate claims rather than one `||`: the tail flag alone would also be true
+    // for damage that cost no records, and a count alone says nothing about whether
+    // the reader noticed.
+    assert!(
+        one_report.truncated_corrupt_tail,
+        "{label}: no corrupt tail was seen, so the damage did not take and this is          the undamaged case under another name"
+    );
+    assert!(
+        one_report.surviving_records < records as usize,
+        "{label}: all {records} records survived, so the broken checksum cost          nothing and this state does not exercise recovery"
+    );
+
+    for dir in [source, two_dir, one_dir] {
+        let _ = fs::remove_dir_all(dir);
+    }
+}
