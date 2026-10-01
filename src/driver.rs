@@ -24,7 +24,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -34,7 +34,19 @@ use crate::{
 };
 
 /// The clock the ticker advances, in milliseconds per step.
+///
+/// Still the granularity of the logical clock. It is no longer how often the
+/// ticker wakes: the ticker waits until the earliest deadline in its heap, so a
+/// store on a 100ms interval wakes about ten times a second rather than a
+/// thousand.
 const DRIVER_CLOCK_STEP_MS: u64 = 1;
+
+/// Longest the ticker will wait, however far away the next deadline is.
+///
+/// A backstop, not the cadence. `exit` is read between waits and a registration
+/// notifies, so neither depends on this; it bounds how long a ticker with an
+/// empty heap can sit before noticing anything at all.
+const DRIVER_MAX_SLEEP_MS: u64 = 50;
 
 /// Which group a driver entry belongs to.
 ///
@@ -189,6 +201,10 @@ struct TickState {
 struct DriverInner {
     options: DriverOptions,
     state: Mutex<TickState>,
+    /// Wakes the ticker when the thing it is waiting for has changed: a group
+    /// registered with a deadline earlier than the one it went to sleep on, or
+    /// the driver shutting down.
+    wake: Condvar,
     exit: AtomicBool,
     ticks_fired: AtomicU64,
     ticks_dropped: AtomicU64,
@@ -196,6 +212,36 @@ struct DriverInner {
 }
 
 impl DriverInner {
+    /// Waits until the earliest deadline in the heap, or until something changes.
+    ///
+    /// The ticker used to sleep a flat `DRIVER_CLOCK_STEP_MS` and look again,
+    /// which is a thousand wake-ups a second per shard whatever the interval. On
+    /// a 100ms interval that is a hundred wake-ups for each one that had work,
+    /// and it was the larger part of what an idle store cost: 33 threads with
+    /// almost nothing due burned 0.196 cores doing this and nothing else.
+    ///
+    /// Taking the lock to read the next deadline and then handing that same guard
+    /// to `wait_timeout` is what makes it safe: a registration cannot slip
+    /// between the two and be missed, because it needs the lock to change the
+    /// heap and the notify happens under it.
+    fn wait_for_next_deadline(&self, now_ms: u64) {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+        let wait_ms = match state.queue.peek() {
+            // Already due: go round and fire it rather than sleeping on it.
+            Some(Reverse(next)) if next.at_ms <= now_ms => return,
+            Some(Reverse(next)) => (next.at_ms - now_ms).min(DRIVER_MAX_SLEEP_MS),
+            // Nothing registered yet. A registration will notify.
+            None => DRIVER_MAX_SLEEP_MS,
+        };
+        let _ = self.wake.wait_timeout(
+            state,
+            Duration::from_millis(wait_ms.max(DRIVER_CLOCK_STEP_MS)),
+        );
+    }
+
     /// Advances the clock to `now_ms`, then takes what is due, reschedules it,
     /// and fires it with the lock dropped.
     ///
@@ -284,6 +330,7 @@ impl Driver {
                 queue: BinaryHeap::new(),
                 groups: BTreeMap::new(),
             }),
+            wake: Condvar::new(),
             exit: AtomicBool::new(false),
             ticks_fired: AtomicU64::new(0),
             ticks_dropped: AtomicU64::new(0),
@@ -296,9 +343,11 @@ impl Driver {
             .spawn(move || {
                 let started = Instant::now();
                 while !ticker_inner.exit.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(DRIVER_CLOCK_STEP_MS));
-                    // Elapsed, not a count of iterations: see `advance_to`.
+                    // Elapsed, not a count of iterations: see `advance_to`. That
+                    // matters more now than it did, because the waits are no
+                    // longer uniform.
                     ticker_inner.advance_to(started.elapsed().as_millis() as u64);
+                    ticker_inner.wait_for_next_deadline(started.elapsed().as_millis() as u64);
                 }
             })
             .map_err(|err| RaftError::Transport(format!("failed to spawn driver ticker: {err}")))?;
@@ -358,6 +407,11 @@ impl Driver {
             },
         );
         state.queue.push(Reverse(Deadline { at_ms, key }));
+        // This may be earlier than the deadline the ticker went to sleep on, and
+        // nothing else would wake it in time. Dropped before the notify so the
+        // woken thread is not immediately blocked on the lock we still hold.
+        drop(state);
+        self.inner.wake.notify_all();
         Ok(())
     }
 
@@ -406,6 +460,9 @@ impl Driver {
 
     pub fn stop(&mut self) {
         self.inner.exit.store(true, Ordering::Relaxed);
+        // Without this the join waits for the ticker's current sleep to run out,
+        // which is now up to `DRIVER_MAX_SLEEP_MS` rather than a millisecond.
+        self.inner.wake.notify_all();
         if let Some(ticker) = self.ticker.take() {
             let _ = ticker.join();
         }
@@ -904,6 +961,7 @@ mod tests {
                 queue,
                 groups: registered,
             }),
+            wake: Condvar::new(),
             exit: AtomicBool::new(false),
             ticks_fired: AtomicU64::new(0),
             ticks_dropped: AtomicU64::new(0),
