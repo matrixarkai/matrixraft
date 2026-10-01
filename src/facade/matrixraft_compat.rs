@@ -3201,6 +3201,23 @@ impl MatrixRaftNode {
         self.runtime.restart()
     }
 
+    /// `start`, split so a caller with many nodes can send them all before
+    /// waiting on any. See `NodeRuntime::start_in_flight`.
+    fn start_in_flight(
+        &mut self,
+        start_index: LogIndex,
+    ) -> Result<mpsc::Receiver<Result<(), RaftError>>, RaftError> {
+        self.start_index = start_index;
+        self.runtime.start_in_flight()
+    }
+
+    fn finish_start(
+        &mut self,
+        reply_rx: mpsc::Receiver<Result<(), RaftError>>,
+    ) -> Result<(), RaftError> {
+        self.runtime.finish_start(reply_rx)
+    }
+
     pub fn stop(&mut self) -> Result<(), RaftError> {
         self.runtime.stop()
     }
@@ -26161,11 +26178,59 @@ impl MatrixRaftMultiRaftServer {
         self.plan_query_for_groups(group_ids, "sync_fsm_runtimes")
     }
 
+    /// Starts every group this server holds.
+    ///
+    /// Every command is sent before any reply is waited for. Waiting on each in
+    /// turn costs about 100us a group, flat from 1024 groups to 16,384, and
+    /// almost all of it is spent waiting while the pool's workers are idle --
+    /// 1.69s to start 16,384 groups, against 2.33s to create them.
+    ///
+    /// On a failure this still returns the first error, but it differs from the
+    /// one-at-a-time version in which groups are left started: every group is
+    /// sent its command, where before the ones after the failure were not. Both
+    /// leave a partly started server; this one leaves more of it started.
     pub fn start_all(&mut self, start_index: LogIndex) -> Result<(), RaftError> {
-        for node in self.nodes.values_mut() {
-            node.start(start_index)?;
+        // In batches, not all at once. One reply channel per group costs about
+        // 1.25 KiB while it is held -- 20 MiB at 16,384 groups, measured as a
+        // 342 to 362 MiB rise -- and a batch of this size already has sixty
+        // times more work outstanding than there are workers to take it, so
+        // holding every channel at once buys nothing for the memory.
+        const START_BATCH: usize = 1024;
+        let keys: Vec<MatrixRaftRouteKey> = self.nodes.keys().copied().collect();
+        let mut first_error = None;
+        for batch in keys.chunks(START_BATCH) {
+            let mut in_flight = Vec::with_capacity(batch.len());
+            for key in batch {
+                let Some(node) = self.nodes.get_mut(key) else {
+                    continue;
+                };
+                match node.start_in_flight(start_index) {
+                    Ok(reply_rx) => in_flight.push((*key, reply_rx)),
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+            // Keyed rather than zipped against a second iteration: the pairing
+            // is then the key itself and does not rest on two walks of the map
+            // producing the same order.
+            for (key, reply_rx) in in_flight {
+                let Some(node) = self.nodes.get_mut(&key) else {
+                    continue;
+                };
+                if let Err(error) = node.finish_start(reply_rx) {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     pub fn start_group(
