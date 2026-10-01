@@ -264,6 +264,20 @@ struct ThreadEach {
     /// groups, or `None` when the groups were never started and so were
     /// never meant to tick.
     kept_up: Option<f64>,
+    /// Share of ticks the tickers could not run in place and handed to a
+    /// worker, for the hosted arms.
+    ///
+    /// This is the early warning. It rises before `kept up` falls, because
+    /// a ticker that is merely close to its capacity still delivers every
+    /// tick -- it just pays a worker hand-off for more and more of them,
+    /// and each hand-off costs more than the tick it replaced.
+    handed_over: Option<f64>,
+    /// How long `start_all` took, for the arms that start.
+    ///
+    /// Measured because it is what actually gave way first: 4096 hosted
+    /// groups on four shards never finished starting, while the same groups
+    /// on eight started and then ticked at 100% for a fraction of a core.
+    started_in: Option<Duration>,
     /// How many groups actually hold leadership. Zero on the unstarted arm by
     /// definition; on the live arm anything short of every group means the
     /// sample is of groups still campaigning, not of a steady state.
@@ -317,9 +331,12 @@ fn hosted(
             )
             .expect("create node");
     }
-    if live {
+    let handover_before = server.shared_stats();
+    let started_in = live.then(|| {
+        let began = Instant::now();
         server.start_all(0).expect("start every group");
-    }
+        began.elapsed()
+    });
 
     // A spread of groups rather than all of them: a status is a round trip
     // through the runtime being measured, and asking thousands of times
@@ -361,6 +378,17 @@ fn hosted(
         let wanted = watched.len() as f64 * watched_for * 1000.0 / interval_ms as f64;
         delivered as f64 / wanted.max(1.0)
     });
+    let handed_over = match (handover_before, server.shared_stats()) {
+        (Some(before), Some(after)) => {
+            let handed = after
+                .ticks_handed_over
+                .saturating_sub(before.ticks_handed_over);
+            let in_place = after.ticks_in_place.saturating_sub(before.ticks_in_place);
+            let total = handed + in_place;
+            (total > 0).then(|| handed as f64 / total as f64)
+        }
+        _ => None,
+    };
     // Asked after the window closes: each call is a round trip to that
     // group's own thread, which would otherwise be measured as its cost.
     let with_a_leader = (1..=groups)
@@ -377,6 +405,8 @@ fn hosted(
     ThreadEach {
         sample,
         kept_up,
+        handed_over,
+        started_in,
         with_a_leader,
     }
 }
@@ -455,8 +485,16 @@ fn main() {
          groups are solo voters holding their own leadership\n"
     );
     println!(
-        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>9}  {:>8}",
-        "hosting", "groups", "cores", "switches/sec", "threads", "leaders", "kept up"
+        "  {:>21}  {:>8}  {:>12}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}",
+        "hosting",
+        "groups",
+        "cores",
+        "switches/sec",
+        "threads",
+        "leaders",
+        "kept up",
+        "handed",
+        "start"
     );
 
     let counts: Vec<u64> = match only {
@@ -485,7 +523,7 @@ fn main() {
             let root = probe_root();
             let seen = hosted(groups, interval_ms, seconds, live, shared, workers, &root);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}  {:>7}",
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}",
                 label,
                 groups,
                 seen.sample.cores,
@@ -494,6 +532,14 @@ fn main() {
                 seen.with_a_leader,
                 match seen.kept_up {
                     Some(share) => format!("{:.1}%", share * 100.0),
+                    None => "-".to_string(),
+                },
+                match seen.handed_over {
+                    Some(share) => format!("{:.1}%", share * 100.0),
+                    None => "-".to_string(),
+                },
+                match seen.started_in {
+                    Some(took) => format!("{:.2}s", took.as_secs_f64()),
                     None => "-".to_string(),
                 }
             );
@@ -519,8 +565,16 @@ fn main() {
         if arm != "facade" {
             let seen = shared_ticker(groups, interval_ms, seconds);
             println!(
-                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>9}  {:>8}",
-                "shared ticker", groups, seen.cores, seen.switches_per_sec, seen.threads, "-", "-"
+                "  {:>21}  {:>8}  {:>12.3}  {:>14.0}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}",
+                "shared ticker",
+                groups,
+                seen.cores,
+                seen.switches_per_sec,
+                seen.threads,
+                "-",
+                "-",
+                "-",
+                "-"
             );
         }
     }
