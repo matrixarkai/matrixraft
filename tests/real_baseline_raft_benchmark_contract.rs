@@ -3173,3 +3173,59 @@ fn a_sample_says_when_its_latencies_sat_on_the_timers_floor() {
     // put it far lower. The flag's claim is about the two percentiles it reads,
     // and the ceiling above; the equality was never part of it.
 }
+
+#[test]
+fn a_timed_sample_carries_nanoseconds_and_a_modelled_one_does_not() {
+    let options = BenchmarkOptions::default();
+    let mut runner = RuntimeBenchmarkRunner::new("release");
+    let sample = runner.run_workload(BenchmarkWorkload::ReadIndexReads, &options);
+
+    let p50_nanos = sample
+        .p50_latency_nanos
+        .expect("a sample that was really timed carries nanoseconds");
+    let p99_nanos = sample
+        .p99_latency_nanos
+        .expect("a sample that was really timed carries nanoseconds");
+    let total_nanos = sample
+        .total_duration_nanos
+        .expect("a sample that was really timed carries nanoseconds");
+
+    // The contract between the two units, which is what keeps every figure that
+    // was published before exactly where it was: the microsecond fields are the
+    // nanosecond ones truncated, which is what `as_micros` did when the recorder
+    // produced microseconds directly.
+    assert_eq!(
+        sample.p50_latency_micros,
+        (p50_nanos / 1_000).max(1),
+        "p50 in microseconds is not the nanosecond figure truncated"
+    );
+    assert_eq!(
+        sample.p99_latency_micros,
+        (p99_nanos / 1_000).max(1),
+        "p99 in microseconds is not the nanosecond figure truncated"
+    );
+    assert!(p50_nanos >= 1 && p50_nanos <= p99_nanos);
+    assert!(
+        total_nanos >= p99_nanos,
+        "the whole run cannot be shorter than its slowest iteration"
+    );
+
+    println!(
+        "  a read: p50 {p50_nanos}ns (reported as {}us), p99 {p99_nanos}ns (reported as {}us), on the floor: {}",
+        sample.p50_latency_micros,
+        sample.p99_latency_micros,
+        sample.latency_at_timer_resolution()
+    );
+
+    // And the reason the fields are optional. A modelled sample is generated in
+    // whole microseconds; giving it nanoseconds would be reporting its own
+    // rounding back as though it were a measurement.
+    let mut model = matrixraft::benchmark::SameMachineModelRunner::matrixraft_candidate();
+    let modelled = model.run_workload(BenchmarkWorkload::ReadIndexReads, &options);
+    assert!(
+        modelled.p50_latency_nanos.is_none()
+            && modelled.p99_latency_nanos.is_none()
+            && modelled.total_duration_nanos.is_none(),
+        "a modelled sample must not claim a precision it never had"
+    );
+}

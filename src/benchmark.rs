@@ -267,6 +267,19 @@ pub struct BenchmarkSample {
     pub operations_per_timed_iteration: usize,
     #[serde(default)]
     pub total_duration_micros: u64,
+    /// The same three figures in nanoseconds, for a sample that was really timed.
+    ///
+    /// A read is faster than the microsecond the fields above are recorded in, so
+    /// it lands on the floor: `latency_at_timer_resolution` exists to say when
+    /// that has happened, and these exist so there is something to read when it
+    /// has. `None` on a synthetic sample, which is generated in whole microseconds
+    /// and would only be reporting its own rounding back as precision.
+    #[serde(default)]
+    pub p50_latency_nanos: Option<u64>,
+    #[serde(default)]
+    pub p99_latency_nanos: Option<u64>,
+    #[serde(default)]
+    pub total_duration_nanos: Option<u64>,
     pub operation_count: usize,
     /// Median latency of a timed iteration, in whole microseconds.
     ///
@@ -1031,6 +1044,9 @@ fn failed_real_baseline_raft_sample(
         timed_iteration_count: options.iterations_per_workload,
         operations_per_timed_iteration: writes_per_iteration(workload, options),
         total_duration_micros: 1_000_000_000,
+        p50_latency_nanos: None,
+        p99_latency_nanos: None,
+        total_duration_nanos: None,
         operation_count: operation_count_for(workload, options),
         p50_latency_micros: 1_000_000_000,
         p99_latency_micros: 1_000_000_000,
@@ -3812,6 +3828,9 @@ fn run_same_machine_model_workload(
         timed_iteration_count: latency.len(),
         operations_per_timed_iteration: writes_per_iteration(workload, options),
         total_duration_micros: total_micros,
+        p50_latency_nanos: None,
+        p99_latency_nanos: None,
+        total_duration_nanos: None,
         operation_count,
         p50_latency_micros,
         p99_latency_micros,
@@ -3981,7 +4000,14 @@ fn run_rustraft_runtime_workload(
                 .is_ok()
         }
     };
-    let total_micros = latencies.iter().sum::<u64>().max(1);
+    // `latencies` is nanoseconds now. The microsecond figures below are the same
+    // truncation the recorder used to do, element by element, so nothing that was
+    // reported before moves.
+    let micros: Vec<u64> = latencies
+        .iter()
+        .map(|nanos| (nanos / 1000).max(1))
+        .collect();
+    let total_micros = micros.iter().sum::<u64>().max(1);
     let throughput_ops_per_sec = throughput_from_duration(operation_count, total_micros);
     BenchmarkSample {
         workload,
@@ -4002,8 +4028,11 @@ fn run_rustraft_runtime_workload(
         operations_per_timed_iteration: writes_per_iteration(workload, options),
         total_duration_micros: total_micros,
         operation_count,
-        p50_latency_micros: percentile(&latencies, 50.0),
-        p99_latency_micros: percentile(&latencies, 99.0),
+        p50_latency_micros: percentile(&micros, 50.0),
+        p99_latency_micros: percentile(&micros, 99.0),
+        p50_latency_nanos: Some(percentile(&latencies, 50.0)),
+        p99_latency_nanos: Some(percentile(&latencies, 99.0)),
+        total_duration_nanos: Some(latencies.iter().sum::<u64>().max(1)),
         throughput_ops_per_sec,
         correctness_passed,
         blockers: Vec::new(),
@@ -4018,7 +4047,10 @@ fn run_timed(
     for iteration in 0..iterations.max(1) {
         let start = Instant::now();
         operation(iteration)?;
-        latencies.push(start.elapsed().as_micros().max(1) as u64);
+        // Nanoseconds, with the microsecond figures derived below. `as_micros`
+        // truncates, so `(nanos / 1000).max(1)` is exactly what this line used to
+        // push, and the existing fields are unchanged rather than approximately so.
+        latencies.push(start.elapsed().as_nanos().max(1) as u64);
     }
     Ok(())
 }
