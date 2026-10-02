@@ -470,7 +470,33 @@ The sizing consequence is the point. 65,536 one-voter groups on a 10ms interval
 measured 14.5 cores; the same groups with three voters each would want something
 near 36, which is past a sixteen-core machine. A three-voter store at that size
 needs a longer interval, fewer groups a machine, or more machines -- and picking one
-from the one-voter figure would be picking it from the cheapest shape there is. Creating is still
+from the one-voter figure would be picking it from the cheapest shape there is.
+
+**And the cost is linear in the peer count, so it is a formula rather than one
+figure.** 8192 groups on a 10ms interval, voter counts run 1, 3, 5, 7 and then 7, 5,
+3, 1 so that a drift in load cancels:
+
+| voters | peers | cores | ns a tick | per group |
+|---|---|---|---|---|
+| 1 | 0 | 0.93 | ~1130 | 20 KiB |
+| 3 | 2 | 2.49 | ~3040 | 23 KiB |
+| 5 | 4 | 4.07 | ~4970 | 24 KiB |
+| 7 | 6 | 5.32 | ~6490 | 24 KiB |
+
+Fitting the ends gives `cores = 0.93 + 0.73 x peers`, which predicts 2.39 at two
+peers against 2.49 measured and 3.86 at four against 4.07 -- within 5% without
+being fitted to them. So **a tick costs about 1,130ns plus about 890ns for each
+peer**, which is the same thing as saying **each peer adds roughly 80% of what the
+group's own tick costs**.
+
+Use the ratio rather than the nanoseconds when sizing, because the base moves with
+the group count: the same one-voter tick is about 1,130ns at 8192 groups and about
+2,200ns at 65,536. Measure the base at your own size and add 80% of it per peer.
+
+**Memory does not follow the same shape.** It goes 20, 23, 24, 24 KiB a group across
+those four rows -- the first peers cost about 1.5 KiB each and then it flattens,
+which is an allocator rounding up rather than a cost per peer. Past about five
+voters, a group costs no more to hold than at five. Creating is still
 the slow half, about 0.2ms each.
 
 One thing the `create` column does **not** include, in this table or the one above:
