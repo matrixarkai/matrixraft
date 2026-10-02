@@ -257,19 +257,22 @@ fn peer(group_id: u64, node_id: u64) -> Peer {
 fn options(
     group_id: u64,
     interval_ms: u64,
-    solo: bool,
+    voters: u64,
     wal: &Path,
     snapshot: &Path,
 ) -> MatrixRaftOptions {
-    // A solo group is its own quorum, so it wins an election immediately and
-    // then heartbeats with nobody to send to. That is a live idle group. With
-    // three peers and no transport it would campaign forever instead, and the
-    // probe would be measuring a broken cluster.
-    let peers = if solo {
-        vec![peer(group_id, 1)]
-    } else {
-        vec![peer(group_id, 1), peer(group_id, 2), peer(group_id, 3)]
-    };
+    // How many voters the group is configured with, which used to be decided by
+    // whether the row was a live one. That tied two things to one flag: the
+    // unstarted rows were three voters and the live rows were one, so the
+    // difference between them was starting AND the peer count at once, and the
+    // README drew a per-group memory figure across both. They are separate now.
+    //
+    // One voter is its own quorum, so it wins an election immediately and then
+    // heartbeats with nobody to send to: a live idle group. More than one, with
+    // no transport running, cannot reach leadership and campaigns forever --
+    // worth measuring for what a group costs to HOLD, but its `cores` is a
+    // campaigning group and not a steady state.
+    let peers: Vec<Peer> = (1..=voters.max(1)).map(|id| peer(group_id, id)).collect();
     MatrixRaftOptions {
         group_id,
         peer_id: 1,
@@ -381,6 +384,7 @@ fn hosted(
     interval_ms: u64,
     seconds: u64,
     live: bool,
+    voters: u64,
     shared: bool,
     workers: usize,
     root: &Path,
@@ -426,7 +430,7 @@ fn hosted(
     for (index, (wal, snapshot)) in dirs.iter().enumerate() {
         server
             .create_node(
-                options(index as u64 + 1, interval_ms, live, wal, snapshot),
+                options(index as u64 + 1, interval_ms, voters, wal, snapshot),
                 0,
             )
             .expect("create node");
@@ -615,6 +619,18 @@ fn main() {
         .nth(5)
         .and_then(|a| a.parse().ok())
         .unwrap_or(4);
+    // How many voters each group is configured with. One is the default and is
+    // what every figure in the notes above was measured at, because a solo voter
+    // is its own quorum and reaches leadership with no transport running. More
+    // than one is worth measuring for what a group COSTS TO HOLD -- three node
+    // records and two peer pipelines rather than one record and none -- but such
+    // a group cannot reach leadership here, so its `live` row is a group
+    // campaigning forever rather than a steady state. Read `resident` and
+    // `per group` from it, not `cores`.
+    let voters: u64 = std::env::args()
+        .nth(6)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(1);
 
     if status_field("Threads:") == 0 {
         println!("/proc/self/status unavailable: this probe needs Linux");
@@ -677,7 +693,16 @@ fn main() {
                 continue;
             }
             let root = probe_root();
-            let seen = hosted(groups, interval_ms, seconds, live, shared, workers, &root);
+            let seen = hosted(
+                groups,
+                interval_ms,
+                seconds,
+                live,
+                voters,
+                shared,
+                workers,
+                &root,
+            );
             println!(
                 "  {:>21}  {:>8}  {:>12.3}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
                 label,
