@@ -37,7 +37,9 @@ fn fresh(group_id: u64) -> RaftCluster {
 #[test]
 fn the_same_calls_cost_several_times_more_when_the_groups_are_scattered() {
     const CLUSTERS: usize = 2_000;
-    const REPEATS: usize = 3;
+    // Five rather than three: the statistic is a minimum, and on a shared box a
+    // quiet moment is what it is looking for.
+    const REPEATS: usize = 5;
 
     // Built up front, so construction is not in the timed sweep. 2,000 of them is
     // a working set in the tens of MiB, like a small store.
@@ -155,13 +157,29 @@ fn the_same_calls_cost_several_times_more_when_the_groups_are_scattered() {
         scattered > spread,
         "scattered access ({scattered:.1} ns) was not dearer than ordered ({spread:.1} ns), so the two orders are not reaching memory differently and this measures nothing"
     );
-    // Only the ordering is asserted, and only with a slim margin. Over five release
-    // runs the scattered arm cost 2.1 to 9.9 times the hammered one (median about
-    // 7x) and 1.65 to 4.4 times the ordered one -- the direction never moved, the
-    // size moved by a factor of five with how busy the box was. Pinning a
-    // multiplier here would be pinning the neighbours' load.
+    // The ordering, always. It survives a badly loaded box: on one at a load
+    // average of 20 this read 4054.9 against 3742.9 ns, where a quiet one reads
+    // about 200 against 120.
     assert!(
-        scattered > 1.15 * spread,
-        "scattered access cost {scattered:.1} ns against {spread:.1} ns in allocation order, which is not the several-fold difference recorded. Either a group's tick state has become small enough to stop missing cache -- worth knowing -- or these two arms have stopped reaching memory differently."
+        scattered > spread,
+        "scattered access cost {scattered:.1} ns against {spread:.1} ns in allocation order. The scattered order is not dearer at all, so either a group's tick state has become small enough to stop missing cache -- worth knowing -- or these two arms have stopped reaching memory differently."
     );
+
+    // The several-fold margin only when the machine is quiet enough to resolve it,
+    // and the hammered arm is the control for that: about 50-60ns on a quiet box.
+    // When it reads in the thousands, every arm is scheduling noise and the margin
+    // collapses towards one -- an earlier version of this test asserted the margin
+    // unconditionally and failed a gate at 1.08x for exactly that reason, which is
+    // a flaky test rather than a finding.
+    const TOO_BUSY_NS: f64 = 300.0;
+    if hammered <= TOO_BUSY_NS {
+        assert!(
+            scattered > 1.15 * spread,
+            "scattered access cost {scattered:.1} ns against {spread:.1} ns in allocation order on a machine quiet enough to resolve it (the control read {hammered:.1} ns). Over five runs this was 1.65 to 4.4 times, so under 1.15 means the two arms have stopped reaching memory differently."
+        );
+    } else {
+        println!(
+            "  the control read {hammered:.1} ns against the 50-60 of a quiet box, so the machine cannot resolve the margin; the ordering above is all this run asserts"
+        );
+    }
 }
