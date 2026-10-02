@@ -436,8 +436,23 @@ the two sets of `cores` figures are not comparable with each other:
 **The envelope stays linear the whole way: 21 KiB a group and exactly one
 descriptor a group at every size.** 65,536 groups is 1.3 GiB resident and 65,540
 descriptors, and the resident figure doubles cleanly -- 340, 676, 1348 MiB -- with
-no inflection. A group that has been created but not started is 15 KiB and **no**
-descriptor, so starting one costs about 6 KiB and its one file. Creating is still
+no inflection. A group that has been created but not started is **13 KiB** and **no**
+descriptor, so starting one costs about **7 KiB** and its one file. An extra
+configured voter costs about **1 KiB**: three voters, created and not started, is
+15 KiB a group against one voter's 13.
+
+An earlier version of this page said 13 KiB was 15 and 7 was 6. It was comparing a
+**three-voter** unstarted group against a **one-voter** started one, because the
+probe decided the voter count from whether the row was a live one -- a single flag
+for two variables, so the difference between the two rows was starting *and* the
+peer count. They are separate arguments now, which is what makes the two figures
+above separable at all.
+
+**Every figure on this page is a group with one voter**, which is its own quorum and
+so reaches leadership with no transport running. That is what makes an idle hosted
+group measurable, and it is not what anyone deploys. A three-voter group holds three
+node records and two peer pipelines, and its tick does real work for each peer, so
+read the memory figures as a floor and do not take the per-tick cost across at all. Creating is still
 the slow half, about 0.2ms each.
 
 One thing the `create` column does **not** include, in this table or the one above:
