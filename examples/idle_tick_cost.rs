@@ -78,8 +78,12 @@
 //! second -- 102,700/sec at 1024 groups and 207,915/sec at 2048, against the
 //! 102,400 and 204,800 the arithmetic calls for. That is one switch per group
 //! per interval, which is what a thread parked in `recv_timeout` must pay. The
-//! shared ticker sits at about 910/sec whatever the group count, because that
-//! is its own loop and nothing else.
+//! shared ticker sat at about 910/sec whatever the group count, because that
+//! is its own loop and nothing else -- measured when this arm always ran **one**
+//! shard. It now runs whichever shard count the hosted arms were given, because a
+//! one-shard ticker subtracted from a fourteen-shard runtime measures the shard
+//! count as much as the raft work, and subtracting it is the only thing this arm
+//! is for. Pass `1` to get the old reading back.
 //!
 //! So roughly **one core per thousand idle groups**, for no raft work at all,
 //! and it stays linear. The shared ticker is flat and was separately measured
@@ -556,9 +560,13 @@ impl DriverTickReceiver for Idle {
     }
 }
 
-fn shared_ticker(groups: u64, interval_ms: u64, seconds: u64) -> Sample {
+fn shared_ticker(groups: u64, interval_ms: u64, seconds: u64, workers: usize) -> Sample {
+    // The shard count the hosted arms were given, not a hardcoded one. This arm is
+    // the bare ticker with no raft work behind it, so it is only worth anything as
+    // a subtraction from the hosted rows -- and a one-shard driver subtracted from
+    // a fourteen-shard runtime measures the shard count as much as the raft work.
     let driver = Driver::start(DriverOptions {
-        worker_num: 1,
+        worker_num: workers.max(1),
         tick_interval_ms: interval_ms,
         ..DriverOptions::default()
     })
@@ -737,7 +745,7 @@ fn main() {
             let _ = std::fs::remove_dir_all(&root);
         }
         if arm != "facade" && arm != "live" {
-            let seen = shared_ticker(groups, interval_ms, seconds);
+            let seen = shared_ticker(groups, interval_ms, seconds, workers);
             println!(
                 "  {:>21}  {:>8}  {:>12.3}  {:>14}  {:>8}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}  {:>9}  {:>9}",
                 "shared ticker",
