@@ -228,6 +228,14 @@ fn persistent_wal_reports_slow_fsync_backpressure_through_lifecycle_status() {
     assert!(status.max_fsync_elapsed_ms >= slow.fsync_elapsed_ms);
     assert_eq!(status.compacted_after_slow_fsync_count, 0);
 
+    // Put this append under the threshold by construction, rather than trusting
+    // the machine to make it so. Left at 50ms the assertion below read
+    // `left: 2, right: 1` in a full-suite run: nothing is injected here, but an
+    // ordinary fsync on a loaded box can take longer than 50ms, and then it counts
+    // as slow and the test fails having found nothing wrong. What it means to
+    // check is that an fsync *under* the threshold neither adds to the count nor
+    // continues the consecutive run.
+    wal.set_slow_fsync_threshold_ms(10_000);
     wal.append_with_report(wal_record(2))
         .expect("append fast fsync");
     let status = wal.status();
@@ -256,6 +264,12 @@ fn persistent_wal_reports_slow_fsync_backpressure_through_lifecycle_status() {
     assert!(released.fence_valid);
     assert!(released.released_segments > 0);
 
+    // Back to 50 before the evidence is read. `matrixraft_wal_lifecycle_evidence`
+    // tests `max_fsync_elapsed_ms >= slow_fsync_threshold_ms`, comparing a
+    // recorded maximum against the threshold as it stands now -- so a raised
+    // threshold erases a slow fsync that really did happen. Leaving it at 10s here
+    // made this assertion fail, which is how that was found.
+    wal.set_slow_fsync_threshold_ms(50);
     let evidence = matrixraft_wal_lifecycle_evidence(&wal.status());
     assert!(evidence.compaction_observed);
     assert!(evidence.slow_fsync_backpressure_observed);
