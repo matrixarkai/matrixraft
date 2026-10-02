@@ -450,9 +450,27 @@ above separable at all.
 
 **Every figure on this page is a group with one voter**, which is its own quorum and
 so reaches leadership with no transport running. That is what makes an idle hosted
-group measurable, and it is not what anyone deploys. A three-voter group holds three
-node records and two peer pipelines, and its tick does real work for each peer, so
-read the memory figures as a floor and do not take the per-tick cost across at all. Creating is still
+group measurable, and it is not what anyone deploys.
+
+**Configuring three voters instead of one costs about two and a half times the CPU a
+tick.** Measured at 8192 groups on a 10ms interval, release, four pairs in ABBA
+order: a one-voter group ran 1.03 to 1.23 cores and a three-voter group 2.19 to
+3.37, and the four pairwise ratios were 2.62, 2.75, 2.36 and 2.13 -- so **2.1x to
+2.8x**, which is tight enough to size from. Both arms held leadership on every
+sampled group and delivered every tick the interval asked for, so this is two steady
+states and not one of them falling over.
+
+What it is measuring is the per-peer work a tick does: heartbeats, liveness ticking
+and catch-up attempts, once for each peer. A one-voter group runs **none** of that,
+which is why these pages' figures are a floor rather than an estimate. The two extra
+peers here never answer, because the probe starts no transport -- so a healthy
+three-node cluster pays this *and* the network on top.
+
+The sizing consequence is the point. 65,536 one-voter groups on a 10ms interval
+measured 14.5 cores; the same groups with three voters each would want something
+near 36, which is past a sixteen-core machine. A three-voter store at that size
+needs a longer interval, fewer groups a machine, or more machines -- and picking one
+from the one-voter figure would be picking it from the cheapest shape there is. Creating is still
 the slow half, about 0.2ms each.
 
 One thing the `create` column does **not** include, in this table or the one above:
