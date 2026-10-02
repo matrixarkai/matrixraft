@@ -8,16 +8,28 @@
 //! budget of a hosted store. The obvious place to look for it is the dozen calls a
 //! tick makes into the cluster.
 //!
-//! They are not it. The whole row is about **45 ns** in release, so the raft
-//! arithmetic of a tick is roughly **2%** of it, and making those calls faster
-//! cannot help. In a debug build the same row is 861 ns, which is what this prints
-//! when the suite runs it -- the 2,200 ns a tick is a release figure, so compare
-//! like with like. The
+//! Their **arithmetic** is not it: the whole row is about 45 ns in release here.
+//! But that is 50,000 calls in a row on one cluster, which is this test's purpose
+//! and also its limit -- it holds one group's state in L1 and lets the branch
+//! predictor learn it, which is not what a store does.
+//!
+//! Called once each across 2,000 separately allocated clusters the same row costs
+//! 120-200 ns in allocation order and 200-660 ns in a scattered one -- several
+//! times this, varying with how busy the machine is -- and cutting the tick body
+//! in a running store puts the region at roughly 500 ns. So these calls are most
+//! of a tick after all; what is cheap is what they compute, and what is expensive
+//! is reaching the state they read. The lever is locality.
+//! `tests/tick_locality.rs` is the measurement.
+//!
+//! (In a debug build this row is 861 ns, which is what the suite prints; the
+//! figures above are release, so compare like with like.) The
 //! cost is the hosting around them: the wake, the lock, the scheduling, and the
 //! parts of `NodeCore::tick` that are not calls into the cluster.
 //!
-//! So this guards against one of them *becoming* expensive. It is not a target to
-//! push down, which is why the ceiling is loose.
+//! So this guards against one of them becoming *algorithmically* expensive -- a
+//! lock, an allocation, a scan of something that grew. It cannot see a cost that
+//! is cache misses, because it is built to avoid them, which is why the ceiling is
+//! loose and why it is the wrong instrument for asking what a tick costs.
 //!
 //! Two notes on the instrument. The statistic is the **minimum** over repeats
 //! rather than a mean: this box is shared and carries several cores of other work,

@@ -377,13 +377,26 @@ Four things worth knowing before sizing a host:
 
   On a debug build it is about double, so measure the profile you will run.
 
-- **The raft work is not what a tick costs, so do not look for it there.** An idle
-  hosted group's tick runs about 2,200ns, and the dozen calls it makes into the
-  cluster cost about **48ns together** -- roughly **2%** of it. Timed with
-  `cargo test --release --test tick_call_cost -- --nocapture`, which prints the row
-  dearest first. The cost is the hosting around those calls: the wake, the lock, the
-  scheduling, and the parts of the tick that are not calls into the cluster. Three
-  separate reductions have been found by measuring there rather than in raft.
+- **A tick's cost is reaching the group, not the arithmetic it then does.** The
+  dozen calls a tick makes into the cluster measure about **60ns together** when
+  timed in a loop on one cluster -- but that measures their arithmetic, not what
+  they cost a store. Called once each across 2,000 separately allocated clusters the
+  same row costs **120-200ns** in allocation order and **200-660ns** visited in a
+  scattered one. Over five runs the scattered arm was **2.1 to 9.9 times** the
+  hammered one, median about seven; the direction never moved and the size moved by
+  a factor of five with how busy the machine was, so take the shape and not the
+  multiplier. Cutting the tick body in a running store puts the same region at
+  roughly **500ns**, which is the end of that range rather than the beginning.
+
+  So the lever is locality, not algorithmic work in those functions. A tick reaches
+  its group through an `Arc`, a `Mutex` and then `BTreeMap`s, in whatever order the
+  ticker's heap hands groups over; every one of those is a pointer chase the
+  prefetcher cannot follow. Making a group's per-tick state compact and contiguous
+  is worth more than making any of these calls cleverer.
+
+  `cargo test --release --test tick_call_cost -- --nocapture` prints the row dearest
+  first. Read it as a guard against a call becoming *algorithmically* expensive --
+  which is what it is for -- and not as what a tick costs.
 
 - **Treat one `cores` reading as indicative, not as a number.** On a 10ms interval
   with a shared box, 16,384 groups read 2.295, 2.700, 2.810, 3.409 and 4.194 cores
