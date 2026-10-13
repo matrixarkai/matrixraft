@@ -149,37 +149,37 @@ fn the_same_calls_cost_several_times_more_when_the_groups_are_scattered() {
     println!("  (in situ, cutting the tick body puts the same region at about 508 ns)");
 
     // The claim is the ratio, not any of the figures: the same work, the same
-    // number of clusters, reached in a different order. A machine where this is
-    // flat would be one where locality does not matter, and there is no such
-    // machine -- so a small ratio here means the arms stopped differing, not that
-    // the finding stopped being true.
+    // number of clusters, reached in a different order.
+    //
+    // Nothing here is resolvable when the control arm is noisy -- the ordering
+    // included. An earlier version of this test asserted the ordering
+    // unconditionally, on the grounds that it survives a badly loaded box. It does
+    // not. A gate run with the control at 841.9 ns read scattered 1112.4 ns
+    // against 1372.5 ns in allocation order, inverting it, because at that point
+    // every arm is scheduling noise and which one wins is a coin toss. So the
+    // control decides whether this run asserts the finding or only reports it.
+    //
+    // That leaves little asserted on a loaded box, which is the price of not
+    // asserting noise. What stays unconditional is that the measurement happened
+    // at all: a harness that stops timing reads as zero, not as a passing run.
     assert!(
-        scattered > spread,
-        "scattered access ({scattered:.1} ns) was not dearer than ordered ({spread:.1} ns), so the two orders are not reaching memory differently and this measures nothing"
-    );
-    // The ordering, always. It survives a badly loaded box: on one at a load
-    // average of 20 this read 4054.9 against 3742.9 ns, where a quiet one reads
-    // about 200 against 120.
-    assert!(
-        scattered > spread,
-        "scattered access cost {scattered:.1} ns against {spread:.1} ns in allocation order. The scattered order is not dearer at all, so either a group's tick state has become small enough to stop missing cache -- worth knowing -- or these two arms have stopped reaching memory differently."
+        spread > 0.0 && scattered > 0.0 && hammered > 0.0,
+        "every arm must have measured something: ordered {spread:.1} ns, scattered {scattered:.1} ns, control {hammered:.1} ns"
     );
 
-    // The several-fold margin only when the machine is quiet enough to resolve it,
-    // and the hammered arm is the control for that: about 50-60ns on a quiet box.
-    // When it reads in the thousands, every arm is scheduling noise and the margin
-    // collapses towards one -- an earlier version of this test asserted the margin
-    // unconditionally and failed a gate at 1.08x for exactly that reason, which is
-    // a flaky test rather than a finding.
     const TOO_BUSY_NS: f64 = 300.0;
     if hammered <= TOO_BUSY_NS {
+        assert!(
+            scattered > spread,
+            "scattered access cost {scattered:.1} ns against {spread:.1} ns in allocation order on a machine quiet enough to resolve it (the control read {hammered:.1} ns). The scattered order is not dearer at all, so either a group-s tick state has become small enough to stop missing cache -- worth knowing -- or these two arms have stopped reaching memory differently."
+        );
         assert!(
             scattered > 1.15 * spread,
             "scattered access cost {scattered:.1} ns against {spread:.1} ns in allocation order on a machine quiet enough to resolve it (the control read {hammered:.1} ns). Over five runs this was 1.65 to 4.4 times, so under 1.15 means the two arms have stopped reaching memory differently."
         );
     } else {
         println!(
-            "  the control read {hammered:.1} ns against the 50-60 of a quiet box, so the machine cannot resolve the margin; the ordering above is all this run asserts"
+            "  the control read {hammered:.1} ns against the 50-60 of a quiet box, so this run cannot resolve the comparison and asserts only that every arm measured something"
         );
     }
 }
