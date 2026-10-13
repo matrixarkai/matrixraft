@@ -280,8 +280,14 @@ impl DriverInner {
     /// overshoot -- 7.7% at 100 groups, where there is no capacity pressure at
     /// all. Leases and election timeouts are counted in these ticks, so the
     /// drift lengthened both.
-    fn advance_to(&self, now_ms: u64) {
-        let due = {
+    /// The caller lends the vector the due groups are gathered into, because
+    /// there is one ticker thread and it can keep the same one for the life of
+    /// the driver. Making a fresh one here was **one allocation per tick** for
+    /// every group that came due together -- 1.250 allocations a tick in
+    /// `tests/tick_window.rs`, which is where it showed.
+    fn advance_to(&self, now_ms: u64, due: &mut Vec<Arc<dyn DriverTickReceiver>>) {
+        debug_assert!(due.is_empty(), "the lent vector arrives drained");
+        {
             let mut state = self.state.lock().expect("driver state mutex poisoned");
             // Never goes backwards, and a late wake-up catches up instead of
             // losing the time for good.
@@ -290,7 +296,6 @@ impl DriverInner {
             }
             let now = state.clock_ms;
 
-            let mut due: Vec<Arc<dyn DriverTickReceiver>> = Vec::new();
             while let Some((&next_due, _)) = state.buckets.first_key_value() {
                 if next_due > now {
                     break;
@@ -343,10 +348,11 @@ impl DriverInner {
                 // Emptied by the drain, and keeping its capacity.
                 state.spare.push(scheduled);
             }
-            due
-        };
+        }
 
-        for receiver in due {
+        // Outside the lock, and drained rather than consumed so the vector goes
+        // back to the caller empty and keeping its capacity.
+        for receiver in due.drain(..) {
             receiver.fire_tick();
             self.ticks_fired.fetch_add(1, Ordering::Relaxed);
         }
@@ -395,11 +401,13 @@ impl Driver {
             .name("rustraft-driver-ticker".to_string())
             .spawn(move || {
                 let started = Instant::now();
+                // One vector for the life of the ticker, lent to every call.
+                let mut due: Vec<Arc<dyn DriverTickReceiver>> = Vec::new();
                 while !ticker_inner.exit.load(Ordering::Relaxed) {
                     // Elapsed, not a count of iterations: see `advance_to`. That
                     // matters more now than it did, because the waits are no
                     // longer uniform.
-                    ticker_inner.advance_to(started.elapsed().as_millis() as u64);
+                    ticker_inner.advance_to(started.elapsed().as_millis() as u64, &mut due);
                     ticker_inner.wait_for_next_deadline(started.elapsed().as_millis() as u64);
                 }
             })
@@ -1057,6 +1065,13 @@ mod tests {
     }
 
     impl DriverInner {
+        /// Lends `advance_to` a vector of its own. The ticker keeps one for its
+        /// whole life; a test that only cares which groups fired need not.
+        fn advance_to_once(&self, now_ms: u64) {
+            let mut due = Vec::new();
+            self.advance_to(now_ms, &mut due);
+        }
+
         /// The logical clock, for tests that assert on it directly rather
         /// than inferring it from which groups came due.
         fn clock(&self) -> u64 {
@@ -1083,7 +1098,7 @@ mod tests {
         let (inner, counter) = hand_driven(&[(1, 10)]);
 
         for _ in 0..5 {
-            inner.advance_to(10);
+            inner.advance_to_once(10);
         }
         assert_eq!(
             counter.count(),
@@ -1093,7 +1108,7 @@ mod tests {
             counter.count()
         );
 
-        inner.advance_to(20);
+        inner.advance_to_once(20);
         assert_eq!(counter.count(), 2, "the next interval is due at 20ms");
     }
 
@@ -1109,11 +1124,11 @@ mod tests {
         // neither delivered a tick and the test passed on broken code.
         let (inner, counter) = hand_driven(&[(1, 10)]);
 
-        inner.advance_to(100);
+        inner.advance_to_once(100);
         assert_eq!(counter.count(), 1, "the group was due and fired once");
         assert_eq!(inner.clock(), 100, "the clock took the reading");
 
-        inner.advance_to(50);
+        inner.advance_to_once(50);
         assert_eq!(
             inner.clock(),
             100,
@@ -1124,7 +1139,7 @@ mod tests {
 
         // Visible in ticks too: a group registered now is scheduled off the
         // clock, so a clock that went back would make it due early.
-        inner.advance_to(101);
+        inner.advance_to_once(101);
         assert_eq!(counter.count(), 2, "the schedule resumes from where it was");
     }
 
@@ -1136,7 +1151,7 @@ mod tests {
         // instead: one tick, then the ordinary cadence.
         let (inner, counter) = hand_driven(&[(1, 10)]);
 
-        inner.advance_to(5_000);
+        inner.advance_to_once(5_000);
         assert_eq!(
             counter.count(),
             1,
@@ -1150,7 +1165,7 @@ mod tests {
             "the five hundred ticks it was owed were refused but not recorded"
         );
 
-        inner.advance_to(5_001);
+        inner.advance_to_once(5_001);
         assert_eq!(counter.count(), 2, "and then it resumes");
         assert_eq!(
             inner.ticks_skipped.load(Ordering::Relaxed),
@@ -1169,7 +1184,7 @@ mod tests {
         let (inner, counter) = hand_driven(&[(1, 1)]);
 
         for ms in (2..=20).step_by(2) {
-            inner.advance_to(ms);
+            inner.advance_to_once(ms);
         }
 
         assert_eq!(
@@ -1227,7 +1242,7 @@ mod tests {
             // The departed group-s deadline at 10ms is still in the heap.
         }
 
-        inner.advance_to(10);
+        inner.advance_to_once(10);
 
         assert_eq!(
             newcomer.count(),
@@ -1242,7 +1257,7 @@ mod tests {
         );
 
         // And the newcomer still gets its own.
-        inner.advance_to(1_000);
+        inner.advance_to_once(1_000);
         assert_eq!(newcomer.count(), 1, "the newcomer keeps its own schedule");
     }
 
@@ -1279,7 +1294,7 @@ mod tests {
                 let (inner, counter) = hand_driven(&groups);
                 let began = Instant::now();
                 for ms in 1..=span {
-                    inner.advance_to(ms);
+                    inner.advance_to_once(ms);
                 }
                 let elapsed_ns = began.elapsed().as_nanos() as f64;
 
@@ -1317,7 +1332,7 @@ mod tests {
         let (inner, counter) = hand_driven(&groups);
 
         for ms in 1..=100 {
-            inner.advance_to(ms);
+            inner.advance_to_once(ms);
         }
 
         assert_eq!(

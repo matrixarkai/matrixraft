@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
-//! The driver's own allocation is per wake, not per group.
+//! The driver allocates nothing to tick, at any group count.
 //!
-//! A ticker builds a list of what came due and fires it with the lock dropped, so
-//! it allocates once per wake-up however many groups that wake covers. With one
-//! group that is one allocation a tick; with many it divides away:
+//! It used to allocate once per wake-up: the ticker built a fresh list of what
+//! came due, fired it with the lock dropped, and dropped the list. That cost did
+//! not scale with the groups, because one wake covers every group due at that
+//! millisecond, and the table this file was first written around shows it
+//! dividing away:
 //!
-//! | groups | allocations per tick |
+//! | groups | allocations per tick, when the list was built per wake |
 //! |---|---|
 //! | 1 | 1.0000 |
 //! | 4 | 0.2500 |
@@ -15,15 +17,17 @@
 //! | 64 | 0.0781 |
 //! | 256 | 0.0273 |
 //!
-//! That shape is what this guards. A change making the driver allocate per group
-//! rather than per wake would leave the one-group figure alone and lift the
-//! many-group one, which is the comparison asserted below rather than either
-//! number on its own.
+//! The ticker now keeps one list for its whole life and lends it to each call,
+//! so there is no allocation to divide. Both figures read 0.0000, and this file
+//! asserts that of each arm rather than comparing them: a per-wake cost coming
+//! back lifts the one-group figure, a per-group cost lifts both, and a ceiling
+//! on each catches either. The old shape -- many-group against one-group -- can
+//! no longer express it, because zero is not a quarter of zero.
 //!
-//! It also says what `tests/tick_window.rs` is not. That test runs a single hosted
-//! group and reads about 1.25 allocations a tick; a whole allocation of that is
-//! this per-wake cost, which a store with many groups a shard does not pay. The
-//! per-group cost of a tick is the quarter, not the one and a quarter.
+//! It also says what `tests/tick_window.rs` is not. That test runs a single
+//! hosted group and reads about 0.25 allocations a tick, which is the per-group
+//! cost of a hosted tick: a quarter, because the group runs a four-tick election
+//! cycle. It read 1.25 while a whole allocation of it was this per-wake cost.
 
 use matrixraft::{Driver, DriverGroupKey, DriverOptions, DriverTickReceiver};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -84,27 +88,43 @@ fn measure(groups: u64) -> f64 {
 }
 
 #[test]
-fn the_drivers_allocation_is_per_wake_and_not_per_group() {
-    // Two points rather than the five the table above was drawn from, because two
-    // are enough to tell a per-wake cost from a per-group one and each costs two
-    // seconds of wall clock.
+fn the_driver_allocates_nothing_to_tick() {
+    // The control first, and it is not optional: an assertion that a figure is
+    // near zero passes just as well when the instrument is broken. Prove the
+    // counter moves for an allocation this test makes itself before believing a
+    // zero it reports for the driver.
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let proof: Vec<u64> = (0..64).collect();
+    std::hint::black_box(&proof);
+    let counted = ALLOCATIONS.load(Ordering::Relaxed) - before;
+    assert!(
+        counted > 0,
+        "the allocator counter did not move for a vector this test built, so a \
+         zero it reports for the driver means nothing"
+    );
+    drop(proof);
+
+    // Two group counts rather than the five the table was drawn from, because
+    // two tell a per-wake cost from a per-group one and each costs two seconds
+    // of wall clock.
     let one = measure(1);
     let many = measure(64);
 
-    // Per group, the many-group run would read the same as the single-group one.
-    // Per wake, it reads about a sixteenth of it -- one wake covering the groups
-    // that came due together.
+    // A ceiling on each arm. A list built per wake would put the one-group
+    // figure back near 1.0; anything per group would lift both. A twentieth of
+    // an allocation is slack for whatever else the process does in the window,
+    // not room for either to return.
+    const CEILING_PER_TICK: f64 = 0.05;
     assert!(
-        many < one / 4.0,
-        "64 groups allocate {many:.4} a tick against one group's {one:.4}. Closer \
-         than a quarter means the driver is allocating per group rather than per \
-         wake, which is a cost a store with many groups a shard would pay in full."
+        one <= CEILING_PER_TICK,
+        "one group allocates {one:.4} a tick, above {CEILING_PER_TICK}. The \
+         ticker is allocating to tick again -- most likely building a list of \
+         what came due instead of reusing the one it is lent."
     );
-    // And the control: if neither figure were measuring anything, both would be
-    // zero and the comparison above would hold vacuously.
     assert!(
-        one > 0.5,
-        "one group allocated {one:.4} a tick, so there is nothing here to amortise \
-         and the comparison says nothing"
+        many <= CEILING_PER_TICK,
+        "64 groups allocate {many:.4} a tick, above {CEILING_PER_TICK}. A cost \
+         that shows at 64 groups and not at one is per group, which a store with \
+         many groups a shard pays in full."
     );
 }
