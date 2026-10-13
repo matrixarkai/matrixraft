@@ -410,6 +410,27 @@ pub struct RaftCluster {
     leader_lease_confirmations: BTreeMap<NodeId, LeaderLeaseConfirmation>,
     leader_lease_confirmation_epochs: BTreeMap<NodeId, u64>,
     #[serde(default)]
+    /// **Not the capped reorder queue.** `ReplicationPipeline` keeps one too, and
+    /// that one is gated by `enable_reorder_queue`, held to `reorder_window_size`
+    /// (default 1024) with a counter for what it turns away, dropped on
+    /// `reorder_timeout_us`, and published as `reorder_queue_depth`. This queue has
+    /// no window, no timeout and no counter, and it stores whole
+    /// `AppendEntriesRequest`s rather than a set of indexes: 64 rejected appends
+    /// cached 64 requests, roughly 96% of the retained bytes being entry payload.
+    ///
+    /// Everything that carries the name reads the *other* queue.
+    /// `expire_peer_reorder_queue` and `AdminCommand::ExpirePeerReorderQueue` go to
+    /// `peer_pipelines`; the `reorder_queue_pressure` hint filters
+    /// `input.peer_pipeline`; `rustraft_peer_reorder_queue_depth` is only ever
+    /// assigned from `ReplicationPipeline::reorder_queue.len()`. This field is read
+    /// nowhere outside this file, so draining it is not something an operator can
+    /// ask for.
+    ///
+    /// What holds it down is the rejection itself: an append past `match_index` is
+    /// answered with `rejection_hint: Some(match_index + 1)`, so a leader that
+    /// honours the hint caches nothing at all. Growth needs a driver that keeps
+    /// pipelining past a rejection, and a drain only clears the contiguous run --
+    /// filling one hole left 63 of 64 cached. See `tests/reorder_queue_window.rs`.
     reorder_queues: BTreeMap<NodeId, BTreeMap<LogIndex, ReorderedAppend>>,
     ignore_witness: bool,
     count_witness_in_commit_quorum: bool,
