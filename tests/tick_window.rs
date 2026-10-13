@@ -148,23 +148,25 @@ fn how_much_a_hosted_group_allocates_while_only_ticking() {
     let per_tick = allocations as f64 / ticks;
     println!("window: {allocations} allocations over {ticks:.0} ticks actually run = {per_tick:.3} per tick");
 
-    // 1.250 on this box, three times, to three decimals. The ceiling carries a
-    // quarter of an allocation of slack rather than none, because the figure is not
-    // a whole number: this group runs a four-tick election cycle, so a quarter of
-    // the ticks do extra work and a machine that times them differently can land
-    // slightly either side. A whole allocation arriving still fails it.
+    // 0.250 on this box, to three decimals. The ceiling carries a quarter of an
+    // allocation of slack rather than none, because the figure is not a whole
+    // number: this group runs a four-tick election cycle, so a quarter of the ticks
+    // do extra work and a machine that times them differently can land slightly
+    // either side. A whole allocation arriving still fails it.
     //
-    // The history, because each step was found by this instrument: 3.499 before
+    // The history, because every step was found by this instrument: 3.499 before
     // `last_tick_reason` stopped turning a literal into a `String` every tick,
     // 2.250 before `has_live_quorum` stopped building a `Membership` to ask how
-    // large a quorum is, 1.250 now.
+    // large a quorum is, 1.250 before the driver`s ticker stopped building a fresh
+    // list of what came due on every wake, 0.250 now.
     //
-    // A whole allocation of that 1.250 is not per group at all. The ticker builds
-    // one list of what came due per wake-up, and this test runs a single group, so
-    // a per-wake cost reads here as a per-tick one. `tests/alloc_driver.rs`
-    // measures it dividing away -- 1.0000 a tick at one group, 0.0273 at 256 -- so
-    // the per-group cost of a tick is the quarter, not the one and a quarter.
-    const CEILING_PER_TICK: f64 = 1.5;
+    // That last step is why this figure fell by a whole allocation and the cost a
+    // store pays did not fall by nearly as much. The list was built once per
+    // wake-up, not once per group, and this test runs a single group, so a per-wake
+    // cost read here as a per-tick one. `tests/alloc_driver.rs` has the table of it
+    // dividing away -- 1.0000 a tick at one group, 0.0273 at 256 -- and now asserts
+    // it is gone at both ends. What is left, the quarter, is the per-group cost.
+    const CEILING_PER_TICK: f64 = 0.5;
     assert!(
         per_tick <= CEILING_PER_TICK,
         "a hosted group now allocates {per_tick:.3} times a tick, above the          {CEILING_PER_TICK} recorded here. Every group pays this on every interval,          so if it is deliberate, move the ceiling and say what needs the heap."
