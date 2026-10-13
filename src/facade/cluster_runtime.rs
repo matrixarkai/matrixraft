@@ -1137,6 +1137,31 @@ impl RaftCluster {
         self.stabled_membership_change_index
     }
 
+    /// Whether a membership change is in flight, in either of two senses: it is
+    /// in the log and not applied everywhere, or it is being persisted and not
+    /// yet durable.
+    ///
+    /// Read by the two learner auto-promotion sites and nothing else, so what it
+    /// gates is whether a caught-up learner is promoted now or parked in
+    /// `Promoting` until the change settles.
+    ///
+    /// **Armed from two places, neither of which a server reaches.**
+    /// `propose_with_options` arms it when `ProposeOptions::is_membership_change`
+    /// is set, and the `begin_pending`/`begin_saving` pair arms it when called
+    /// directly. The public `MatrixRaftProposeOptions` has no such field and its
+    /// `From` conversion hardcodes `false`; no shipped layer calls the `begin_*`
+    /// pair; and `append_entries_to` sends an empty index slice, so a follower
+    /// never marks one either. On every path a server takes this is therefore
+    /// always false and the deferral never fires -- it is a mechanism for an
+    /// embedder driving `RaftCluster` itself, and for the tests.
+    ///
+    /// `tests/membership_fence_reach.rs` pins that, with a control proving the
+    /// mechanism works rather than merely being unreachable. Note the three
+    /// tests of "is a change in flight" do not agree on what applied means: this
+    /// one uses `self.applied_index`, which `refresh_cluster_indexes` computes as
+    /// the *minimum* across data-serving nodes; `propose_with_options` uses the
+    /// leader's own `safety_applied_index`; and the receiving side uses the
+    /// receiving node's. This one is the strictest of the three.
     fn membership_change_fence_active(&self) -> bool {
         self.pending_membership_change_index
             .is_some_and(|pending| pending > self.applied_index)
