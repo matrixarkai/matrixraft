@@ -19,9 +19,8 @@
 //! every 10ms beside one ticking every second without either of them paying for
 //! the other.
 
-use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -165,38 +164,17 @@ pub struct DriverStats {
     pub clock_ms: u64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-/// 16 bytes, against 24 when this carried a `DriverGroupKey`. The heap holds one
-/// of these per registered group and sifts them on every pop and push, so the
-/// width is on the tick path twice.
-struct Deadline {
-    at_ms: u64,
-    /// Where the registration lives, so coming due is an array index rather than
-    /// a search. Paired with the generation it was scheduled under: a slot is
-    /// handed out again after a cancel, and a deadline still outstanding across
+/// A group waiting for its millisecond: 8 bytes, and no time of its own,
+/// because the bucket it sits in carries that. One per registered group,
+/// appended and taken in runs rather than sifted one at a time.
+#[derive(Clone, Copy)]
+struct Scheduled {
+    /// Where the registration lives, so coming due is an array index rather
+    /// than a search. Paired with the generation it was scheduled under: a slot
+    /// is handed out again after a cancel, and a group still scheduled across
     /// that reuse must not fire whoever took the slot over.
     slot: u32,
     generation: u32,
-}
-
-impl Ord for Deadline {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // By time first, then by slot, so the order is total and a run is
-        // reproducible rather than depending on heap luck. This used to tie-break
-        // on the group key; slot is assigned at registration, so for groups
-        // registered in key order -- the ordinary case -- it is the same order,
-        // and where it differs it is still total and still reproducible, which is
-        // all the tie-break was ever for.
-        self.at_ms
-            .cmp(&other.at_ms)
-            .then(self.slot.cmp(&other.slot))
-    }
-}
-
-impl PartialOrd for Deadline {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
 }
 
 struct Registration {
@@ -216,9 +194,29 @@ struct Slot {
 
 struct TickState {
     clock_ms: u64,
-    /// `Reverse` because `BinaryHeap` is a max-heap and the earliest deadline
-    /// is the one wanted.
-    queue: BinaryHeap<Reverse<Deadline>>,
+    /// Keyed by the millisecond they come due, so the earliest is the first key
+    /// and groups that share an interval share a bucket. One entry per distinct
+    /// deadline rather than one per group, which is what a heap held: it sifted
+    /// an entry per group on every pop and every push, and cost 71.4ns a tick
+    /// at 65,536 groups against 17.8ns here, on one interval, measured in the
+    /// same run on the same box.
+    ///
+    /// The cost stops growing with the group count: 17.4, 16.7 and 17.8ns at
+    /// 1,024, 8,192 and 65,536 groups, where the heap read 44.6, 59.0 and 71.4.
+    /// What it grows with instead is how many distinct deadlines are in flight,
+    /// which is bounded by the intervals in use rather than by the groups.
+    ///
+    /// Within a bucket the order is the order groups were put there. They all
+    /// come due at the same logical time, so there is nothing to sort by; what
+    /// the old tie-break was for was determinism, and an append-ordered run is
+    /// deterministic.
+    buckets: BTreeMap<u64, Vec<Scheduled>>,
+    /// Bucket vectors that have been emptied, kept for the next bucket that
+    /// needs one. A bucket holding a single group would otherwise free its
+    /// vector and allocate another on every tick of that group -- measured at
+    /// 2.25 allocations a tick against the 1.25 a heap managed, by
+    /// `tests/tick_window.rs`, which is what caught it.
+    spare: Vec<Vec<Scheduled>>,
     /// Key to slot. Consulted when a group is registered or cancelled, never
     /// when one comes due: a `BTreeMap` lookup on the tick path cost at least
     /// 55ns of the 138ns a tick took at 65,536 groups, which is where the
@@ -254,16 +252,16 @@ impl DriverInner {
     /// Taking the lock to read the next deadline and then handing that same guard
     /// to `wait_timeout` is what makes it safe: a registration cannot slip
     /// between the two and be missed, because it needs the lock to change the
-    /// heap and the notify happens under it.
+    /// buckets and the notify happens under it.
     fn wait_for_next_deadline(&self, now_ms: u64) {
         let state = match self.state.lock() {
             Ok(state) => state,
             Err(_) => return,
         };
-        let wait_ms = match state.queue.peek() {
+        let wait_ms = match state.buckets.first_key_value() {
             // Already due: go round and fire it rather than sleeping on it.
-            Some(Reverse(next)) if next.at_ms <= now_ms => return,
-            Some(Reverse(next)) => (next.at_ms - now_ms).min(DRIVER_MAX_SLEEP_MS),
+            Some((&at_ms, _)) if at_ms <= now_ms => return,
+            Some((&at_ms, _)) => (at_ms - now_ms).min(DRIVER_MAX_SLEEP_MS),
             // Nothing registered yet. A registration will notify.
             None => DRIVER_MAX_SLEEP_MS,
         };
@@ -293,45 +291,57 @@ impl DriverInner {
             let now = state.clock_ms;
 
             let mut due: Vec<Arc<dyn DriverTickReceiver>> = Vec::new();
-            while let Some(Reverse(next)) = state.queue.peek() {
-                if next.at_ms > now {
+            while let Some((&next_due, _)) = state.buckets.first_key_value() {
+                if next_due > now {
                     break;
                 }
-                let Some(Reverse(entry)) = state.queue.pop() else {
+                let Some((at_ms, mut scheduled)) = state.buckets.pop_first() else {
                     break;
                 };
-                // An array index, not a search. The generation check is what
-                // used to be the lookup failing: unregistered between being
-                // scheduled and coming due, or the slot handed to another group
-                // since.
-                let slot = &state.slots[entry.slot as usize];
-                let Some(registration) = slot
-                    .registration
-                    .as_ref()
-                    .filter(|_| slot.generation == entry.generation)
-                else {
-                    self.ticks_dropped.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                };
-                due.push(Arc::clone(&registration.receiver));
-                let interval = registration.interval_ms.max(1);
-                // Every whole interval between the deadline and now is a tick
-                // this group was owed and will not get, because `max(now + 1)`
-                // below pulls the deadline forward instead of delivering the
-                // backlog. Counted rather than delivered, so the shortfall is
-                // visible without an external probe.
-                let owed = now.saturating_sub(entry.at_ms) / interval;
-                if owed > 0 {
-                    self.ticks_skipped.fetch_add(owed, Ordering::Relaxed);
+                for entry in scheduled.drain(..) {
+                    // An array index, not a search. The generation check is
+                    // what used to be a lookup failing: unregistered between
+                    // being scheduled and coming due, or the slot handed to
+                    // another group since.
+                    let slot = &state.slots[entry.slot as usize];
+                    let Some(registration) = slot
+                        .registration
+                        .as_ref()
+                        .filter(|_| slot.generation == entry.generation)
+                    else {
+                        self.ticks_dropped.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    };
+                    due.push(Arc::clone(&registration.receiver));
+                    let interval = registration.interval_ms.max(1);
+                    // Every whole interval between the deadline and now is a
+                    // tick this group was owed and will not get, because
+                    // `max(now + 1)` below pulls the deadline forward instead
+                    // of delivering the backlog. Counted rather than delivered,
+                    // so the shortfall is visible without an external probe.
+                    let owed = now.saturating_sub(at_ms) / interval;
+                    if owed > 0 {
+                        self.ticks_skipped.fetch_add(owed, Ordering::Relaxed);
+                    }
+                    // From the deadline rather than from now, so a group that
+                    // fell behind catches up to its schedule instead of
+                    // drifting. Always past `at_ms`, because the interval is at
+                    // least 1, so a bucket can never reschedule into itself.
+                    let next_at = at_ms.saturating_add(interval).max(now + 1);
+                    // `get_mut` before `insert` so the common case -- the rest
+                    // of a bucket landing where the first of it did -- is one
+                    // lookup, and so a new bucket can take a vector back from
+                    // the pool rather than allocating one.
+                    if let Some(bucket) = state.buckets.get_mut(&next_at) {
+                        bucket.push(entry);
+                    } else {
+                        let mut fresh = state.spare.pop().unwrap_or_default();
+                        fresh.push(entry);
+                        state.buckets.insert(next_at, fresh);
+                    }
                 }
-                // From the deadline rather than from now, so a group that fell
-                // behind catches up to its schedule instead of drifting.
-                let next_at = entry.at_ms.saturating_add(interval).max(now + 1);
-                state.queue.push(Reverse(Deadline {
-                    at_ms: next_at,
-                    slot: entry.slot,
-                    generation: entry.generation,
-                }));
+                // Emptied by the drain, and keeping its capacity.
+                state.spare.push(scheduled);
             }
             due
         };
@@ -367,7 +377,8 @@ impl Driver {
             options,
             state: Mutex::new(TickState {
                 clock_ms: 0,
-                queue: BinaryHeap::new(),
+                buckets: BTreeMap::new(),
+                spare: Vec::new(),
                 groups: BTreeMap::new(),
                 slots: Vec::new(),
                 free: Vec::new(),
@@ -461,11 +472,11 @@ impl Driver {
         };
         let generation = state.slots[slot as usize].generation;
         state.groups.insert(key, slot);
-        state.queue.push(Reverse(Deadline {
-            at_ms,
-            slot,
-            generation,
-        }));
+        state
+            .buckets
+            .entry(at_ms)
+            .or_default()
+            .push(Scheduled { slot, generation });
         // This may be earlier than the deadline the ticker went to sleep on, and
         // nothing else would wake it in time. Dropped before the notify so the
         // woken thread is not immediately blocked on the lock we still hold.
@@ -1007,7 +1018,7 @@ mod tests {
     /// assertions independent of the machine.
     fn hand_driven(groups: &[(u64, u64)]) -> (DriverInner, Arc<Counter>) {
         let counter = Arc::new(Counter::default());
-        let mut queue = BinaryHeap::new();
+        let mut buckets: BTreeMap<u64, Vec<Scheduled>> = BTreeMap::new();
         let mut registered = BTreeMap::new();
         let mut slots = Vec::new();
         for &(group_id, interval_ms) in groups {
@@ -1021,17 +1032,17 @@ mod tests {
             });
             let slot = (slots.len() - 1) as u32;
             registered.insert(key, slot);
-            queue.push(Reverse(Deadline {
-                at_ms: interval_ms,
+            buckets.entry(interval_ms).or_default().push(Scheduled {
                 slot,
                 generation: 0,
-            }));
+            });
         }
         let inner = DriverInner {
             options: DriverOptions::default(),
             state: Mutex::new(TickState {
                 clock_ms: 0,
-                queue,
+                buckets,
+                spare: Vec::new(),
                 groups: registered,
                 slots,
                 free: Vec::new(),
@@ -1208,11 +1219,11 @@ mod tests {
                 interval_ms: 1_000,
             });
             state.groups.insert(DriverGroupKey::new(2, 1), slot);
-            state.queue.push(Reverse(Deadline {
-                at_ms: 1_000,
-                slot,
-                generation,
-            }));
+            state
+                .buckets
+                .entry(1_000)
+                .or_default()
+                .push(Scheduled { slot, generation });
             // The departed group-s deadline at 10ms is still in the heap.
         }
 
@@ -1241,44 +1252,58 @@ mod tests {
         // cost. A timing assertion here would be a flaky test rather than a
         // finding -- `tests/tick_locality.rs` carries the scars of one.
         //
-        // The print is for reproducing the figure the slot table was built on.
-        // With a key-to-registration `BTreeMap` consulted on the tick path this
-        // read 111.6 ns a tick at 65,536 groups; with the slot table, 67.0 ns.
-        // One quiet box, release profile, minimum of five, arms interleaved.
+        // The print is for reproducing the figures the scheduler was built on.
+        // Release profile, minimum of four, arms interleaved, one box, at 65,536
+        // groups on a single interval: a heap of one entry per group read
+        // 71.4 ns a tick and these buckets read 17.8. Levels move between boxes
+        // and between days, so only compare figures from one run with each other.
+        //
+        // The spread rows are there because one bucket per distinct deadline is
+        // only cheap while deadlines are shared. Across the six rows the gain
+        // ran from 1.53x, at 1,024 groups spread over 64 intervals where there
+        // is barely a group per bucket, to 5.90x at 65,536 groups over 64, where
+        // a heap degrades and buckets do not. It was not slower anywhere
+        // measured, and a group per interval is the case to watch: there the two
+        // converge.
         use std::time::Instant;
-        const INTERVAL: u64 = 10;
         const TICKS_EACH: u64 = 10;
         println!();
         for &n in &[1_024u64, 8_192, 65_536] {
-            let groups: Vec<(u64, u64)> = (1..=n).map(|g| (g, INTERVAL)).collect();
-            let (inner, counter) = hand_driven(&groups);
+            for &spread in &[1u64, 64] {
+                // `spread` distinct intervals, dealt round-robin.
+                let interval = |g: u64| 10 + (g % spread);
+                let groups: Vec<(u64, u64)> = (1..=n).map(|g| (g, interval(g - 1))).collect();
+                let span = TICKS_EACH * 10;
+                let owed: u64 = (0..n).map(|g| span / interval(g)).sum();
 
-            let began = Instant::now();
-            for ms in 1..=(TICKS_EACH * INTERVAL) {
-                inner.advance_to(ms);
+                let (inner, counter) = hand_driven(&groups);
+                let began = Instant::now();
+                for ms in 1..=span {
+                    inner.advance_to(ms);
+                }
+                let elapsed_ns = began.elapsed().as_nanos() as f64;
+
+                assert_eq!(
+                    counter.count(),
+                    owed,
+                    "{n} groups over {span} ms at {spread} distinct intervals owe \
+                     exactly one tick per whole interval each"
+                );
+                assert_eq!(
+                    inner.ticks_dropped.load(Ordering::Relaxed),
+                    0,
+                    "nothing was cancelled, so nothing may be dropped"
+                );
+                assert_eq!(
+                    inner.ticks_skipped.load(Ordering::Relaxed),
+                    0,
+                    "the clock is driven a millisecond at a time, so nothing is owed"
+                );
+                println!(
+                    "    {n:>6} groups  {spread:>3} interval(s)  {:>7.1} ns a tick",
+                    elapsed_ns / counter.count() as f64
+                );
             }
-            let elapsed_ns = began.elapsed().as_nanos() as f64;
-
-            assert_eq!(
-                counter.count(),
-                n * TICKS_EACH,
-                "every one of {n} groups owes {TICKS_EACH} ticks over {} ms",
-                TICKS_EACH * INTERVAL
-            );
-            assert_eq!(
-                inner.ticks_dropped.load(Ordering::Relaxed),
-                0,
-                "nothing was cancelled, so nothing may be dropped"
-            );
-            assert_eq!(
-                inner.ticks_skipped.load(Ordering::Relaxed),
-                0,
-                "the clock is driven a millisecond at a time, so nothing is owed"
-            );
-            println!(
-                "    {n:>6} groups  {:>7.1} ns a tick",
-                elapsed_ns / counter.count() as f64
-            );
         }
         println!();
     }
