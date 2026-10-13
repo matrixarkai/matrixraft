@@ -1045,6 +1045,21 @@ pub struct PipelineLimits {
     pub max_apply_batch_bytes: u64,
     pub enable_reorder_queue: bool,
     pub reorder_window_size: u64,
+    /// **Its magnitude is never read.** The only use of this field is
+    /// `reorder_timeout_us > 0`, a liveness predicate inside
+    /// `matrixraft_pipeline_evidence`, so 1 and 5,000,000 behave alike.
+    ///
+    /// A timeout is impossible by construction: `reorder_queue` is a
+    /// `BTreeSet<LogIndex>` and records no arrival time, and nothing ages its
+    /// contents. The same file does implement elapsed-against-timeout for snapshot
+    /// transfer (`latest_receiving_elapsed_ms` against `send_timeout_ms`), so this
+    /// is a queue that keeps no clock rather than a module that has none.
+    ///
+    /// Entries leave the queue two ways: drained when the hole before them is
+    /// filled, or dropped when an embedder calls `expire_reorder_queue` --
+    /// reachable as `AdminCommand::ExpirePeerReorderQueue`. That manual drop is
+    /// what increments `reorder_entry_timeouts`, so the counter named for timeouts
+    /// counts operator-initiated drops. Expiry policy is the embedder-s.
     pub reorder_timeout_us: u64,
 }
 
