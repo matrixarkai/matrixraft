@@ -166,16 +166,30 @@ pub struct DriverStats {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+/// 16 bytes, against 24 when this carried a `DriverGroupKey`. The heap holds one
+/// of these per registered group and sifts them on every pop and push, so the
+/// width is on the tick path twice.
 struct Deadline {
     at_ms: u64,
-    key: DriverGroupKey,
+    /// Where the registration lives, so coming due is an array index rather than
+    /// a search. Paired with the generation it was scheduled under: a slot is
+    /// handed out again after a cancel, and a deadline still outstanding across
+    /// that reuse must not fire whoever took the slot over.
+    slot: u32,
+    generation: u32,
 }
 
 impl Ord for Deadline {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // By time first, then by key, so the order is total and a run is
-        // reproducible rather than depending on heap luck.
-        self.at_ms.cmp(&other.at_ms).then(self.key.cmp(&other.key))
+        // By time first, then by slot, so the order is total and a run is
+        // reproducible rather than depending on heap luck. This used to tie-break
+        // on the group key; slot is assigned at registration, so for groups
+        // registered in key order -- the ordinary case -- it is the same order,
+        // and where it differs it is still total and still reproducible, which is
+        // all the tie-break was ever for.
+        self.at_ms
+            .cmp(&other.at_ms)
+            .then(self.slot.cmp(&other.slot))
     }
 }
 
@@ -190,12 +204,29 @@ struct Registration {
     interval_ms: u64,
 }
 
+/// One registration's home. Vacant slots are kept rather than compacted, so a
+/// slot index stays valid for as long as a deadline can be outstanding against
+/// it.
+struct Slot {
+    registration: Option<Registration>,
+    /// Bumped on every cancel, so a deadline scheduled before the cancel can be
+    /// told from one scheduled after a reuse.
+    generation: u32,
+}
+
 struct TickState {
     clock_ms: u64,
     /// `Reverse` because `BinaryHeap` is a max-heap and the earliest deadline
     /// is the one wanted.
     queue: BinaryHeap<Reverse<Deadline>>,
-    groups: BTreeMap<DriverGroupKey, Registration>,
+    /// Key to slot. Consulted when a group is registered or cancelled, never
+    /// when one comes due: a `BTreeMap` lookup on the tick path cost at least
+    /// 55ns of the 138ns a tick took at 65,536 groups, which is where the
+    /// slot table comes from.
+    groups: BTreeMap<DriverGroupKey, u32>,
+    slots: Vec<Slot>,
+    /// Slots whose group was cancelled, to be handed out again.
+    free: Vec<u32>,
 }
 
 struct DriverInner {
@@ -269,8 +300,16 @@ impl DriverInner {
                 let Some(Reverse(entry)) = state.queue.pop() else {
                     break;
                 };
-                let Some(registration) = state.groups.get(&entry.key) else {
-                    // Unregistered between being scheduled and coming due.
+                // An array index, not a search. The generation check is what
+                // used to be the lookup failing: unregistered between being
+                // scheduled and coming due, or the slot handed to another group
+                // since.
+                let slot = &state.slots[entry.slot as usize];
+                let Some(registration) = slot
+                    .registration
+                    .as_ref()
+                    .filter(|_| slot.generation == entry.generation)
+                else {
                     self.ticks_dropped.fetch_add(1, Ordering::Relaxed);
                     continue;
                 };
@@ -290,7 +329,8 @@ impl DriverInner {
                 let next_at = entry.at_ms.saturating_add(interval).max(now + 1);
                 state.queue.push(Reverse(Deadline {
                     at_ms: next_at,
-                    key: entry.key,
+                    slot: entry.slot,
+                    generation: entry.generation,
                 }));
             }
             due
@@ -329,6 +369,8 @@ impl Driver {
                 clock_ms: 0,
                 queue: BinaryHeap::new(),
                 groups: BTreeMap::new(),
+                slots: Vec::new(),
+                free: Vec::new(),
             }),
             wake: Condvar::new(),
             exit: AtomicBool::new(false),
@@ -399,14 +441,31 @@ impl Driver {
             )));
         }
         let at_ms = state.clock_ms.saturating_add(interval_ms);
-        state.groups.insert(
-            key,
-            Registration {
-                receiver,
-                interval_ms,
-            },
-        );
-        state.queue.push(Reverse(Deadline { at_ms, key }));
+        let registration = Registration {
+            receiver,
+            interval_ms,
+        };
+        let slot = match state.free.pop() {
+            Some(slot) => {
+                let reused = &mut state.slots[slot as usize];
+                reused.registration = Some(registration);
+                slot
+            }
+            None => {
+                state.slots.push(Slot {
+                    registration: Some(registration),
+                    generation: 0,
+                });
+                (state.slots.len() - 1) as u32
+            }
+        };
+        let generation = state.slots[slot as usize].generation;
+        state.groups.insert(key, slot);
+        state.queue.push(Reverse(Deadline {
+            at_ms,
+            slot,
+            generation,
+        }));
         // This may be earlier than the deadline the ticker went to sleep on, and
         // nothing else would wake it in time. Dropped before the notify so the
         // woken thread is not immediately blocked on the lock we still hold.
@@ -423,7 +482,17 @@ impl Driver {
             .state
             .lock()
             .expect("driver state mutex poisoned");
-        state.groups.remove(&key).is_some()
+        let Some(slot) = state.groups.remove(&key) else {
+            return false;
+        };
+        let vacated = &mut state.slots[slot as usize];
+        vacated.registration = None;
+        // Any deadline still outstanding for this group was scheduled under the
+        // old generation, so it will be dropped rather than fired -- including
+        // after the slot is handed to someone else.
+        vacated.generation = vacated.generation.wrapping_add(1);
+        state.free.push(slot);
+        true
     }
 
     pub fn group_count(&self) -> usize {
@@ -940,18 +1009,22 @@ mod tests {
         let counter = Arc::new(Counter::default());
         let mut queue = BinaryHeap::new();
         let mut registered = BTreeMap::new();
+        let mut slots = Vec::new();
         for &(group_id, interval_ms) in groups {
             let key = DriverGroupKey::new(group_id, 1);
-            registered.insert(
-                key,
-                Registration {
+            slots.push(Slot {
+                registration: Some(Registration {
                     receiver: Arc::clone(&counter) as Arc<dyn DriverTickReceiver>,
                     interval_ms,
-                },
-            );
+                }),
+                generation: 0,
+            });
+            let slot = (slots.len() - 1) as u32;
+            registered.insert(key, slot);
             queue.push(Reverse(Deadline {
                 at_ms: interval_ms,
-                key,
+                slot,
+                generation: 0,
             }));
         }
         let inner = DriverInner {
@@ -960,6 +1033,8 @@ mod tests {
                 clock_ms: 0,
                 queue,
                 groups: registered,
+                slots,
+                free: Vec::new(),
             }),
             wake: Condvar::new(),
             exit: AtomicBool::new(false),
@@ -1101,6 +1176,111 @@ mod tests {
         );
         // Not a dropped tick: nothing was unregistered.
         assert_eq!(inner.ticks_dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_deadline_outstanding_across_a_slot_reuse_does_not_fire_its_successor() {
+        // A registration lives in a slot and a deadline names that slot, so a
+        // cancel followed by a registration that takes the slot over leaves a
+        // deadline in the heap pointing at the wrong group. The generation is
+        // what tells them apart; without it the newcomer would be ticked on the
+        // departed group-s schedule.
+        let (inner, departed) = hand_driven(&[(1, 10)]);
+        let newcomer = Arc::new(Counter::default());
+
+        {
+            let mut state = inner.state.lock().expect("driver state mutex poisoned");
+            // Cancel, exactly as `cancel_group` does.
+            let slot = state
+                .groups
+                .remove(&DriverGroupKey::new(1, 1))
+                .expect("registered");
+            let vacated = &mut state.slots[slot as usize];
+            vacated.registration = None;
+            vacated.generation = vacated.generation.wrapping_add(1);
+            state.free.push(slot);
+
+            // A new group takes the freed slot, as registration would give it.
+            let slot = state.free.pop().expect("one free slot");
+            let generation = state.slots[slot as usize].generation;
+            state.slots[slot as usize].registration = Some(Registration {
+                receiver: Arc::clone(&newcomer) as Arc<dyn DriverTickReceiver>,
+                interval_ms: 1_000,
+            });
+            state.groups.insert(DriverGroupKey::new(2, 1), slot);
+            state.queue.push(Reverse(Deadline {
+                at_ms: 1_000,
+                slot,
+                generation,
+            }));
+            // The departed group-s deadline at 10ms is still in the heap.
+        }
+
+        inner.advance_to(10);
+
+        assert_eq!(
+            newcomer.count(),
+            0,
+            "the newcomer was ticked on the departed group-s 10ms deadline"
+        );
+        assert_eq!(departed.count(), 0, "the departed group must not be ticked");
+        assert_eq!(
+            inner.ticks_dropped.load(Ordering::Relaxed),
+            1,
+            "the stale deadline must be counted as dropped, not silently ignored"
+        );
+
+        // And the newcomer still gets its own.
+        inner.advance_to(1_000);
+        assert_eq!(newcomer.count(), 1, "the newcomer keeps its own schedule");
+    }
+
+    #[test]
+    fn the_tick_count_is_exact_at_every_scale_and_the_cost_is_reported() {
+        // Asserts the counts, which are exact arithmetic, and only *prints* the
+        // cost. A timing assertion here would be a flaky test rather than a
+        // finding -- `tests/tick_locality.rs` carries the scars of one.
+        //
+        // The print is for reproducing the figure the slot table was built on.
+        // With a key-to-registration `BTreeMap` consulted on the tick path this
+        // read 111.6 ns a tick at 65,536 groups; with the slot table, 67.0 ns.
+        // One quiet box, release profile, minimum of five, arms interleaved.
+        use std::time::Instant;
+        const INTERVAL: u64 = 10;
+        const TICKS_EACH: u64 = 10;
+        println!();
+        for &n in &[1_024u64, 8_192, 65_536] {
+            let groups: Vec<(u64, u64)> = (1..=n).map(|g| (g, INTERVAL)).collect();
+            let (inner, counter) = hand_driven(&groups);
+
+            let began = Instant::now();
+            for ms in 1..=(TICKS_EACH * INTERVAL) {
+                inner.advance_to(ms);
+            }
+            let elapsed_ns = began.elapsed().as_nanos() as f64;
+
+            assert_eq!(
+                counter.count(),
+                n * TICKS_EACH,
+                "every one of {n} groups owes {TICKS_EACH} ticks over {} ms",
+                TICKS_EACH * INTERVAL
+            );
+            assert_eq!(
+                inner.ticks_dropped.load(Ordering::Relaxed),
+                0,
+                "nothing was cancelled, so nothing may be dropped"
+            );
+            assert_eq!(
+                inner.ticks_skipped.load(Ordering::Relaxed),
+                0,
+                "the clock is driven a millisecond at a time, so nothing is owed"
+            );
+            println!(
+                "    {n:>6} groups  {:>7.1} ns a tick",
+                elapsed_ns / counter.count() as f64
+            );
+        }
+        println!();
     }
 
     #[test]
