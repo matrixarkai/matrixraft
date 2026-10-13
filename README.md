@@ -493,6 +493,35 @@ Use the ratio rather than the nanoseconds when sizing, because the base moves wi
 the group count: the same one-voter tick is about 1,130ns at 8192 groups and about
 2,200ns at 65,536. Measure the base at your own size and add 80% of it per peer.
 
+**Why the base moves with the group count, and it is not the raft work.** A tick
+does the same arithmetic whichever group it reaches. What changes is whether that
+group's state is still in cache. `RaftCluster` is **680 bytes** of inline state --
+`std::mem::size_of`, so not counting what its maps and vectors point at -- and a
+shard ticking thousands of groups walks all of it between one visit to a group and
+the next.
+
+`examples/tick_working_set.rs` isolates that, running the same calls the same number
+of times in two orders: one group over and over, and a group apiece across two
+thousand. Five runs on one Ryzen 5850U read **2.3x to 3.8x** dearer for the second,
+the hammered arm at 47 to 65ns and the spread arm at 126 to 248. It takes a couple
+of seconds, where seeing the same thing in the table above takes a 65,536-group
+sweep.
+
+Two honest limits on that figure. The direction reproduces every time and **the
+multiplier does not travel** -- treat it as "a few times", not as 3x. And walking the
+group count to find where the rise begins did give a clean step across per-core L2
+on a quiet box, but would not reproduce an hour later, with the worst of a row three
+to five times its own best; so the example reports two orders rather than a curve,
+and this page claims no group count as the boundary.
+
+What it does mean for sizing: fewer groups to a shard keeps more of them warm, so
+`worker_num` buys locality as well as tick capacity. The sweep in the table is still
+how to pick it -- this only says what the rise is made of.
+
+```bash
+cargo run --release --example tick_working_set
+```
+
 **Memory does not follow the same shape.** It goes 20, 23, 24, 24 KiB a group across
 those four rows -- the first peers cost about 1.5 KiB each and then it flattens,
 which is an allocator rounding up rather than a cost per peer. Past about five
@@ -909,6 +938,17 @@ Inspect the open-source embedding surface:
 ```bash
 cargo run --example open_source_surface
 ```
+
+See what a tick costs when each one reaches a different group:
+
+```bash
+cargo run --release --example tick_working_set
+```
+
+It prints `size_of::<RaftCluster>()` and the same calls in two orders, one group
+hammered against a group apiece across two thousand. Release, because the point is
+a memory effect and a debug build buries it. There is more on reading it in
+the shared-runtime sizing notes above, under "Why the base moves with the group count".
 
 Build a BaselineRaft-style operational evidence bundle:
 
