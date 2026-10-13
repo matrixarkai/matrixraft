@@ -435,11 +435,17 @@ pub struct RaftCluster {
     ignore_witness: bool,
     count_witness_in_commit_quorum: bool,
     prohibits_election: bool,
-    leader_transfer: Option<LeaderTransferState>,
+    /// Boxed because it is `None` in the steady state and 64 bytes when it is
+    /// not. Inline it was 64 bytes of every group's `RaftCluster`, which a shard
+    /// walks past on the way to the next group it ticks.
+    leader_transfer: Option<Box<LeaderTransferState>>,
     leader_transfer_timeout_ticks: u64,
     aborted_leader_transfers: u64,
     duplicate_leader_transfer_requests: u64,
-    snapshot_trigger: Option<SnapshotTriggerState>,
+    /// Boxed for the same reason as `leader_transfer`, and it is the larger of
+    /// the two: 112 bytes, most of it the `SnapshotMetadata` with its id string
+    /// and two member vectors.
+    snapshot_trigger: Option<Box<SnapshotTriggerState>>,
     duplicate_snapshot_trigger_requests: u64,
     vote_responses: BTreeMap<NodeId, bool>,
     pre_vote_responses: BTreeMap<NodeId, bool>,
@@ -3594,7 +3600,7 @@ impl RaftCluster {
                 transfer.duplicate_requests = transfer.duplicate_requests.saturating_add(1);
                 transfer.reason = admission.reason;
             }
-            return Ok(self.leader_transfer.clone());
+            return Ok(self.leader_transfer.as_deref().cloned());
         }
         if !admission.is_accepted() {
             return Ok(None);
@@ -3609,7 +3615,7 @@ impl RaftCluster {
         if self.leader_transfer.is_some() {
             self.aborted_leader_transfers = aborted_transfers;
         }
-        self.leader_transfer = Some(LeaderTransferState {
+        self.leader_transfer = Some(Box::new(LeaderTransferState {
             transferee_id: target,
             elapsed_ticks: 0,
             timeout_ticks: self.leader_transfer_timeout_ticks,
@@ -3622,8 +3628,8 @@ impl RaftCluster {
             } else {
                 "waiting_for_transferee_catchup".to_string()
             },
-        });
-        Ok(self.leader_transfer.clone())
+        }));
+        Ok(self.leader_transfer.as_deref().cloned())
     }
 
     pub fn transfer_leader(&mut self, target: NodeId) -> Result<(), RaftError> {
@@ -3766,7 +3772,7 @@ impl RaftCluster {
     }
 
     pub fn leader_transfer_state(&self) -> Option<LeaderTransferState> {
-        self.leader_transfer.clone()
+        self.leader_transfer.as_deref().cloned()
     }
 
     pub fn membership(&self) -> Membership {
@@ -5101,13 +5107,13 @@ impl RaftCluster {
         Ok(matrixraft_cluster_status_report(
             self.group_id,
             self.leader_id,
-            self.leader_transfer.clone(),
+            self.leader_transfer.as_deref().cloned(),
             nodes,
         ))
     }
 
     pub fn snapshot_trigger_in_progress(&self) -> Option<&SnapshotTriggerState> {
-        self.snapshot_trigger.as_ref()
+        self.snapshot_trigger.as_deref()
     }
 
     pub fn duplicate_snapshot_trigger_requests(&self) -> u64 {
@@ -5171,12 +5177,12 @@ impl RaftCluster {
             membership: self.node_ids(),
             members: self.snapshot_members(),
         };
-        self.snapshot_trigger = Some(SnapshotTriggerState {
+        self.snapshot_trigger = Some(Box::new(SnapshotTriggerState {
             meta: meta.clone(),
             elapsed_ticks: 0,
             timeout_ticks: self.leader_transfer_timeout_ticks,
             timed_out: false,
-        });
+        }));
         Ok(meta)
     }
 
