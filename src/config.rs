@@ -16,6 +16,16 @@ pub struct Config {
     pub max_payload_bytes: u64,
     #[serde(default = "default_max_log_buffer_bytes")]
     pub max_log_buffer_bytes: u64,
+    /// **Consulted by nothing.** It is declared, defaulted to 10,000, rejected
+    /// when zero, and read nowhere in the crate: there is no log-size snapshot
+    /// trigger. A snapshot starts when an embedder calls
+    /// `RaftCluster::trigger_snapshot`, and `tick_snapshot_trigger` only ages out
+    /// a trigger already in flight.
+    ///
+    /// `MatrixRaftOptions::max_applied_log_bytes` is the byte-valued knob for the
+    /// same idea and is equally unread, defaulting to `u64::MAX`. Two knobs promise
+    /// automatic snapshots and neither delivers one, so treat both as the
+    /// embedder's business until a trigger exists to honour them.
     pub snapshot_threshold_entries: u64,
     pub max_segment_bytes: u64,
     pub min_keep_segment_num: u64,

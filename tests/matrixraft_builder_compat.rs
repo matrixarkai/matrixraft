@@ -193,7 +193,8 @@ fn matrixraft_builders_capture_node_group_transport_and_option_shape() {
             last_follower_lease_ms: 200,
             max_payload_bytes: 64 * 1024,
             max_log_buffer_bytes: 16 * 1024 * 1024,
-            snapshot_threshold_entries: 64 * 1024,
+            // Not max_apply_batch_bytes: that is a byte budget, this is a count.
+            snapshot_threshold_entries: 10_000,
             max_segment_bytes: 64 * 1024 * 1024,
             min_keep_segment_num: 2,
             enable_pre_vote: true,

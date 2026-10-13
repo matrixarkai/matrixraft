@@ -3061,7 +3061,14 @@ impl MatrixRaftOptions {
             last_follower_lease_ms: self.last_lease_duration_ms,
             max_payload_bytes: self.max_memory_replicate_log_bytes.max(1),
             max_log_buffer_bytes: self.max_cache_memory_bytes.max(1),
-            snapshot_threshold_entries: self.max_apply_batch_bytes.max(1),
+            // MatrixRaftOptions carries no threshold in entries, and
+            // max_apply_batch_bytes is a byte budget -- 8 MiB by default, which
+            // arrived here as a threshold of 8,388,608 entries. The byte-valued
+            // snapshot knob on this struct is max_applied_log_bytes, not this one.
+            // Nothing consults Config::snapshot_threshold_entries, so taking the
+            // default changes no behaviour; it stops the value being nonsense for
+            // whoever wires the trigger up.
+            snapshot_threshold_entries: Config::default().snapshot_threshold_entries,
             max_segment_bytes: self.max_segment_bytes.max(1),
             min_keep_segment_num: self.min_keep_segment_num.max(1),
             enable_pre_vote: self.enable_pre_vote,
