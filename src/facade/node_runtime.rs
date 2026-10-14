@@ -1663,8 +1663,26 @@ impl NodeCore {
                         let local_replica_role =
                             cluster.nodes.get(&node_id).map(|node| node.replica_role);
                         let lease_expired = !cluster.is_follower_lease_valid();
-                        let local_can_campaign = local_replica_role
-                            .is_some_and(ReplicaRole::can_be_leader)
+                        // A leader holds no FOLLOWER lease, so `lease_expired` is
+                        // true for one every cycle and this branch used to run on
+                        // the sitting leader: a `pre_vote` that grants itself, a
+                        // `campaign` that returns `Ok(())` at its own
+                        // already-leader check, and a counter that recorded it.
+                        // Measured at 920 campaigns in four seconds on one idle
+                        // group, none of which changed anything -- the term does
+                        // not move, because `campaign` refuses before touching it.
+                        //
+                        // Losing quorum is handled above by
+                        // `step_down_leader_if_lost_quorum`, so there is no case
+                        // where a node that is still leader needs to campaign.
+                        let already_leading = cluster.leader_id() == Some(node_id)
+                            && cluster
+                                .nodes
+                                .get(&node_id)
+                                .map(|node| node.raft_role == StateRole::Leader)
+                                .unwrap_or(false);
+                        let local_can_campaign = !already_leading
+                            && local_replica_role.is_some_and(ReplicaRole::can_be_leader)
                             && cluster
                                 .nodes
                                 .get(&node_id)
