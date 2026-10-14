@@ -190,6 +190,29 @@ pub struct TickAdmission {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// A pending-tick limit that refuses. **Nothing in the crate uses it.**
+///
+/// It is exported, and `tests/node_runtime.rs` exercises it directly, but no
+/// runtime path calls `admit_tick`. The hosted runtime bounds pending ticks by a
+/// different route: `PooledGroup::ticks_due` is an `AtomicU64` that
+/// `try_run_tick` clears with `swap(0)`, so every tick that arrived while the
+/// group was busy coalesces into one. The pending count is bounded at one *by
+/// construction* rather than by a limit, and what became of each tick is counted
+/// as `ticks_in_place`, `ticks_handed_over`, `ticks_fired`, `ticks_dropped` and
+/// `ticks_skipped`. The five counters here map onto those.
+///
+/// So these are two designs for one problem, and the wired one collapses where
+/// this one refuses. Before reaching for this, read
+/// `PooledGroupTicker::fire_tick` and decide which behaviour is wanted, because
+/// they are not the same: a coalesced tick runs once for several arrivals, a
+/// refused one does not run at all.
+///
+/// **And it cannot go on the tick path as written.** `admit_tick` returns a
+/// [`TickAdmission`] carrying an owned `reason`, so it allocates on every call,
+/// accept or refuse. A hosted group ticking allocates nothing at all now, held
+/// there by `tests/tick_window.rs`; this would put a whole allocation back per
+/// tick, to enforce a bound the coalesce already enforces.
+/// `tests/tick_admission_cost.rs` measures that and fails if it stops being true.
 pub struct TickBackpressure {
     pub pending_ticks: u64,
     pub max_pending_ticks: u64,
