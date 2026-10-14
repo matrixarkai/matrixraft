@@ -116,7 +116,7 @@ pub use benchmark::{
 };
 pub use channel_selector::{
     ChannelSelection, ChannelSelector, ChannelSelectorPolicy, MailChannel,
-    MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
+    MailChannelPressureStats, MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
 };
 pub use checksum::{
     matrixraft_checksum_file_list, matrixraft_crc32c, matrixraft_murmur32, ChecksumContext,
