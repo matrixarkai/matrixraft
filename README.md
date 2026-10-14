@@ -389,10 +389,34 @@ Four things worth knowing before sizing a host:
   roughly **500ns**, which is the end of that range rather than the beginning.
 
   So the lever is locality, not algorithmic work in those functions. A tick reaches
-  its group through an `Arc`, a `Mutex` and then `BTreeMap`s, in whatever order the
-  ticker's heap hands groups over; every one of those is a pointer chase the
-  prefetcher cannot follow. Making a group's per-tick state compact and contiguous
-  is worth more than making any of these calls cleverer.
+  its group through an `Arc`, a `Mutex` and then `BTreeMap`s, and every one of those
+  is a pointer chase the prefetcher cannot follow.
+
+  **It is not the visit order.** The ticker holds one bucket per deadline
+  millisecond and appends into it, so it hands groups over in the order they were
+  registered — which is allocation order, the cheaper of the two arms measured
+  above. `examples/tick_working_set.rs` runs the two orders against each other in a
+  couple of seconds and prints both the best and the worst of its runs, so a reader
+  can see when the box is not resolving the comparison; five runs read 2.3x to 3.8x,
+  and the multiplier does not travel.
+
+  What is left is the footprint walked between one visit to a group and the next.
+  `RaftCluster` is **520 bytes** of inline state by `size_of`, down from 680 once
+  `leader_transfer` and `snapshot_trigger` were boxed — both are `None` in the steady
+  state and were 64 and 112 bytes inline. `tests/cluster_footprint.rs` const-asserts
+  the figure, so a change in width fails the build rather than a test run. Making a
+  group's per-tick state compact is still worth more than making any of these calls
+  cleverer; that is the first instalment of it.
+
+  The driver's own share of a tick is no longer part of this. Across runs it reads
+  **13 to 18ns** at 1,024, 8,192 **and** 65,536 groups — the flatness is the point
+  rather than the figure, and like every level on this page it moves with how busy
+  the machine is. It is flat because coming due is an array index into a slot table
+  rather than a tree lookup, and because the queue holds one entry per deadline
+  millisecond rather than one per group, so a shared interval is one entry however
+  many groups are on it. A hosted group doing nothing but tick also
+  allocates **nothing**: `tests/tick_window.rs` holds that at 0.05 allocations a
+  tick, and `tests/alloc_driver.rs` holds the driver itself at zero.
 
   `cargo test --release --test tick_call_cost -- --nocapture` prints the row dearest
   first. Read it as a guard against a call becoming *algorithmically* expensive --
