@@ -90,6 +90,7 @@ fn pipeline_peer(peer_id: u64, match_index: u64, next_index: u64) -> PeerProgres
         reorder_queue_depth: 0,
         out_of_order_append_rejections: 0,
         reorder_entries_rejected: 0,
+        reorder_entries_converged: 0,
         reorder_entry_timeouts: 0,
         reorder_dropped_packages: 0,
         stale_term_rejections: 0,
