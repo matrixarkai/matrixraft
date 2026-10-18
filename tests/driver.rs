@@ -328,6 +328,105 @@ fn a_receiver_can_cancel_its_own_group_from_inside_a_tick() {
 }
 
 #[test]
+fn ticking_can_be_switched_off_and_the_schedule_keeps_running() {
+    let driver = Driver::start(options(1, 2)).expect("driver");
+    let counter = Arc::new(TickCounter::default());
+    let key = DriverGroupKey::new(41, 1);
+    driver
+        .register_group(key, Arc::clone(&counter) as Arc<dyn DriverTickReceiver>)
+        .expect("register");
+    assert!(driver.ticks_enabled());
+
+    assert!(
+        wait_until("the group ticks", Duration::from_secs(20), || counter
+            .count()
+            >= 3),
+        "the group never ticked, so switching ticks off proves nothing"
+    );
+
+    driver.disable_ticks();
+    assert!(!driver.ticks_enabled());
+    // A tick already in flight when the switch landed is still a tick, so the
+    // reading that matters is taken after the count has settled rather than
+    // the instant the switch was thrown.
+    let settled = wait_until("the count settles", Duration::from_secs(20), || {
+        let before = counter.count();
+        std::thread::sleep(Duration::from_millis(30));
+        counter.count() == before
+    });
+    assert!(settled, "the tick count never stopped moving");
+    let quiet = counter.count();
+    let suppressed_at_quiet = driver.stats().ticks_suppressed;
+
+    // The schedule is still running: it keeps coming due and keeps being
+    // rescheduled, which is what the suppressed count is counting.
+    assert!(
+        wait_until(
+            "the schedule keeps running",
+            Duration::from_secs(20),
+            || { driver.stats().ticks_suppressed >= suppressed_at_quiet + 3 }
+        ),
+        "suppressed stayed at {suppressed_at_quiet}, so the schedule stopped too"
+    );
+    assert_eq!(
+        counter.count(),
+        quiet,
+        "a suppressed tick must not reach the group"
+    );
+    let fired_while_off = driver.stats().ticks_fired;
+
+    driver.enable_ticks();
+    assert!(driver.ticks_enabled());
+    assert!(
+        wait_until("ticking resumes", Duration::from_secs(20), || counter
+            .count()
+            >= quiet + 3),
+        "the group never ticked again after ticking was switched back on"
+    );
+    assert!(
+        driver.stats().ticks_fired > fired_while_off,
+        "fired {} against {fired_while_off} before the switch",
+        driver.stats().ticks_fired
+    );
+
+    // And the resumed group is not handed the backlog it missed: the deadlines
+    // were rescheduled as they came due, so what it gets is its own cadence.
+    let resumed = counter.count();
+    std::thread::sleep(Duration::from_millis(100));
+    let after = counter.count();
+    assert!(
+        after - resumed < 200,
+        "a resumed group was handed {} ticks in 100ms at a 2ms interval",
+        after - resumed
+    );
+}
+
+#[test]
+fn a_group_registered_while_ticking_is_off_ticks_when_it_returns() {
+    let driver = Driver::start(options(1, 2)).expect("driver");
+    driver.disable_ticks();
+    let counter = Arc::new(TickCounter::default());
+    let key = DriverGroupKey::new(42, 1);
+    driver
+        .register_group(key, Arc::clone(&counter) as Arc<dyn DriverTickReceiver>)
+        .expect("register while ticking is off");
+
+    assert!(
+        wait_until("the schedule runs anyway", Duration::from_secs(20), || {
+            driver.stats().ticks_suppressed >= 2
+        }),
+        "the group was never put on the schedule"
+    );
+    assert_eq!(counter.count(), 0);
+
+    driver.enable_ticks();
+    assert!(
+        wait_until("it ticks", Duration::from_secs(20), || counter.count() >= 2),
+        "a group registered while ticking was off never ticked"
+    );
+}
+
+#[test]
 fn a_group_cannot_register_twice() {
     let driver = Driver::start(DriverOptions::default()).expect("driver");
     let key = DriverGroupKey::new(3, 2);
