@@ -91,11 +91,50 @@ pub struct MergedHeartbeatBatch {
     pub messages: Vec<HeartbeatMergeMessage>,
 }
 
-#[derive(Debug, Clone)]
+/// The counters behind [`HeartbeatMergeStats`], as a merger that many threads
+/// share has to hold them.
+#[derive(Debug, Default)]
+struct MergeCounters {
+    queued_requests: AtomicU64,
+    queued_responses: AtomicU64,
+    flushed_requests: AtomicU64,
+    flushed_responses: AtomicU64,
+    bypassed_messages: AtomicU64,
+    resolver_failures: AtomicU64,
+}
+
+impl MergeCounters {
+    fn snapshot(&self) -> HeartbeatMergeStats {
+        HeartbeatMergeStats {
+            queued_requests: self.queued_requests.load(Ordering::Relaxed),
+            queued_responses: self.queued_responses.load(Ordering::Relaxed),
+            flushed_requests: self.flushed_requests.load(Ordering::Relaxed),
+            flushed_responses: self.flushed_responses.load(Ordering::Relaxed),
+            bypassed_messages: self.bypassed_messages.load(Ordering::Relaxed),
+            resolver_failures: self.resolver_failures.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Holds heartbeats bound for the same peer together, bucketed by that peer's
+/// address.
+///
+/// **A lock per bucket, not one over all of them.** The buckets exist so that
+/// heartbeats for different peers do not wait for each other, and one mutex
+/// over the whole merger gave that away: every group on every worker queued its
+/// heartbeat through a single lock, so the bucket count was an organising
+/// detail with nothing behind it. A heartbeat is offered on the path that sends
+/// it, which at thousands of groups is the busiest path there is.
+///
+/// The address decides the bucket, so one peer's heartbeats always land in one
+/// bucket and arrive in the order they were offered. Two peers that hash
+/// together share a lock; sixteen buckets is the default because that is enough
+/// that they rarely do.
+#[derive(Debug)]
 pub struct HeartbeatMerger {
     enabled: bool,
-    buckets: Vec<BTreeMap<String, Vec<HeartbeatMergeMessage>>>,
-    stats: HeartbeatMergeStats,
+    buckets: Vec<Mutex<BTreeMap<String, Vec<HeartbeatMergeMessage>>>>,
+    counters: MergeCounters,
 }
 
 impl HeartbeatMerger {
@@ -115,29 +154,65 @@ impl HeartbeatMerger {
         let bucket_count = bucket_count.max(1);
         Self {
             enabled,
-            buckets: vec![BTreeMap::new(); bucket_count],
-            stats: HeartbeatMergeStats::default(),
+            buckets: (0..bucket_count)
+                .map(|_| Mutex::new(BTreeMap::new()))
+                .collect(),
+            counters: MergeCounters::default(),
         }
+    }
+
+    /// How many locks the merger spreads its peers over.
+    pub fn bucket_count(&self) -> usize {
+        self.buckets.len()
+    }
+
+    /// How many heartbeats one bucket is holding, or `None` for an index that
+    /// is not a bucket.
+    ///
+    /// `pending_len` is the figure a host wants. This one is what makes the
+    /// spreading observable at all: a merger that put every peer in one bucket
+    /// would behave identically and only a contention measurement would notice,
+    /// so without this the claim that the work is spread could be argued but
+    /// not checked. It also answers the operational form of the same question
+    /// -- whether one bucket is carrying the peers that matter.
+    pub fn pending_in_bucket(&self, index: usize) -> Option<usize> {
+        if index >= self.buckets.len() {
+            return None;
+        }
+        Some(self.bucket(index).values().map(Vec::len).sum())
+    }
+
+    fn bucket(
+        &self,
+        index: usize,
+    ) -> std::sync::MutexGuard<'_, BTreeMap<String, Vec<HeartbeatMergeMessage>>> {
+        self.buckets[index]
+            .lock()
+            .expect("heartbeat merge bucket mutex poisoned")
     }
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
-    pub fn stats(&self) -> &HeartbeatMergeStats {
-        &self.stats
+    /// A snapshot, not a borrow: the counters move under a shared merger, so
+    /// there is nothing stable to lend out.
+    ///
+    /// The six counters are read one at a time, so a snapshot taken while
+    /// heartbeats are being queued can show a queued count from after a flushed
+    /// count. Each figure is right; the set is not an instant.
+    pub fn stats(&self) -> HeartbeatMergeStats {
+        self.counters.snapshot()
     }
 
     pub fn pending_len(&self) -> usize {
-        self.buckets
-            .iter()
-            .flat_map(BTreeMap::values)
-            .map(Vec::len)
+        (0..self.buckets.len())
+            .map(|index| self.bucket(index).values().map(Vec::len).sum::<usize>())
             .sum()
     }
 
     pub fn maybe_merge<R>(
-        &mut self,
+        &self,
         message: Message,
         resolver: &R,
     ) -> Result<Option<Message>, RaftError>
@@ -145,7 +220,9 @@ impl HeartbeatMerger {
         R: HeartbeatAddressResolver,
     {
         if !self.enabled {
-            self.stats.bypassed_messages = self.stats.bypassed_messages.saturating_add(1);
+            self.counters
+                .bypassed_messages
+                .fetch_add(1, Ordering::Relaxed);
             return Ok(Some(message));
         }
 
@@ -154,7 +231,9 @@ impl HeartbeatMerger {
                 HeartbeatMergeMessage::AppendEntriesRequest { target, request }
             }
             other => {
-                self.stats.bypassed_messages = self.stats.bypassed_messages.saturating_add(1);
+                self.counters
+                    .bypassed_messages
+                    .fetch_add(1, Ordering::Relaxed);
                 return Ok(Some(other));
             }
         };
@@ -164,7 +243,7 @@ impl HeartbeatMerger {
     }
 
     pub fn merge_heartbeat_response<R>(
-        &mut self,
+        &self,
         local_node_id: NodeId,
         peer_id: NodeId,
         response: AppendEntriesResponse,
@@ -174,7 +253,9 @@ impl HeartbeatMerger {
         R: HeartbeatAddressResolver,
     {
         if !self.enabled {
-            self.stats.bypassed_messages = self.stats.bypassed_messages.saturating_add(1);
+            self.counters
+                .bypassed_messages
+                .fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         self.queue_heartbeat(
@@ -188,7 +269,7 @@ impl HeartbeatMerger {
     }
 
     fn queue_heartbeat<R>(
-        &mut self,
+        &self,
         heartbeat: HeartbeatMergeMessage,
         resolver: &R,
     ) -> Result<(), RaftError>
@@ -200,44 +281,59 @@ impl HeartbeatMerger {
         let raft_addr = match resolver.resolve_raft_addr(from, to) {
             Ok(raft_addr) => raft_addr,
             Err(error) => {
-                self.stats.resolver_failures = self.stats.resolver_failures.saturating_add(1);
+                self.counters
+                    .resolver_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 return Err(error);
             }
         };
         let bucket = bucket_for_addr(&raft_addr, self.buckets.len());
         match heartbeat {
             HeartbeatMergeMessage::AppendEntriesRequest { .. } => {
-                self.stats.queued_requests = self.stats.queued_requests.saturating_add(1);
-                self.buckets[bucket]
-                    .entry(raft_addr)
-                    .or_default()
-                    .push(heartbeat);
+                self.counters
+                    .queued_requests
+                    .fetch_add(1, Ordering::Relaxed);
             }
             HeartbeatMergeMessage::AppendEntriesResponse { .. } => {
-                self.stats.queued_responses = self.stats.queued_responses.saturating_add(1);
-                self.buckets[bucket]
-                    .entry(raft_addr)
-                    .or_default()
-                    .push(heartbeat);
+                self.counters
+                    .queued_responses
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
+        // One bucket, chosen by the address, so a heartbeat for one peer does
+        // not wait on a heartbeat for another.
+        self.bucket(bucket)
+            .entry(raft_addr)
+            .or_default()
+            .push(heartbeat);
         Ok(())
     }
 
-    pub fn flush(&mut self) -> Vec<MergedHeartbeatBatch> {
+    /// Takes everything held, one bucket at a time.
+    ///
+    /// Each bucket is taken under its own lock and released before the next is
+    /// touched, so a flush never holds two and never blocks a peer whose bucket
+    /// it has already passed. What it costs is that a flush is not an instant
+    /// across all sixteen -- a heartbeat offered while the flush is part way
+    /// through can land in a bucket already taken, and goes out on the next
+    /// flush instead. The flush interval is the bound on that, and it is the
+    /// same bound merging already imposes.
+    pub fn flush(&self) -> Vec<MergedHeartbeatBatch> {
         let mut batches = Vec::new();
-        for bucket in &mut self.buckets {
-            let drained = std::mem::take(bucket);
+        for index in 0..self.buckets.len() {
+            let drained = std::mem::take(&mut *self.bucket(index));
             for (raft_addr, messages) in drained {
                 for message in &messages {
                     match message {
                         HeartbeatMergeMessage::AppendEntriesRequest { .. } => {
-                            self.stats.flushed_requests =
-                                self.stats.flushed_requests.saturating_add(1);
+                            self.counters
+                                .flushed_requests
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                         HeartbeatMergeMessage::AppendEntriesResponse { .. } => {
-                            self.stats.flushed_responses =
-                                self.stats.flushed_responses.saturating_add(1);
+                            self.counters
+                                .flushed_responses
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -250,7 +346,7 @@ impl HeartbeatMerger {
         batches
     }
 
-    pub fn flush_messages(&mut self) -> Vec<Message> {
+    pub fn flush_messages(&self) -> Vec<Message> {
         self.flush()
             .into_iter()
             .flat_map(|batch| batch.messages)
@@ -302,7 +398,10 @@ pub trait MergedHeartbeatSender: Send + Sync {
 /// straight back, so a host can leave the call in place and turn the behaviour
 /// off with the setting rather than with a branch of its own.
 pub struct HeartbeatFlusher {
-    merger: Mutex<HeartbeatMerger>,
+    /// Not behind a mutex: the merger holds one per bucket, which is the whole
+    /// point of the buckets. Wrapping it again here would put every peer back
+    /// behind one lock.
+    merger: HeartbeatMerger,
     sender: Arc<dyn MergedHeartbeatSender>,
     flushes: AtomicU64,
     batches_sent: AtomicU64,
@@ -337,7 +436,7 @@ pub struct HeartbeatFlushStats {
 impl HeartbeatFlusher {
     pub fn new(merger: HeartbeatMerger, sender: Arc<dyn MergedHeartbeatSender>) -> Arc<Self> {
         Arc::new(Self {
-            merger: Mutex::new(merger),
+            merger,
             sender,
             flushes: AtomicU64::new(0),
             batches_sent: AtomicU64::new(0),
@@ -358,21 +457,15 @@ impl HeartbeatFlusher {
     where
         R: HeartbeatAddressResolver,
     {
-        self.merger
-            .lock()
-            .expect("heartbeat merger mutex poisoned")
-            .maybe_merge(message, resolver)
+        self.merger.maybe_merge(message, resolver)
     }
 
     /// Sends everything held, and reports how many batches went.
     ///
-    /// The sender is called with the lock released, so a slow transport delays
-    /// the next flush rather than every group trying to queue a heartbeat.
+    /// The sender is called with no bucket held, so a slow transport delays the
+    /// next flush rather than every group trying to queue a heartbeat.
     pub fn flush_now(&self) -> usize {
-        let batches = {
-            let mut merger = self.merger.lock().expect("heartbeat merger mutex poisoned");
-            merger.flush()
-        };
+        let batches = self.merger.flush();
         self.flushes.fetch_add(1, Ordering::Relaxed);
         if batches.is_empty() {
             return 0;
@@ -388,21 +481,17 @@ impl HeartbeatFlusher {
     }
 
     pub fn stats(&self) -> HeartbeatFlushStats {
-        let merger = self.merger.lock().expect("heartbeat merger mutex poisoned");
         HeartbeatFlushStats {
             flushes: self.flushes.load(Ordering::Relaxed),
             batches_sent: self.batches_sent.load(Ordering::Relaxed),
             messages_sent: self.messages_sent.load(Ordering::Relaxed),
-            pending: merger.pending_len(),
-            merger: merger.stats().clone(),
+            pending: self.merger.pending_len(),
+            merger: self.merger.stats(),
         }
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.merger
-            .lock()
-            .expect("heartbeat merger mutex poisoned")
-            .is_enabled()
+        self.merger.is_enabled()
     }
 }
 
