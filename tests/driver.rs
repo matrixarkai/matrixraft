@@ -639,9 +639,23 @@ struct BlockedHandler {
     release: Mutex<bool>,
     released: Condvar,
     finished: AtomicBool,
+    /// Drawn from when the handler returns, so the order of that against the
+    /// cancel returning is fixed at the moment each happens rather than at
+    /// whatever moment the test gets round to reading it. Shared with the test,
+    /// which draws the other ticket.
+    tickets: Arc<AtomicU64>,
+    /// The ticket this handler drew, or zero if it never returned.
+    finished_at: AtomicU64,
 }
 
 impl BlockedHandler {
+    fn sharing(tickets: Arc<AtomicU64>) -> Self {
+        Self {
+            tickets,
+            ..Self::default()
+        }
+    }
+
     fn release(&self) {
         *self.release.lock().expect("release mutex") = true;
         self.released.notify_all();
@@ -665,13 +679,18 @@ impl DriverMailHandler<u64> for BlockedHandler {
         }
         drop(release);
         self.finished.store(true, Ordering::SeqCst);
+        self.finished_at.store(
+            self.tickets.fetch_add(1, Ordering::SeqCst) + 1,
+            Ordering::SeqCst,
+        );
     }
 }
 
 #[test]
 fn cancelling_a_group_waits_for_the_handler_it_raced() {
     let pool = DriverWorkerPool::<u64>::start(options(1, 5)).expect("pool");
-    let handler = Arc::new(BlockedHandler::default());
+    let tickets = Arc::new(AtomicU64::new(0));
+    let handler = Arc::new(BlockedHandler::sharing(Arc::clone(&tickets)));
     let key = DriverGroupKey::new(21, 1);
     pool.register_group(key, Arc::clone(&handler) as Arc<dyn DriverMailHandler<u64>>)
         .expect("register");
@@ -687,7 +706,13 @@ fn cancelling_a_group_waits_for_the_handler_it_raced() {
     // On its own thread, because it is expected to block and this test is the
     // only thing that can release the handler it waits for.
     std::thread::scope(|scope| {
-        let cancel = scope.spawn(|| pool.cancel_group(key));
+        let cancel = scope.spawn(|| {
+            let found = pool.cancel_group(key);
+            // Drawn here rather than read later: what is claimed is that this
+            // call did not return before the handler did, and that is an order
+            // between two moments, not a state at a third.
+            (found, tickets.fetch_add(1, Ordering::SeqCst) + 1)
+        });
 
         assert!(
             wait_until("the cancel waits", Duration::from_secs(20), || pool
@@ -706,13 +731,14 @@ fn cancelling_a_group_waits_for_the_handler_it_raced() {
         );
         handler.release();
 
+        let (found, cancel_at) = cancel.join().expect("cancel thread");
+        assert!(found, "cancel should find the group");
+        let finished_at = handler.finished_at.load(Ordering::SeqCst);
+        assert_ne!(finished_at, 0, "the handler never returned at all");
         assert!(
-            cancel.join().expect("cancel thread"),
-            "cancel should find the group"
-        );
-        assert!(
-            handler.finished.load(Ordering::SeqCst),
-            "cancel_group returned while the handler it raced was still running"
+            finished_at < cancel_at,
+            "cancel_group returned (ticket {cancel_at}) before the handler it \
+             raced finished (ticket {finished_at})"
         );
     });
 
