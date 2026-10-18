@@ -2,7 +2,8 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    matrixraft_baseline_raft_parity_matrix, matrixraft_baseline_raft_reference_policy,
+    matrixraft_baseline_raft_capability_coverage, matrixraft_baseline_raft_parity_matrix,
+    matrixraft_baseline_raft_parity_surface, matrixraft_baseline_raft_reference_policy,
     matrixraft_parity_report, BaselineRaftParityStatus, ReadinessSnapshot,
 };
 
@@ -34,6 +35,7 @@ fn baseline_raft_parity_matrix_tracks_all_required_capabilities() {
     assert_eq!(
         ids,
         [
+            "campaign",
             "leader_election",
             "leader_transfer",
             "learner_promotion",
@@ -41,11 +43,15 @@ fn baseline_raft_parity_matrix_tracks_all_required_capabilities() {
             "log_compaction",
             "log_replication",
             "membership_changes",
+            "node_lifecycle",
             "observability_status",
             "pre_vote",
+            "propose_expected_term",
             "read_index",
             "restart_recovery",
             "snapshot_trigger_install",
+            "transport_contract_validation",
+            "wal_hard_state",
             "witness_quorum_behavior",
         ]
         .into_iter()
@@ -118,4 +124,113 @@ fn baseline_raft_is_feature_and_performance_reference_but_rust_api_can_be_idioma
 
     let report = matrixraft_parity_report(&ready_snapshot());
     assert_eq!(report.baseline_raft_reference_policy, policy);
+}
+
+#[test]
+fn baseline_raft_capability_coverage_is_total() {
+    // The comparison surface names the capabilities the baseline engine exposes,
+    // and the matrix is what tracks them. Nothing connected the two: the surface
+    // named about forty capabilities, the matrix carried thirteen items, and a
+    // capability could be missing from the matrix entirely without any test
+    // noticing. That is the one failure a tracking matrix cannot be allowed --
+    // it reports completeness it has not checked.
+    //
+    // So the mapping is asserted to be total in both directions.
+    let surface = matrixraft_baseline_raft_parity_surface();
+    let coverage = matrixraft_baseline_raft_capability_coverage();
+    let matrix = matrixraft_baseline_raft_parity_matrix(&ready_snapshot());
+
+    let families: Vec<(&str, &Vec<String>)> = vec![
+        ("node_lifecycle", &surface.node_lifecycle),
+        ("transport_api", &surface.transport_api),
+        ("write_api", &surface.write_api),
+        ("read_api", &surface.read_api),
+        ("membership_api", &surface.membership_api),
+        ("durability_api", &surface.durability_api),
+        ("observability_api", &surface.observability_api),
+    ];
+
+    // Not vacuous: a surface that had gone empty, or a mapping that had, would
+    // satisfy every containment check below.
+    let surface_count: usize = families.iter().map(|(_, names)| names.len()).sum();
+    assert!(
+        surface_count >= 30,
+        "the surface names only {surface_count} capabilities, which is too few for this \
+         assertion to be testing anything"
+    );
+    assert_eq!(
+        coverage.len(),
+        surface_count,
+        "the mapping has {} entries against {surface_count} named capabilities",
+        coverage.len()
+    );
+
+    // Every named capability is tracked, exactly once.
+    for (family, names) in &families {
+        for name in names.iter() {
+            let matches = coverage
+                .iter()
+                .filter(|entry| entry.family == *family && entry.capability == *name)
+                .count();
+            assert_eq!(
+                matches, 1,
+                "{family}/{name} is named by the surface and has {matches} mapping entries"
+            );
+        }
+    }
+
+    // And every item the mapping names exists in the matrix, so the mapping
+    // cannot point at a tracker that is not there.
+    for entry in &coverage {
+        assert!(
+            matrix.iter().any(|item| item.id == entry.matrix_item),
+            "{}/{} is mapped to matrix item {:?}, which the matrix does not contain",
+            entry.family,
+            entry.capability,
+            entry.matrix_item
+        );
+        assert!(
+            families
+                .iter()
+                .any(|(family, names)| *family == entry.family
+                    && names.iter().any(|name| name == &entry.capability)),
+            "the mapping names {}/{}, which the surface does not",
+            entry.family,
+            entry.capability
+        );
+    }
+
+    // Every matrix item earns its place: an item nothing maps to is tracking a
+    // capability the surface does not claim.
+    for item in &matrix {
+        assert!(
+            coverage.iter().any(|entry| entry.matrix_item == item.id),
+            "matrix item {:?} answers for no capability the surface names",
+            item.id
+        );
+    }
+
+    // On a ready snapshot the five items added with this mapping are satisfied,
+    // so the mapping did not become total by admitting untracked shortfalls.
+    for id in [
+        "node_lifecycle",
+        "transport_contract_validation",
+        "propose_expected_term",
+        "campaign",
+        "wal_hard_state",
+    ] {
+        let item = matrix
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap_or_else(|| panic!("the matrix should contain {id}"));
+        assert_eq!(
+            item.status,
+            BaselineRaftParityStatus::Satisfied,
+            "{id} should be satisfied on a ready snapshot"
+        );
+        assert!(
+            !item.evidence.is_empty(),
+            "{id} should name the evidence it rests on"
+        );
+    }
 }
