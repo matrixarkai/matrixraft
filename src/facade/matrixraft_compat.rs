@@ -2091,6 +2091,20 @@ impl MatrixRaftCallbackScheduler {
         self.timer.next_timeout_ms(now_ms)
     }
 
+    /// Callbacks held in the operation map, which must equal [`Self::len`].
+    ///
+    /// Two maps keyed by the same pair have to be kept in step, and `len`
+    /// reports only the timer's. An entry left in this one is unreachable --
+    /// nothing can complete it, cancel it or time it out, because every one of
+    /// those looks in the timer first -- so a leak here has no behaviour to
+    /// betray it and a test cannot catch it without this.
+    ///
+    /// That is not hypothetical: a plant that cleared the timer and left this
+    /// map alone passed every test in `tests/matrixraft_callback_compat.rs`.
+    pub fn pending_operations(&self) -> usize {
+        self.operations.len()
+    }
+
     pub fn len(&self) -> usize {
         self.timer.len()
     }

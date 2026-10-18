@@ -110,6 +110,11 @@ fn removing_a_group_hands_back_every_callback_it_still_owed() {
     scheduler.schedule(8, 80, MatrixRaftAsyncOperation::Propose, 100, 50);
     assert_eq!(scheduler.len(), 4);
     assert_eq!(scheduler.timed_len(), 3);
+    assert_eq!(
+        scheduler.pending_operations(),
+        4,
+        "the two maps keyed by node start in step"
+    );
 
     let mut abandoned = scheduler.remove_node(7);
     abandoned.sort_by_key(|callback| callback.task.request_id);
@@ -138,11 +143,16 @@ fn removing_a_group_hands_back_every_callback_it_still_owed() {
         "each one keeps the operation it was scheduled as"
     );
 
-    // Nothing of the group is left, in either of the two maps keyed by node:
-    // `len` is the timer's and a lapse afterwards is what would betray the
-    // other.
+    // Nothing of the group is left, in EITHER of the two maps keyed by node.
+    // `len` is the timer's; the operation map needs its own reading, because an
+    // entry left there is unreachable and so has no behaviour to betray it.
     assert_eq!(scheduler.len(), 1);
     assert_eq!(scheduler.timed_len(), 1);
+    assert_eq!(
+        scheduler.pending_operations(),
+        1,
+        "an operation left behind is a leak nothing else can see"
+    );
     assert!(scheduler
         .lapsed(10_000, 10)
         .iter()
