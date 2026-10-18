@@ -747,6 +747,22 @@ struct PoolGroup<Mail> {
 /// slower as threads are added rather than faster.
 struct WorkerSlot<Mail> {
     selector: ChannelSelector<Envelope<Mail>>,
+    /// The channel this worker is inside a handler for, or zero for none.
+    ///
+    /// Written while `handlers` is held, which is what makes a cancel's
+    /// reading of it meaningful: the handler is taken out of that map under the
+    /// same lock, so a cancel holding it sees either a handler that has not
+    /// been taken -- and so cannot be called, because it is gone -- or the
+    /// channel of a call that is already under way.
+    ///
+    /// A channel id is never zero and never reused: they are handed out from
+    /// `next_slot`, which starts at one and only goes up. So a cancel waiting
+    /// for this to stop being its own channel cannot be fooled by the same
+    /// value arriving again for a different group.
+    in_flight: AtomicU64,
+    /// This worker's thread, so a handler that cancels its own group is not
+    /// made to wait for itself.
+    thread: OnceLock<ThreadId>,
 }
 
 /// Tells the pool how many bytes a mail is, so `driver_batch_bytes` can bound a
@@ -764,6 +780,12 @@ struct PoolInner<Mail> {
     batches_handled: AtomicU64,
     mails_handled: AtomicU64,
     mails_refused: AtomicU64,
+    cancel_quiesce_waits: AtomicU64,
+    /// Cancels waiting for a handler to return, so a worker that has just
+    /// finished one pays a single load to find out that nobody cares.
+    cancel_waiters: AtomicUsize,
+    /// Notified when a handler returns. Paired with `handlers`.
+    quiesced: Condvar,
 }
 
 /// What a worker pool is doing.
@@ -775,6 +797,12 @@ pub struct DriverWorkerStats {
     pub mails_handled: u64,
     /// Sends refused because a group's queue was at `max_queue_depth`.
     pub mails_refused: u64,
+    /// Times `cancel_group` had to wait for a handler that was already running.
+    ///
+    /// Zero on a pool whose groups are cancelled while idle. A host that sees
+    /// it climbing is cancelling groups that are busy, which is worth knowing
+    /// because that is the case where the cancel costs it a handler call.
+    pub cancel_quiesce_waits: u64,
     pub queued_mails: i64,
 }
 
@@ -840,6 +868,8 @@ impl<Mail: Send + 'static> DriverWorkerPool<Mail> {
             slots: (0..options.worker_num)
                 .map(|_| WorkerSlot {
                     selector: ChannelSelector::new(),
+                    in_flight: AtomicU64::new(0),
+                    thread: OnceLock::new(),
                 })
                 .collect(),
             groups: Mutex::new(BTreeMap::new()),
@@ -849,6 +879,9 @@ impl<Mail: Send + 'static> DriverWorkerPool<Mail> {
             batches_handled: AtomicU64::new(0),
             mails_handled: AtomicU64::new(0),
             mails_refused: AtomicU64::new(0),
+            cancel_quiesce_waits: AtomicU64::new(0),
+            cancel_waiters: AtomicUsize::new(0),
+            quiesced: Condvar::new(),
         });
 
         let mut workers = Vec::with_capacity(options.worker_num);
@@ -909,20 +942,79 @@ impl<Mail: Send + 'static> DriverWorkerPool<Mail> {
         Ok(())
     }
 
+    /// Stops a group taking mail, and does not return while its handler is
+    /// still running.
+    ///
+    /// Both halves matter to a caller that is about to drop what the handler
+    /// borrows. Removing the group stops further mail reaching it and removing
+    /// the handler stops a drain already in flight from finding anything to
+    /// call -- but a worker takes the handler out of the map and calls it with
+    /// the lock dropped, so a cancel arriving in between removed the handler
+    /// and returned `true` while `handle_mail` was running on the `Arc` the
+    /// worker had already cloned.
+    ///
+    /// The worker records which channel it is inside a handler for while it
+    /// still holds that lock, so the two cases are now distinguishable and the
+    /// second one waits. `DriverWorkerStats::cancel_quiesce_waits` counts it.
+    ///
+    /// This waits for *this group's* handler rather than for the worker to go
+    /// idle: one worker serves many groups, and a group cancelled while its
+    /// neighbour is mid-handler has nothing to wait for.
+    ///
+    /// Mail that was queued and not yet drained is dropped rather than
+    /// delivered, which is unchanged and deliberate -- see `drain_channel`.
+    ///
+    /// A handler may cancel its own group from inside `handle_mail`. That is
+    /// not made to wait, which would be a wait for itself: the pool records
+    /// each worker's thread and skips the wait for it. Sound rather than
+    /// merely convenient, because the handler is out of the map before the
+    /// wait would begin, so the only call that can still be running is the
+    /// caller's own.
     pub fn cancel_group(&self, key: DriverGroupKey) -> bool {
-        let mut groups = self
-            .inner
-            .groups
-            .lock()
-            .expect("driver groups mutex poisoned");
-        let Some(group) = groups.remove(&key) else {
-            return false;
+        let channel_id = {
+            let mut groups = self
+                .inner
+                .groups
+                .lock()
+                .expect("driver groups mutex poisoned");
+            let Some(group) = groups.remove(&key) else {
+                return false;
+            };
+            group.channel_id
         };
-        self.inner
+        // The group is out before the handlers lock is taken, so nothing new
+        // can be sent to it while this waits, and two locks are never held at
+        // once.
+        let worker = self.inner.worker_for(&key);
+        let mut handlers = self
+            .inner
             .handlers
             .lock()
-            .expect("driver handlers mutex poisoned")
-            .remove(&group.channel_id);
+            .expect("driver handlers mutex poisoned");
+        handlers.remove(&channel_id);
+
+        let slot = &self.inner.slots[worker];
+        let on_this_worker = slot
+            .thread
+            .get()
+            .is_some_and(|worker_thread| *worker_thread == thread::current().id());
+        if slot.in_flight.load(Ordering::Acquire) == channel_id && !on_this_worker {
+            self.inner
+                .cancel_quiesce_waits
+                .fetch_add(1, Ordering::Relaxed);
+            self.inner.cancel_waiters.fetch_add(1, Ordering::SeqCst);
+            while slot.in_flight.load(Ordering::Acquire) == channel_id {
+                // Bounded, so a notify that is somehow missed costs this caller
+                // latency rather than wedging it.
+                let (next, _) = self
+                    .inner
+                    .quiesced
+                    .wait_timeout(handlers, Duration::from_millis(DRIVER_MAX_SLEEP_MS))
+                    .expect("driver handlers mutex poisoned");
+                handlers = next;
+            }
+            self.inner.cancel_waiters.fetch_sub(1, Ordering::SeqCst);
+        }
         true
     }
 
@@ -990,6 +1082,7 @@ impl<Mail: Send + 'static> DriverWorkerPool<Mail> {
             batches_handled: self.inner.batches_handled.load(Ordering::Relaxed),
             mails_handled: self.inner.mails_handled.load(Ordering::Relaxed),
             mails_refused: self.inner.mails_refused.load(Ordering::Relaxed),
+            cancel_quiesce_waits: self.inner.cancel_quiesce_waits.load(Ordering::Relaxed),
             queued_mails: self
                 .inner
                 .slots
@@ -1027,6 +1120,41 @@ impl<Mail> DriverWorkerPool<Mail> {
     }
 }
 
+/// Clears a worker's in-flight mark when a drain leaves the handler.
+///
+/// A guard rather than a call at each return, so a panic inside a host's
+/// handler cannot leave a cancel waiting on a mark that nothing will clear.
+struct InFlightGuard<'pool, Mail> {
+    inner: &'pool PoolInner<Mail>,
+    worker: usize,
+}
+
+impl<Mail> Drop for InFlightGuard<'_, Mail> {
+    fn drop(&mut self) {
+        self.inner.finished_with(self.worker);
+    }
+}
+
+impl<Mail> PoolInner<Mail> {
+    /// Says the worker is out of the handler, and wakes a cancel if one is
+    /// waiting for exactly that.
+    ///
+    /// The mark is cleared before the waiter count is read, so a cancel that
+    /// registers itself after that read has already seen the mark cleared and
+    /// will not wait. With nobody cancelling -- the whole life of a pool, minus
+    /// a few microseconds -- this is one store and one load, and no lock.
+    fn finished_with(&self, worker: usize) {
+        self.slots[worker].in_flight.store(0, Ordering::Release);
+        if self.cancel_waiters.load(Ordering::SeqCst) > 0 {
+            let _handlers = self
+                .handlers
+                .lock()
+                .expect("driver handlers mutex poisoned");
+            self.quiesced.notify_all();
+        }
+    }
+}
+
 impl<Mail> Drop for DriverWorkerPool<Mail> {
     fn drop(&mut self) {
         self.shutdown();
@@ -1045,6 +1173,10 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
     }
 
     fn run_worker(&self, worker: usize) {
+        // Recorded by the worker itself, because this has to be the thread that
+        // calls a handler -- it is read to tell a handler cancelling its own
+        // group from anyone else cancelling it.
+        let _ = self.slots[worker].thread.set(thread::current().id());
         let policy = ChannelSelectorPolicy {
             limit: self.options.max_messages_each_poll.max(1),
             timeout_ms: MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
@@ -1164,7 +1296,17 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
                 .handlers
                 .lock()
                 .expect("driver handlers mutex poisoned");
-            handlers.get(&channel_id).map(Arc::clone)
+            let handler = handlers.get(&channel_id).map(Arc::clone);
+            // Marked here, under the same lock the handler was taken from, so a
+            // cancel holding that lock cannot see this call as not started.
+            // Marking after the lock was dropped would leave exactly the window
+            // the cancel is waiting to close.
+            if handler.is_some() {
+                self.slots[worker]
+                    .in_flight
+                    .store(channel_id, Ordering::Release);
+            }
+            handler
         };
         // A group cancelled between selection and drain has no handler; its
         // mail is dropped rather than held for a group that is gone.
@@ -1175,6 +1317,13 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
         // already in hand. `split_on_byte_budget` wrapped it in a second vector
         // to return it, which was an allocation per drain for a cut that was
         // never made.
+        // Clears the mark however this leaves the handler, a panic in a
+        // host's handler included: a cancel waiting on the mark would
+        // otherwise wait for a call that is never coming back.
+        let _in_flight = InFlightGuard {
+            inner: self,
+            worker,
+        };
         if self.mail_size.is_none() {
             let count = mails.len() as u64;
             handler.handle_mail(mails);

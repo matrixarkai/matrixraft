@@ -631,6 +631,216 @@ fn a_cancelled_group_takes_no_more_mail() {
     );
 }
 
+/// Blocks inside `handle_mail` until the test releases it, so a cancel can be
+/// made to arrive while a batch of the group's mail is being handled.
+#[derive(Debug, Default)]
+struct BlockedHandler {
+    started: AtomicBool,
+    release: Mutex<bool>,
+    released: Condvar,
+    finished: AtomicBool,
+    /// Drawn from when the handler returns, so the order of that against the
+    /// cancel returning is fixed at the moment each happens rather than at
+    /// whatever moment the test gets round to reading it. Shared with the test,
+    /// which draws the other ticket.
+    tickets: Arc<AtomicU64>,
+    /// The ticket this handler drew, or zero if it never returned.
+    finished_at: AtomicU64,
+}
+
+impl BlockedHandler {
+    fn sharing(tickets: Arc<AtomicU64>) -> Self {
+        Self {
+            tickets,
+            ..Self::default()
+        }
+    }
+
+    fn release(&self) {
+        *self.release.lock().expect("release mutex") = true;
+        self.released.notify_all();
+    }
+}
+
+impl DriverMailHandler<u64> for BlockedHandler {
+    fn handle_mail(&self, _mails: Vec<u64>) {
+        if self.finished.load(Ordering::SeqCst) {
+            return;
+        }
+        self.started.store(true, Ordering::SeqCst);
+        let mut release = self.release.lock().expect("release mutex");
+        while !*release {
+            // Bounded, so a lost notify cannot hang the suite.
+            let (next, _) = self
+                .released
+                .wait_timeout(release, Duration::from_millis(20))
+                .expect("release mutex");
+            release = next;
+        }
+        drop(release);
+        self.finished.store(true, Ordering::SeqCst);
+        self.finished_at.store(
+            self.tickets.fetch_add(1, Ordering::SeqCst) + 1,
+            Ordering::SeqCst,
+        );
+    }
+}
+
+#[test]
+fn cancelling_a_group_waits_for_the_handler_it_raced() {
+    let pool = DriverWorkerPool::<u64>::start(options(1, 5)).expect("pool");
+    let tickets = Arc::new(AtomicU64::new(0));
+    let handler = Arc::new(BlockedHandler::sharing(Arc::clone(&tickets)));
+    let key = DriverGroupKey::new(21, 1);
+    pool.register_group(key, Arc::clone(&handler) as Arc<dyn DriverMailHandler<u64>>)
+        .expect("register");
+    pool.send(key, MailPriority::Normal, 1).expect("send");
+
+    assert!(
+        wait_until("the handler starts", Duration::from_secs(20), || handler
+            .started
+            .load(Ordering::SeqCst)),
+        "the handler never started, so cancelling underneath it proves nothing"
+    );
+
+    // On its own thread, because it is expected to block and this test is the
+    // only thing that can release the handler it waits for.
+    std::thread::scope(|scope| {
+        let cancel = scope.spawn(|| {
+            let found = pool.cancel_group(key);
+            // Drawn here rather than read later: what is claimed is that this
+            // call did not return before the handler did, and that is an order
+            // between two moments, not a state at a third.
+            (found, tickets.fetch_add(1, Ordering::SeqCst) + 1)
+        });
+
+        assert!(
+            wait_until("the cancel waits", Duration::from_secs(20), || pool
+                .stats()
+                .cancel_quiesce_waits
+                == 1),
+            "the cancel never reached the wait, so the race was not reproduced"
+        );
+
+        // Nothing is timed. The handler cannot finish until the line below
+        // releases it, and that line is not reached until the cancel is already
+        // waiting.
+        assert!(
+            !handler.finished.load(Ordering::SeqCst),
+            "the handler finished before the test released it"
+        );
+        handler.release();
+
+        let (found, cancel_at) = cancel.join().expect("cancel thread");
+        assert!(found, "cancel should find the group");
+        let finished_at = handler.finished_at.load(Ordering::SeqCst);
+        assert_ne!(finished_at, 0, "the handler never returned at all");
+        assert!(
+            finished_at < cancel_at,
+            "cancel_group returned (ticket {cancel_at}) before the handler it \
+             raced finished (ticket {finished_at})"
+        );
+    });
+
+    assert_eq!(pool.group_count(), 0);
+}
+
+#[test]
+fn a_cancel_waits_for_its_own_groups_handler_and_not_the_workers() {
+    // One worker, so both groups are served by it and the blocked handler is
+    // in the way of the other group's mail. Cancelling the group that is NOT
+    // being handled must not wait: a worker serves many groups, and the one
+    // being torn down has nothing in flight.
+    let pool = DriverWorkerPool::<u64>::start(options(1, 5)).expect("pool");
+    let blocked = Arc::new(BlockedHandler::default());
+    let idle = Arc::new(MailRecorder::default());
+    let blocked_key = DriverGroupKey::new(22, 1);
+    let idle_key = DriverGroupKey::new(23, 1);
+    pool.register_group(
+        blocked_key,
+        Arc::clone(&blocked) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register the blocked group");
+    pool.register_group(
+        idle_key,
+        Arc::clone(&idle) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register the idle group");
+    pool.send(blocked_key, MailPriority::Normal, 1)
+        .expect("send");
+
+    assert!(
+        wait_until("the handler starts", Duration::from_secs(20), || blocked
+            .started
+            .load(Ordering::SeqCst)),
+        "the handler never started, so there is nothing for the other cancel to race"
+    );
+
+    // Returns rather than blocking, with the worker still inside the other
+    // group's handler. If it waited for the worker instead of for the group,
+    // this would not return until the release below.
+    assert!(pool.cancel_group(idle_key), "the idle group is there");
+    assert_eq!(
+        pool.stats().cancel_quiesce_waits,
+        0,
+        "a cancel waited for a handler belonging to another group"
+    );
+
+    blocked.release();
+    assert!(pool.cancel_group(blocked_key), "the blocked group is there");
+    assert_eq!(pool.group_count(), 0);
+}
+
+#[test]
+fn a_handler_can_cancel_its_own_group_from_inside_a_batch() {
+    // A handler is a plausible place to decide a group is finished with, and
+    // the wait would be a wait for itself.
+    struct SelfCancel {
+        pool: Mutex<Option<Arc<DriverWorkerPool<u64>>>>,
+        key: DriverGroupKey,
+        cancelled: AtomicBool,
+    }
+
+    impl DriverMailHandler<u64> for SelfCancel {
+        fn handle_mail(&self, _mails: Vec<u64>) {
+            if self.cancelled.load(Ordering::SeqCst) {
+                return;
+            }
+            let pool = self
+                .pool
+                .lock()
+                .expect("pool handle")
+                .clone()
+                .expect("the handle is set before the group is registered");
+            assert!(pool.cancel_group(self.key), "its own group is there");
+            self.cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let pool = Arc::new(DriverWorkerPool::<u64>::start(options(1, 5)).expect("pool"));
+    let key = DriverGroupKey::new(24, 1);
+    let handler = Arc::new(SelfCancel {
+        pool: Mutex::new(Some(Arc::clone(&pool))),
+        key,
+        cancelled: AtomicBool::new(false),
+    });
+    pool.register_group(key, Arc::clone(&handler) as Arc<dyn DriverMailHandler<u64>>)
+        .expect("register");
+    pool.send(key, MailPriority::Normal, 1).expect("send");
+
+    assert!(
+        wait_until("the group cancels itself", Duration::from_secs(20), || {
+            handler.cancelled.load(Ordering::SeqCst)
+        }),
+        "the handler never returned from cancelling its own group"
+    );
+    assert_eq!(pool.group_count(), 0);
+
+    // Breaks the cycle, so the pool is dropped and its workers joined when this
+    // test ends rather than at the end of the process.
+    *handler.pool.lock().expect("pool handle") = None;
+}
+
 #[test]
 fn stopping_the_pool_joins_its_workers() {
     // Workers block on the selector rather than polling a timeout, so stop has
