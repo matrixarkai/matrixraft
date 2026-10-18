@@ -318,6 +318,18 @@ pub struct ChannelSelection<Mail> {
     pub has_active_channels_left: bool,
 }
 
+impl<Mail> Default for ChannelSelection<Mail> {
+    /// Empty, and allocating nothing. Derived would demand `Mail: Default`,
+    /// which a selection of no mail has no need of.
+    fn default() -> Self {
+        Self {
+            channels: Vec::new(),
+            global_mails: Vec::new(),
+            has_active_channels_left: false,
+        }
+    }
+}
+
 impl<Mail> Default for ChannelSelector<Mail> {
     fn default() -> Self {
         Self::new()
@@ -431,6 +443,57 @@ impl<Mail> ChannelSelector<Mail> {
         policy: ChannelSelectorPolicy,
         input: &[Arc<MailChannel<Mail>>],
     ) -> Result<ChannelSelection<Mail>, RaftError> {
+        let mut channels = Vec::new();
+        let mut global_mails = Vec::new();
+        let has_active_channels_left =
+            self.select_into_checked(policy, input, &mut channels, &mut global_mails)?;
+        Ok(ChannelSelection {
+            channels,
+            global_mails,
+            has_active_channels_left,
+        })
+    }
+
+    /// Selects into two buffers the caller keeps, appending to each.
+    ///
+    /// A worker selects on every pass of its loop and is finished with what it
+    /// selected by the end of that pass, so the vectors are free again
+    /// immediately. Returning fresh ones made that an allocation per pass for
+    /// as long as the worker ran; lending them costs nothing after the first.
+    /// It is the same bargain as `fetch_into` and as the ticker's due list.
+    ///
+    /// Returns whether channels were left behind -- the caller asked for at
+    /// most `policy.limit` of them and there were more.
+    ///
+    /// Both buffers arrive empty. The channels one is emptied by the caller
+    /// draining it, which is also what hands the channels on; the mail one is
+    /// only ever non-empty on a path that stops the worker for good.
+    pub fn select_into(
+        &self,
+        policy: ChannelSelectorPolicy,
+        input: &[Arc<MailChannel<Mail>>],
+        channels: &mut Vec<Arc<MailChannel<Mail>>>,
+        global_mails: &mut Vec<Mail>,
+    ) -> bool {
+        self.select_into_checked(policy, input, channels, global_mails)
+            .expect("channel selector mutex poisoned")
+    }
+
+    pub fn select_into_checked(
+        &self,
+        policy: ChannelSelectorPolicy,
+        input: &[Arc<MailChannel<Mail>>],
+        channels: &mut Vec<Arc<MailChannel<Mail>>>,
+        global_mails: &mut Vec<Mail>,
+    ) -> Result<bool, RaftError> {
+        debug_assert!(
+            channels.is_empty(),
+            "the lent channel buffer arrives drained"
+        );
+        debug_assert!(
+            global_mails.is_empty(),
+            "the lent mail buffer arrives drained"
+        );
         let mut inner = self.inner.lock().map_err(channel_selector_poisoned)?;
         self.rearrange(&mut inner, input);
         if !inner.has_ready_work()
@@ -461,9 +524,12 @@ impl<Mail> ChannelSelector<Mail> {
             }
         }
 
-        let global_mails = inner.global_mails.drain(..).collect::<Vec<_>>();
+        global_mails.extend(inner.global_mails.drain(..));
         let count = policy.limit.min(inner.active_channels.len());
-        let mut channels = Vec::with_capacity(count);
+        // Reserved once rather than grown by doubling, and on a lent buffer
+        // that is already large enough after the first pass this asks for
+        // nothing at all.
+        channels.reserve(count);
         for _ in 0..count {
             let Some(channel) = inner.channel_list.pop_front() else {
                 break;
@@ -471,11 +537,7 @@ impl<Mail> ChannelSelector<Mail> {
             inner.active_channels.remove(&channel.replica_id());
             channels.push(channel);
         }
-        Ok(ChannelSelection {
-            channels,
-            global_mails,
-            has_active_channels_left: !inner.active_channels.is_empty(),
-        })
+        Ok(!inner.active_channels.is_empty())
     }
 
     pub fn total_mail_count(&self) -> i64 {

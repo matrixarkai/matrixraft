@@ -1050,11 +1050,14 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
             timeout_ms: MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
         };
         let selector = &self.slots[worker].selector;
-        // One buffer for the life of this worker, lent to every drain. A fresh
-        // vector per drain was an allocation per group per pass.
+        // Three buffers for the life of this worker, lent to every pass. A
+        // fresh vector per pass was an allocation per pass for the selection
+        // and one per group for the drain.
         let mut envelopes: Vec<Envelope<Mail>> = Vec::new();
+        let mut channels: Vec<Arc<MailChannel<Envelope<Mail>>>> = Vec::new();
+        let mut global_mails: Vec<Envelope<Mail>> = Vec::new();
         while !self.exit.load(Ordering::Relaxed) {
-            let selection = selector.select(policy, &[]);
+            selector.select_into(policy, &[], &mut channels, &mut global_mails);
             // Global mail is only ever the stop sentinel.
             //
             // `select` drains EVERY global mail, so one worker can take all the
@@ -1062,8 +1065,7 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
             // good -- a join that never returns. Each worker relays one on its
             // way out instead, so the wake-up walks the pool however the drain
             // happened to split them.
-            if selection
-                .global_mails
+            if global_mails
                 .iter()
                 .any(|mail| matches!(mail, Envelope::Stop))
             {
@@ -1073,7 +1075,20 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
                 selector.send_global(Envelope::Stop);
                 return;
             }
-            for channel in selection.channels {
+            // The mail buffer is lent to the next pass, which needs it empty.
+            // Nothing clears it here because there is nothing in it: global
+            // mail is only ever the sentinel, and the sentinel returned above.
+            // Asserted rather than assumed, because the assumption is what
+            // makes the lending sound.
+            debug_assert!(
+                global_mails.is_empty(),
+                "global mail is only ever the stop sentinel"
+            );
+            // Drained rather than consumed, so the buffer comes back empty
+            // for the next pass and keeps the capacity it has earned. Breaking
+            // out part way still empties it: dropping the `Drain` removes
+            // whatever is left.
+            for channel in channels.drain(..) {
                 if self.exit.load(Ordering::Relaxed) {
                     return;
                 }
