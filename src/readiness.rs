@@ -110,6 +110,22 @@ pub struct BaselineRaftParityItem {
     pub note: String,
 }
 
+/// Which matrix item tracks one named capability of the comparison surface.
+///
+/// The surface names about forty capabilities and the matrix tracked thirteen
+/// items, with nothing stating which item answered for which capability. A
+/// capability could therefore be absent from the matrix entirely and no test
+/// would notice, which is the one thing a tracking matrix must not allow.
+/// `baseline_raft_capability_coverage_is_total` asserts this mapping covers the
+/// surface exactly: every capability named once, and every item it names
+/// present in the matrix.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BaselineRaftCapabilityCoverage {
+    pub family: String,
+    pub capability: String,
+    pub matrix_item: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProductionReadinessInput {
     pub readiness: ReadinessSnapshot,
@@ -465,7 +481,11 @@ pub fn matrixraft_baseline_raft_parity_surface() -> BaselineRaftParitySurface {
             "propose".to_string(),
             "propose_options.expected_term".to_string(),
         ],
-        read_api: vec!["read_index".to_string(), "lease_read".to_string()],
+        read_api: vec![
+            "read_index".to_string(),
+            "lease_read".to_string(),
+            "in_lease".to_string(),
+        ],
         membership_api: vec![
             "add_node".to_string(),
             "add_learner".to_string(),
@@ -474,12 +494,16 @@ pub fn matrixraft_baseline_raft_parity_surface() -> BaselineRaftParitySurface {
             "remove_node".to_string(),
             "transfer_leader".to_string(),
             "campaign".to_string(),
+            "forced_campaign".to_string(),
         ],
         durability_api: vec![
             "wal_hard_state".to_string(),
             "snapshot_install".to_string(),
             "snapshot_tail_catchup".to_string(),
             "apply_snapshot_fence".to_string(),
+            "async_snapshot".to_string(),
+            "log_retention_trigger".to_string(),
+            "compacted_entry_rejection".to_string(),
         ],
         observability_api: vec![
             "status".to_string(),
@@ -490,6 +514,8 @@ pub fn matrixraft_baseline_raft_parity_surface() -> BaselineRaftParitySurface {
             "metrics".to_string(),
             "blocker_report".to_string(),
             "fatal_events".to_string(),
+            "peer_status".to_string(),
+            "resolve_address".to_string(),
         ],
     }
 }
@@ -654,6 +680,170 @@ pub fn matrixraft_baseline_raft_parity_matrix(
             status(snapshot.matrixraft_operator_observability_present),
             &["rustraft_operator_observability_present", "StatusSnapshot"],
             "status snapshots and metric names are part of the public contract",
+        ),
+        item(
+            "node_lifecycle",
+            status(
+                snapshot.raft_storage_apply_fence_present
+                    && snapshot.matrixraft_apply_snapshot_fence_present,
+            ),
+            &[
+                "raft_storage_apply_fence_present",
+                "rustraft_apply_snapshot_fence_present",
+            ],
+            "create, start, stop and shutdown are safe exactly while the storage and apply fences hold",
+        ),
+        item(
+            "transport_contract_validation",
+            status(snapshot.matrixraft_rpc_transport_contract_present),
+            &[
+                "rustraft_rpc_transport_contract_present",
+                "TransportValidationReport",
+            ],
+            "request/response validation covers the in-memory and tcp transports and the auth wrapper",
+        ),
+        item(
+            "propose_expected_term",
+            status(snapshot.matrixraft_leader_write_authority_present),
+            &[
+                "rustraft_leader_write_authority_present",
+                "ProposeOptions.expected_term",
+            ],
+            "an expected-term propose is admitted only through leader write authority",
+        ),
+        item(
+            "campaign",
+            status(snapshot.matrixraft_metaserver_snapshot_floor_election_present),
+            &["rustraft_metaserver_snapshot_floor_election_present"],
+            "campaign and its forced form are bounded by snapshot-floor election safety",
+        ),
+        item(
+            "wal_hard_state",
+            status(snapshot.raft_storage_apply_fence_present),
+            &["raft_storage_apply_fence_present", "HardState"],
+            "the durable term/vote/commit record is fenced by storage apply",
+        ),
+    ]
+}
+
+/// The mapping from each named capability of the comparison surface to the
+/// matrix item that answers for it.
+///
+/// Written out rather than derived, so that adding a capability to the surface
+/// without tracking it is a test failure instead of a silent omission.
+pub fn matrixraft_baseline_raft_capability_coverage() -> Vec<BaselineRaftCapabilityCoverage> {
+    fn covered(
+        family: &str,
+        capability: &str,
+        matrix_item: &str,
+    ) -> BaselineRaftCapabilityCoverage {
+        BaselineRaftCapabilityCoverage {
+            family: family.to_string(),
+            capability: capability.to_string(),
+            matrix_item: matrix_item.to_string(),
+        }
+    }
+
+    vec![
+        covered("node_lifecycle", "create", "node_lifecycle"),
+        covered("node_lifecycle", "start", "node_lifecycle"),
+        covered("node_lifecycle", "restart", "restart_recovery"),
+        covered("node_lifecycle", "stop", "node_lifecycle"),
+        covered("node_lifecycle", "shutdown", "node_lifecycle"),
+        covered("transport_api", "append_entries_rpc", "log_replication"),
+        covered("transport_api", "vote_rpc", "leader_election"),
+        covered("transport_api", "pre_vote_rpc", "pre_vote"),
+        covered(
+            "transport_api",
+            "install_snapshot_chunk_rpc",
+            "snapshot_trigger_install",
+        ),
+        covered("transport_api", "read_index_rpc", "read_index"),
+        covered(
+            "transport_api",
+            "request_response_validation",
+            "transport_contract_validation",
+        ),
+        covered(
+            "transport_api",
+            "in_memory_transport",
+            "transport_contract_validation",
+        ),
+        covered(
+            "transport_api",
+            "tcp_reference_transport",
+            "transport_contract_validation",
+        ),
+        covered(
+            "transport_api",
+            "auth_wrapper",
+            "transport_contract_validation",
+        ),
+        covered("write_api", "propose", "log_replication"),
+        covered(
+            "write_api",
+            "propose_options.expected_term",
+            "propose_expected_term",
+        ),
+        covered("read_api", "read_index", "read_index"),
+        covered("read_api", "lease_read", "lease_read"),
+        covered("read_api", "in_lease", "lease_read"),
+        covered("membership_api", "add_node", "membership_changes"),
+        covered("membership_api", "add_learner", "learner_promotion"),
+        covered("membership_api", "add_witness", "witness_quorum_behavior"),
+        covered("membership_api", "promote", "learner_promotion"),
+        covered("membership_api", "remove_node", "membership_changes"),
+        covered("membership_api", "transfer_leader", "leader_transfer"),
+        covered("membership_api", "campaign", "campaign"),
+        covered("membership_api", "forced_campaign", "campaign"),
+        covered("durability_api", "wal_hard_state", "wal_hard_state"),
+        covered(
+            "durability_api",
+            "snapshot_install",
+            "snapshot_trigger_install",
+        ),
+        covered(
+            "durability_api",
+            "snapshot_tail_catchup",
+            "snapshot_trigger_install",
+        ),
+        covered("durability_api", "apply_snapshot_fence", "restart_recovery"),
+        covered(
+            "durability_api",
+            "async_snapshot",
+            "snapshot_trigger_install",
+        ),
+        covered("durability_api", "log_retention_trigger", "log_compaction"),
+        covered(
+            "durability_api",
+            "compacted_entry_rejection",
+            "log_compaction",
+        ),
+        covered("observability_api", "status", "observability_status"),
+        covered(
+            "observability_api",
+            "status_snapshot",
+            "observability_status",
+        ),
+        covered("observability_api", "local_status", "observability_status"),
+        covered("observability_api", "admin_report", "observability_status"),
+        covered(
+            "observability_api",
+            "readiness_report",
+            "observability_status",
+        ),
+        covered("observability_api", "metrics", "observability_status"),
+        covered(
+            "observability_api",
+            "blocker_report",
+            "observability_status",
+        ),
+        covered("observability_api", "fatal_events", "observability_status"),
+        covered("observability_api", "peer_status", "observability_status"),
+        covered(
+            "observability_api",
+            "resolve_address",
+            "observability_status",
         ),
     ]
 }
