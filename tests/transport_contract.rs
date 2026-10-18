@@ -5,12 +5,12 @@ use matrixraft::{
     matrixraft_validate_read_index_response, matrixraft_validate_tcp_transport_request,
     matrixraft_validate_vote_request, AppendEntriesRequest, AppendEntriesResponse,
     AuthenticatedRaftTransport, ClusterRaftTransport, Driver, DriverGroupKey, DriverOptions,
-    DriverTickReceiver, HeartbeatFlusher, HeartbeatMerger, InMemoryRaftTransport,
-    InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogId, MergedHeartbeatBatch,
-    MergedHeartbeatSender, Message, Peer, RaftCluster, RaftError, ReadIndexRequest,
-    ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState,
-    StaticRaftAuthToken, TcpRaftTransport, TcpRaftTransportRequest, TcpRaftTransportServer,
-    Transport, VoteRequest, VoteResponse,
+    DriverTickReceiver, HeartbeatFlusher, HeartbeatMergeMessage, HeartbeatMerger,
+    InMemoryRaftTransport, InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogId,
+    MergedHeartbeatBatch, MergedHeartbeatSender, Message, Peer, RaftCluster, RaftError,
+    ReadIndexRequest, ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata,
+    SnapshotState, StaticRaftAuthToken, TcpRaftTransport, TcpRaftTransportRequest,
+    TcpRaftTransportServer, Transport, VoteRequest, VoteResponse,
 };
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -343,6 +343,153 @@ fn in_memory_transport_forwards_and_validates_all_rpc_messages() {
         },
     );
     assert!(matches!(rejected, Err(RaftError::InvalidRequest(_))));
+}
+
+/// Offers heartbeats for one peer from one caller, so the order the flush
+/// hands them back is the order they were offered.
+///
+/// The address decides the bucket, so one peer's heartbeats are always in one
+/// bucket and always under one lock. That is what makes the order a property
+/// rather than a coincidence, and it is the reason the merger buckets by
+/// address and not by group.
+#[test]
+fn one_peers_heartbeats_keep_the_order_they_were_offered() {
+    let mut resolver = HashMap::new();
+    for group in 1..=16u64 {
+        resolver.insert((group, 99), "10.0.0.1:7000".to_string());
+    }
+    let merger = HeartbeatMerger::enabled();
+
+    for group in 1..=16u64 {
+        let message = Message::AppendEntries {
+            target: 99,
+            request: AppendEntriesRequest {
+                group_id: group,
+                term: 1,
+                leader_id: group,
+                prev_log_id: None,
+                entries: Vec::new(),
+                leader_commit: group,
+                lease_epoch: 1,
+            },
+        };
+        assert!(merger
+            .maybe_merge(message, &resolver)
+            .expect("merge")
+            .is_none());
+    }
+
+    let batches = merger.flush();
+    assert_eq!(batches.len(), 1, "one peer, one batch");
+    let groups: Vec<u64> = batches[0]
+        .messages
+        .iter()
+        .map(|message| match message {
+            HeartbeatMergeMessage::AppendEntriesRequest { request, .. } => request.group_id,
+            other => panic!("unexpected merged message: {other:?}"),
+        })
+        .collect();
+    assert_eq!(groups, (1..=16u64).collect::<Vec<_>>());
+}
+
+/// Many callers offer at once, which the merger could not even be asked to do
+/// while its methods took `&mut self`.
+///
+/// What is asserted is that nothing is lost or duplicated: every heartbeat
+/// offered comes back from the flush exactly once, grouped under the address it
+/// was offered for. It does not assert anything about how long the offers took
+/// -- `examples/heartbeat_merge_contention.rs` measures that, because a
+/// contention figure is not something to assert on a shared runner.
+#[test]
+fn every_concurrent_offer_reaches_the_flush() {
+    const CALLERS: u64 = 8;
+    const PER_CALLER: u64 = 500;
+
+    let mut resolver = HashMap::new();
+    for caller in 0..CALLERS {
+        for round in 0..PER_CALLER {
+            let group = caller * PER_CALLER + round + 1;
+            resolver.insert((group, 99), format!("10.0.{caller}.1:7000"));
+        }
+    }
+    let resolver = Arc::new(resolver);
+    let merger = Arc::new(HeartbeatMerger::enabled());
+
+    let mut callers = Vec::new();
+    for caller in 0..CALLERS {
+        let merger = Arc::clone(&merger);
+        let resolver = Arc::clone(&resolver);
+        callers.push(std::thread::spawn(move || {
+            for round in 0..PER_CALLER {
+                let group = caller * PER_CALLER + round + 1;
+                let message = Message::AppendEntries {
+                    target: 99,
+                    request: AppendEntriesRequest {
+                        group_id: group,
+                        term: 1,
+                        leader_id: group,
+                        prev_log_id: None,
+                        entries: Vec::new(),
+                        leader_commit: round,
+                        lease_epoch: 1,
+                    },
+                };
+                assert!(merger
+                    .maybe_merge(message, resolver.as_ref())
+                    .expect("the resolver knows every pair offered")
+                    .is_none());
+            }
+        }));
+    }
+    for caller in callers {
+        caller.join().expect("caller");
+    }
+
+    let offered = CALLERS * PER_CALLER;
+    assert_eq!(merger.pending_len() as u64, offered);
+    let batches = merger.flush();
+    assert_eq!(
+        batches.len() as u64,
+        CALLERS,
+        "one batch per address, and there is one address per caller"
+    );
+
+    let mut seen: Vec<u64> = batches
+        .iter()
+        .flat_map(|batch| batch.messages.iter())
+        .map(|message| match message {
+            HeartbeatMergeMessage::AppendEntriesRequest { request, .. } => request.group_id,
+            other => panic!("unexpected merged message: {other:?}"),
+        })
+        .collect();
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        (1..=offered).collect::<Vec<_>>(),
+        "every heartbeat offered must come back exactly once"
+    );
+    assert_eq!(merger.pending_len(), 0);
+    assert_eq!(merger.stats().queued_requests, offered);
+    assert_eq!(merger.stats().flushed_requests, offered);
+}
+
+/// The buckets are what the locking is spread over, so the count is worth
+/// being able to read.
+#[test]
+fn a_merger_reports_how_many_buckets_it_spreads_over() {
+    assert_eq!(
+        HeartbeatMerger::enabled().bucket_count(),
+        matrixraft::MATRIXRAFT_HEARTBEAT_MERGE_BUCKETS
+    );
+    assert_eq!(
+        HeartbeatMerger::with_bucket_count(true, 4).bucket_count(),
+        4
+    );
+    assert_eq!(
+        HeartbeatMerger::with_bucket_count(true, 0).bucket_count(),
+        1,
+        "zero buckets would be nowhere to put a heartbeat"
+    );
 }
 
 #[test]
