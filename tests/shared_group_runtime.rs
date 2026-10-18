@@ -16,7 +16,7 @@
 //! not.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use matrixraft::{
@@ -158,6 +158,55 @@ fn process_threads() -> u64 {
     0
 }
 
+/// The three tests below measure a property of the whole process, so they must
+/// not run while another of them is creating or dropping a server. Nothing else
+/// in the process does: each test binary is its own process, so this file's own
+/// tests are the only source of that churn.
+///
+/// Taken with the poison ignored, because a panic in one of these tests is
+/// already being reported and should not turn the others into a second, more
+/// confusing failure.
+static THREAD_MEASUREMENT: Mutex<()> = Mutex::new(());
+
+fn thread_measurement_guard() -> std::sync::MutexGuard<'static, ()> {
+    THREAD_MEASUREMENT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The ids of the threads the per-group default spawns, which are named
+/// `rustraft-node-<group>-<node>`.
+///
+/// Ids rather than a count, because a count is the wrong instrument: a sibling
+/// dropping its server lowers the process total between two samples, so a
+/// subtraction reads low through no fault of the thing being measured. That is
+/// what made the control below fail in CI while passing locally. Comparing id
+/// sets is immune to it -- a thread that existed in both samples cancels, and
+/// one that appears can only add.
+///
+/// `comm` is capped at fifteen characters, so `rustraft-node-1` covers group 1
+/// and groups 10 to 16 alike. The prefix is all this needs; the ids do the
+/// distinguishing.
+#[cfg(target_os = "linux")]
+fn node_thread_ids() -> std::collections::BTreeSet<u64> {
+    let mut ids = std::collections::BTreeSet::new();
+    let Ok(dir) = std::fs::read_dir("/proc/self/task") else {
+        return ids;
+    };
+    for entry in dir.flatten() {
+        let Ok(tid) = entry.file_name().to_string_lossy().parse::<u64>() else {
+            continue;
+        };
+        let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) else {
+            continue;
+        };
+        if comm.trim_end().starts_with("rustraft-node-") {
+            ids.insert(tid);
+        }
+    }
+    ids
+}
+
 #[test]
 fn a_hosted_group_reaches_leadership_without_a_thread_of_its_own() {
     let root = probe_root("leader");
@@ -228,6 +277,10 @@ fn a_hosted_group_ticks() {
 
 #[test]
 fn hosting_is_opt_in_and_the_default_gives_each_group_its_own_thread() {
+    // Measures a process-wide total, so it must not run beside another test
+    // that is creating or dropping servers: those threads would be counted
+    // here and the bound below is an upper one.
+    let _guard = thread_measurement_guard();
     // The control. Without this a flag that did nothing would pass every
     // other test in this file, because a group on its own thread works too.
     let root = probe_root("default");
@@ -250,6 +303,10 @@ fn hosting_is_opt_in_and_the_default_gives_each_group_its_own_thread() {
 
 #[test]
 fn a_fixed_pool_carries_any_number_of_groups() {
+    // Measures a process-wide total, so it must not run beside another test
+    // that is creating or dropping servers: those threads would be counted
+    // here and the bound below is an upper one.
+    let _guard = thread_measurement_guard();
     // Asserted against the runtime's own count rather than the process's.
     //
     // An earlier version read `/proc/self/status` before and after building
@@ -293,19 +350,82 @@ fn a_thread_each_is_what_the_default_actually_costs() {
     // default really spends, and an accessor would just be the code agreeing
     // with itself.
     //
-    // A `>=` bound is sound here even with sibling tests running, because
-    // their threads can only add to the count. Noise cannot make this pass.
+    // A `>=` bound does not make a subtraction of process totals sound. The
+    // original form read `process_threads()` twice and subtracted, on the
+    // reasoning that sibling threads can only add -- but a sibling that *drops*
+    // its server removes threads between the two samples, so the difference
+    // reads low and the control fails having measured nothing. That is exactly
+    // how it failed in CI while passing every time locally.
+    //
+    // So the measurement compares the ids of the threads the default spawns, and
+    // this test deliberately runs the churn that broke it: a sibling server is
+    // created before the first sample and dropped during the window, which is
+    // the worst case for a subtraction and no case at all for id sets.
+    let _guard = thread_measurement_guard();
     let root = probe_root("cost");
-    let before = process_threads();
+    let churn_root = probe_root("cost-churn");
+
+    // Threads start and stop asynchronously, so every sample below waits for
+    // the state it is about to measure instead of reading once and hoping. Both
+    // conditions are monotone -- a server's threads are there for as long as it
+    // is alive, and gone for good once it is dropped -- so a bounded wait is
+    // sound and a single sample is not. Reading once is what made this flake.
+    let quiet = node_thread_ids();
+    let churn = server_with(4, false, &churn_root);
+    assert!(
+        wait_until(
+            "the churn threads to start",
+            Duration::from_secs(20),
+            || { node_thread_ids().difference(&quiet).count() >= 4 }
+        ),
+        "the churn server never reached 4 threads, so it is not the interference \
+         this test needs to survive"
+    );
+    let before = node_thread_ids();
+    let churn_ids = before
+        .difference(&quiet)
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let subtraction_before = process_threads();
+    drop(churn);
+    assert!(
+        wait_until("the churn threads to exit", Duration::from_secs(20), || {
+            node_thread_ids().is_disjoint(&churn_ids)
+        }),
+        "the churn server's threads never left the process"
+    );
+
     let server = server_with(16, false, &root);
-    let spent = process_threads().saturating_sub(before);
+    assert!(
+        wait_until(
+            "the group threads to start",
+            Duration::from_secs(20),
+            || { node_thread_ids().difference(&before).count() >= 16 }
+        ),
+        "16 groups on their own threads never reached 16 threads, so the control \
+         is not measuring what it claims"
+    );
+    let spent = node_thread_ids().difference(&before).count() as u64;
+    let subtraction = process_threads().saturating_sub(subtraction_before);
+
     assert!(
         spent >= 16,
         "16 groups on their own threads took only {spent} threads, so the control \
          is not measuring what it claims"
     );
+    // And the reason the instrument changed: under that same churn a
+    // subtraction of process totals undercounts, so a passing `>=` on it would
+    // have been luck.
+    assert!(
+        subtraction < spent,
+        "the subtraction read {subtraction} against {spent} counted threads, so this \
+         run did not reproduce the churn the id sets exist to survive"
+    );
+
     drop(server);
     let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&churn_root);
 }
 
 #[test]
