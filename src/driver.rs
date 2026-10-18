@@ -938,6 +938,9 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
             timeout_ms: MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
         };
         let selector = &self.slots[worker].selector;
+        // One buffer for the life of this worker, lent to every drain. A fresh
+        // vector per drain was an allocation per group per pass.
+        let mut envelopes: Vec<Envelope<Mail>> = Vec::new();
         while !self.exit.load(Ordering::Relaxed) {
             let selection = selector.select(policy, &[]);
             // Global mail is only ever the stop sentinel.
@@ -962,7 +965,7 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
                 if self.exit.load(Ordering::Relaxed) {
                     return;
                 }
-                self.drain_channel(worker, &channel);
+                self.drain_channel(worker, &channel, &mut envelopes);
             }
         }
     }
@@ -995,20 +998,38 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
         batches
     }
 
-    fn drain_channel(&self, worker: usize, channel: &Arc<MailChannel<Envelope<Mail>>>) {
+    /// Drains one channel into the handler, borrowing the worker's buffer.
+    ///
+    /// `envelopes` arrives empty and leaves empty; it is the worker's, kept for
+    /// the life of the worker so a drain does not allocate one. It leaves empty
+    /// even on the `Stop` path, because breaking out of a `drain` still drops
+    /// the `Drain` guard and that removes whatever is left -- the `debug_assert`
+    /// is what says so out loud, since the next channel in the same pass is
+    /// drained with the same buffer.
+    fn drain_channel(
+        &self,
+        worker: usize,
+        channel: &Arc<MailChannel<Envelope<Mail>>>,
+        envelopes: &mut Vec<Envelope<Mail>>,
+    ) {
+        debug_assert!(envelopes.is_empty(), "the lent buffer arrives drained");
         let channel_id = channel.replica_id();
-        let envelopes = channel.fetch(&self.slots[worker].selector);
+        channel.fetch_into(&self.slots[worker].selector, envelopes);
         if envelopes.is_empty() {
             return;
         }
         let mut mails = Vec::with_capacity(envelopes.len());
-        for envelope in envelopes {
+        let mut stopping = false;
+        for envelope in envelopes.drain(..) {
             match envelope {
                 Envelope::Mail(mail) => mails.push(mail),
-                Envelope::Stop => return,
+                Envelope::Stop => {
+                    stopping = true;
+                    break;
+                }
             }
         }
-        if mails.is_empty() {
+        if stopping || mails.is_empty() {
             return;
         }
         let handler = {
@@ -1023,6 +1044,17 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
         let Some(handler) = handler else {
             return;
         };
+        // Without a mail sizer there is exactly one batch, and it is the vector
+        // already in hand. `split_on_byte_budget` wrapped it in a second vector
+        // to return it, which was an allocation per drain for a cut that was
+        // never made.
+        if self.mail_size.is_none() {
+            let count = mails.len() as u64;
+            handler.handle_mail(mails);
+            self.batches_handled.fetch_add(1, Ordering::Relaxed);
+            self.mails_handled.fetch_add(count, Ordering::Relaxed);
+            return;
+        }
         for batch in self.split_on_byte_budget(mails) {
             let count = batch.len() as u64;
             handler.handle_mail(batch);

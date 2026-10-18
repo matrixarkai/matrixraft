@@ -146,17 +146,43 @@ impl<Mail> MailChannel<Mail> {
     }
 
     pub fn fetch_checked(&self, selector: &ChannelSelector<Mail>) -> Result<Vec<Mail>, RaftError> {
+        let mut mails = Vec::new();
+        self.fetch_into_checked(selector, &mut mails)?;
+        Ok(mails)
+    }
+
+    /// Fetches into a buffer the caller keeps, appending to whatever is in it.
+    ///
+    /// A worker drains a channel on every pass of its loop and hands the mail
+    /// on, so the vector it drained into is free again immediately. Returning a
+    /// fresh one each time made that an allocation per drain, per group; lending
+    /// one costs nothing after the first pass. The ticker's due list is kept the
+    /// same way and for the same reason.
+    ///
+    /// The buffer is not cleared here. The caller owns what is already in it,
+    /// and a drain that appends is what lets one pass gather from more than one
+    /// channel.
+    pub fn fetch_into(&self, selector: &ChannelSelector<Mail>, out: &mut Vec<Mail>) {
+        self.fetch_into_checked(selector, out)
+            .expect("mail channel mutex poisoned")
+    }
+
+    pub fn fetch_into_checked(
+        &self,
+        selector: &ChannelSelector<Mail>,
+        out: &mut Vec<Mail>,
+    ) -> Result<(), RaftError> {
         self.consume_checked(selector)?;
         let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
-        // Sized once from what is staged. `Vec::new()` grew by doubling, so a
-        // fetch of 64 mails allocated its own buffer four times over on the way
-        // up; the count is known before anything is moved.
-        let staged = inner.buffered.iter().map(VecDeque::len).sum();
-        let mut mails = Vec::with_capacity(staged);
+        // Reserved once from what is staged. Extending from three deques in turn
+        // reallocated once per non-empty priority, and the count is known before
+        // anything is moved.
+        let staged: usize = inner.buffered.iter().map(VecDeque::len).sum();
+        out.reserve(staged);
         for channel in &mut inner.buffered {
-            mails.extend(channel.drain(..));
+            out.extend(channel.drain(..));
         }
-        Ok(mails)
+        Ok(())
     }
 
     pub fn queued_len(&self) -> usize {
