@@ -1037,10 +1037,25 @@ impl<Mail: Send + 'static> DriverWorkerPool<Mail> {
             };
             (Arc::clone(&group.channel), group.worker)
         };
-        // The depth is checked here rather than left to the channel. A
-        // channel's own limit is compared against a selector-wide count that is
-        // only refreshed when a worker fetches, so a group whose worker is busy
-        // -- exactly the group a depth bound is for -- would never be refused.
+        // The depth is checked here as well as in the channel, and what that
+        // buys is narrower than this comment used to claim. It said the
+        // channel's own limit was compared against a selector-wide count that
+        // only a fetch refreshed; the channel compares against its own queued
+        // count, which is the same quantity this reads, so for every depth
+        // above zero the channel refuses exactly these sends -- and does it
+        // without letting go of the lock it then queues the mail with, which
+        // this cannot.
+        //
+        // What it is still for is a depth of **zero**: a channel raises its own
+        // limit to one, so a group configured to take nothing would take one
+        // mail. `a_zero_queue_depth_takes_no_mail_at_all` is that case.
+        //
+        // Removing it was measured rather than assumed, and bought nothing:
+        // 15 runs an arm of `examples/pool_batch_send.rs`, medians 281.5 and
+        // 296.9ns a mail at a batch of one and 256.0 against 256.7 at eight,
+        // with the arms overlapping throughout. An uncontended lock is tens of
+        // nanoseconds against this path's 256, and this probe cannot resolve
+        // it. So the duplicate stays until something can show it costs.
         if channel.queued_len() >= self.inner.options.max_queue_depth {
             self.inner.mails_refused.fetch_add(1, Ordering::Relaxed);
             return Err(RaftError::InvalidRequest(format!(
@@ -1115,11 +1130,11 @@ impl<Mail: Send + 'static> DriverWorkerPool<Mail> {
             };
             (Arc::clone(&group.channel), group.worker)
         };
-        // Checked here for the reason `send` explains: the channel's own limit
-        // is compared against a selector-wide count that is only refreshed when
-        // a worker fetches, so a group whose worker is busy would never be
-        // refused. Counting the batch in is what makes the check mean the same
-        // thing for a batch as for one mail.
+        // Checked here for the reason `send` explains, which is a depth of
+        // zero and not what that comment used to say. Counting the batch in is
+        // what makes the check mean the same thing for a batch as for one mail;
+        // the channel's `admit` compares the same way, under the lock it is
+        // about to queue them with.
         let refused = mails.len();
         if channel.queued_len().saturating_add(refused) > self.inner.options.max_queue_depth {
             self.inner
