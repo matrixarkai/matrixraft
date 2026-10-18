@@ -651,6 +651,47 @@ fn an_empty_batch_is_nothing_to_do() {
 }
 
 #[test]
+fn a_zero_queue_depth_takes_no_mail_at_all() {
+    // Zero means zero, for one mail and for a batch. It has to be the pool that
+    // says so: a channel raises its own limit to one, so left to the channel a
+    // group configured to take nothing would take one mail. That is what the
+    // pool's own depth check is for -- at every other depth the channel refuses
+    // the same sends, atomically and under its own lock.
+    let pool = DriverWorkerPool::<u64>::start(DriverOptions {
+        worker_num: 1,
+        tick_interval_ms: 5,
+        max_queue_depth: 0,
+        ..DriverOptions::default()
+    })
+    .expect("pool");
+    let recorder = Arc::new(MailRecorder::default());
+    let key = DriverGroupKey::new(36, 1);
+    pool.register_group(
+        key,
+        Arc::clone(&recorder) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register");
+
+    assert!(
+        pool.send(key, MailPriority::Normal, 1).is_err(),
+        "a depth of zero cannot take one mail"
+    );
+    assert!(
+        pool.send_many(key, MailPriority::Normal, vec![1]).is_err(),
+        "nor a batch of one"
+    );
+    assert_eq!(pool.stats().mails_refused, 2);
+
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        recorder.count(),
+        0,
+        "received {:?} with a queue depth of zero",
+        recorder.received()
+    );
+}
+
+#[test]
 fn a_batch_for_a_group_that_is_gone_is_refused() {
     let pool = DriverWorkerPool::<u64>::start(options(1, 5)).expect("pool");
     let key = DriverGroupKey::new(35, 1);
