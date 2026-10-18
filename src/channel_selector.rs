@@ -115,16 +115,58 @@ impl<Mail> MailChannel<Mail> {
         mails: Vec<Mail>,
     ) -> Result<Result<(), Vec<Mail>>, RaftError> {
         let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
-        if self.overflow(&inner) || inner.size.saturating_add(mails.len()) > self.num_mail_limit {
-            inner.rejected_send_count = inner
-                .rejected_send_count
-                .saturating_add(mails.len().try_into().unwrap_or(u64::MAX));
+        if !self.admit(&mut inner, mails.len()) {
             return Ok(Err(mails));
         }
-        inner.size += mails.len();
-        inner.max_depth = inner.max_depth.max(inner.size);
         inner.channels[priority_index(priority)].extend(mails);
         Ok(Ok(()))
+    }
+
+    /// Sends many, taking them from an iterator rather than a vector.
+    ///
+    /// For a caller that has to map its mails on the way in -- which the
+    /// driver's pool does, wrapping each in an envelope -- collecting first
+    /// would be an allocation per batch for a vector consumed immediately.
+    /// The length has to be known before anything is moved, because the
+    /// depth check is on the whole batch, which is what `ExactSizeIterator`
+    /// is here for.
+    ///
+    /// On a refusal nothing is taken from the iterator and the count that
+    /// would not fit is returned. It cannot hand the mails back the way
+    /// `try_send_many` does, because what it was given is not a container.
+    pub fn try_send_iter_checked<I>(
+        &self,
+        priority: MailPriority,
+        mails: I,
+    ) -> Result<Result<(), usize>, RaftError>
+    where
+        I: IntoIterator<Item = Mail>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let mails = mails.into_iter();
+        let count = mails.len();
+        let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
+        if !self.admit(&mut inner, count) {
+            return Ok(Err(count));
+        }
+        inner.channels[priority_index(priority)].extend(mails);
+        Ok(Ok(()))
+    }
+
+    /// Admits a batch of `count` or refuses it, counting the refusal.
+    ///
+    /// All or nothing: the whole batch has to fit, so that a caller told its
+    /// send was refused does not have to wonder which prefix of it arrived.
+    fn admit(&self, inner: &mut MailChannelInner<Mail>, count: usize) -> bool {
+        if self.overflow(inner) || inner.size.saturating_add(count) > self.num_mail_limit {
+            inner.rejected_send_count = inner
+                .rejected_send_count
+                .saturating_add(count.try_into().unwrap_or(u64::MAX));
+            return false;
+        }
+        inner.size += count;
+        inner.max_depth = inner.max_depth.max(inner.size);
+        true
     }
 
     pub fn send(&self, priority: MailPriority, mail: Mail) {
@@ -408,6 +450,25 @@ impl<Mail> ChannelSelector<Mail> {
     ) -> Result<Result<(), Vec<Mail>>, RaftError> {
         if let Err(mails) = channel.try_send_many_checked(priority, mails)? {
             return Ok(Err(mails));
+        }
+        let _ = self.fire_checked(channel)?;
+        Ok(Ok(()))
+    }
+
+    /// One batch into the channel and one wake for the selector, taking the
+    /// mails from an iterator. See [`MailChannel::try_send_iter_checked`].
+    pub fn try_send_iter_to_channel_checked<I>(
+        &self,
+        channel: Arc<MailChannel<Mail>>,
+        priority: MailPriority,
+        mails: I,
+    ) -> Result<Result<(), usize>, RaftError>
+    where
+        I: IntoIterator<Item = Mail>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        if let Err(count) = channel.try_send_iter_checked(priority, mails)? {
+            return Ok(Err(count));
         }
         let _ = self.fire_checked(channel)?;
         Ok(Ok(()))

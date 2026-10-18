@@ -1062,6 +1062,98 @@ impl<Mail: Send + 'static> DriverWorkerPool<Mail> {
         Ok(())
     }
 
+    /// Queues many mails for one group at once.
+    ///
+    /// A host that has several messages for the same group -- a batch of append
+    /// responses, or whatever one network read carried -- can hand them over
+    /// together. `send` costs a lock on the group table, a lock on the worker's
+    /// selector and a wake for **each** mail; this costs one of each for the
+    /// batch, and the mails land in the channel in the order given.
+    ///
+    /// All or nothing. The batch is refused whole when it would take the group
+    /// past `max_queue_depth`, rather than part of it going and the rest being
+    /// dropped: a caller that has to retry needs to know what to retry, and
+    /// "some prefix" is not something this could report. The refusal counts
+    /// every mail in the batch, because none of them arrived.
+    ///
+    /// An empty batch is nothing to do, and in particular does not wake a
+    /// worker to look at a channel with nothing in it.
+    ///
+    /// **Not free, and not always a win.** The batch is a vector the caller
+    /// built, and at a batch of one that vector costs more than the locks it
+    /// saves. Measured by `examples/pool_batch_send.rs` on this library's own
+    /// pool, nanoseconds and allocations per mail, medians of seven:
+    ///
+    /// | mails per call | `send` | `send_many` |
+    /// |---|---|---|
+    /// | 1 | 301.1 ns, 0.217 allocations | 344.4 ns, 1.254 allocations |
+    /// | 4 | 269.8 ns, 0.185 | 99.4 ns, 0.326 |
+    /// | 8 | 262.2 ns, 0.176 | 45.3 ns, 0.154 |
+    /// | 64 | 247.6 ns, 0.176 | 10.2 ns, 0.017 |
+    ///
+    /// So: faster from about four mails, and cheaper in allocations from about
+    /// eight. A caller with one mail should use `send`, and a caller whose
+    /// batch already exists -- because a network read or a replication round
+    /// produced it -- gets the time without paying for the vector at all.
+    pub fn send_many(
+        &self,
+        key: DriverGroupKey,
+        priority: MailPriority,
+        mails: Vec<Mail>,
+    ) -> Result<(), RaftError> {
+        if mails.is_empty() {
+            return Ok(());
+        }
+        let (channel, worker) = {
+            let groups = self
+                .inner
+                .groups
+                .lock()
+                .expect("driver groups mutex poisoned");
+            let Some(group) = groups.get(&key) else {
+                return Err(RaftError::NodeNotFound(key.node_id));
+            };
+            (Arc::clone(&group.channel), group.worker)
+        };
+        // Checked here for the reason `send` explains: the channel's own limit
+        // is compared against a selector-wide count that is only refreshed when
+        // a worker fetches, so a group whose worker is busy would never be
+        // refused. Counting the batch in is what makes the check mean the same
+        // thing for a batch as for one mail.
+        let refused = mails.len();
+        if channel.queued_len().saturating_add(refused) > self.inner.options.max_queue_depth {
+            self.inner
+                .mails_refused
+                .fetch_add(refused as u64, Ordering::Relaxed);
+            return Err(RaftError::InvalidRequest(format!(
+                "group {} node {} cannot take {} more: its queue depth is {}",
+                key.group_id, key.node_id, refused, self.inner.options.max_queue_depth
+            )));
+        }
+        // Wrapped on the way in rather than collected first: a vector of
+        // envelopes would be an allocation per batch for something the channel
+        // consumes immediately. `map` over a vector's iterator keeps the exact
+        // length, which the depth check inside needs.
+        if self.inner.slots[worker]
+            .selector
+            .try_send_iter_to_channel_checked(
+                channel,
+                priority,
+                mails.into_iter().map(Envelope::Mail),
+            )?
+            .is_err()
+        {
+            self.inner
+                .mails_refused
+                .fetch_add(refused as u64, Ordering::Relaxed);
+            return Err(RaftError::InvalidRequest(format!(
+                "group {} node {} cannot take {} more: its queue depth is {}",
+                key.group_id, key.node_id, refused, self.inner.options.max_queue_depth
+            )));
+        }
+        Ok(())
+    }
+
     pub fn group_count(&self) -> usize {
         self.inner
             .groups

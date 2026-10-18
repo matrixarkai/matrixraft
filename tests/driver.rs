@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use matrixraft::{
     Driver, DriverGroupKey, DriverMailHandler, DriverOptions, DriverTickReceiver, DriverWorkerPool,
-    MailPriority,
+    MailPriority, RaftError,
 };
 
 /// Counts the ticks it is sent.
@@ -541,6 +541,124 @@ fn mail_reaches_the_group_it_was_addressed_to() {
             index as u64 + 1
         );
     }
+}
+
+#[test]
+fn a_batch_arrives_whole_and_in_order() {
+    let pool = DriverWorkerPool::<u64>::start(options(2, 5)).expect("pool");
+    let first = Arc::new(MailRecorder::default());
+    let second = Arc::new(MailRecorder::default());
+    let first_key = DriverGroupKey::new(31, 1);
+    let second_key = DriverGroupKey::new(32, 1);
+    pool.register_group(
+        first_key,
+        Arc::clone(&first) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register the first group");
+    pool.register_group(
+        second_key,
+        Arc::clone(&second) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register the second group");
+
+    pool.send_many(first_key, MailPriority::Normal, (1..=8).collect())
+        .expect("the first batch");
+    pool.send_many(second_key, MailPriority::Normal, (101..=103).collect())
+        .expect("the second batch");
+
+    assert!(
+        wait_until("both batches arrive", Duration::from_secs(20), || first
+            .count()
+            == 8
+            && second.count() == 3),
+        "first had {:?}, second had {:?}",
+        first.received(),
+        second.received()
+    );
+    assert_eq!(first.received(), (1..=8).collect::<Vec<u64>>());
+    assert_eq!(second.received(), vec![101, 102, 103]);
+}
+
+#[test]
+fn a_batch_too_big_for_the_queue_is_refused_whole() {
+    // The handler blocks so the batch cannot be drained out from under the
+    // depth check, which is what makes the depth the thing being tested.
+    let pool = DriverWorkerPool::<u64>::start(DriverOptions {
+        worker_num: 1,
+        tick_interval_ms: 5,
+        max_queue_depth: 4,
+        ..DriverOptions::default()
+    })
+    .expect("pool");
+    let recorder = Arc::new(MailRecorder::default());
+    let key = DriverGroupKey::new(33, 1);
+    pool.register_group(
+        key,
+        Arc::clone(&recorder) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register");
+
+    let refused = pool.send_many(key, MailPriority::Normal, (1..=5).collect());
+    assert!(
+        refused.is_err(),
+        "five into a depth of four must be refused"
+    );
+    assert_eq!(
+        pool.stats().mails_refused,
+        5,
+        "the refusal counts every mail in the batch, because none arrived"
+    );
+
+    // And the refusal is whole: a prefix must not have gone.
+    pool.send_many(key, MailPriority::Normal, (10..=13).collect())
+        .expect("four into a depth of four fits");
+    assert!(
+        wait_until(
+            "the batch that fit arrives",
+            Duration::from_secs(20),
+            || { recorder.count() == 4 }
+        ),
+        "received {:?}",
+        recorder.received()
+    );
+    assert_eq!(
+        recorder.received(),
+        vec![10, 11, 12, 13],
+        "nothing from the refused batch may appear"
+    );
+}
+
+#[test]
+fn an_empty_batch_is_nothing_to_do() {
+    let pool = DriverWorkerPool::<u64>::start(options(1, 5)).expect("pool");
+    let recorder = Arc::new(MailRecorder::default());
+    let key = DriverGroupKey::new(34, 1);
+    pool.register_group(
+        key,
+        Arc::clone(&recorder) as Arc<dyn DriverMailHandler<u64>>,
+    )
+    .expect("register");
+
+    pool.send_many(key, MailPriority::Normal, Vec::new())
+        .expect("an empty batch is not an error");
+
+    // Nothing queued, and no batch handed over -- a wake for an empty channel
+    // would be a worker pass for no reason.
+    assert_eq!(pool.stats().queued_mails, 0);
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(pool.stats().batches_handled, 0);
+    assert_eq!(recorder.batch_count(), 0);
+}
+
+#[test]
+fn a_batch_for_a_group_that_is_gone_is_refused() {
+    let pool = DriverWorkerPool::<u64>::start(options(1, 5)).expect("pool");
+    let key = DriverGroupKey::new(35, 1);
+    let refused = pool.send_many(key, MailPriority::Normal, vec![1, 2, 3]);
+    assert!(
+        matches!(refused, Err(RaftError::NodeNotFound(1))),
+        "got {refused:?}"
+    );
 }
 
 #[test]
