@@ -148,7 +148,11 @@ impl<Mail> MailChannel<Mail> {
     pub fn fetch_checked(&self, selector: &ChannelSelector<Mail>) -> Result<Vec<Mail>, RaftError> {
         self.consume_checked(selector)?;
         let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
-        let mut mails = Vec::new();
+        // Sized once from what is staged. `Vec::new()` grew by doubling, so a
+        // fetch of 64 mails allocated its own buffer four times over on the way
+        // up; the count is known before anything is moved.
+        let staged = inner.buffered.iter().map(VecDeque::len).sum();
+        let mut mails = Vec::with_capacity(staged);
         for channel in &mut inner.buffered {
             mails.extend(channel.drain(..));
         }
@@ -208,10 +212,21 @@ impl<Mail> MailChannel<Mail> {
         // same channel at once. Assigning here made the second consume discard
         // whatever the first had staged and not yet drained -- mail accepted by
         // `send` and then silently dropped.
-        let mut channels: [VecDeque<Mail>; 3] = std::array::from_fn(|_| VecDeque::new());
-        std::mem::swap(&mut inner.channels, &mut channels);
-        for (buffered, taken) in inner.buffered.iter_mut().zip(channels.iter_mut()) {
-            buffered.extend(taken.drain(..));
+        //
+        // Drained in place rather than swapped out. Swapping three fresh deques
+        // in left the channel at zero capacity, so the next send had to grow the
+        // buffer again -- every cycle, for every group on every worker. Draining
+        // moves exactly the same mail and keeps the allocation the channel had
+        // already earned: a cycle of 64 mails cost 6 allocations and now costs 1,
+        // and the one left is the vector `fetch` returns.
+        //
+        // The two fields are borrowed separately on purpose; they are disjoint,
+        // which is what lets this take both at once.
+        let MailChannelInner {
+            channels, buffered, ..
+        } = &mut *inner;
+        for (buffered, channel) in buffered.iter_mut().zip(channels.iter_mut()) {
+            buffered.extend(channel.drain(..));
         }
         Ok(())
     }
