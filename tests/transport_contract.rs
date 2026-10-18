@@ -473,6 +473,64 @@ fn every_concurrent_offer_reaches_the_flush() {
     assert_eq!(merger.stats().flushed_requests, offered);
 }
 
+/// Many peers must not all land in one bucket.
+///
+/// A merger that put every peer in bucket zero would behave exactly as this one
+/// does -- same batches, same order, same counters -- and only a contention
+/// measurement would see the difference. That plant passes every other test in
+/// this file, which is why `pending_in_bucket` exists and why this asserts on
+/// it.
+#[test]
+fn many_peers_are_spread_over_the_buckets() {
+    const PEERS: u64 = 64;
+    const BUCKETS: usize = 16;
+
+    let mut resolver = HashMap::new();
+    for peer in 0..PEERS {
+        resolver.insert(
+            (1, peer + 2),
+            format!("10.0.{}.{}:7000", peer / 8, peer % 8),
+        );
+    }
+    let merger = HeartbeatMerger::with_bucket_count(true, BUCKETS);
+
+    for peer in 0..PEERS {
+        let message = Message::AppendEntries {
+            target: peer + 2,
+            request: AppendEntriesRequest {
+                group_id: 1,
+                term: 1,
+                leader_id: 1,
+                prev_log_id: None,
+                entries: Vec::new(),
+                leader_commit: peer,
+                lease_epoch: 1,
+            },
+        };
+        assert!(merger
+            .maybe_merge(message, &resolver)
+            .expect("merge")
+            .is_none());
+    }
+
+    let held: Vec<usize> = (0..BUCKETS)
+        .map(|index| merger.pending_in_bucket(index).expect("a real bucket"))
+        .collect();
+    let occupied = held.iter().filter(|held| **held > 0).count();
+    assert_eq!(
+        held.iter().sum::<usize>() as u64,
+        PEERS,
+        "every heartbeat is in some bucket: {held:?}"
+    );
+    // The threshold is deliberately far below even: what is being refused is
+    // one bucket carrying everything, not an uneven hash.
+    assert!(
+        occupied > BUCKETS / 2,
+        "64 peers landed in only {occupied} of {BUCKETS} buckets: {held:?}"
+    );
+    assert_eq!(merger.pending_in_bucket(BUCKETS), None);
+}
+
 /// The buckets are what the locking is spread over, so the count is worth
 /// being able to read.
 #[test]

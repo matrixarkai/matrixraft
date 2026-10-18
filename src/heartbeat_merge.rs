@@ -166,6 +166,22 @@ impl HeartbeatMerger {
         self.buckets.len()
     }
 
+    /// How many heartbeats one bucket is holding, or `None` for an index that
+    /// is not a bucket.
+    ///
+    /// `pending_len` is the figure a host wants. This one is what makes the
+    /// spreading observable at all: a merger that put every peer in one bucket
+    /// would behave identically and only a contention measurement would notice,
+    /// so without this the claim that the work is spread could be argued but
+    /// not checked. It also answers the operational form of the same question
+    /// -- whether one bucket is carrying the peers that matter.
+    pub fn pending_in_bucket(&self, index: usize) -> Option<usize> {
+        if index >= self.buckets.len() {
+            return None;
+        }
+        Some(self.bucket(index).values().map(Vec::len).sum())
+    }
+
     fn bucket(
         &self,
         index: usize,
