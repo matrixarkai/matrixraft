@@ -99,6 +99,89 @@ fn matrixraft_callback_scheduler_exposes_scheduled_timeout_and_cancellation_shap
 }
 
 #[test]
+fn removing_a_group_hands_back_every_callback_it_still_owed() {
+    let mut scheduler = MatrixRaftCallbackScheduler::new();
+    // Two groups, and one of them has a callback with no deadline at all --
+    // which is the entry nothing could ever time out, so it is the one that
+    // would sit here for good.
+    scheduler.schedule(7, 70, MatrixRaftAsyncOperation::Propose, 100, 50);
+    scheduler.schedule(7, 71, MatrixRaftAsyncOperation::ReadIndex, 100, 0);
+    scheduler.schedule(7, 72, MatrixRaftAsyncOperation::Campaign, 100, 90);
+    scheduler.schedule(8, 80, MatrixRaftAsyncOperation::Propose, 100, 50);
+    assert_eq!(scheduler.len(), 4);
+    assert_eq!(scheduler.timed_len(), 3);
+
+    let mut abandoned = scheduler.remove_node(7);
+    abandoned.sort_by_key(|callback| callback.task.request_id);
+    assert_eq!(
+        abandoned.len(),
+        3,
+        "all three of the group's callbacks, deadline or not"
+    );
+    assert_eq!(
+        abandoned
+            .iter()
+            .map(|callback| callback.task.request_id)
+            .collect::<Vec<_>>(),
+        vec![70, 71, 72]
+    );
+    assert_eq!(
+        abandoned
+            .iter()
+            .map(|callback| callback.operation)
+            .collect::<Vec<_>>(),
+        vec![
+            MatrixRaftAsyncOperation::Propose,
+            MatrixRaftAsyncOperation::ReadIndex,
+            MatrixRaftAsyncOperation::Campaign,
+        ],
+        "each one keeps the operation it was scheduled as"
+    );
+
+    // Nothing of the group is left, in either of the two maps keyed by node:
+    // `len` is the timer's and a lapse afterwards is what would betray the
+    // other.
+    assert_eq!(scheduler.len(), 1);
+    assert_eq!(scheduler.timed_len(), 1);
+    assert!(scheduler
+        .lapsed(10_000, 10)
+        .iter()
+        .all(|result| result.node_id == Some(8)));
+
+    // And the other group is untouched: its callback is still owed, and still
+    // times out on its own deadline.
+    assert_eq!(scheduler.remove_node(7).len(), 0, "twice removes nothing");
+}
+
+#[test]
+fn an_abandoned_callback_is_not_a_timeout() {
+    // A host that cannot tell the two apart retries a request whose group it
+    // has just torn down.
+    let mut scheduler = MatrixRaftCallbackScheduler::new();
+    scheduler.schedule(9, 90, MatrixRaftAsyncOperation::Propose, 100, 40);
+    let abandoned = scheduler.remove_node(9);
+    assert_eq!(abandoned.len(), 1);
+
+    let result = abandoned[0].abandoned_result();
+    assert!(!result.ok);
+    assert!(
+        !result.timed_out,
+        "nothing waited out a deadline: the group went away"
+    );
+    assert_eq!(result.operation, MatrixRaftAsyncOperation::Propose);
+    assert_eq!(result.node_id, Some(9));
+    assert_eq!(result.request_id, Some(90));
+    assert_eq!(result.deadline_ms, Some(140));
+    assert_eq!(result.timeout_ms, 40);
+    let error = result.error.expect("an abandoned callback says why");
+    assert!(error.contains("removed"), "error was {error:?}");
+    assert!(error.contains("90"), "error names the request: {error:?}");
+
+    // The timeout result for the same callback is the one that sets the flag.
+    assert!(abandoned[0].timeout_result().timed_out);
+}
+
+#[test]
 fn matrixraft_callback_facade_invokes_step_down_and_resign_admin_callbacks() {
     let wal_dir = temp_dir("admin-wal");
     let snapshot_dir = temp_dir("admin-snapshot");
