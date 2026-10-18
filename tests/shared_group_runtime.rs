@@ -16,7 +16,7 @@
 //! not.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use matrixraft::{
@@ -148,32 +148,6 @@ fn server_with_ids(
 }
 
 #[cfg(target_os = "linux")]
-fn process_threads() -> u64 {
-    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("Threads:") {
-            return rest.trim().parse().unwrap_or(0);
-        }
-    }
-    0
-}
-
-/// The three tests below measure a property of the whole process, so they must
-/// not run while another of them is creating or dropping a server. Nothing else
-/// in the process does: each test binary is its own process, so this file's own
-/// tests are the only source of that churn.
-///
-/// Taken with the poison ignored, because a panic in one of these tests is
-/// already being reported and should not turn the others into a second, more
-/// confusing failure.
-static THREAD_MEASUREMENT: Mutex<()> = Mutex::new(());
-
-fn thread_measurement_guard() -> std::sync::MutexGuard<'static, ()> {
-    THREAD_MEASUREMENT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// The ids of the threads the per-group default spawns, which are named
 /// `rustraft-node-<group>-<node>`.
 ///
@@ -277,10 +251,6 @@ fn a_hosted_group_ticks() {
 
 #[test]
 fn hosting_is_opt_in_and_the_default_gives_each_group_its_own_thread() {
-    // Measures a process-wide total, so it must not run beside another test
-    // that is creating or dropping servers: those threads would be counted
-    // here and the bound below is an upper one.
-    let _guard = thread_measurement_guard();
     // The control. Without this a flag that did nothing would pass every
     // other test in this file, because a group on its own thread works too.
     let root = probe_root("default");
@@ -303,10 +273,6 @@ fn hosting_is_opt_in_and_the_default_gives_each_group_its_own_thread() {
 
 #[test]
 fn a_fixed_pool_carries_any_number_of_groups() {
-    // Measures a process-wide total, so it must not run beside another test
-    // that is creating or dropping servers: those threads would be counted
-    // here and the bound below is an upper one.
-    let _guard = thread_measurement_guard();
     // Asserted against the runtime's own count rather than the process's.
     //
     // An earlier version read `/proc/self/status` before and after building
@@ -361,7 +327,20 @@ fn a_thread_each_is_what_the_default_actually_costs() {
     // this test deliberately runs the churn that broke it: a sibling server is
     // created before the first sample and dropped during the window, which is
     // the worst case for a subtraction and no case at all for id sets.
-    let _guard = thread_measurement_guard();
+    //
+    // It does not assert that a subtraction would have read lower. That held
+    // for the churn this test makes, but a subtraction also counts the threads
+    // of every other test in this binary, so the comparison depends on whatever
+    // else is running -- it failed under `llvm-cov` for exactly that reason. The
+    // claim belongs to the change that introduced the id sets, where a plant
+    // shows it on demand, not to an assertion that is only usually true.
+    //
+    // Nothing here is serialised against the other tests, either. Comparing id
+    // sets is what makes that unnecessary: a thread in both samples cancels and
+    // a new one can only add, so a sibling creating or dropping a server cannot
+    // move this. The two tests below that bound a thread count assert on the
+    // runtime's own accessor for the same reason, which their own comment has
+    // recorded since before this measurement existed.
     let root = probe_root("cost");
     let churn_root = probe_root("cost-churn");
 
@@ -387,7 +366,6 @@ fn a_thread_each_is_what_the_default_actually_costs() {
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
 
-    let subtraction_before = process_threads();
     drop(churn);
     assert!(
         wait_until("the churn threads to exit", Duration::from_secs(20), || {
@@ -407,20 +385,11 @@ fn a_thread_each_is_what_the_default_actually_costs() {
          is not measuring what it claims"
     );
     let spent = node_thread_ids().difference(&before).count() as u64;
-    let subtraction = process_threads().saturating_sub(subtraction_before);
 
     assert!(
         spent >= 16,
         "16 groups on their own threads took only {spent} threads, so the control \
          is not measuring what it claims"
-    );
-    // And the reason the instrument changed: under that same churn a
-    // subtraction of process totals undercounts, so a passing `>=` on it would
-    // have been luck.
-    assert!(
-        subtraction < spent,
-        "the subtraction read {subtraction} against {spent} counted threads, so this \
-         run did not reproduce the churn the id sets exist to survive"
     );
 
     drop(server);
