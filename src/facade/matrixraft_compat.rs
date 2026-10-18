@@ -1962,6 +1962,24 @@ impl MatrixRaftScheduledCallback {
         )
         .with_timer_task(&self.task, self.operation)
     }
+
+    /// The result for a callback given up on because its group went away.
+    ///
+    /// Not a timeout. Nothing waited out a deadline here -- the group stopped
+    /// existing -- and a host that treats the two the same would retry a
+    /// request whose group it has just torn down. So `timed_out` stays false
+    /// and the error says which it was.
+    pub fn abandoned_result(&self) -> MatrixRaftAsyncResult {
+        MatrixRaftAsyncResult::error(
+            self.operation,
+            self.task.deadline_ms.saturating_sub(self.task.start_at_ms),
+            format!(
+                "matrixraft node {} was removed with request {} in flight",
+                self.task.node_id, self.task.request_id
+            ),
+        )
+        .with_timer_task(&self.task, self.operation)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -2024,6 +2042,37 @@ impl MatrixRaftCallbackScheduler {
         Some(MatrixRaftScheduledCallback { operation, task })
     }
 
+    /// Gives up every callback outstanding for one group, and hands them back.
+    ///
+    /// A host tearing a group down has to answer its callers, and until this
+    /// existed it could not: `cancel` needs a request id, and the ids of what
+    /// is in flight are not something this exposed. So the only way to retire a
+    /// group was to leave its callbacks here -- in the timer and in the
+    /// operation map, both keyed by node -- where nothing would ever remove
+    /// them. A host that cycles groups leaked one entry per request that had
+    /// not completed, and a deadline that lapsed afterwards reported a timeout
+    /// for a group that was gone.
+    ///
+    /// Returns them rather than dropping them, because each one is a caller
+    /// still waiting. `MatrixRaftScheduledCallback::abandoned_result` is the
+    /// answer to give them, and it is deliberately not a timeout.
+    ///
+    /// Callbacks with no deadline are included. `schedule` with a zero timeout
+    /// still records the operation, so leaving those behind would leak exactly
+    /// the entries nothing can ever time out.
+    pub fn remove_node(&mut self, node_id: NodeId) -> Vec<MatrixRaftScheduledCallback> {
+        let tasks = self.timer.remove_node_tasks(node_id);
+        let mut callbacks = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let operation = self
+                .operations
+                .remove(&(task.node_id, task.request_id))
+                .unwrap_or(MatrixRaftAsyncOperation::Propose);
+            callbacks.push(MatrixRaftScheduledCallback { operation, task });
+        }
+        callbacks
+    }
+
     pub fn lapsed(&mut self, now_ms: u64, limit: usize) -> Vec<MatrixRaftAsyncResult> {
         self.timer
             .lapsed(now_ms, limit)
@@ -2040,6 +2089,20 @@ impl MatrixRaftCallbackScheduler {
 
     pub fn next_timeout_ms(&self, now_ms: u64) -> u64 {
         self.timer.next_timeout_ms(now_ms)
+    }
+
+    /// Callbacks held in the operation map, which must equal [`Self::len`].
+    ///
+    /// Two maps keyed by the same pair have to be kept in step, and `len`
+    /// reports only the timer's. An entry left in this one is unreachable --
+    /// nothing can complete it, cancel it or time it out, because every one of
+    /// those looks in the timer first -- so a leak here has no behaviour to
+    /// betray it and a test cannot catch it without this.
+    ///
+    /// That is not hypothetical: a plant that cleared the timer and left this
+    /// map alone passed every test in `tests/matrixraft_callback_compat.rs`.
+    pub fn pending_operations(&self) -> usize {
+        self.operations.len()
     }
 
     pub fn len(&self) -> usize {
