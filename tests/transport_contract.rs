@@ -351,7 +351,7 @@ fn heartbeat_merger_queues_empty_append_heartbeats() {
     resolver.insert((1, 2), "127.0.0.1:7002".to_string());
     resolver.insert((3, 2), "127.0.0.1:7002".to_string());
     resolver.insert((2, 1), "127.0.0.1:7001".to_string());
-    let mut merger = HeartbeatMerger::enabled();
+    let merger = HeartbeatMerger::enabled();
 
     let first = Message::AppendEntries {
         target: 2,
@@ -437,7 +437,7 @@ fn heartbeat_merger_bypasses_disabled_and_non_heartbeat_appends() {
             lease_epoch: 0,
         },
     };
-    let mut enabled = HeartbeatMerger::enabled();
+    let enabled = HeartbeatMerger::enabled();
     let bypassed = enabled
         .maybe_merge(request_with_entry.clone(), &resolver)
         .expect("non-heartbeat append bypasses");
@@ -476,7 +476,7 @@ fn heartbeat_merger_bypasses_disabled_and_non_heartbeat_appends() {
             lease_epoch: 0,
         },
     };
-    let mut disabled = HeartbeatMerger::disabled();
+    let disabled = HeartbeatMerger::disabled();
     let bypassed = disabled
         .maybe_merge(heartbeat.clone(), &resolver)
         .expect("disabled merger bypasses");
