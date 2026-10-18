@@ -161,6 +161,22 @@ pub struct DriverStats {
     /// the whole sweep. Heartbeats, leases and election timeouts are
     /// counted in ticks, so a shortfall here lengthens all three.
     pub ticks_skipped: u64,
+    /// Times a registration woke the ticker because the group it registered
+    /// came due before the deadline the ticker was waiting on.
+    ///
+    /// Registering woke the ticker unconditionally, which is a thread wake and a
+    /// lock handoff per group. A host registers its groups in a loop and they
+    /// land in the same millisecond, so all but the first asked the ticker to
+    /// wake for a deadline it already held: 65,536 groups cost 824ns each to
+    /// register, against 190ns once the wake became conditional.
+    ///
+    /// It is reported rather than merely fixed because the condition is not
+    /// provable from the outside -- the ticker never sleeps longer than
+    /// `DRIVER_MAX_SLEEP_MS`, so a wake that is skipped when it should not be
+    /// costs latency and nothing fails. This counter is what makes that
+    /// visible, and `driver_registration_wakes_only_when_the_deadline_moves`
+    /// is what holds it.
+    pub registration_wakes: u64,
     pub clock_ms: u64,
 }
 
@@ -238,6 +254,7 @@ struct DriverInner {
     ticks_fired: AtomicU64,
     ticks_dropped: AtomicU64,
     ticks_skipped: AtomicU64,
+    registration_wakes: AtomicU64,
 }
 
 impl DriverInner {
@@ -394,6 +411,7 @@ impl Driver {
             ticks_fired: AtomicU64::new(0),
             ticks_dropped: AtomicU64::new(0),
             ticks_skipped: AtomicU64::new(0),
+            registration_wakes: AtomicU64::new(0),
         });
 
         let ticker_inner = Arc::clone(&inner);
@@ -460,6 +478,8 @@ impl Driver {
             )));
         }
         let at_ms = state.clock_ms.saturating_add(interval_ms);
+        // Read before the insert, because the insert is what may change it.
+        let earliest_before = state.buckets.keys().next().copied();
         let registration = Registration {
             receiver,
             interval_ms,
@@ -485,11 +505,27 @@ impl Driver {
             .entry(at_ms)
             .or_default()
             .push(Scheduled { slot, generation });
-        // This may be earlier than the deadline the ticker went to sleep on, and
-        // nothing else would wake it in time. Dropped before the notify so the
-        // woken thread is not immediately blocked on the lock we still hold.
+        // The ticker has to be woken when this deadline lands before the one it
+        // went to sleep on, and nothing else would wake it in time. When it does
+        // not -- which is every registration after the first at a given
+        // millisecond -- the ticker is already due to wake then, so a notify
+        // buys nothing and costs a thread wake and a lock handoff each time.
+        //
+        // That was the whole of the registration cost: a store registering the
+        // groups it hosts does so in a loop, and the groups land in the same
+        // bucket, so all but a handful of the wakes were for a deadline the
+        // ticker already held. Strictly earlier is the condition -- an equal
+        // deadline is one the ticker will already serve.
+        let wake_ticker = earliest_before.is_none_or(|earliest| at_ms < earliest);
+        // Dropped before the notify so the woken thread is not immediately
+        // blocked on the lock we still hold.
         drop(state);
-        self.inner.wake.notify_all();
+        if wake_ticker {
+            self.inner
+                .registration_wakes
+                .fetch_add(1, Ordering::Relaxed);
+            self.inner.wake.notify_all();
+        }
         Ok(())
     }
 
@@ -542,6 +578,7 @@ impl Driver {
             ticks_fired: self.inner.ticks_fired.load(Ordering::Relaxed),
             ticks_dropped: self.inner.ticks_dropped.load(Ordering::Relaxed),
             ticks_skipped: self.inner.ticks_skipped.load(Ordering::Relaxed),
+            registration_wakes: self.inner.registration_wakes.load(Ordering::Relaxed),
             clock_ms: state.clock_ms,
         }
     }
@@ -1060,6 +1097,7 @@ mod tests {
             ticks_fired: AtomicU64::new(0),
             ticks_dropped: AtomicU64::new(0),
             ticks_skipped: AtomicU64::new(0),
+            registration_wakes: AtomicU64::new(0),
         };
         (inner, counter)
     }

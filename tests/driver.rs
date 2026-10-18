@@ -686,3 +686,76 @@ fn a_mail_larger_than_the_whole_budget_still_arrives() {
         "each mail is over the whole budget, so each should go on its own"
     );
 }
+
+#[test]
+fn driver_registration_wakes_only_when_the_deadline_moves() {
+    // Registering woke the ticker every time, which is a thread wake and a lock
+    // handoff per group. A host registers the groups it hosts in a loop, so they
+    // land in the same millisecond and all but the first were asking the ticker
+    // to wake for a deadline it already held.
+    //
+    // This is asserted by counting the decision rather than by timing a tick,
+    // because the ticker never sleeps longer than fifty milliseconds: skipping a
+    // wake that was needed costs latency and fails nothing, so a timing test
+    // would be measuring the cap rather than the condition. Removing the wake
+    // entirely leaves the whole suite green, which is why this counter exists.
+    let driver = Driver::start(DriverOptions {
+        worker_num: 1,
+        tick_interval_ms: 1_000,
+        ..DriverOptions::default()
+    })
+    .expect("driver starts");
+    let receiver: Arc<dyn DriverTickReceiver> = Arc::new(TickCounter::default());
+
+    // The first registration finds no deadline at all, so it must wake: the
+    // ticker is sitting on its maximum sleep with nothing to do.
+    driver
+        .register_group(DriverGroupKey::new(1, 1), Arc::clone(&receiver))
+        .expect("first group registers");
+    assert_eq!(
+        driver.stats().registration_wakes,
+        1,
+        "the first group registered into an empty schedule and has to wake the ticker"
+    );
+
+    // The rest share that interval. The clock only moves forward, so their
+    // deadlines are at or after the first one's -- never earlier -- and the
+    // ticker is already due to wake then.
+    for group_id in 2..=64 {
+        driver
+            .register_group(DriverGroupKey::new(group_id, 1), Arc::clone(&receiver))
+            .expect("group registers");
+    }
+    assert_eq!(
+        driver.stats().registered_groups,
+        64,
+        "all sixty-four groups should be registered"
+    );
+    assert_eq!(
+        driver.stats().registration_wakes,
+        1,
+        "sixty-three groups registered at the same interval asked the ticker to wake \
+         for a deadline it already held"
+    );
+
+    // One that really does come due earlier has to wake it.
+    driver
+        .register_group_every(DriverGroupKey::new(65, 1), Arc::clone(&receiver), 1)
+        .expect("sooner group registers");
+    assert_eq!(
+        driver.stats().registration_wakes,
+        2,
+        "a group coming due before the earliest deadline has to wake the ticker"
+    );
+
+    // And a later one after that does not, because the one-millisecond group is
+    // now the earliest and the ticker is waiting on it.
+    driver
+        .register_group_every(DriverGroupKey::new(66, 1), Arc::clone(&receiver), 5_000)
+        .expect("later group registers");
+    assert_eq!(
+        driver.stats().registration_wakes,
+        2,
+        "a group coming due after the earliest deadline must not wake the ticker"
+    );
+}
