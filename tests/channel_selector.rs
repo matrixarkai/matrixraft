@@ -39,6 +39,84 @@ fn channel_selector_selects_unique_active_channels() {
 }
 
 #[test]
+fn a_lent_selection_buffer_serves_one_pass_after_another() {
+    // The worker keeps one pair of buffers for its whole life, so what one pass
+    // leaves behind is what the next one starts with. The contract is that it
+    // leaves nothing: the caller drains the channels it was handed, and global
+    // mail only ever reaches a caller that is stopping.
+    let selector = ChannelSelector::<u64>::new();
+    let channel_1 = MailChannel::<u64>::new(1, 100);
+    let channel_2 = MailChannel::<u64>::new(2, 100);
+    let policy = ChannelSelectorPolicy {
+        limit: 1,
+        timeout_ms: 0,
+    };
+
+    // Oversized on purpose: a buffer the worker has already grown is what the
+    // next pass is supposed to inherit, so the assertions below can tell a
+    // reused buffer from a fresh one that happens to hold the same thing.
+    let mut channels = Vec::with_capacity(8);
+    let mut global_mails = Vec::new();
+
+    assert!(selector.fire(Arc::clone(&channel_1)));
+    assert!(selector.fire(Arc::clone(&channel_2)));
+
+    assert!(
+        selector.select_into(policy, &[], &mut channels, &mut global_mails),
+        "one of the two was left behind"
+    );
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0].replica_id(), 1);
+    assert!(global_mails.is_empty());
+    let lent = channels.capacity();
+    assert_eq!(
+        lent, 8,
+        "the buffer the test lent is the one that came back"
+    );
+    channels.clear();
+
+    // The second pass borrows the same buffer and must see only its own
+    // selection in it -- not the first pass's channel, and not an empty slot
+    // left where it was.
+    assert!(!selector.select_into(policy, &[], &mut channels, &mut global_mails));
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0].replica_id(), 2);
+    assert_eq!(
+        channels.capacity(),
+        lent,
+        "the second pass should reuse the capacity the first earned"
+    );
+    channels.clear();
+
+    // Nothing active: an empty selection, and still no allocation asked for.
+    assert!(!selector.select_into(policy, &[], &mut channels, &mut global_mails));
+    assert!(channels.is_empty());
+    assert_eq!(channels.capacity(), lent);
+}
+
+#[test]
+fn select_still_returns_a_selection_of_its_own() {
+    // `select` is now a wrapper over `select_into`; this is the caller outside
+    // the pool that the wrapper exists for.
+    let selector = ChannelSelector::<u64>::new();
+    let channel = MailChannel::<u64>::new(4, 100);
+    selector.send_to_channel(Arc::clone(&channel), MailPriority::Normal, 77);
+    selector.send_global(5);
+
+    let selection = selector.select(
+        ChannelSelectorPolicy {
+            limit: 4,
+            timeout_ms: 0,
+        },
+        &[],
+    );
+    assert_eq!(selection.global_mails, vec![5]);
+    assert_eq!(selection.channels.len(), 1);
+    assert_eq!(selection.channels[0].replica_id(), 4);
+    assert!(!selection.has_active_channels_left);
+}
+
+#[test]
 fn mail_channel_fetch_drains_priority_lanes() {
     let selector = ChannelSelector::new();
     let channel = MailChannel::new(9, 100);
