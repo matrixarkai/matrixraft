@@ -7,8 +7,8 @@
 //! fixed sleep turns a loaded machine into a red suite, which is how
 //! `a_busy_node_still_ticks` came to demand a rate no runner could supply.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use matrixraft::{
@@ -170,8 +170,10 @@ fn a_cancelled_group_stops_ticking() {
     assert!(!driver.cancel_group(key), "cancelling twice finds nothing");
     assert_eq!(driver.group_count(), 0);
 
-    // One tick can already be in flight, so settle before taking the reading.
-    std::thread::sleep(Duration::from_millis(50));
+    // Read with no settling time at all. A tick could be in flight when the
+    // cancel arrived, but `cancel_group` does not return while one is -- which
+    // is what `cancelling_a_group_waits_for_the_tick_it_raced` holds -- so this
+    // reading is already final.
     let after_cancel = counter.count();
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(
@@ -179,6 +181,150 @@ fn a_cancelled_group_stops_ticking() {
         after_cancel,
         "a cancelled group must stop ticking: 100 intervals passed and it moved"
     );
+}
+
+/// Blocks inside `fire_tick` until the test releases it, so a cancel can be
+/// made to arrive while a tick of the group is running -- the window a host
+/// cannot see from the outside and cannot avoid by ordering its own calls.
+#[derive(Debug, Default)]
+struct BlockedTick {
+    started: AtomicBool,
+    release: Mutex<bool>,
+    released: Condvar,
+    finished: AtomicBool,
+}
+
+impl BlockedTick {
+    fn release(&self) {
+        *self.release.lock().expect("release mutex") = true;
+        self.released.notify_all();
+    }
+}
+
+impl DriverTickReceiver for BlockedTick {
+    fn fire_tick(&self) {
+        // Only the first tick blocks. A second would be a tick of a cancelled
+        // group, which is what `a_cancelled_group_stops_ticking` is for.
+        if self.finished.load(Ordering::SeqCst) {
+            return;
+        }
+        self.started.store(true, Ordering::SeqCst);
+        let mut release = self.release.lock().expect("release mutex");
+        while !*release {
+            // Bounded, so a lost notify cannot hang the suite.
+            let (next, _) = self
+                .released
+                .wait_timeout(release, Duration::from_millis(20))
+                .expect("release mutex");
+            release = next;
+        }
+        drop(release);
+        self.finished.store(true, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn cancelling_a_group_waits_for_the_tick_it_raced() {
+    let driver = Driver::start(options(1, 1)).expect("driver");
+    let blocked = Arc::new(BlockedTick::default());
+    let key = DriverGroupKey::new(11, 1);
+    driver
+        .register_group(key, Arc::clone(&blocked) as Arc<dyn DriverTickReceiver>)
+        .expect("register");
+
+    assert!(
+        wait_until("the tick starts", Duration::from_secs(20), || blocked
+            .started
+            .load(Ordering::SeqCst)),
+        "the tick never started, so cancelling underneath it proves nothing"
+    );
+
+    // The cancel runs on a thread of its own because it is expected to block,
+    // and this test is the only thing that can release the tick it waits for.
+    std::thread::scope(|scope| {
+        let cancel = scope.spawn(|| driver.cancel_group(key));
+
+        assert!(
+            wait_until("the cancel waits", Duration::from_secs(20), || driver
+                .stats()
+                .cancel_quiesce_waits
+                == 1),
+            "the cancel never reached the wait, so the race was not reproduced"
+        );
+
+        // Nothing here is timed. The tick cannot finish until the line below
+        // releases it, and that line is not reached until the cancel is already
+        // waiting, so the tick finishing is strictly after the cancel began to
+        // wait -- which is the only ordering that makes the last assertion mean
+        // what it says.
+        assert!(
+            !blocked.finished.load(Ordering::SeqCst),
+            "the tick finished before the test released it"
+        );
+        blocked.release();
+
+        assert!(
+            cancel.join().expect("cancel thread"),
+            "cancel should find the group"
+        );
+        assert!(
+            blocked.finished.load(Ordering::SeqCst),
+            "cancel_group returned while the tick it raced was still running"
+        );
+    });
+
+    assert_eq!(driver.group_count(), 0);
+}
+
+#[test]
+fn a_receiver_can_cancel_its_own_group_from_inside_a_tick() {
+    // A receiver is a plausible place to decide a group is finished with, and
+    // the wait above would be a wait for itself. The driver has to notice that
+    // the caller is the ticker and not make it wait.
+    struct SelfCancel {
+        driver: Mutex<Option<Arc<Driver>>>,
+        key: DriverGroupKey,
+        cancelled: AtomicBool,
+    }
+
+    impl DriverTickReceiver for SelfCancel {
+        fn fire_tick(&self) {
+            if self.cancelled.load(Ordering::SeqCst) {
+                return;
+            }
+            let driver = self
+                .driver
+                .lock()
+                .expect("driver handle")
+                .clone()
+                .expect("the handle is set before the group is registered");
+            assert!(driver.cancel_group(self.key), "its own group is there");
+            self.cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let driver = Arc::new(Driver::start(options(1, 1)).expect("driver"));
+    let key = DriverGroupKey::new(12, 1);
+    let receiver = Arc::new(SelfCancel {
+        driver: Mutex::new(Some(Arc::clone(&driver))),
+        key,
+        cancelled: AtomicBool::new(false),
+    });
+    driver
+        .register_group(key, Arc::clone(&receiver) as Arc<dyn DriverTickReceiver>)
+        .expect("register");
+
+    assert!(
+        wait_until("the group cancels itself", Duration::from_secs(20), || {
+            receiver.cancelled.load(Ordering::SeqCst)
+        }),
+        "the tick never returned from cancelling its own group"
+    );
+    assert_eq!(driver.group_count(), 0);
+
+    // Breaks the cycle, so the driver is dropped and its ticker joined when
+    // this test ends rather than at the end of the process.
+    *receiver.driver.lock().expect("driver handle") = None;
 }
 
 #[test]

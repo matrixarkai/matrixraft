@@ -22,9 +22,9 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread::{self, JoinHandle};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use crate::{
@@ -177,6 +177,16 @@ pub struct DriverStats {
     /// visible, and `driver_registration_wakes_only_when_the_deadline_moves`
     /// is what holds it.
     pub registration_wakes: u64,
+    /// Times `cancel_group` had to wait for a tick that was already firing.
+    ///
+    /// A cancel takes the state lock and the ticker gathers what is due under
+    /// the same lock, so a cancel either wins -- and the group is simply not
+    /// gathered -- or arrives after the gather, holding a receiver the ticker
+    /// is about to call. Only the second case waits, which is why this counts
+    /// rather than being inferable from the cancel count: on a quiet driver it
+    /// stays at zero, and a host that sees it climbing is cancelling into its
+    /// own tick storm.
+    pub cancel_quiesce_waits: u64,
     pub clock_ms: u64,
 }
 
@@ -255,6 +265,24 @@ struct DriverInner {
     ticks_dropped: AtomicU64,
     ticks_skipped: AtomicU64,
     registration_wakes: AtomicU64,
+    cancel_quiesce_waits: AtomicU64,
+    /// Which firing pass the ticker is in, and whether it is in one: bumped
+    /// once when a pass of due receivers has been gathered and once when they
+    /// have all been called, so an odd value means receivers are in flight.
+    ///
+    /// Per pass, not per tick. A mark on each tick would put a lock or a fence
+    /// on the path that costs 17.8ns at 65,536 groups, to serve a cancel that
+    /// a host performs once per group in its life.
+    fire_pass: AtomicU64,
+    /// Cancels currently waiting for a pass to finish. Read by the ticker so
+    /// the common case -- nobody cancelling -- pays one load per pass and no
+    /// lock at all.
+    cancel_waiters: AtomicUsize,
+    /// Notified when a firing pass ends. Paired with `state`, like `wake`.
+    quiesced: Condvar,
+    /// The ticker's own thread, so a receiver that cancels its own group from
+    /// inside `fire_tick` is not made to wait for itself.
+    ticker_thread: OnceLock<ThreadId>,
 }
 
 impl DriverInner {
@@ -365,6 +393,19 @@ impl DriverInner {
                 // Emptied by the drain, and keeping its capacity.
                 state.spare.push(scheduled);
             }
+
+            // Marked while the lock is still held, which is what makes a
+            // cancel's reading of it meaningful: a cancel holding this lock
+            // sees either an even value -- nothing gathered, so nothing of its
+            // group is in flight -- or the odd value of the pass that may be
+            // holding its receiver. There is no window in between.
+            if !due.is_empty() {
+                self.fire_pass.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        if due.is_empty() {
+            return;
         }
 
         // Outside the lock, and drained rather than consumed so the vector goes
@@ -372,6 +413,16 @@ impl DriverInner {
         for receiver in due.drain(..) {
             receiver.fire_tick();
             self.ticks_fired.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Ends the pass before looking for waiters, so a cancel that increments
+        // `cancel_waiters` after this read has already seen the new pass value
+        // and will not wait. The load is what keeps a quiet driver off the
+        // lock: one atomic read per pass when nobody is cancelling.
+        self.fire_pass.fetch_add(1, Ordering::SeqCst);
+        if self.cancel_waiters.load(Ordering::SeqCst) > 0 {
+            let _state = self.state.lock().expect("driver state mutex poisoned");
+            self.quiesced.notify_all();
         }
     }
 }
@@ -412,12 +463,22 @@ impl Driver {
             ticks_dropped: AtomicU64::new(0),
             ticks_skipped: AtomicU64::new(0),
             registration_wakes: AtomicU64::new(0),
+            cancel_quiesce_waits: AtomicU64::new(0),
+            fire_pass: AtomicU64::new(0),
+            cancel_waiters: AtomicUsize::new(0),
+            quiesced: Condvar::new(),
+            ticker_thread: OnceLock::new(),
         });
 
         let ticker_inner = Arc::clone(&inner);
         let ticker = thread::Builder::new()
             .name("rustraft-driver-ticker".to_string())
             .spawn(move || {
+                // Recorded by the ticker itself rather than taken from the
+                // JoinHandle, because `Thread::id` of a handle is available
+                // before the thread runs but this is read on the cancel path
+                // and has to be the id of whoever calls `fire_tick`.
+                let _ = ticker_inner.ticker_thread.set(thread::current().id());
                 let started = Instant::now();
                 // One vector for the life of the ticker, lent to every call.
                 let mut due: Vec<Arc<dyn DriverTickReceiver>> = Vec::new();
@@ -529,8 +590,30 @@ impl Driver {
         Ok(())
     }
 
-    /// Stops ticking a group. Its next scheduled deadline is dropped when it
-    /// comes due, which `DriverStats::ticks_dropped` counts.
+    /// Stops ticking a group, and does not return while a tick of it is still
+    /// running.
+    ///
+    /// Both halves matter to a caller that is about to drop whatever the
+    /// receiver borrows. Removing the registration is what stops further ticks:
+    /// any deadline still outstanding was scheduled under the old generation,
+    /// so it is dropped when it comes due rather than fired, which
+    /// `DriverStats::ticks_dropped` counts. But the ticker gathers the
+    /// receivers it is about to call under the state lock and then calls them
+    /// with the lock dropped, so a cancel that arrives after the gather can
+    /// take the lock, remove the registration and return while `fire_tick` is
+    /// running on the `Arc` the ticker already cloned. That is the window this
+    /// waits out, and `DriverStats::cancel_quiesce_waits` counts how often it
+    /// is hit.
+    ///
+    /// It waits for the whole pass rather than for this group's tick, which is
+    /// a stronger guarantee than asked for and the reason it costs nothing when
+    /// it is not needed: the alternative is marking each tick as it is fired,
+    /// on a path measured in tens of nanoseconds.
+    ///
+    /// A receiver may cancel its own group from inside `fire_tick`. That is not
+    /// made to wait -- it would be waiting for itself -- and it does not need
+    /// to: the registration is gone before the wait would start, so the only
+    /// tick of this group that can still be running is the caller's own.
     pub fn cancel_group(&self, key: DriverGroupKey) -> bool {
         let mut state = self
             .inner
@@ -547,6 +630,34 @@ impl Driver {
         // after the slot is handed to someone else.
         vacated.generation = vacated.generation.wrapping_add(1);
         state.free.push(slot);
+
+        // Read under the lock the ticker marks the pass under, so this is
+        // either the pass that may hold this group's receiver or an even value
+        // meaning there is none.
+        let pass = self.inner.fire_pass.load(Ordering::SeqCst);
+        let on_the_ticker = self
+            .inner
+            .ticker_thread
+            .get()
+            .is_some_and(|ticker| *ticker == thread::current().id());
+        if pass % 2 == 1 && !on_the_ticker {
+            self.inner
+                .cancel_quiesce_waits
+                .fetch_add(1, Ordering::Relaxed);
+            self.inner.cancel_waiters.fetch_add(1, Ordering::SeqCst);
+            while self.inner.fire_pass.load(Ordering::SeqCst) == pass {
+                // Bounded, so a notify that is somehow missed costs this caller
+                // latency rather than wedging it -- the same reason the ticker's
+                // own wait is bounded.
+                let (next, _) = self
+                    .inner
+                    .quiesced
+                    .wait_timeout(state, Duration::from_millis(DRIVER_MAX_SLEEP_MS))
+                    .expect("driver state mutex poisoned");
+                state = next;
+            }
+            self.inner.cancel_waiters.fetch_sub(1, Ordering::SeqCst);
+        }
         true
     }
 
@@ -579,6 +690,7 @@ impl Driver {
             ticks_dropped: self.inner.ticks_dropped.load(Ordering::Relaxed),
             ticks_skipped: self.inner.ticks_skipped.load(Ordering::Relaxed),
             registration_wakes: self.inner.registration_wakes.load(Ordering::Relaxed),
+            cancel_quiesce_waits: self.inner.cancel_quiesce_waits.load(Ordering::Relaxed),
             clock_ms: state.clock_ms,
         }
     }
@@ -1130,6 +1242,11 @@ mod tests {
             ticks_dropped: AtomicU64::new(0),
             ticks_skipped: AtomicU64::new(0),
             registration_wakes: AtomicU64::new(0),
+            cancel_quiesce_waits: AtomicU64::new(0),
+            fire_pass: AtomicU64::new(0),
+            cancel_waiters: AtomicUsize::new(0),
+            quiesced: Condvar::new(),
+            ticker_thread: OnceLock::new(),
         };
         (inner, counter)
     }
