@@ -161,6 +161,15 @@ pub struct DriverStats {
     /// the whole sweep. Heartbeats, leases and election timeouts are
     /// counted in ticks, so a shortfall here lengthens all three.
     pub ticks_skipped: u64,
+    /// Ticks the schedule produced while ticking was switched off.
+    ///
+    /// Distinct from `ticks_skipped`, which counts intervals a group was owed
+    /// and never got because the clock ran ahead. These were due, were taken
+    /// off the schedule on time, and were deliberately not delivered -- so
+    /// without a counter of their own a maintenance window would look like
+    /// either a healthy driver or a stalled one, depending on which figure a
+    /// host happened to be watching.
+    pub ticks_suppressed: u64,
     /// Times a registration woke the ticker because the group it registered
     /// came due before the deadline the ticker was waiting on.
     ///
@@ -266,6 +275,9 @@ struct DriverInner {
     ticks_skipped: AtomicU64,
     registration_wakes: AtomicU64,
     cancel_quiesce_waits: AtomicU64,
+    ticks_suppressed: AtomicU64,
+    /// Whether a due tick is delivered. The schedule runs either way.
+    ticks_enabled: AtomicBool,
     /// Which firing pass the ticker is in, and whether it is in one: bumped
     /// once when a pass of due receivers has been gathered and once when they
     /// have all been called, so an odd value means receivers are in flight.
@@ -394,6 +406,19 @@ impl DriverInner {
                 state.spare.push(scheduled);
             }
 
+            // Gathered and then dropped when ticking is off, rather than not
+            // gathered: the deadlines above have already been rescheduled, so
+            // the schedule keeps its cadence through a maintenance window and
+            // the groups resume on it instead of all coming due at once when
+            // ticking returns.
+            //
+            // Read once a pass, not once a tick. A tick is tens of nanoseconds
+            // and switching this is something a host does by hand.
+            if !self.ticks_enabled.load(Ordering::Relaxed) {
+                self.ticks_suppressed
+                    .fetch_add(due.len() as u64, Ordering::Relaxed);
+                due.clear();
+            }
             // Marked while the lock is still held, which is what makes a
             // cancel's reading of it meaningful: a cancel holding this lock
             // sees either an even value -- nothing gathered, so nothing of its
@@ -464,6 +489,8 @@ impl Driver {
             ticks_skipped: AtomicU64::new(0),
             registration_wakes: AtomicU64::new(0),
             cancel_quiesce_waits: AtomicU64::new(0),
+            ticks_suppressed: AtomicU64::new(0),
+            ticks_enabled: AtomicBool::new(true),
             fire_pass: AtomicU64::new(0),
             cancel_waiters: AtomicUsize::new(0),
             quiesced: Condvar::new(),
@@ -661,6 +688,40 @@ impl Driver {
         true
     }
 
+    /// Stops delivering ticks without unregistering anything.
+    ///
+    /// A host closing a maintenance window across the groups it hosts would
+    /// otherwise have to cancel them and register them again -- thousands of
+    /// times, losing each group's place in the schedule, and racing its own
+    /// teardown. This is one flag.
+    ///
+    /// **The schedule keeps running.** Deadlines still come due and are still
+    /// rescheduled; only the delivery stops, and `DriverStats::ticks_suppressed`
+    /// counts what was not delivered. So groups resume on the cadence they had
+    /// rather than all coming due together when ticking returns, and a group
+    /// registered while ticking is off is on the schedule when it comes back.
+    ///
+    /// What stops are the things a tick drives: elections, heartbeats and lease
+    /// renewal. A quorum that is not ticking does not elect, which is the point
+    /// and also the hazard -- a driver left disabled is a cluster that cannot
+    /// make progress, and nothing here times that out.
+    pub fn disable_ticks(&self) {
+        self.inner.ticks_enabled.store(false, Ordering::Relaxed);
+    }
+
+    /// Delivers ticks again. Idempotent, like `disable_ticks`.
+    pub fn enable_ticks(&self) {
+        self.inner.ticks_enabled.store(true, Ordering::Relaxed);
+        // The ticker may be asleep on a deadline that has already passed; this
+        // costs one wake and saves up to `DRIVER_MAX_SLEEP_MS` of dead time
+        // before the first tick arrives.
+        self.inner.wake.notify_all();
+    }
+
+    pub fn ticks_enabled(&self) -> bool {
+        self.inner.ticks_enabled.load(Ordering::Relaxed)
+    }
+
     pub fn group_count(&self) -> usize {
         self.inner
             .state
@@ -691,6 +752,7 @@ impl Driver {
             ticks_skipped: self.inner.ticks_skipped.load(Ordering::Relaxed),
             registration_wakes: self.inner.registration_wakes.load(Ordering::Relaxed),
             cancel_quiesce_waits: self.inner.cancel_quiesce_waits.load(Ordering::Relaxed),
+            ticks_suppressed: self.inner.ticks_suppressed.load(Ordering::Relaxed),
             clock_ms: state.clock_ms,
         }
     }
@@ -1514,6 +1576,8 @@ mod tests {
             ticks_skipped: AtomicU64::new(0),
             registration_wakes: AtomicU64::new(0),
             cancel_quiesce_waits: AtomicU64::new(0),
+            ticks_suppressed: AtomicU64::new(0),
+            ticks_enabled: AtomicBool::new(true),
             fire_pass: AtomicU64::new(0),
             cancel_waiters: AtomicUsize::new(0),
             quiesced: Condvar::new(),
