@@ -1430,6 +1430,36 @@ A no-op carries nothing a host has to replay. It is now `is_command: false`,
 which left **all 753 other tests passing** -- the evidence that nothing
 depended on the old classification.
 
+### A membership change takes the leader lease with it
+
+A leader lease is held by a **quorum of the current membership**. Change the
+membership and the quorum it was measured against is gone:
+
+- a **removed** peer's confirmation would count toward a group it has left,
+- an **added** voter raises the bar the lease was measured by,
+- a **promoted** learner changes which confirmations are eligible at all,
+  because the quorum requires a confirmation's recorded role to match the
+  node's current one.
+
+`reset_leader_lease_epoch` handles it the strong way: every confirmation is
+cleared and the lease invalidated, so it has to be earned again from the new
+membership. That is more conservative than adjusting the member set in place,
+which is what the comparable engine's lease does with its own `UpdateMember`.
+
+Two things make this sound rather than merely present. The quorum is counted
+over the nodes the cluster holds **now**, not over a member list recorded when
+the lease was taken — so a confirmation from a departed node cannot be reached
+whatever is left in the map. And a confirmation is only counted while its
+epoch, its role and its remaining duration all still match.
+
+**None of it was tested.** Deleting the reset from `add_peer`, `remove_peer` or
+`promote_peer` left all 755 tests passing. The code was right and the guarantee
+was undefended, so the next person to decide that clearing every confirmation
+looks wasteful would have had nothing stop them.
+`tests/lease_membership_contract.rs` is what stops them, and each of the three
+paths has its own case: the lease drops, and one heartbeat round against the
+new membership earns it back — an invalidation, not a one-way door.
+
 ### Heartbeats from many groups to one peer, in one batch
 
 `HeartbeatMerger` buckets by destination address rather than by group, which is
