@@ -39,6 +39,29 @@ fn node_id(peer_id: u64) -> MatrixRaftNodeId {
     }
 }
 
+/// The operation timeout every callback-shape test here passes.
+///
+/// Large on purpose, and the same everywhere. These tests assert the SHAPE of a
+/// callback -- that it came back ok, carried its operation, its node and its
+/// request id -- and the facade turns an operation that outruns its own timeout
+/// into a timeout result. So a timeout short enough to be reachable under load
+/// turns `assert!(returned.ok)` into an assertion about the machine.
+///
+/// The test already carries one scar from this, recorded in its own comment:
+/// its raft intervals are longer than the test so the automatic tick cannot
+/// churn elections underneath it, after `ok` failed 13 runs in 60 under 2x CPU
+/// load. The operation timeout was the other half. At 1,000ms it passed five
+/// runs out of five on its own and reddened a full-suite run.
+///
+/// One constant rather than a number at each call, because the test also
+/// compares deadlines across operations -- `read.deadline_ms >=
+/// propose.deadline_ms` -- and those only hold while every operation is given
+/// the same timeout. Raising three of the fourteen is what found that.
+///
+/// A local in-memory propose takes microseconds. A minute is not a bound on the
+/// operation; it is a bound on the test hanging.
+const OPERATION_TIMEOUT_MS: u64 = 60_000;
+
 fn assert_callback(
     returned: &MatrixRaftAsyncResult,
     callback: &MatrixRaftAsyncResult,
@@ -220,8 +243,11 @@ fn matrixraft_callback_facade_invokes_step_down_and_resign_admin_callbacks() {
     node.start(1).expect("start");
 
     let mut step_down_callback = None;
-    let step_down =
-        node.step_down_callback(Some(2), |result| step_down_callback = Some(result), 1_000);
+    let step_down = node.step_down_callback(
+        Some(2),
+        |result| step_down_callback = Some(result),
+        OPERATION_TIMEOUT_MS,
+    );
     assert_callback(
         &step_down,
         step_down_callback.as_ref().expect("step-down callback"),
@@ -243,7 +269,7 @@ fn matrixraft_callback_facade_invokes_step_down_and_resign_admin_callbacks() {
     let resign = node.resign_leader_callback(
         "operator_resign",
         |result| resign_callback = Some(result),
-        1_000,
+        OPERATION_TIMEOUT_MS,
     );
     assert_callback(
         &resign,
@@ -307,7 +333,7 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
         },
         b"callback-write".to_vec(),
         |result| propose_callback = Some(result),
-        1_000,
+        OPERATION_TIMEOUT_MS,
     );
     assert_callback(
         &propose,
@@ -321,7 +347,8 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     assert_eq!(node.callback_scheduler_len(), 0);
 
     let mut read_callback = None;
-    let read = node.read_index_callback(|result| read_callback = Some(result), 1_000);
+    let read =
+        node.read_index_callback(|result| read_callback = Some(result), OPERATION_TIMEOUT_MS);
     assert_callback(
         &read,
         read_callback.as_ref().expect("read callback"),
@@ -334,8 +361,11 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     assert!(read.deadline_ms >= propose.deadline_ms);
 
     let mut quorum_read_callback = None;
-    let quorum_read =
-        node.quorum_read_index_callback(1, |result| quorum_read_callback = Some(result), 1_000);
+    let quorum_read = node.quorum_read_index_callback(
+        1,
+        |result| quorum_read_callback = Some(result),
+        OPERATION_TIMEOUT_MS,
+    );
     assert_callback(
         &quorum_read,
         quorum_read_callback.as_ref().expect("quorum read callback"),
@@ -350,7 +380,7 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
         node_id(4),
         false,
         |result| learner_callback = Some(result),
-        1_000,
+        OPERATION_TIMEOUT_MS,
     );
     assert_callback(
         &learner,
@@ -360,8 +390,11 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     assert!(learner.membership.as_ref().expect("membership").success);
 
     let mut promote_callback = None;
-    let promoted =
-        node.promote_callback(node_id(4), |result| promote_callback = Some(result), 1_000);
+    let promoted = node.promote_callback(
+        node_id(4),
+        |result| promote_callback = Some(result),
+        OPERATION_TIMEOUT_MS,
+    );
     assert_callback(
         &promoted,
         promote_callback.as_ref().expect("promote callback"),
@@ -371,8 +404,11 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     node.add_learner(node_id(6), true)
         .expect("add auto-promote learner");
     let mut auto_promote_callback = None;
-    let auto_promoted =
-        node.auto_promote_learner_callback(6, |result| auto_promote_callback = Some(result), 1_000);
+    let auto_promoted = node.auto_promote_learner_callback(
+        6,
+        |result| auto_promote_callback = Some(result),
+        OPERATION_TIMEOUT_MS,
+    );
     assert_callback(
         &auto_promoted,
         auto_promote_callback
@@ -389,8 +425,11 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     );
 
     let mut witness_callback = None;
-    let witness =
-        node.add_witness_callback(node_id(5), |result| witness_callback = Some(result), 1_000);
+    let witness = node.add_witness_callback(
+        node_id(5),
+        |result| witness_callback = Some(result),
+        OPERATION_TIMEOUT_MS,
+    );
     assert_callback(
         &witness,
         witness_callback.as_ref().expect("witness callback"),
@@ -398,8 +437,11 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     );
 
     let mut remove_callback = None;
-    let removed =
-        node.remove_node_callback(node_id(5), |result| remove_callback = Some(result), 1_000);
+    let removed = node.remove_node_callback(
+        node_id(5),
+        |result| remove_callback = Some(result),
+        OPERATION_TIMEOUT_MS,
+    );
     assert_callback(
         &removed,
         remove_callback.as_ref().expect("remove callback"),
@@ -422,7 +464,10 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     assert!(removed.membership.as_ref().expect("membership").success);
 
     let mut campaign_callback = None;
-    let campaign = node.campaign_callback(|result| campaign_callback = Some(result), 1_000);
+    let campaign = node.campaign_callback(
+        |result| campaign_callback = Some(result),
+        OPERATION_TIMEOUT_MS,
+    );
     assert_callback(
         &campaign,
         campaign_callback.as_ref().expect("campaign callback"),
@@ -430,7 +475,10 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     );
 
     let mut forced_callback = None;
-    let forced = node.forced_campaign_callback(|result| forced_callback = Some(result), 1_000);
+    let forced = node.forced_campaign_callback(
+        |result| forced_callback = Some(result),
+        OPERATION_TIMEOUT_MS,
+    );
     assert_callback(
         &forced,
         forced_callback.as_ref().expect("forced callback"),
@@ -438,8 +486,12 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     );
 
     let mut timeout_now_callback = None;
-    let timeout_now =
-        node.timeout_now_callback(1, 2, |result| timeout_now_callback = Some(result), 1_000);
+    let timeout_now = node.timeout_now_callback(
+        1,
+        2,
+        |result| timeout_now_callback = Some(result),
+        OPERATION_TIMEOUT_MS,
+    );
     assert_callback(
         &timeout_now,
         timeout_now_callback.as_ref().expect("timeout-now callback"),
@@ -455,8 +507,11 @@ fn matrixraft_callback_facade_invokes_timeout_shaped_callbacks_for_node_operatio
     assert_eq!(timeout_now_response.reason, "timeout_now_campaign");
 
     let mut transfer_callback = None;
-    let transfer =
-        node.transfer_leader_callback(3, |result| transfer_callback = Some(result), 1_000);
+    let transfer = node.transfer_leader_callback(
+        3,
+        |result| transfer_callback = Some(result),
+        OPERATION_TIMEOUT_MS,
+    );
     assert_callback(
         &transfer,
         transfer_callback.as_ref().expect("transfer callback"),
