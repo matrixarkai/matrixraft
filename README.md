@@ -1202,6 +1202,46 @@ in a separate file from the data. Three details that follow:
   a stale hint would make `owned_bytes` fiction — which is the number a host
   watches to decide whether to sweep at all.
 
+### Storage interfaces the engine does not drive
+
+Three exported traits describe Raft storage. **This crate calls none of them.**
+
+<!-- unwired-traits: Storage, MatrixRaftLogStorage, MatrixRaftGroupStorage -->
+
+- `Storage`
+- `MatrixRaftLogStorage`
+- `MatrixRaftGroupStorage`
+
+They are faithful and tested — `MatrixRaftMemoryLogStorage` and
+`MatrixRaftMemoryGroupStorage` implement them, and
+`tests/matrixraft_storage_compat.rs` exercises the segment events, the
+compaction report and the two committed indexes. What they are **not** is a
+plug-in point: no driver, node or runtime holds one, and a host that
+implements one gets a conformant storage engine that this crate will not call.
+It has to drive it itself.
+
+The engine's own log is `wal.rs`, which declares **no trait at all**, so log
+storage cannot be substituted from outside even in principle. That is the
+state of things rather than a recommendation, and it is written down here
+because the alternative is someone finding out after writing a backend.
+
+`Storage`'s doc comment used to claim it was "used by production adapters".
+It said that while having no implementation, no bound and no caller anywhere
+in the crate.
+
+`tests/storage_surface_contract.rs` checks this list against the engine's
+sources in both directions, as `tests/settings_contract.rs` does for
+settings. If one of these traits is ever wired up the test fails — which is
+good news, and a reason to update this section rather than the test.
+
+**One thing that test had to get right**, and is worth repeating anywhere a
+scan decides whether something is used: a bound is `: Trait`, never
+`::Trait`. The first version of the scan behind it counted both, so every one
+of the dozens of `RaftError::Storage(..)` constructions read as a use of the
+`Storage` trait and the surface came back thoroughly wired. A scan that cannot
+tell a path from a bound will confirm whatever it was pointed at, so the test
+asserts its own matcher on both.
+
 ### Heartbeats from many groups to one peer, in one batch
 
 `HeartbeatMerger` buckets by destination address rather than by group, which is
