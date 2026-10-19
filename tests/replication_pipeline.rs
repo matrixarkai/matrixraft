@@ -5,8 +5,8 @@ use matrixraft::{
     matrixraft_apply_batch_outcome, matrixraft_peer_pipeline_status_from_observed,
     matrixraft_replication_pipeline_evidence_artifact,
     matrixraft_validate_replication_pipeline_evidence_artifact, AppendEntriesResponse,
-    ApplyBatchStatus, LogEntry, LogId, ObservedPeerPipeline, Peer, PipelineLimits, ProgressState,
-    RaftCluster, ReplicaRole, ReplicationPipeline, SnapshotState, StateRole,
+    ApplyBatchStatus, InflightAppend, LogEntry, LogId, ObservedPeerPipeline, Peer, PipelineLimits,
+    ProgressState, RaftCluster, ReplicaRole, ReplicationPipeline, SnapshotState, StateRole,
 };
 
 fn entry(index: u64, payload: &[u8]) -> LogEntry {
@@ -981,4 +981,81 @@ fn raft_cluster_auto_promotes_marked_learner_after_catchup() {
         cluster.status(4).expect("promoted learner status").role,
         StateRole::Follower
     );
+}
+
+#[test]
+fn the_lending_flush_appends_and_counts_only_what_it_added() {
+    // Nothing asserted this, and a plant proved it: returning the vector's
+    // whole length instead of what this call added survived the entire suite,
+    // because every other caller passes a vector that starts empty and reads
+    // `.len()` afterwards. A caller that accumulates across peers -- which is
+    // the reason the lending shape exists -- would have been told the running
+    // total each time.
+    // Explicit, generous limits. `PipelineLimits::default()` caps
+    // `max_inflights_replicate`, and a flush does nothing once that is
+    // reached -- only a response brings it down. The first version of this
+    // test used the default and failed on its own second flush, which is the
+    // same trap that made two allocation probes report work that had stopped
+    // happening.
+    let limits = PipelineLimits {
+        max_inflights_replicate: 64,
+        max_memory_replicate_log_bytes: 1 << 20,
+        max_inflights_apply_task: 64,
+        max_apply_batch_bytes: 1 << 16,
+        enable_reorder_queue: false,
+        reorder_window_size: 0,
+        reorder_timeout_us: 0,
+    };
+    let mut pipeline = ReplicationPipeline::new(2, 1, limits);
+    let mut flushed = Vec::new();
+    flushed.push(InflightAppend {
+        first_log_id: LogId { term: 9, index: 99 },
+        last_log_id: LogId { term: 9, index: 99 },
+        entry_count: 7,
+        bytes: 7,
+    });
+
+    pipeline.queue_append(&entry(1, b"a")).expect("queue");
+    let added = pipeline.flush_append_batch_into(64, 1024, &mut flushed);
+
+    assert_eq!(added, 1, "the count is what this call appended");
+    assert_eq!(flushed.len(), 2, "and it appended rather than replacing");
+    assert_eq!(
+        flushed[0].entry_count, 7,
+        "what was already in the vector must still be there"
+    );
+    assert_eq!(flushed[1].first_log_id.index, 1);
+
+    // A second flush adds nothing yet, and leaves what is there alone. Not
+    // because the queue is empty -- because a fresh pipeline is probing, so it
+    // flushes one batch and pauses until the follower answers. That is the
+    // pipeline being correct, and a test that did not know it would read the
+    // zero as a broken flush.
+    let added = pipeline.flush_append_batch_into(64, 1024, &mut flushed);
+    assert_eq!(added, 0, "a probing pipeline waits for its answer");
+    assert_eq!(flushed.len(), 2);
+
+    // Answer it, and the next flush APPENDS to the same vector rather than
+    // replacing it. This is the whole reason the lending shape exists: a
+    // caller accumulating across peers must keep what the last one added.
+    pipeline
+        .handle_append_response(&AppendEntriesResponse {
+            term: 1,
+            success: true,
+            match_index: 1,
+            rejection_hint: None,
+            rejected_index: None,
+            require_snapshot: None,
+            snapshot_state: SnapshotState::None,
+            lease_confirmation_epoch: 0,
+            lease_duration_ms: 0,
+        })
+        .expect("response");
+    pipeline.queue_append(&entry(2, b"b")).expect("queue");
+    let added = pipeline.flush_append_batch_into(64, 1024, &mut flushed);
+    assert_eq!(added, 1, "the count is again only what this call appended");
+    assert_eq!(flushed.len(), 3, "and the vector kept both earlier entries");
+    assert_eq!(flushed[0].entry_count, 7);
+    assert_eq!(flushed[1].first_log_id.index, 1);
+    assert_eq!(flushed[2].first_log_id.index, 2);
 }

@@ -1241,6 +1241,54 @@ of the dozens of `RaftError::Storage(..)` constructions read as a use of the
 `Storage` trait and the surface came back thoroughly wired. A scan that cannot
 tell a path from a bound will confirm whatever it was pointed at, so the test
 asserts its own matcher on both.
+### One buffer for every follower
+
+A proposal used to pay **two allocations per follower**, and neither bought
+anything.
+
+One was the vector `flush_append_batch` returns. The replication path calls it
+once per follower and **discards the result** -- the pipeline's own state is
+what matters -- so it was an allocation per follower for a value nobody read.
+The other was the lease-acknowledgement list, which started at capacity one
+and grew by doubling as peers acknowledged, for a length the node count
+already says.
+
+`flush_append_batch_into` writes into a vector the caller owns, so the
+replication loop lends one across all the followers, and the acknowledgement
+list is sized up front. Measured with `examples/propose_allocations`, per
+proposal at a 256-byte payload:
+
+| peers | allocations before | after | bytes before | after |
+|---|---|---|---|---|
+| 1 | 5.02 | 5.02 | 387 | 387 |
+| 3 | 9.06 | 7.06 | 1,402 | 1,194 |
+| 5 | 13.10 | 8.10 | 1,968 | 1,328 |
+| 7 | 15.14 | 8.14 | 2,406 | 1,398 |
+| 9 | 19.18 | 9.18 | 3,101 | 1,597 |
+
+Per additional peer: **1.77 allocations down to 0.35**. At nine peers that is
+52% fewer allocations and 48% fewer bytes.
+
+**The one-peer row is the control.** A single-node cluster has no follower to
+flush to and one acknowledgement, so it exercises none of this -- and it did
+not move, which is what says the saving is the followers and not something
+else that changed.
+
+`examples/peer_append_allocations` isolates one follower's share: 2
+allocations and 448 bytes before, 1 and 256 after, where the remaining one is
+the harness's own entry. The pipeline's per-follower cost is exactly one
+`Vec<InflightAppend>` first push -- 192 bytes, four slots of 48 -- and it is
+now zero.
+
+**Allocations do not follow the payload**, and did not before this either: the
+figure is 8.10 at 64 bytes and 8.10 at 16 KiB. A node's log holds entries
+behind an `Arc`, so a proposal's payload is allocated once and shared by every
+node rather than copied per node. That part was already right; this is the
+handles around it.
+
+`tests/alloc_propose.rs` guards the **slope** rather than the absolute, so a
+fixed cost added honestly elsewhere in `propose` does not fail it for an
+unrelated reason.
 
 ### Heartbeats from many groups to one peer, in one batch
 
