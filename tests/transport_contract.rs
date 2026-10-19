@@ -7,10 +7,10 @@ use matrixraft::{
     AuthenticatedRaftTransport, ClusterRaftTransport, Driver, DriverGroupKey, DriverOptions,
     DriverTickReceiver, HeartbeatFlusher, HeartbeatMergeMessage, HeartbeatMerger,
     InMemoryRaftTransport, InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogId,
-    MergedHeartbeatBatch, MergedHeartbeatSender, Message, Peer, RaftCluster, RaftError,
-    ReadIndexRequest, ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata,
-    SnapshotState, StaticRaftAuthToken, TcpRaftTransport, TcpRaftTransportRequest,
-    TcpRaftTransportServer, Transport, VoteRequest, VoteResponse,
+    MatrixRaftRuntimeWiring, MergedHeartbeatBatch, MergedHeartbeatSender, Message, Peer,
+    RaftCluster, RaftError, ReadIndexRequest, ReadIndexResponse, ReplicaRole, SnapshotChunk,
+    SnapshotMetadata, SnapshotState, StaticRaftAuthToken, TcpRaftTransport,
+    TcpRaftTransportRequest, TcpRaftTransportServer, Transport, VoteRequest, VoteResponse,
 };
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -352,6 +352,110 @@ fn in_memory_transport_forwards_and_validates_all_rpc_messages() {
 /// bucket and always under one lock. That is what makes the order a property
 /// rather than a coincidence, and it is the reason the merger buckets by
 /// address and not by group.
+/// A wiring with the heartbeat merge settings and nothing else of interest.
+///
+/// Written out because `MatrixRaftRuntimeWiring` has no `Default` and should
+/// not: a `worker_num` of zero is not a runtime anyone configured.
+fn wiring_with_merge(merge: bool, interval_ms: u64) -> MatrixRaftRuntimeWiring {
+    MatrixRaftRuntimeWiring {
+        group_id: 5,
+        node_id: 1,
+        creator_index: Some(0),
+        store_id: 1,
+        worker_num: 1,
+        reader_num: 1,
+        executor_num: 1,
+        applier_num: 1,
+        apply_max_batch_count: 8,
+        snapshot_loader_num: 1,
+        snapshot_downloader_num: 1,
+        snapshot_creator_num: 1,
+        snapshot_sender_num: 1,
+        flexible_apply: false,
+        heartbeat_merge: merge,
+        merge_heartbeat_interval_milli: interval_ms,
+        watched_address_resolver: false,
+        transport: Default::default(),
+        snapshot_send_rate_limiter: None,
+        snapshot_download_rate_limiter: None,
+        has_store_fsm: false,
+        has_group_storage: false,
+    }
+}
+
+#[test]
+fn the_configured_merge_interval_reaches_a_registered_flusher() {
+    // `enable_heartbeat_merge()` and `merge_heartbeat_interval_milli(25)` were
+    // both recorded in the wiring and read by nothing, so a host that set them
+    // got no merging at all: the flusher that does the work has to be
+    // registered with a driver, and nothing connected the setting to the
+    // registration.
+    assert_eq!(
+        wiring_with_merge(true, 25).heartbeat_merge_interval_ms(),
+        Some(25)
+    );
+    assert_eq!(
+        wiring_with_merge(false, 25).heartbeat_merge_interval_ms(),
+        None,
+        "merging off means no flusher, whatever interval was left behind"
+    );
+    assert_eq!(
+        wiring_with_merge(true, 0).heartbeat_merge_interval_ms(),
+        Some(0),
+        "zero is the driver's own cadence, not an unset interval"
+    );
+
+    // And the interval registers a flusher that actually flushes.
+    let driver = Driver::start(DriverOptions {
+        worker_num: 1,
+        tick_interval_ms: 2,
+        ..DriverOptions::default()
+    })
+    .expect("driver");
+    let sender = Arc::new(SentBatches::default());
+    let flusher = HeartbeatFlusher::new(
+        HeartbeatMerger::enabled(),
+        Arc::clone(&sender) as Arc<dyn MergedHeartbeatSender>,
+    );
+    let wiring = wiring_with_merge(true, 2);
+    let interval = wiring
+        .heartbeat_merge_interval_ms()
+        .expect("merging is on for this group");
+    let key = DriverGroupKey::new(5, 1);
+    flusher
+        .register_every(&driver, key, interval)
+        .expect("register the flusher");
+    assert_eq!(driver.group_count(), 1);
+
+    let mut resolver = HashMap::new();
+    resolver.insert((1, 2), "127.0.0.1:7100".to_string());
+    let message = Message::AppendEntries {
+        target: 2,
+        request: AppendEntriesRequest {
+            group_id: 5,
+            term: 1,
+            leader_id: 1,
+            prev_log_id: None,
+            entries: Vec::new(),
+            leader_commit: 1,
+            lease_epoch: 1,
+        },
+    };
+    assert!(flusher
+        .maybe_merge(message, &resolver)
+        .expect("merge")
+        .is_none());
+
+    assert!(
+        wait_until(
+            "the driver flushes the merger",
+            Duration::from_secs(20),
+            || { sender.batch_count() > 0 }
+        ),
+        "the registered flusher never ran, so the interval reached nothing"
+    );
+}
+
 #[test]
 fn one_peers_heartbeats_keep_the_order_they_were_offered() {
     let mut resolver = HashMap::new();

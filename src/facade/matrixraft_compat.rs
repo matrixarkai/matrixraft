@@ -3098,6 +3098,27 @@ impl MatrixRaftRuntimeWiring {
             .transpose()
     }
 
+    /// How often this group's heartbeats should be flushed, or `None` when
+    /// merging is off for it.
+    ///
+    /// `heartbeat_merge` and `merge_heartbeat_interval_milli` were both
+    /// recorded here and read by nothing: a host that called
+    /// `enable_heartbeat_merge().merge_heartbeat_interval_milli(25)` got two
+    /// numbers in a struct and no merging, because the flusher that does the
+    /// work has to be registered with a driver and nothing connected the
+    /// setting to the registration.
+    ///
+    /// Folding the flag and the interval into one answer is deliberate: it is
+    /// not possible to read this and run a flusher for a group that has
+    /// merging switched off. Zero means the driver's own tick interval, which
+    /// is what `Driver::register_group_every` documents -- so `Some(0)` is a
+    /// group that wants merging at the driver's cadence, not a group that
+    /// forgot to configure one.
+    pub fn heartbeat_merge_interval_ms(&self) -> Option<u64> {
+        self.heartbeat_merge
+            .then_some(self.merge_heartbeat_interval_milli)
+    }
+
     /// The download limiter this group was configured with, if any.
     pub fn snapshot_download_limiter(&self) -> Result<Option<ByteQuotaLimiter>, RaftError> {
         self.snapshot_download_rate_limiter
