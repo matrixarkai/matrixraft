@@ -956,6 +956,53 @@ changes nothing observable is how this setting spent its first life.
 is shared and can change under a resolver, so lending out a borrow into it
 would be lending out the answer to a question whose answer moves.
 
+### A replica that appears when a peer asks for one
+
+A request for a group a server does not host is `NodeNotFound`, so a replica
+has to exist before the first message can reach it. That makes adding one a
+dance across two hosts — create it there, then let the leader find it — when
+the leader contacting the host is itself the signal that it should exist.
+
+```rust
+let server = MatrixRaftMultiRaftServer::new(context)
+    .with_replica_factory(Arc::new(|request: &MatrixRaftReplicaRequest| {
+        // Decide WHETHER, not just how. Returning Ok(None) refuses.
+        if !placement.should_host(request.group_id) {
+            return Ok(None);
+        }
+        Ok(Some((options_for(request.group_id, request.node_id), 1)))
+    }));
+
+let node = server.node_or_create(&request)?;
+```
+
+**Opt in, because creating state on an incoming message is a serious thing.**
+Without a factory a server behaves exactly as it did, and that is asserted.
+With one, a peer can cause allocation here — so pair it with a cluster id
+(`start_in_cluster`), or a server that creates replicas on request and serves
+every cluster will create them for strangers.
+
+- **Only on absence.** An existing replica is returned without the factory
+  being consulted at all, so a host's placement logic stays off the Raft path.
+- **Only `node_or_create`.** `node`, `node_mut` and `has_node` still refuse,
+  because a read of a replica that does not exist should not bring one into
+  being.
+- **A refusal looks like a host that never had the group**, which is the only
+  honest thing to tell a peer; `on_demand_refusals` is how the *host* tells
+  the two apart, since a factory refusing everything leaves a cluster unable
+  to add a replica with `NodeNotFound` as the only symptom.
+- **A factory answering for a different group is refused** rather than
+  registered, or the caller would be handed a node that is not the one it
+  asked for.
+
+`MatrixRaftReplicaRequest` carries the group, the node, the asker and the
+term — everything that came off the request. There is deliberately **no
+host-supplied payload field**: nothing on the wire carries one, and a field
+that is always `None` is how a setting becomes a knob that does nothing.
+Carrying one would mean threading it through the four `Transport` methods,
+which every host implementation of that trait would have to absorb — a
+decision worth making on its own.
+
 ### Heartbeats from many groups to one peer, in one batch
 
 `HeartbeatMerger` buckets by destination address rather than by group, which is

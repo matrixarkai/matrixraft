@@ -16,15 +16,15 @@ use matrixraft::{
     MatrixRaftNodeCreatorBuilder, MatrixRaftOldSnapshotFinish, MatrixRaftOldSnapshotFinishState,
     MatrixRaftOptions, MatrixRaftPriorityRoutedAdminCommand, MatrixRaftPriorityRoutedMessage,
     MatrixRaftPropose, MatrixRaftProposeOptions, MatrixRaftRateLimiterConfig,
-    MatrixRaftReadIndexMode, MatrixRaftReadIndexOptions, MatrixRaftReplicatedReport,
-    MatrixRaftResignReport, MatrixRaftRouteGroupSummary, MatrixRaftRouteKey, MatrixRaftRouteResult,
-    MatrixRaftRouteResultKind, MatrixRaftRouteResultStatus, MatrixRaftRoutedAdminCommand,
-    MatrixRaftRoutedMessage, MatrixRaftSnapshotDesc, MatrixRaftSnapshotProgress,
-    MatrixRaftStepDownReport, MatrixRaftSyncedReport, MatrixRaftTransferLeaderReport,
-    MatrixRaftTransportBuilder, MembershipOperation, Peer, RaftError, RaftSnapshot,
-    ReadIndexRequest, ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata,
-    SnapshotState, StateRole, StorageApplyFence, TimeoutNowResponse, VoteRequest, VoteResponse,
-    WalCompactionReport, WitnessQuorumReport,
+    MatrixRaftReadIndexMode, MatrixRaftReadIndexOptions, MatrixRaftReplicaRequest,
+    MatrixRaftReplicatedReport, MatrixRaftResignReport, MatrixRaftRouteGroupSummary,
+    MatrixRaftRouteKey, MatrixRaftRouteResult, MatrixRaftRouteResultKind,
+    MatrixRaftRouteResultStatus, MatrixRaftRoutedAdminCommand, MatrixRaftRoutedMessage,
+    MatrixRaftSnapshotDesc, MatrixRaftSnapshotProgress, MatrixRaftStepDownReport,
+    MatrixRaftSyncedReport, MatrixRaftTransferLeaderReport, MatrixRaftTransportBuilder,
+    MembershipOperation, Peer, RaftError, RaftSnapshot, ReadIndexRequest, ReadIndexResponse,
+    ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState, StateRole, StorageApplyFence,
+    TimeoutNowResponse, VoteRequest, VoteResponse, WalCompactionReport, WitnessQuorumReport,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -21327,4 +21327,217 @@ fn a_group_that_names_no_tick_takes_the_servers() {
         kept.timer_status.heartbeat_interval_ms, 70,
         "a group that set its own tick must keep it"
     );
+}
+
+/// A server with a factory, and the counter of how often the factory ran.
+///
+/// `asked` is the part that cannot be read off the server: "an existing
+/// replica does not consult the factory" is a claim about a call that did not
+/// happen.
+fn server_with_factory(
+    answer: impl Fn(&MatrixRaftReplicaRequest) -> Result<Option<MatrixRaftOptions>, RaftError>
+        + Send
+        + Sync
+        + 'static,
+) -> (
+    MatrixRaftMultiRaftServer,
+    std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
+    let transport = MatrixRaftTransportBuilder::new()
+        .bind_address_resolver()
+        .build()
+        .expect("transport");
+    let creator = MatrixRaftNodeCreatorBuilder::new().store_id(9100).build();
+    let context = MatrixRaftGroupContextBuilder::new()
+        .transport(transport)
+        .add_raft_node_creator(creator)
+        .build()
+        .expect("context");
+
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = std::sync::Arc::clone(&asked);
+    let factory = move |request: &MatrixRaftReplicaRequest| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        answer(request).map(|options| options.map(|options| (options, 1)))
+    };
+    let server =
+        MatrixRaftMultiRaftServer::new(context).with_replica_factory(std::sync::Arc::new(factory));
+    (server, asked)
+}
+
+fn replica_request(group_id: u64, node_id: u64) -> MatrixRaftReplicaRequest {
+    MatrixRaftReplicaRequest {
+        group_id,
+        node_id,
+        from_node_id: 7,
+        term: 3,
+    }
+}
+
+#[test]
+fn a_replica_appears_when_a_peer_asks_for_one() {
+    // The point: a request for a group this host does not have used to be
+    // NodeNotFound for ever, so a replica had to be created out of band
+    // before the leader's first message could land.
+    let wal = temp_dir("on-demand-wal");
+    let snap = temp_dir("on-demand-snapshot");
+    let (mut server, asked) = server_with_factory(move |request| {
+        let mut options = options(request.group_id, &wal, &snap);
+        options.peer_id = request.node_id;
+        Ok(Some(options))
+    });
+
+    assert_eq!(server.node_count(), 0);
+    let request = replica_request(900, 4);
+    let node = server
+        .node_or_create(&request)
+        .expect("the factory should have created the replica");
+    assert_eq!(node.group_id(), 900);
+    assert_eq!(node.node_id(), 4);
+
+    assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(server.on_demand_creations(), 1);
+    assert_eq!(server.on_demand_refusals(), 0);
+    assert_eq!(server.node_count(), 1);
+    assert!(server.has_node(900, 4), "and it is routable afterwards");
+}
+
+#[test]
+fn an_existing_replica_does_not_consult_the_factory() {
+    // The factory is for the absence, not for every message. Asking it per
+    // request would put a host's placement logic on the Raft path.
+    let wal = temp_dir("on-demand-existing-wal");
+    let snap = temp_dir("on-demand-existing-snapshot");
+    let factory_wal = temp_dir("on-demand-existing-factory-wal");
+    let factory_snap = temp_dir("on-demand-existing-factory-snapshot");
+    let (mut server, asked) = server_with_factory(move |request| {
+        let mut options = options(request.group_id, &factory_wal, &factory_snap);
+        options.peer_id = request.node_id;
+        Ok(Some(options))
+    });
+
+    let mut existing = options(901, &wal, &snap);
+    existing.peer_id = 5;
+    server.create_node(existing, 1).expect("create it normally");
+    assert_eq!(server.node_count(), 1);
+
+    let node = server
+        .node_or_create(&replica_request(901, 5))
+        .expect("an existing replica is returned");
+    assert_eq!(node.node_id(), 5);
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the factory must not be consulted for a replica that exists"
+    );
+    assert_eq!(server.on_demand_creations(), 0);
+    assert_eq!(server.node_count(), 1);
+}
+
+#[test]
+fn a_factory_that_refuses_leaves_the_peer_with_what_it_had() {
+    // A refusal has to look to the peer exactly like a host that never had
+    // the group -- there is nothing better to tell it -- which is why the
+    // counter exists for the host.
+    let (mut server, asked) = server_with_factory(|_| Ok(None));
+    let refused = server.node_or_create(&replica_request(902, 6));
+    assert!(
+        matches!(refused, Err(RaftError::NodeNotFound(6))),
+        "expected NodeNotFound, got {refused:?}"
+    );
+    assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(server.on_demand_refusals(), 1);
+    assert_eq!(server.on_demand_creations(), 0);
+    assert_eq!(server.node_count(), 0, "nothing was registered");
+
+    // A factory that fails counts the same way: the peer cannot act on the
+    // reason, and the host can see it in the counter.
+    let (mut failing, failing_asked) = server_with_factory(|_| {
+        Err(RaftError::InvalidRequest(
+            "placement says not here".to_string(),
+        ))
+    });
+    assert!(failing.node_or_create(&replica_request(903, 6)).is_err());
+    assert_eq!(failing_asked.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(failing.on_demand_refusals(), 1);
+    assert_eq!(failing.node_count(), 0);
+}
+
+#[test]
+fn a_server_without_a_factory_is_exactly_what_it_was() {
+    let transport = MatrixRaftTransportBuilder::new()
+        .bind_address_resolver()
+        .build()
+        .expect("transport");
+    let context = MatrixRaftGroupContextBuilder::new()
+        .transport(transport)
+        .add_raft_node_creator(MatrixRaftNodeCreatorBuilder::new().store_id(9101).build())
+        .build()
+        .expect("context");
+    let mut server = MatrixRaftMultiRaftServer::new(context);
+
+    let missing = server.node_or_create(&replica_request(904, 8));
+    assert!(matches!(missing, Err(RaftError::NodeNotFound(8))));
+    assert_eq!(
+        server.on_demand_refusals(),
+        0,
+        "no factory is not a refusal: there was nobody to refuse"
+    );
+    assert_eq!(server.on_demand_creations(), 0);
+    assert_eq!(server.node_count(), 0);
+}
+
+#[test]
+fn a_factory_answering_for_another_group_is_refused() {
+    // A factory that hands back options for a different group would register
+    // a replica the request cannot route to, and the caller would be handed a
+    // node that is not the one it asked for.
+    let wal = temp_dir("on-demand-wrong-group-wal");
+    let snap = temp_dir("on-demand-wrong-group-snapshot");
+    let (mut server, _asked) = server_with_factory(move |_request| {
+        let mut options = options(999, &wal, &snap);
+        options.peer_id = 1;
+        Ok(Some(options))
+    });
+
+    let wrong = server.node_or_create(&replica_request(905, 9));
+    let message = match wrong {
+        Err(RaftError::InvalidRequest(message)) => message,
+        other => panic!("expected an invalid request, got {other:?}"),
+    };
+    assert!(
+        message.contains("group 999") && message.contains("group 905"),
+        "the refusal should name both groups, got {message}"
+    );
+    assert_eq!(server.on_demand_refusals(), 1);
+    assert_eq!(server.on_demand_creations(), 0);
+    assert_eq!(
+        server.node_count(),
+        0,
+        "the mismatched replica must not be registered"
+    );
+}
+
+#[test]
+fn the_ordinary_accessors_still_refuse_to_create() {
+    // A read of a replica that does not exist must not bring one into being,
+    // or every query becomes a write.
+    let wal = temp_dir("on-demand-accessor-wal");
+    let snap = temp_dir("on-demand-accessor-snapshot");
+    let (mut server, asked) = server_with_factory(move |request| {
+        let mut options = options(request.group_id, &wal, &snap);
+        options.peer_id = request.node_id;
+        Ok(Some(options))
+    });
+
+    assert!(!server.has_node(906, 2));
+    assert!(server.node(906, 2).is_err());
+    assert!(server.node_mut(906, 2).is_err());
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "none of the accessors may consult the factory"
+    );
+    assert_eq!(server.on_demand_creations(), 0);
+    assert_eq!(server.node_count(), 0);
 }

@@ -17947,7 +17947,64 @@ impl MatrixRaftRouteResult {
     }
 }
 
-#[derive(Debug)]
+/// What a server knows about a request for a replica it does not host.
+///
+/// Everything here came off the request. There is deliberately **no
+/// host-supplied payload field**: nothing on the wire carries one, and a
+/// field that is always `None` is how a setting becomes a knob that does
+/// nothing. Carrying one would mean threading it through the four `Transport`
+/// methods, which every host implementation of that trait would have to
+/// absorb -- a decision worth making on its own rather than smuggling in
+/// behind this one.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MatrixRaftReplicaRequest {
+    pub group_id: GroupId,
+    /// The replica being asked for: this host's id in that group.
+    pub node_id: NodeId,
+    /// Who asked. A factory that wants to check the asker against a placement
+    /// service needs this, and it is the only identity the request carries.
+    pub from_node_id: NodeId,
+    pub term: Term,
+}
+
+/// Creates a replica for a group this server does not host yet.
+///
+/// Why this exists: a request for an unknown group is
+/// [`RaftError::NodeNotFound`], so a replica has to exist before the first
+/// message reaches it. That makes adding one a two-step dance across two
+/// hosts -- create it there, then let the leader find it -- when the leader
+/// contacting the host is itself the signal that it should exist.
+///
+/// **Opt in, because creating state on an incoming message is a serious
+/// thing.** Without a factory a server behaves exactly as it did. With one,
+/// a peer can cause allocation on this host, so a factory is the place to
+/// decide *whether*, not just *how*: refuse by returning `Ok(None)`.
+///
+/// Pair it with a cluster id ([`TcpRaftTransportServer::start_in_cluster`]).
+/// A server that creates replicas on request and serves every cluster will
+/// create them for strangers.
+pub trait MatrixRaftReplicaFactory {
+    /// `Ok(Some(..))` creates the replica with those options and start index.
+    /// `Ok(None)` refuses it, and the caller gets the `NodeNotFound` it would
+    /// have got anyway. `Err` refuses it with a reason.
+    fn create_replica(
+        &self,
+        request: &MatrixRaftReplicaRequest,
+    ) -> Result<Option<(MatrixRaftOptions, LogIndex)>, RaftError>;
+}
+
+impl<F> MatrixRaftReplicaFactory for F
+where
+    F: Fn(&MatrixRaftReplicaRequest) -> Result<Option<(MatrixRaftOptions, LogIndex)>, RaftError>,
+{
+    fn create_replica(
+        &self,
+        request: &MatrixRaftReplicaRequest,
+    ) -> Result<Option<(MatrixRaftOptions, LogIndex)>, RaftError> {
+        self(request)
+    }
+}
+
 pub struct MatrixRaftMultiRaftServer {
     context: MatrixRaftGroupContext,
     /// Started on the first group when the context asks for it, so that a
@@ -17956,6 +18013,26 @@ pub struct MatrixRaftMultiRaftServer {
     nodes: BTreeMap<MatrixRaftRouteKey, MatrixRaftNode>,
     snapshot_routes: BTreeMap<MatrixRaftRouteKey, MatrixRaftSnapshotDesc>,
     runtime_wiring: BTreeMap<MatrixRaftRouteKey, MatrixRaftRuntimeWiring>,
+    replica_factory: Option<Arc<dyn MatrixRaftReplicaFactory + Send + Sync>>,
+    on_demand_created: u64,
+    on_demand_refused: u64,
+}
+
+// Hand-written because a factory is not `Debug`, and demanding that of a
+// host's placement logic would be a strange thing to require.
+impl std::fmt::Debug for MatrixRaftMultiRaftServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MatrixRaftMultiRaftServer")
+            .field("context", &self.context)
+            .field("shared", &self.shared.is_some())
+            .field("nodes", &self.nodes)
+            .field("snapshot_routes", &self.snapshot_routes)
+            .field("runtime_wiring", &self.runtime_wiring)
+            .field("replica_factory", &self.replica_factory.is_some())
+            .field("on_demand_created", &self.on_demand_created)
+            .field("on_demand_refused", &self.on_demand_refused)
+            .finish()
+    }
 }
 
 impl Drop for MatrixRaftMultiRaftServer {
@@ -17980,7 +18057,40 @@ impl MatrixRaftMultiRaftServer {
             nodes: BTreeMap::new(),
             snapshot_routes: BTreeMap::new(),
             runtime_wiring: BTreeMap::new(),
+            replica_factory: None,
+            on_demand_created: 0,
+            on_demand_refused: 0,
         }
+    }
+
+    /// Lets this server create a replica for a group it does not host when one
+    /// is asked for.
+    ///
+    /// See [`MatrixRaftReplicaFactory`] for what the factory decides, and
+    /// [`MatrixRaftMultiRaftServer::node_or_create`] for the call that
+    /// consults it. Nothing else does: the ordinary accessors still answer
+    /// `NodeNotFound`, because a read of a replica that does not exist should
+    /// not bring one into being.
+    pub fn with_replica_factory(
+        mut self,
+        factory: Arc<dyn MatrixRaftReplicaFactory + Send + Sync>,
+    ) -> Self {
+        self.replica_factory = Some(factory);
+        self
+    }
+
+    /// Replicas this server created because a peer asked for one.
+    pub fn on_demand_creations(&self) -> u64 {
+        self.on_demand_created
+    }
+
+    /// Times a factory was asked and said no, or failed.
+    ///
+    /// Counted separately from creations and worth watching: a factory that
+    /// refuses everything leaves a cluster unable to add a replica, and the
+    /// symptom -- `NodeNotFound` -- is identical to having no factory at all.
+    pub fn on_demand_refusals(&self) -> u64 {
+        self.on_demand_refused
     }
 
     pub fn context(&self) -> &MatrixRaftGroupContext {
@@ -19235,6 +19345,57 @@ impl MatrixRaftMultiRaftServer {
         self.nodes
             .get_mut(&MatrixRaftRouteKey::new(group_id, node_id))
             .ok_or(RaftError::NodeNotFound(node_id))
+    }
+
+    /// The replica a request is for, creating it if a factory allows.
+    ///
+    /// The one call that consults [`MatrixRaftReplicaFactory`]. An existing
+    /// replica is returned without asking the factory anything -- the factory
+    /// is for the absence, not for every message.
+    ///
+    /// Without a factory this is exactly [`MatrixRaftMultiRaftServer::node_mut`]
+    /// and does not count a refusal: there was nobody to refuse. A factory
+    /// that says no, or fails, counts one and returns the `NodeNotFound` the
+    /// caller would have had anyway, so a refusal is indistinguishable to the
+    /// peer from a host that never had the group -- which is the right answer
+    /// to give a peer and the reason the counter exists for the host.
+    pub fn node_or_create(
+        &mut self,
+        request: &MatrixRaftReplicaRequest,
+    ) -> Result<&mut MatrixRaftNode, RaftError> {
+        let key = MatrixRaftRouteKey::new(request.group_id, request.node_id);
+        if self.nodes.contains_key(&key) {
+            return self
+                .nodes
+                .get_mut(&key)
+                .ok_or(RaftError::NodeNotFound(request.node_id));
+        }
+        let Some(factory) = self.replica_factory.clone() else {
+            return Err(RaftError::NodeNotFound(request.node_id));
+        };
+        let created = match factory.create_replica(request) {
+            Ok(Some(created)) => created,
+            Ok(None) | Err(_) => {
+                self.on_demand_refused += 1;
+                return Err(RaftError::NodeNotFound(request.node_id));
+            }
+        };
+        let (options, start_index) = created;
+        // A factory that answers with options for some other group would
+        // register a replica the request cannot be routed to, and the caller
+        // would then be handed a node that is not the one it asked for.
+        if options.group_id != request.group_id || options.peer_id != request.node_id {
+            self.on_demand_refused += 1;
+            return Err(RaftError::InvalidRequest(format!(
+                "replica factory answered for group {} node {} when asked for group {} node {}",
+                options.group_id, options.peer_id, request.group_id, request.node_id
+            )));
+        }
+        self.create_node(options, start_index)?;
+        self.on_demand_created += 1;
+        self.nodes
+            .get_mut(&key)
+            .ok_or(RaftError::NodeNotFound(request.node_id))
     }
 
     /// Serve a linearizable read on `node_id` by forwarding to the group leader.
