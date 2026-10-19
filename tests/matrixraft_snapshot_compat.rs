@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    LogId, MatrixRaftOldSnapshotFinishState, MatrixRaftRateLimiterConfig,
+    LogId, MatrixRaftOldSnapshotFinishState, MatrixRaftRateLimiterConfig, MatrixRaftRuntimeWiring,
     MatrixRaftSnapshotCreator, MatrixRaftSnapshotDownloader, MatrixRaftSnapshotLoader,
     MatrixRaftSnapshotSender, RaftSnapshot, SnapshotInstallState, SnapshotLifecycleConfig,
     SnapshotMetadata,
@@ -168,4 +168,86 @@ fn a_configured_send_limit_limits_an_ordinary_poll() {
 
     // And a sender with no limit refills nothing rather than erroring.
     assert_eq!(unlimited.refill_rate_limit(&rate_limit), 0);
+}
+
+/// A wiring carrying a send limit and nothing else of interest.
+///
+/// Written out rather than defaulted: a wiring has no `Default` and should not,
+/// because a `worker_num` of zero is not a runtime anyone configured. The point
+/// of the literal is that it shows exactly which field carries a send limit.
+fn wiring_with_send_limit(
+    rate_limit: Option<MatrixRaftRateLimiterConfig>,
+) -> MatrixRaftRuntimeWiring {
+    MatrixRaftRuntimeWiring {
+        group_id: 7,
+        node_id: 1,
+        creator_index: Some(0),
+        store_id: 1,
+        worker_num: 1,
+        reader_num: 1,
+        executor_num: 1,
+        applier_num: 1,
+        apply_max_batch_count: 8,
+        snapshot_loader_num: 1,
+        snapshot_downloader_num: 1,
+        snapshot_creator_num: 1,
+        snapshot_sender_num: 1,
+        flexible_apply: false,
+        heartbeat_merge: false,
+        merge_heartbeat_interval_milli: 0,
+        watched_address_resolver: false,
+        transport: Default::default(),
+        snapshot_send_rate_limiter: rate_limit,
+        snapshot_download_rate_limiter: None,
+        has_store_fsm: false,
+        has_group_storage: false,
+    }
+}
+
+#[test]
+fn a_sender_built_from_the_wiring_carries_the_configured_limit() {
+    // The route a host actually has: a limit configured on the context or the
+    // creator reaches the wiring, and the wiring builds the sender. A plant
+    // that dropped the limiter on this path passed the other test in this file,
+    // which only exercises `with_rate_limit`.
+    let rate_limit = MatrixRaftRateLimiterConfig {
+        bytes_limit_per_sec: 4,
+        check_cycle_sec: 1,
+    };
+    let config = SnapshotLifecycleConfig {
+        chunk_size: 4,
+        max_chunks_per_tick: 8,
+        max_bytes_per_tick: 1 << 20,
+        max_retry_attempts: 2,
+    };
+    let snapshot = snapshot(9, b"abcdefghijkl".to_vec());
+
+    let wired = wiring_with_send_limit(Some(rate_limit.clone()));
+    assert_eq!(
+        wired.snapshot_send_limiter().expect("a valid limit"),
+        Some(matrixraft::ByteQuotaLimiter::new(4)),
+        "the wiring turns the configured rate into one cycle of bytes"
+    );
+
+    let mut sender =
+        MatrixRaftSnapshotSender::from_wiring(config, &wired).expect("sender from the wiring");
+    assert_eq!(sender.rate_limit_available_bytes(), Some(4));
+    sender.begin_send(&snapshot, 2, 1).expect("begin send");
+    let first = sender.poll_send_requests().expect("poll");
+    assert_eq!(
+        first.len(),
+        1,
+        "the wired limit is four bytes, which is one chunk"
+    );
+    assert!(sender.poll_send_requests().expect("second poll").is_empty());
+
+    // And a wiring with no limit gives a sender with no limit, which is what
+    // that group asked for.
+    let unwired = wiring_with_send_limit(None);
+    assert_eq!(unwired.snapshot_send_limiter().expect("no limit"), None);
+    let mut unlimited =
+        MatrixRaftSnapshotSender::from_wiring(config, &unwired).expect("sender from the wiring");
+    assert_eq!(unlimited.rate_limit_available_bytes(), None);
+    unlimited.begin_send(&snapshot, 2, 1).expect("begin send");
+    assert_eq!(unlimited.poll_send_requests().expect("poll").len(), 3);
 }
