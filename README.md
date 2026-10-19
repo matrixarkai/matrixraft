@@ -813,14 +813,35 @@ assertion.
 
 ### Settings this crate still only records
 
-Three settings on `MatrixRaftGroupContext` are recorded, reported in
-`MatrixRaftRuntimeWiring`, and reach nothing that runs:
+Recorded, reported back, and reaching nothing that runs:
 
-<!-- inert-settings: reader_num, executor_num, watched_address_resolver -->
+<!-- inert-settings: reader_num, executor_num, watched_address_resolver, num_connection_group, dynamic_address_map, user_payload_callback_bound -->
+
+On `MatrixRaftGroupContext`:
 
 - `reader_num`
 - `executor_num`
 - `watched_address_resolver`
+
+On `MatrixRaftTransportOptions`:
+
+- `num_connection_group`
+- `dynamic_address_map`
+- `user_payload_callback_bound`
+
+The transport half of this list is new to the list rather than new to the
+crate: these were as inert as the three above it while this section said
+"three settings on `MatrixRaftGroupContext`", which left the transport
+options reading as live. They are not.
+
+`timeout_ms` on the same struct is inert too, and is named here in prose
+rather than in the marker above because `timeout_ms` is also a field on
+several live types; the guard matches on the name alone and would read those
+as this one being wired up.
+
+`cluster_id` **was** on this list and is now live — see "A cluster id that
+refuses the other cluster" below. `address_resolver_bound` is not inert
+either: `MatrixRaftTransportBuilder::build` refuses without it.
 
 `store_id` belongs to `MatrixRaftNodeCreator` rather than the context. It is
 resolved into the wiring report — a group with no creator takes its `peer_id`
@@ -850,6 +871,42 @@ let pool = DriverWorkerPool::start_with_mail_size(
 `start` without one bounds a batch by `max_messages_each_poll` alone, because
 the pool cannot measure a `Mail` it knows nothing about. A mail larger than the
 whole budget is still delivered, on its own, rather than stranded.
+
+### A cluster id that refuses the other cluster
+
+`set_cluster_id` was recorded and read by nothing, which made it the most
+misleading knob in the crate: node ids are small integers, so two clusters
+that both number their nodes from 1 could append each other's entries
+whatever it was set to.
+
+It is now stamped on every request and checked by the receiver **before the
+dispatch**, which is the only place it can be checked — a raft node asked to
+append entries has already changed its log by the time it could object.
+
+```rust
+let options = MatrixRaftTransportBuilder::new()
+    .set_cluster_id(42)
+    .bind_address_resolver()
+    .build()?;
+
+// Both halves, or the id guards nothing: the sender stamps, the server refuses.
+let server = options.start_tcp_server("0.0.0.0:7001", handler)?;
+let transport = options.into_tcp_transport(peers);
+```
+
+`ANY_CLUSTER_ID` is `0` and is the default, so this is opt-in in both
+directions: an unconfigured server serves everyone, and an unconfigured
+sender is served by everyone. Two *different* non-zero ids do not talk.
+
+Wire-compatible both ways. The id rides in a `TcpRaftTransportEnvelope` whose
+`cluster_id` is `serde(default)` and whose request is `flatten`ed, so a peer
+that predates the field sends no id and is read as `ANY_CLUSTER_ID`, and one
+that predates it ignores the extra field on arrival.
+
+`TcpRaftTransportServer::refused_foreign_cluster` counts the refusals, and is
+worth watching rather than merely available: a node given the wrong cluster id
+is indistinguishable from a node that is down — every RPC fails — and the
+counter is what tells the two apart.
 
 ### Heartbeats from many groups to one peer, in one batch
 

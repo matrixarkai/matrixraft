@@ -336,6 +336,48 @@ pub enum TcpRaftTransportRequest {
     },
 }
 
+/// The cluster id that talks to every cluster, and that every cluster answers.
+///
+/// This is the default, so a transport and a server that were built without
+/// one behave exactly as they did before the id existed. It is also what a
+/// peer that predates the field decodes as, because the field is
+/// `serde(default)`: an unstamped request is an any-cluster request rather
+/// than a request from cluster 0.
+pub const ANY_CLUSTER_ID: u64 = 0;
+
+/// Whether a request stamped `sender` may be served by a node in `local`.
+///
+/// Equal ids talk. Either side being [`ANY_CLUSTER_ID`] talks, which is what
+/// keeps a configured cluster reachable from an unconfigured tool and makes
+/// the whole check opt-in. Two different non-zero ids do not talk, and that
+/// is the entire point: node ids are small integers, and two clusters that
+/// both number their nodes from 1 will happily append each other's entries
+/// if nothing stops them.
+pub fn raft_clusters_may_talk(local: u64, sender: u64) -> bool {
+    local == ANY_CLUSTER_ID || sender == ANY_CLUSTER_ID || local == sender
+}
+
+/// A request with the sending transport's cluster id on it.
+///
+/// A separate struct rather than a field on each variant because the cluster
+/// id belongs to the transport, not to the RPC -- and because `Batch` would
+/// otherwise have to carry one per nested request and could disagree with
+/// itself.
+///
+/// `flatten` keeps the wire shape of the request exactly as it was, so this
+/// is compatible in both directions: a peer that predates the field sends no
+/// `cluster_id` and reads as [`ANY_CLUSTER_ID`], and a peer that predates it
+/// ignores the extra field on arrival.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TcpRaftTransportEnvelope {
+    /// The cluster the sender believes it is in. [`ANY_CLUSTER_ID`] when it
+    /// was not told, or when the sender predates this field.
+    #[serde(default)]
+    pub cluster_id: u64,
+    #[serde(flatten)]
+    pub request: TcpRaftTransportRequest,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TcpRaftRpcResult<T> {
     pub ok: Option<T>,
@@ -383,6 +425,9 @@ pub struct TcpRaftTransport {
     /// is pooled rather than the raw stream so that anything a read buffered
     /// stays with its connection instead of being dropped.
     idle: Arc<Mutex<BTreeMap<NodeId, Vec<BufReader<TcpStream>>>>>,
+    /// Stamped on every request this transport sends. [`ANY_CLUSTER_ID`]
+    /// unless the host asked for one, which is why `Default` is still right.
+    cluster_id: u64,
 }
 
 /// Enough to keep a leader's concurrent RPCs to one follower off the handshake
@@ -429,9 +474,21 @@ impl TcpRaftTransport {
     }
 
     pub fn new(peers: BTreeMap<NodeId, String>) -> Self {
+        Self::new_in_cluster(peers, ANY_CLUSTER_ID)
+    }
+
+    /// A transport that stamps `cluster_id` on everything it sends.
+    ///
+    /// A server built with a different non-zero id refuses the request
+    /// instead of serving it. See [`raft_clusters_may_talk`] for which pairs
+    /// of ids talk, and [`TcpRaftTransportServer::start_in_cluster`] for the
+    /// half that does the refusing -- stamping alone guards nothing, because
+    /// it is the receiver that decides.
+    pub fn new_in_cluster(peers: BTreeMap<NodeId, String>, cluster_id: u64) -> Self {
         Self {
             peers,
             idle: Arc::default(),
+            cluster_id,
         }
     }
 
@@ -482,6 +539,11 @@ impl TcpRaftTransport {
         self.peers.get(&node_id).map(String::as_str)
     }
 
+    /// The cluster id this transport stamps on what it sends.
+    pub fn cluster_id(&self) -> u64 {
+        self.cluster_id
+    }
+
     fn send_rpc(
         &self,
         target: NodeId,
@@ -490,7 +552,11 @@ impl TcpRaftTransport {
         let addr = self.peers.get(&target).ok_or_else(|| {
             RaftError::Transport(format!("raft transport target {target} has no address"))
         })?;
-        let mut encoded = serde_json::to_vec(&request)
+        let envelope = TcpRaftTransportEnvelope {
+            cluster_id: self.cluster_id,
+            request,
+        };
+        let mut encoded = serde_json::to_vec(&envelope)
             .map_err(|err| RaftError::Transport(format!("failed to encode raft RPC: {err}")))?;
         // One write, not a body followed by a one-byte newline: the peer reads
         // a line, so splitting them puts a round trip between the request and
@@ -635,10 +701,39 @@ pub struct TcpRaftTransportServer {
     addr: String,
     shutdown: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+    cluster_id: u64,
+    refused: Arc<AtomicU64>,
 }
 
 impl TcpRaftTransportServer {
     pub fn start<T>(addr: impl Into<String>, handler: Arc<T>) -> Result<Self, RaftError>
+    where
+        T: Transport + Send + Sync + 'static,
+    {
+        Self::start_in_cluster(addr, handler, ANY_CLUSTER_ID)
+    }
+
+    /// A server that serves only its own cluster.
+    ///
+    /// A request stamped with a different non-zero cluster id is answered
+    /// with an error and **never reaches the handler**, which is the only
+    /// part that matters: a raft node that is asked to append entries has
+    /// already changed its log by the time it can object, so the refusal has
+    /// to happen before the dispatch rather than inside it.
+    ///
+    /// [`ANY_CLUSTER_ID`] serves everything, which is what
+    /// [`TcpRaftTransportServer::start`] does and what every existing host
+    /// gets.
+    ///
+    /// Count the refusals with
+    /// [`TcpRaftTransportServer::refused_foreign_cluster`]: a misconfigured
+    /// peer that cannot talk to anyone looks exactly like a peer that is
+    /// down, and the counter is the difference.
+    pub fn start_in_cluster<T>(
+        addr: impl Into<String>,
+        handler: Arc<T>,
+        cluster_id: u64,
+    ) -> Result<Self, RaftError>
     where
         T: Transport + Send + Sync + 'static,
     {
@@ -656,6 +751,8 @@ impl TcpRaftTransportServer {
             .to_string();
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
+        let refused = Arc::new(AtomicU64::new(0));
+        let worker_refused = Arc::clone(&refused);
         let worker = thread::Builder::new()
             .name("rustraft-tcp-transport".to_string())
             .spawn(move || {
@@ -677,6 +774,7 @@ impl TcpRaftTransportServer {
                             // connection lived rather than for one exchange.
                             let conn_handler = Arc::clone(&handler);
                             let conn_shutdown = Arc::clone(&worker_shutdown);
+                            let conn_refused = Arc::clone(&worker_refused);
                             let spawned = thread::Builder::new()
                                 .name("rustraft-tcp-conn".to_string())
                                 .spawn(move || {
@@ -684,6 +782,8 @@ impl TcpRaftTransportServer {
                                         stream,
                                         conn_handler.as_ref(),
                                         &conn_shutdown,
+                                        cluster_id,
+                                        &conn_refused,
                                     );
                                 });
                             if spawned.is_err() {
@@ -704,11 +804,28 @@ impl TcpRaftTransportServer {
             addr,
             shutdown,
             worker: Some(worker),
+            cluster_id,
+            refused,
         })
     }
 
     pub fn addr(&self) -> &str {
         &self.addr
+    }
+
+    /// The cluster this server serves. [`ANY_CLUSTER_ID`] serves everything.
+    pub fn cluster_id(&self) -> u64 {
+        self.cluster_id
+    }
+
+    /// Requests refused because they came stamped with another cluster's id.
+    ///
+    /// Worth watching rather than merely available. A node whose transport
+    /// was given the wrong cluster id is indistinguishable from a node that
+    /// is unreachable -- every RPC fails -- and this is what tells the two
+    /// apart.
+    pub fn refused_foreign_cluster(&self) -> u64 {
+        self.refused.load(Ordering::Relaxed)
     }
 
     pub fn shutdown(&mut self) -> Result<(), RaftError> {
@@ -737,6 +854,8 @@ fn serve_tcp_raft_connection<T>(
     stream: TcpStream,
     handler: &T,
     shutdown: &AtomicBool,
+    cluster_id: u64,
+    refused: &AtomicU64,
 ) -> Result<(), RaftError>
 where
     T: Transport + ?Sized,
@@ -766,11 +885,21 @@ where
         if shutdown.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let request: TcpRaftTransportRequest = serde_json::from_str(&line).map_err(|err| {
-            RaftError::Transport(format!("failed to decode raft TCP request: {err}"))
-        })?;
-        require_transport_validation(matrixraft_validate_tcp_transport_request(&request))?;
-        let response = handle_tcp_raft_request(request, handler);
+        let envelope: TcpRaftTransportEnvelope =
+            serde_json::from_str(&line).map_err(|err| {
+                RaftError::Transport(format!("failed to decode raft TCP request: {err}"))
+            })?;
+        require_transport_validation(matrixraft_validate_tcp_transport_request(
+            &envelope.request,
+        ))?;
+        // Before the dispatch, deliberately. A refusal that ran inside the
+        // handler would already have appended the entries it was refusing.
+        let response = if raft_clusters_may_talk(cluster_id, envelope.cluster_id) {
+            handle_tcp_raft_request(envelope.request, handler)
+        } else {
+            refused.fetch_add(1, Ordering::Relaxed);
+            refuse_foreign_cluster(&envelope.request, cluster_id, envelope.cluster_id)
+        };
         let mut encoded = serde_json::to_vec(&response).map_err(|err| {
             RaftError::Transport(format!("failed to encode raft TCP response: {err}"))
         })?;
@@ -781,6 +910,49 @@ where
         reader.get_mut().write_all(&encoded).map_err(|err| {
             RaftError::Transport(format!("failed to write raft TCP response: {err}"))
         })?;
+    }
+}
+
+/// The refusal, in the shape of the request that earned it.
+///
+/// A caller decodes the response by the RPC it sent, so a refusal has to come
+/// back as that same kind with the error set -- not as a single generic error,
+/// which the caller could not decode, and not as a dropped connection, which
+/// it would read as the peer being down.
+fn refuse_foreign_cluster(
+    request: &TcpRaftTransportRequest,
+    local: u64,
+    sender: u64,
+) -> TcpRaftTransportResponse {
+    // A generic function rather than a closure: a closure's return type is
+    // fixed by its first use, so one shared `refusal()` would make every arm
+    // an `AppendEntriesResponse`.
+    fn refusal<T>(local: u64, sender: u64) -> TcpRaftRpcResult<T> {
+        TcpRaftRpcResult::from_result(Err(RaftError::Transport(format!(
+            "raft request from cluster {sender} refused by cluster {local}"
+        ))))
+    }
+    match request {
+        TcpRaftTransportRequest::AppendEntries { .. } => {
+            TcpRaftTransportResponse::AppendEntries(refusal(local, sender))
+        }
+        TcpRaftTransportRequest::Vote { .. } => {
+            TcpRaftTransportResponse::Vote(refusal(local, sender))
+        }
+        TcpRaftTransportRequest::InstallSnapshot { .. } => {
+            TcpRaftTransportResponse::InstallSnapshot(refusal(local, sender))
+        }
+        TcpRaftTransportRequest::ReadIndex { .. } => {
+            TcpRaftTransportResponse::ReadIndex(refusal(local, sender))
+        }
+        // Every nested request is refused, so a batch cannot smuggle one
+        // through by wrapping it.
+        TcpRaftTransportRequest::Batch { requests } => TcpRaftTransportResponse::Batch(
+            requests
+                .iter()
+                .map(|request| refuse_foreign_cluster(request, local, sender))
+                .collect(),
+        ),
     }
 }
 
