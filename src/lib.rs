@@ -276,11 +276,12 @@ pub use wal::{
     matrixraft_recover_latest_wal_record, matrixraft_validate_apply_snapshot_fence,
     matrixraft_validate_hard_state_persistence,
     matrixraft_validate_wal_lifecycle_evidence_artifact, matrixraft_wal_checksum,
-    matrixraft_wal_checksum_format, matrixraft_wal_checksum_valid, matrixraft_wal_delta_base,
-    matrixraft_wal_lifecycle_evidence, matrixraft_wal_lifecycle_evidence_artifact,
-    LogRetainedRange, WalChecksumFormat, WalCompactionReport, WalLifecycleEvidence,
-    WalLifecycleEvidenceArtifact, WalLifecycleEvidenceValidationReport, WalLifecycleStatus,
-    WalRecord, WalRecoveryReport, WalSegment, WalSegmentIndex, WalWriteReport,
+    matrixraft_wal_checksum_covers_membership, matrixraft_wal_checksum_format,
+    matrixraft_wal_checksum_valid, matrixraft_wal_delta_base, matrixraft_wal_lifecycle_evidence,
+    matrixraft_wal_lifecycle_evidence_artifact, LogRetainedRange, WalChecksumFormat,
+    WalCompactionReport, WalLifecycleEvidence, WalLifecycleEvidenceArtifact,
+    WalLifecycleEvidenceValidationReport, WalLifecycleStatus, WalRecord, WalRecoveryReport,
+    WalSegment, WalSegmentIndex, WalWriteReport,
 };
 // process rollout and cross-plane evidence report structs.
 include!("facade/process_reports.rs");

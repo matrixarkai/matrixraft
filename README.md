@@ -1459,6 +1459,35 @@ looks wasteful would have had nothing stop them.
 `tests/lease_membership_contract.rs` is what stops them, and each of the three
 paths has its own case: the lease drops, and one heartbeat round against the
 new membership earns it back — an invalidation, not a one-way door.
+### The checksum covers the membership, now that recovery trusts it
+
+The WAL checksum covered the group and node ids, the hard state, the entries,
+the delta flag, the installed snapshot and the apply fence. It did not cover
+the membership, and while nothing read that field, nothing was at risk.
+
+Recovery reads it now, so something is. A membership corrupted on disk
+reconfigures the group on the way back up -- a peer resurrected into the
+quorum, or one dropped out of it -- with every other field intact and
+`matrixraft_wal_checksum_valid` saying yes.
+
+**Each list's length is mixed in before its members.** Without that the three
+lists are one flat stream of ids, and `voters: [1, 2], learners: [3]` hashes
+exactly like `voters: [1, 2, 3], learners: []`. That is not a corner case: it
+is what a demotion looks like, and it is what recovery acts on.
+
+**A WAL written by an earlier build still validates.** The validator accepts
+either checksum, and records this build writes carry the covering one, so the
+exception closes behind each file as it is rewritten rather than becoming a
+second format to maintain.
+
+That acceptance has a cost, and it is visible rather than implied:
+`matrixraft_wal_checksum_covers_membership` answers the question the boolean
+cannot. A record validating the old way has an **unverified** membership, and
+recovery acts on the membership, so a host that wants to know whether what
+validated vouched for the member set can ask. The published format is
+`fnv1a64-rustraft-v2` and names `membership` among its covered fields, because
+covering another field is a new algorithm whatever else stays the same.
+
 ### Recovery restores the membership the record carries
 
 Every WAL record has carried a `membership` for as long as the format has
