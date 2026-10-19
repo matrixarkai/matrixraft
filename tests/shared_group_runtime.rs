@@ -665,3 +665,80 @@ fn start_all_starts_every_group_past_a_batch_boundary() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn ticking_can_be_switched_off_across_every_shard() {
+    // Through the server, because that is what a host holds: the shards are
+    // private to the runtime and the runtime is private to the server, so a
+    // maintenance window is decided where neither is reachable.
+    let root = probe_root("tickswitch");
+    let mut server = server_with(8, true, &root);
+    server.start_all(0).expect("start");
+
+    assert_eq!(server.shared_ticks_enabled(), Some(true));
+    assert!(
+        wait_until("the groups tick", Duration::from_secs(20), || {
+            server
+                .shared_stats()
+                .map(|stats| stats.ticks_in_place > 0)
+                .unwrap_or(false)
+        }),
+        "nothing ticked, so switching ticks off proves nothing"
+    );
+
+    assert!(server.shared_disable_ticks(), "there is a shared runtime");
+    assert_eq!(server.shared_ticks_enabled(), Some(false));
+
+    // A tick already in flight when the switch landed is still a tick, so the
+    // reading is taken once the count has settled rather than at the instant
+    // the switch was thrown.
+    assert!(
+        wait_until("the count settles", Duration::from_secs(20), || {
+            let before = server.shared_stats().expect("stats").ticks_in_place;
+            std::thread::sleep(Duration::from_millis(30));
+            server.shared_stats().expect("stats").ticks_in_place == before
+        }),
+        "the tick count never stopped moving"
+    );
+    let quiet = server.shared_stats().expect("stats").ticks_in_place;
+    let suppressed = server.shared_stats().expect("stats").ticks_suppressed;
+
+    // Every shard keeps its schedule running, and the suppressed count sums
+    // over all of them -- so this also says the switch reached more than the
+    // one shard a group happens to hash to.
+    assert!(
+        wait_until(
+            "the schedules keep running",
+            Duration::from_secs(20),
+            || { server.shared_stats().expect("stats").ticks_suppressed >= suppressed + 8 }
+        ),
+        "suppressed stayed at {suppressed}, so some shard stopped scheduling too"
+    );
+    assert_eq!(
+        server.shared_stats().expect("stats").ticks_in_place,
+        quiet,
+        "a suppressed tick must not reach a group"
+    );
+
+    assert!(server.shared_enable_ticks());
+    assert_eq!(server.shared_ticks_enabled(), Some(true));
+    assert!(
+        wait_until("ticking resumes", Duration::from_secs(20), || {
+            server.shared_stats().expect("stats").ticks_in_place >= quiet + 8
+        }),
+        "no group ticked again after ticking was switched back on"
+    );
+}
+
+#[test]
+fn a_server_without_a_shared_runtime_has_no_switch_to_throw() {
+    // Each group has its own runtime here, so there is nothing central to
+    // switch and saying so is better than pretending it worked.
+    let root = probe_root("tickswitch-own");
+    let mut server = server_with(2, false, &root);
+    server.start_all(0).expect("start");
+
+    assert_eq!(server.shared_ticks_enabled(), None);
+    assert!(!server.shared_disable_ticks());
+    assert!(!server.shared_enable_ticks());
+}

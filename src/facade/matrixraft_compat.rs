@@ -17640,6 +17640,45 @@ impl MatrixRaftMultiRaftServer {
             .map(|runtime| runtime.groups_per_ticker())
     }
 
+    /// Stops delivering ticks to every group this server hosts, and says
+    /// whether there was a shared runtime to stop.
+    ///
+    /// A host holds the server, not the runtime and not the shards, so without
+    /// this the switch is unreachable from where a maintenance window is
+    /// actually decided. `false` means this server gives each group its own
+    /// runtime, where there is nothing central to switch.
+    ///
+    /// What stops are elections, heartbeats and lease renewal. A server left
+    /// disabled is a server whose groups cannot make progress, and nothing
+    /// here times that out -- see [`SharedGroupRuntime::disable_ticks`].
+    pub fn shared_disable_ticks(&self) -> bool {
+        match self.shared.as_ref() {
+            Some(runtime) => {
+                runtime.disable_ticks();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Delivers ticks again. Idempotent, and `false` when there is no shared
+    /// runtime.
+    pub fn shared_enable_ticks(&self) -> bool {
+        match self.shared.as_ref() {
+            Some(runtime) => {
+                runtime.enable_ticks();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the shared runtime is delivering ticks, or `None` when there is
+    /// no shared runtime.
+    pub fn shared_ticks_enabled(&self) -> Option<bool> {
+        self.shared.as_ref().map(|runtime| runtime.ticks_enabled())
+    }
+
     pub fn register_node(&mut self, node: MatrixRaftNode) -> Result<(), RaftError> {
         let key = MatrixRaftRouteKey::new(node.group_id(), node.node_id());
         if self.nodes.contains_key(&key) {
