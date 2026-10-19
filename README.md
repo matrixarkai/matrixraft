@@ -1290,6 +1290,49 @@ handles around it.
 fixed cost added honestly elsewhere in `propose` does not fail it for an
 unrelated reason.
 
+### A stopped cluster refuses
+
+`stop` sets a flag. Of the **121** public operations on `RaftCluster`, exactly
+**two** read it -- `propose` and `campaign`. So a host that stopped a group
+could still add a peer to it, promote one, resign its leader or trigger a
+snapshot, and the operation was carried out on a cluster whose leader lease had
+already been invalidated.
+
+The comparable engine gates this at the node: every client-facing call takes a
+pass, `Stop` shuts the gate, and a call arriving afterwards is answered "raft
+node is not started" rather than served. These now take the same refusal:
+
+| refuses when stopped | |
+|---|---|
+| `propose` | was already gated |
+| `read_index` | |
+| `trigger_snapshot` | |
+| `add_peer`, `add_learner`, `add_witness` | the last two delegate to the first |
+| `remove_peer`, `promote_peer` | |
+| `resign_leader` | |
+
+**What is deliberately not gated, and why**, because a list of refusals is only
+trustworthy next to one of the exceptions:
+
+- **Inbound message handling** -- `step`, `append_entries_to`, the response
+  handlers. This is how a host settles what is already on the wire; refusing it
+  would strand those messages rather than finish them.
+- **Inspection** -- `status`, `leader_id`, `membership`. A stopped cluster is
+  exactly when a host wants to know what it holds.
+- **`start`**, or stopping would be one-way.
+- **`transfer_leader`**, for a specific reason worth writing down: it reports
+  `NoLeader` on a cluster that was never started, and a *running* cluster
+  always has a leader because `start` campaigns one. Gating it would make
+  `RaftError::NoLeader` unreachable from that entry point and silently replace
+  a tested contract with a dead branch. That is a change to make deliberately,
+  with the dead path cleaned up -- not a side effect of adding a gate.
+- **`compact_logs_through`**, which returns `u64` and has nowhere to put a
+  refusal.
+
+`tests/stopped_cluster_contract.rs` pins both halves, including the leader
+transfer exception and its reason, so the boundary is a decision rather than
+whatever happened to be true.
+
 ### Heartbeats from many groups to one peer, in one batch
 
 `HeartbeatMerger` buckets by destination address rather than by group, which is

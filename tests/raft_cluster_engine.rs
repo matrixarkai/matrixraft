@@ -1902,6 +1902,7 @@ fn duplicate_append_response_reports_packet_match_range() {
 #[test]
 fn conflict_truncation_clamps_read_index_current_term_floor() {
     let mut cluster = three_node_cluster();
+    cluster.start().expect("cluster starts");
     cluster
         .append_entries_to(
             2,
