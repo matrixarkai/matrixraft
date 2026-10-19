@@ -572,6 +572,35 @@ impl RaftCluster {
         Ok(())
     }
 
+    /// Refuses a client-initiated operation on a cluster that is not running.
+    ///
+    /// `stop` sets a flag, and for most of this type's life **almost nothing
+    /// read it**: of 121 public operations, `propose` and `campaign` were the
+    /// only two that refused. So a host that stopped a group could still add a
+    /// peer to it, transfer its leadership or trigger a snapshot, and the
+    /// operation would be carried out on a cluster whose lease had already
+    /// been invalidated.
+    ///
+    /// The comparable engine gates this at the node, with a pass every
+    /// client-facing call takes and `Stop` shutting the gate -- it answers
+    /// "raft node is not started" rather than serving. This is the same
+    /// refusal; see the module's own test for exactly which operations take
+    /// the gate and which deliberately do not.
+    ///
+    /// **Inbound message handling is deliberately not gated.** `step` and the
+    /// response handlers are how a host drains what is already in flight, and
+    /// refusing those would strand messages rather than settle them. Nor is
+    /// inspection: a stopped cluster is exactly when a host wants to read its
+    /// status.
+    fn require_running(&self, operation: &str) -> Result<(), RaftError> {
+        if self.running {
+            return Ok(());
+        }
+        Err(RaftError::InvalidRequest(format!(
+            "cannot {operation} while cluster is stopped"
+        )))
+    }
+
     pub fn leader_id(&self) -> Option<NodeId> {
         self.leader_id
     }
@@ -2661,11 +2690,7 @@ impl RaftCluster {
             }
         }
         let leader_id = self.leader_id.ok_or(RaftError::NoLeader)?;
-        if !self.running {
-            return Err(RaftError::InvalidRequest(
-                "cannot propose while cluster is stopped".to_string(),
-            ));
-        }
+        self.require_running("propose")?;
         if payload.len() as u64 > self.config.max_payload_bytes {
             return Err(RaftError::InvalidRequest(
                 "payload exceeds max_payload_bytes".to_string(),
@@ -3370,6 +3395,7 @@ impl RaftCluster {
         &self,
         request: ReadIndexRequest,
     ) -> Result<ReadIndexResponse, RaftError> {
+        self.require_running("read")?;
         if request.group_id != self.group_id {
             return Err(RaftError::InvalidRequest(
                 "read index group id mismatch".to_string(),
@@ -3736,6 +3762,7 @@ impl RaftCluster {
     }
 
     pub fn resign_leader(&mut self, _reason: &str) -> Result<bool, RaftError> {
+        self.require_running("resign")?;
         let Some(leader_id) = self.leader_id else {
             return Ok(false);
         };
@@ -3814,6 +3841,7 @@ impl RaftCluster {
     }
 
     pub fn add_peer(&mut self, peer: Peer) -> Result<(), RaftError> {
+        self.require_running("add a peer")?;
         if self.nodes.contains_key(&peer.node_id) {
             return Err(RaftError::InvalidRequest(format!(
                 "duplicate raft node id {}",
@@ -3850,6 +3878,7 @@ impl RaftCluster {
     }
 
     pub fn promote_peer(&mut self, node_id: NodeId) -> Result<(), RaftError> {
+        self.require_running("promote a peer")?;
         let commit_index = self.commit_index;
         let node = self
             .nodes
@@ -3881,6 +3910,7 @@ impl RaftCluster {
     }
 
     pub fn remove_peer(&mut self, node_id: NodeId) -> Result<(), RaftError> {
+        self.require_running("remove a peer")?;
         let removing_leader = self.leader_id == Some(node_id);
         let transfer_target = removing_leader.then(|| self.closest_follower()).flatten();
         if !self.nodes.contains_key(&node_id) {
@@ -5189,6 +5219,7 @@ impl RaftCluster {
     }
 
     pub fn trigger_snapshot(&mut self) -> Result<SnapshotMetadata, RaftError> {
+        self.require_running("trigger a snapshot")?;
         if let Some(trigger) = &self.snapshot_trigger {
             self.duplicate_snapshot_trigger_requests += 1;
             return Ok(trigger.meta.clone());
