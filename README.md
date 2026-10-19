@@ -1378,6 +1378,58 @@ up. The two rows came back **identical**, so the probe was not the cost -- and
 the probe-vs-caught-up comparison is still in the example, because a refuted
 hypothesis is worth the same as a confirmed one to the next reader.
 
+### A command entry waits for its commit index
+
+A command entry -- one with `is_command` set -- is the shape a host uses for an
+operation it must be able to **replay on restart**: a split, a merge, anything
+whose effect has to survive a crash. Replay is driven by the committed index.
+
+So applying a command before that index is durable means a crash leaves the
+node restarting with a lower committed index and **applying the command a
+second time**. For a non-idempotent command that is a corruption no amount of
+care in the state machine can see coming.
+
+`is_command` was on every entry and read only to classify entries for
+reporting. Nothing held an apply back.
+
+```rust
+let eligible = cluster.apply_eligible_through(node_id, durable_commit_index)?;
+if let Some(index) = eligible.held_back_at {
+    // a command at `index` is waiting for the commit index to be written
+}
+```
+
+- **It holds back the command and what follows, not the whole apply.** Entries
+  before it stay eligible, so a plain entry is never stalled by a command
+  behind it.
+- **It is a query, not an enforcement.** The host owns its durability and has
+  to say what is durable. `mark_apply_task_inflight_with_fence` has it enforced
+  for callers who want that; the unchecked `mark_apply_task_inflight` is
+  unchanged, because a host whose commands are idempotent -- or which writes
+  none -- is paying for nothing.
+- **A log with no command entries is never held back**, at any durable index.
+
+The comparable engine reaches the same conclusion the same way: a committed
+command entry sets `should_delay_apply` alongside `should_flush_meta`, holding
+the apply task until the committed index has been written.
+
+**Where the fence earns its keep.** A `RaftCluster` models every replica in one
+process and advances its own applied index, so the existing lower bound already
+refuses anything behind it and the fence has no window to narrow there. What it
+adds is the **upper** bound, for a host driving its own apply. A test pins that
+distinction rather than leaving it to be discovered.
+
+#### A leader no-op is not a command
+
+Found while building the above: a leader's election no-op was written with
+`is_command: true`. So the fence held the apply at index 1 of every started
+cluster -- and `FsmApplyEntryKind::NoOp` was a variant the actual no-op never
+reached, because the classifier maps `is_command` to `Data`.
+
+A no-op carries nothing a host has to replay. It is now `is_command: false`,
+which left **all 753 other tests passing** -- the evidence that nothing
+depended on the old classification.
+
 ### Heartbeats from many groups to one peer, in one batch
 
 `HeartbeatMerger` buckets by destination address rather than by group, which is

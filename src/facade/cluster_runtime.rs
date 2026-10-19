@@ -374,6 +374,30 @@ struct PendingSnapshotInstall {
     fence: ApplySnapshotFence,
 }
 
+/// How far a node may apply right now, and what stopped it going further.
+///
+/// A **command** entry may not be applied until the committed index that
+/// covers it is durable. See
+/// [`RaftCluster::apply_eligible_through`] for why.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApplyEligibility {
+    /// The highest index the host may apply now. Equal to `commit_index` when
+    /// nothing is held back.
+    pub eligible_through: LogIndex,
+    /// The command entry that stopped it, when something did.
+    pub held_back_at: Option<LogIndex>,
+    pub commit_index: LogIndex,
+    /// What the caller said is durable.
+    pub durable_commit_index: LogIndex,
+}
+
+impl ApplyEligibility {
+    /// Whether a command entry is waiting for the committed index to catch up.
+    pub fn is_held_back(&self) -> bool {
+        self.held_back_at.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RaftCluster {
     pub group_id: GroupId,
@@ -1431,6 +1455,115 @@ impl RaftCluster {
         Ok(replicated_index)
     }
 
+    /// How far this node may apply, given what the host has made durable.
+    ///
+    /// Every committed entry is eligible **except** that a command entry --
+    /// one with `is_command` set -- may not be applied until
+    /// `durable_commit_index` covers it. Entries before it stay eligible, so
+    /// this holds back the command and everything after it rather than
+    /// stalling the whole apply.
+    ///
+    /// **Why a command is different.** A command entry is the shape a host
+    /// uses for an operation it has to be able to replay on restart -- a split
+    /// or a merge, say. Replay is driven by the committed index, so if a
+    /// command is applied and the node dies before that index is durable, the
+    /// node restarts with a lower committed index and **applies the command a
+    /// second time**. For a non-idempotent command that is a corruption, and
+    /// no amount of care in the state machine can see it coming.
+    ///
+    /// The comparable engine reaches the same conclusion the same way: a
+    /// committed command entry sets both `should_delay_apply` and
+    /// `should_flush_meta`, which holds the apply task until the committed
+    /// index has been written.
+    ///
+    /// This is a **query, not an enforcement** -- the host owns its durability
+    /// and has to say what is durable. Pass the result to
+    /// [`RaftCluster::mark_apply_task_inflight_with_fence`] to have it
+    /// enforced, or compare it yourself.
+    ///
+    /// A host that never writes command entries gets `commit_index` every
+    /// time and can ignore all of this.
+    pub fn apply_eligible_through(
+        &self,
+        node_id: NodeId,
+        durable_commit_index: LogIndex,
+    ) -> Result<ApplyEligibility, RaftError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(RaftError::NodeNotFound(node_id))?;
+        let commit_index = node.commit_index;
+        let mut eligible_through = commit_index;
+        let mut held_back_at = None;
+
+        // Scanned from just past the durable point, NOT from the engines own
+        // applied index. The caller is asking about ITS durability: this model
+        // advances  to  on its own, so anchoring
+        // the scan there left the window empty and nothing was ever held back.
+        if commit_index > durable_commit_index {
+            let from = durable_commit_index.saturating_add(1);
+            if let Some(start) = node.log_position_at_or_after(from) {
+                for entry in &node.log[start..] {
+                    let index = entry.log_id.index;
+                    if index > commit_index {
+                        break;
+                    }
+                    // No  here, and not by
+                    // oversight: the scan starts at ,
+                    // so every entry it reaches already satisfies that. A plant
+                    // removing the extra condition changed nothing, which is
+                    // how it was found to be dead -- the lower bound is what
+                    // carries it, and the plant for that is moving the bound.
+                    if entry.is_command {
+                        eligible_through = index.saturating_sub(1);
+                        held_back_at = Some(index);
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(ApplyEligibility {
+            eligible_through,
+            held_back_at,
+            commit_index,
+            durable_commit_index,
+        })
+    }
+
+    /// `mark_apply_task_inflight`, refusing to apply past what is durable.
+    ///
+    /// The enforced form of [`RaftCluster::apply_eligible_through`]: a host
+    /// that hands this its durable committed index cannot apply a command
+    /// entry that a crash could make it replay.
+    ///
+    /// The unchecked [`RaftCluster::mark_apply_task_inflight`] is unchanged,
+    /// because a host whose commands are idempotent -- or which writes none --
+    /// is paying for nothing.
+    ///
+    /// **What this adds is the upper bound.** A `RaftCluster` models every
+    /// replica in one process and advances its own applied index, so in that
+    /// model the existing lower bound already refuses anything behind it and
+    /// there is no window for this to narrow. It is the host-driven apply --
+    /// where the applied index is the host's to advance -- that this is for.
+    pub fn mark_apply_task_inflight_with_fence(
+        &mut self,
+        node_id: NodeId,
+        applied_index: LogIndex,
+        durable_commit_index: LogIndex,
+    ) -> Result<(), RaftError> {
+        let eligibility = self.apply_eligible_through(node_id, durable_commit_index)?;
+        if applied_index > eligibility.eligible_through {
+            return Err(RaftError::InvalidRequest(format!(
+                "applied_index {applied_index} is past what is durable: a command entry at \
+                 {} needs a durable commit index of at least {}, and the caller said {}",
+                eligibility.held_back_at.unwrap_or(applied_index),
+                eligibility.held_back_at.unwrap_or(applied_index),
+                durable_commit_index
+            )));
+        }
+        self.mark_apply_task_inflight(node_id, applied_index)
+    }
+
     pub fn mark_apply_task_inflight(
         &mut self,
         node_id: NodeId,
@@ -1597,7 +1730,7 @@ impl RaftCluster {
         let entry = LogEntry {
             log_id: log_id.clone(),
             payload: b"no-op".to_vec(),
-            is_command: true,
+            is_command: false,
         };
         self.last_log_index = log_id.index;
         let entry = Arc::new(entry);
