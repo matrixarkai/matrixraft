@@ -833,14 +833,12 @@ crate: these were as inert as the three above it while this section said
 "three settings on `MatrixRaftGroupContext`", which left the transport
 options reading as live. They are not.
 
-`timeout_ms` on the same struct is inert too, and is named here in prose
-rather than in the marker above because `timeout_ms` is also a field on
-several live types; the guard matches on the name alone and would read those
-as this one being wired up.
-
-`cluster_id` and `dynamic_address_map` **were** on this list and are now
-live — see "A cluster id that refuses the other cluster" and "Addresses that
-move" below. `address_resolver_bound` is not inert either:
+`cluster_id`, `dynamic_address_map` and `timeout_ms` **were** on this list
+and are now live — see "A cluster id that refuses the other cluster",
+"Addresses that move" and "A send that cannot wait for ever" below.
+`timeout_ms` was never in the marker above even while it was inert, because
+it is also a field on several live types and the guard matches on a name
+alone; that is why its entry was a sentence rather than a list item. `address_resolver_bound` is not inert either:
 `MatrixRaftTransportBuilder::build` refuses without it.
 
 `watched_address_resolver` stays on the list even though
@@ -1002,6 +1000,46 @@ that is always `None` is how a setting becomes a knob that does nothing.
 Carrying one would mean threading it through the four `Transport` methods,
 which every host implementation of that trait would have to absorb — a
 decision worth making on its own.
+
+### A send that cannot wait for ever
+
+A peer that accepts a connection and then never writes — a wedged process, a
+host paging, a frozen container — leaves the read with nothing to return and
+nothing to fail on. The caller is a Raft send path, so **for ever** means the
+leader stops replicating on that thread, not just to the peer that went quiet.
+This transport had no socket timeout of any kind.
+
+`timeout_ms` is now what bounds it, and its default is the baseline's
+**250ms**:
+
+```rust
+let options = MatrixRaftTransportBuilder::new()
+    .set_timeout_ms(250)          // the default; shown because it matters
+    .bind_address_resolver()
+    .build()?;
+let transport = options.into_tcp_transport(peers);   // bounded
+```
+
+`TcpRaftTransport::new` still waits for ever. The two differ on purpose: a
+transport built from options is one a host configured, while `new` is what
+this crate's own tests and examples call, and giving every one of those a
+250ms deadline would make them fail on a loaded machine rather than on a
+broken peer. `with_timeout` is the direct form, and `timeout()` reports which
+you have.
+
+- **Reads and writes, not the connect.** A connect to a port nothing is
+  listening on fails at once; a connect that hangs is a dropped-packet route,
+  and bounding it needs a `SocketAddr` — which means refusing the hostnames
+  `TcpStream::connect` accepts. That trade is the host's, so the OS timeout
+  stands there and this says so rather than implying a bound it does not give.
+- **A timed-out connection is dropped, not pooled.** The peer may answer the
+  old request later, and a pooled connection with a stale response waiting on
+  it would hand that response to the next caller as the answer to a different
+  request.
+
+Its test asserts the send is **bounded**, not that it is fast: ten seconds
+against a 250ms timeout. Asserting the 250ms would be a claim about how busy
+the machine is.
 
 ### Heartbeats from many groups to one peer, in one batch
 

@@ -440,6 +440,10 @@ pub struct TcpRaftTransport {
     /// takes both ends too, and a host behind more than one network needs it.
     local_node_id: NodeId,
     re_resolved: Arc<AtomicU64>,
+    /// Applied to reads and writes on every connection this transport opens.
+    /// `None` blocks indefinitely, which is what this transport did before the
+    /// field existed and what [`TcpRaftTransport::new`] still does.
+    timeout: Option<Duration>,
 }
 
 // Hand-written because a resolver is not `Debug`, and requiring that of a
@@ -452,6 +456,7 @@ impl std::fmt::Debug for TcpRaftTransport {
             .field("resolver", &self.resolver.is_some())
             .field("local_node_id", &self.local_node_id)
             .field("re_resolved", &self.re_resolved.load(Ordering::Relaxed))
+            .field("timeout", &self.timeout)
             .finish()
     }
 }
@@ -478,11 +483,25 @@ impl TcpRaftTransport {
     ///
     /// Hands the connection back so a successful exchange can return it to the
     /// pool. A failed one drops it, which is what closes a broken socket.
+    /// Puts this transport's timeout on a connection.
+    ///
+    /// Called for a fresh connection and again for a pooled one, because a
+    /// pooled connection may have been opened by a clone of this transport
+    /// that carried a different timeout -- the pool is shared, the timeout is
+    /// per transport.
+    fn apply_timeout(&self, stream: &TcpStream) {
+        if let Some(timeout) = self.timeout {
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
+        }
+    }
+
     fn exchange(
         &self,
         mut connection: BufReader<TcpStream>,
         encoded: &[u8],
     ) -> Result<(String, BufReader<TcpStream>), RaftError> {
+        self.apply_timeout(connection.get_ref());
         connection
             .get_mut()
             .write_all(encoded)
@@ -499,6 +518,10 @@ impl TcpRaftTransport {
         Ok((response, connection))
     }
 
+    /// A transport with no timeout: a send to a peer that accepts and never
+    /// answers waits for ever. See [`TcpRaftTransport::with_timeout`], and
+    /// note that [`MatrixRaftTransportOptions::into_tcp_transport`] applies
+    /// the one its options carry.
     pub fn new(peers: BTreeMap<NodeId, String>) -> Self {
         Self::new_in_cluster(peers, ANY_CLUSTER_ID)
     }
@@ -518,7 +541,37 @@ impl TcpRaftTransport {
             resolver: None,
             local_node_id: 0,
             re_resolved: Arc::default(),
+            timeout: None,
         }
+    }
+
+    /// Bounds how long a send will wait for a peer that has stopped answering.
+    ///
+    /// **Without this a send can wait for ever.** A peer that accepts the
+    /// connection and then never writes -- a process wedged, a host paging, a
+    /// container frozen -- leaves the read with nothing to return and nothing
+    /// to fail on. The caller is a Raft send path, so for ever means the
+    /// leader stops replicating to anybody on that thread, not just to the
+    /// peer that went quiet.
+    ///
+    /// Applied to **reads and writes**, not to the connect. A connect to a
+    /// port nothing is listening on fails at once; a connect that hangs is a
+    /// dropped-packet route, and bounding it needs a `SocketAddr`, which means
+    /// refusing the hostnames `TcpStream::connect` accepts. That trade is the
+    /// host's to make, so the OS timeout stands there and this says so rather
+    /// than implying a bound it does not give.
+    ///
+    /// A timed-out connection is **dropped, not pooled**: the peer may still
+    /// answer the old request later, and a connection with a stale response
+    /// waiting on it would hand that response to the next caller.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// What a send will wait for a peer, or `None` if it will wait for ever.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
     }
 
     /// Re-resolves a peer's address when a connect to it fails.

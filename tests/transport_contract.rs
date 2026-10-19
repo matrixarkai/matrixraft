@@ -10,9 +10,9 @@ use matrixraft::{
     LogEntry, LogId, MatrixRaftRuntimeWiring, MatrixRaftTransportBuilder, MergedHeartbeatBatch,
     MergedHeartbeatSender, Message, Peer, RaftCluster, RaftError, ReadIndexRequest,
     ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState,
-    StaticRaftAuthToken, TcpRaftTransport, TcpRaftTransportEnvelope, TcpRaftTransportRequest,
-    TcpRaftTransportResponse, TcpRaftTransportServer, Transport, VoteRequest, VoteResponse,
-    ANY_CLUSTER_ID,
+    StaticRaftAuthToken, TcpRaftRpcResult, TcpRaftTransport, TcpRaftTransportEnvelope,
+    TcpRaftTransportRequest, TcpRaftTransportResponse, TcpRaftTransportServer, Transport,
+    VoteRequest, VoteResponse, ANY_CLUSTER_ID,
 };
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -2093,4 +2093,269 @@ fn refresh_peer_addr_is_the_half_a_host_drives_itself() {
     );
     assert_eq!(transport.re_resolved_addresses(), 1);
     server.shutdown().expect("shutdown");
+}
+
+/// A peer that accepts a connection and then says nothing, for ever.
+///
+/// The failure a timeout exists for, and the one no amount of retrying fixes:
+/// the socket is open, the write succeeded, and the read has nothing to
+/// return and nothing to fail on. Holding the accepted streams is the point --
+/// dropping them would close the connection and give the caller an error for
+/// the wrong reason.
+struct Blackhole {
+    addr: String,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Blackhole {
+    fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let worker = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while !worker_shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => held.push(stream),
+                    Err(_) => break,
+                }
+            }
+            drop(held);
+        });
+        Self {
+            addr,
+            shutdown,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for Blackhole {
+    fn drop(&mut self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // Wake the blocked `accept`, the same way the real server does.
+        let _ = std::net::TcpStream::connect(&self.addr);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Runs `call` on another thread and gives up after `limit`.
+///
+/// `None` means it had not returned, which for these tests is the failure
+/// being asserted against -- and the reason this helper exists rather than
+/// calling directly, because a test that hangs reports nothing at all.
+fn within<T: Send + 'static>(
+    limit: Duration,
+    call: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(call());
+    });
+    rx.recv_timeout(limit).ok()
+}
+
+#[test]
+fn a_send_to_a_peer_that_never_answers_gives_up() {
+    let blackhole = Blackhole::start();
+    let mut peers = BTreeMap::new();
+    peers.insert(2, blackhole.addr.clone());
+    let transport = TcpRaftTransport::new(peers).with_timeout(Duration::from_millis(250));
+    assert_eq!(transport.timeout(), Some(Duration::from_millis(250)));
+
+    // Ten seconds against a 250ms timeout: this asserts that the send is
+    // BOUNDED, not that it is fast. Asserting the 250ms itself would be a
+    // claim about how busy the machine is.
+    let result = within(Duration::from_secs(10), move || {
+        transport.append_entries(2, cluster_append())
+    });
+    let result = result.expect("the send must return rather than wait for ever");
+    let message = match result {
+        Err(err) => err.to_string(),
+        Ok(response) => panic!("a peer that never answers cannot succeed, got {response:?}"),
+    };
+    assert!(
+        message.contains("failed to read raft RPC"),
+        "the failure should be the read, got {message}"
+    );
+}
+
+#[test]
+fn a_timed_out_connection_is_not_pooled() {
+    // A peer that went quiet may answer the old request later. Pooling that
+    // connection would hand the stale response to the next caller, as the
+    // answer to a different request.
+    let blackhole = Blackhole::start();
+    let mut peers = BTreeMap::new();
+    peers.insert(2, blackhole.addr.clone());
+    let transport = TcpRaftTransport::new(peers).with_timeout(Duration::from_millis(100));
+
+    let probe = transport.clone();
+    let failed = within(Duration::from_secs(10), move || {
+        probe.append_entries(2, cluster_append())
+    });
+    assert!(failed.expect("returned").is_err());
+    assert_eq!(
+        transport.idle_connections(2),
+        0,
+        "a connection that timed out must not be handed to the next caller"
+    );
+}
+
+#[test]
+fn a_timeout_does_not_disturb_a_peer_that_answers() {
+    // The other half: a bound that also fails a working peer would be worse
+    // than no bound at all.
+    let (mut server, handler) = counting_server(ANY_CLUSTER_ID);
+    let mut peers = BTreeMap::new();
+    peers.insert(2, server.addr().to_string());
+    let transport = TcpRaftTransport::new(peers).with_timeout(Duration::from_millis(250));
+
+    for _ in 0..3 {
+        transport
+            .append_entries(2, cluster_append())
+            .expect("a peer that answers is unaffected by the timeout");
+    }
+    assert_eq!(handler.calls(), 3);
+    assert_eq!(
+        transport.idle_connections(2),
+        1,
+        "and the connection is still pooled across sends"
+    );
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn the_recorded_timeout_reaches_the_transport_and_new_still_waits_for_ever() {
+    // `timeout_ms` was recorded and read by nothing. Its default is 250ms,
+    // which is what a host gets by building options -- while `new` keeps the
+    // unbounded behaviour it has always had, because the crate's own tests
+    // and examples call it and a deadline there would fail on a busy machine
+    // rather than on a broken peer.
+    let defaults = MatrixRaftTransportBuilder::new()
+        .bind_address_resolver()
+        .build()
+        .expect("build");
+    assert_eq!(defaults.timeout_ms, 250);
+    assert_eq!(
+        defaults.into_tcp_transport(BTreeMap::new()).timeout(),
+        Some(Duration::from_millis(250))
+    );
+
+    let configured = MatrixRaftTransportBuilder::new()
+        .set_timeout_ms(1_500)
+        .bind_address_resolver()
+        .build()
+        .expect("build");
+    assert_eq!(
+        configured.into_tcp_transport(BTreeMap::new()).timeout(),
+        Some(Duration::from_millis(1_500))
+    );
+
+    // And the watching constructor carries it too, rather than dropping it on
+    // the way through.
+    let watching = MatrixRaftTransportBuilder::new()
+        .set_timeout_ms(1_500)
+        .set_dynamic_address_map()
+        .bind_address_resolver()
+        .build()
+        .expect("build");
+    let resolver = Arc::new(ScriptedResolver::new("127.0.0.1:1"));
+    assert_eq!(
+        watching
+            .into_tcp_transport_watching(BTreeMap::new(), 1, resolver)
+            .timeout(),
+        Some(Duration::from_millis(1_500))
+    );
+
+    assert_eq!(
+        TcpRaftTransport::new(BTreeMap::new()).timeout(),
+        None,
+        "new waits for ever, as it always has"
+    );
+}
+
+#[test]
+fn a_peer_that_answers_once_and_then_goes_quiet_is_still_bounded() {
+    // The pooled path needs the timeout too, and nothing else reaches it: a
+    // peer that was never reachable has no pooled connection to reuse, so
+    // only a peer that answered *first* exercises this. It is also the
+    // realistic failure -- a follower that was healthy and then wedged.
+    use std::io::{BufRead, BufReader, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr").to_string();
+    let worker = std::thread::spawn(move || {
+        // One connection, one answer, then silence -- while holding the
+        // stream, so the connection stays open and pooled.
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() {
+            return;
+        }
+        let response = TcpRaftTransportResponse::AppendEntries(TcpRaftRpcResult {
+            ok: Some(AppendEntriesResponse {
+                term: 2,
+                success: true,
+                match_index: 0,
+                rejection_hint: None,
+                rejected_index: None,
+                require_snapshot: None,
+                snapshot_state: SnapshotState::None,
+                lease_confirmation_epoch: 0,
+                lease_duration_ms: 0,
+            }),
+            error: None,
+        });
+        let mut encoded = serde_json::to_vec(&response).expect("encode");
+        encoded.push(b'\n');
+        if reader.get_mut().write_all(&encoded).is_err() {
+            return;
+        }
+        // Hold it, answering nothing further, until the test drops the peer.
+        std::thread::sleep(Duration::from_secs(20));
+        drop(reader);
+    });
+
+    let mut peers = BTreeMap::new();
+    peers.insert(2, addr);
+    let transport = TcpRaftTransport::new(peers).with_timeout(Duration::from_millis(150));
+
+    let first = transport
+        .append_entries(2, cluster_append())
+        .expect("the first send is answered");
+    // No separate "the peer served it" counter. The peer set one AFTER
+    // writing the response, so this thread could read it before the peer got
+    // there -- which is what it did, under coverage instrumentation, while
+    // passing everywhere else. A successful response is already the proof
+    // that the peer answered, and it cannot be observed early.
+    assert!(first.success);
+    assert_eq!(
+        transport.idle_connections(2),
+        1,
+        "the answered connection is pooled, which is what the next send reuses"
+    );
+
+    // Now the peer is quiet. The pooled connection must time out rather than
+    // park the caller -- and the retry on a fresh connection must too.
+    let probe = transport.clone();
+    let second = within(Duration::from_secs(10), move || {
+        probe.append_entries(2, cluster_append())
+    });
+    assert!(
+        second.expect("the send must return").is_err(),
+        "a peer that has gone quiet cannot succeed"
+    );
+    assert_eq!(transport.idle_connections(2), 0);
+
+    drop(transport);
+    let _ = worker;
 }
