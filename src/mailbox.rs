@@ -48,9 +48,13 @@ impl Default for MailBoxFetchPolicy {
     }
 }
 
+/// One queue per [`MailPriority`]. Named because `fetch` has to size an array
+/// by it, and a literal `3` in two places is a literal `3` that can disagree.
+pub const MATRIXRAFT_MAIL_PRIORITY_LANES: usize = 3;
+
 #[derive(Debug)]
 struct MailBoxInner<Mail> {
-    channels: [VecDeque<Mail>; 3],
+    channels: [VecDeque<Mail>; MATRIXRAFT_MAIL_PRIORITY_LANES],
     max_channel_depth: usize,
     rejected_send_count: u64,
 }
@@ -208,25 +212,34 @@ impl<Mail> MailBox<Mail> {
             }
         }
 
-        let mut output = Vec::new();
+        // What each lane gives up is decided before anything moves, so the
+        // output can be sized once. `Vec::new()` grew by doubling, which is an
+        // allocation per power of two: a fetch of 64 mails asked the allocator
+        // seven times for a size that was knowable up front.
+        //
+        // The arithmetic is unchanged. A lane before `include_until` gives up
+        // everything it has and does not draw on the limit; the rest share what
+        // is left, in priority order.
         let mut lower_priority_limit = policy.limit;
         let all_include_until = policy.include_until.index();
-        for priority_index in 0..inner.channels.len() {
-            let channel_len = inner.channels[priority_index].len();
+        let mut takes = [0_usize; MATRIXRAFT_MAIL_PRIORITY_LANES];
+        for (priority_index, channel) in inner.channels.iter().enumerate() {
             let take = if priority_index >= all_include_until {
-                channel_len.min(lower_priority_limit)
+                channel.len().min(lower_priority_limit)
             } else {
-                channel_len
+                channel.len()
             };
-
-            for _ in 0..take {
-                if let Some(mail) = inner.channels[priority_index].pop_front() {
-                    output.push(mail);
-                }
-            }
+            takes[priority_index] = take;
             if priority_index >= all_include_until {
                 lower_priority_limit = lower_priority_limit.saturating_sub(take);
             }
+        }
+
+        let mut output = Vec::with_capacity(takes.iter().sum());
+        for (priority_index, channel) in inner.channels.iter_mut().enumerate() {
+            // Drained in bulk rather than popped one at a time, and the drain
+            // knows its own length, so this does not reallocate on the way.
+            output.extend(channel.drain(..takes[priority_index]));
         }
         self.writable.notify_all();
         Ok(output)
