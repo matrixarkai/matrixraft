@@ -2,10 +2,10 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    InstallSnapshotResponse, LogId, MatrixRaftOldSnapshotFinishState, MatrixRaftRateLimiterConfig,
-    MatrixRaftRuntimeWiring, MatrixRaftSnapshotCreator, MatrixRaftSnapshotDownloader,
-    MatrixRaftSnapshotLoader, MatrixRaftSnapshotSender, RaftSnapshot, SnapshotInstallState,
-    SnapshotLifecycleConfig, SnapshotMetadata,
+    InstallSnapshotRequest, InstallSnapshotResponse, LogId, MatrixRaftOldSnapshotFinishState,
+    MatrixRaftRateLimiterConfig, MatrixRaftRuntimeWiring, MatrixRaftSnapshotCreator,
+    MatrixRaftSnapshotDownloader, MatrixRaftSnapshotLoader, MatrixRaftSnapshotSender, RaftSnapshot,
+    SnapshotInstallState, SnapshotLifecycle, SnapshotLifecycleConfig, SnapshotMetadata,
 };
 
 fn snapshot(index: u64, payload: Vec<u8>) -> RaftSnapshot {
@@ -431,4 +431,310 @@ fn a_downloader_built_from_the_wiring_carries_the_configured_limit() {
     let unlimited =
         MatrixRaftSnapshotDownloader::from_wiring(config, &send_only).expect("from the wiring");
     assert_eq!(unlimited.rate_limit_available_bytes(), None);
+}
+
+fn transfer_config() -> SnapshotLifecycleConfig {
+    SnapshotLifecycleConfig {
+        chunk_size: 4,
+        max_chunks_per_tick: 1,
+        max_bytes_per_tick: 1 << 20,
+        max_retry_attempts: 2,
+    }
+}
+
+/// A sender part-way through a transfer, and the downloader receiving it.
+fn mid_transfer() -> (
+    MatrixRaftSnapshotSender,
+    MatrixRaftSnapshotDownloader,
+    RaftSnapshot,
+) {
+    let config = transfer_config();
+    let snap = snapshot(21, b"abcdefghijkl".to_vec());
+    let mut sender = MatrixRaftSnapshotSender::new(config).expect("sender");
+    sender.begin_send(&snap, 2, 1).expect("begin send");
+    let mut downloader = MatrixRaftSnapshotDownloader::new(config).expect("downloader");
+
+    // One chunk in, so there is a partial install to cancel.
+    let first = sender.poll_send_requests().expect("poll").remove(0);
+    let result = downloader.download(first).expect("download");
+    assert!(result.accepted);
+    assert!(result.installed_snapshot.is_none());
+    sender
+        .record_send_response(&result.response)
+        .expect("record");
+    assert!(downloader.status().downloading);
+    (sender, downloader, snap)
+}
+
+#[test]
+fn a_cancelled_install_is_not_resurrected_by_the_next_chunk() {
+    // The defect: `rollback_install` dropped the partial install, and
+    // `install_request` starts a fresh one whenever it holds none -- so the
+    // very next chunk to arrive quietly began the transfer again. A host
+    // removing a replica, or refusing a snapshot it had decided against, had
+    // no way to make the refusal stick.
+    let (mut sender, mut downloader, _snap) = mid_transfer();
+
+    assert!(
+        downloader.cancel_install(),
+        "a transfer was in progress, so the cancel should say so"
+    );
+    assert!(downloader.install_cancelled());
+    let cancelled = downloader.status();
+    assert!(!cancelled.downloading, "the partial install is gone");
+    assert!(cancelled.install_cancelled);
+    assert_eq!(cancelled.cancelled_installs, 1);
+    assert_eq!(cancelled.refused_chunks, 0, "nothing refused yet");
+
+    // The next chunk of the SAME snapshot is refused rather than installed.
+    let next = sender.poll_send_requests().expect("poll").remove(0);
+    let next_offset = next.chunk.offset;
+    let refused = downloader.download(next).expect("download answers");
+    assert!(
+        !refused.accepted,
+        "a cancelled install must not take a chunk"
+    );
+    assert!(
+        !refused.response.throttled,
+        "this is not a throttle: a throttle means later, and this means not at all"
+    );
+    assert!(refused.response.reason.contains("cancelled"));
+    assert_eq!(refused.response.next_offset, next_offset);
+    assert!(refused.installed_snapshot.is_none());
+    assert!(!refused.over_quota);
+    assert_eq!(downloader.status().refused_chunks, 1);
+    assert!(!downloader.status().downloading);
+
+    // And the resurrection route that mattered most: the first chunk of a
+    // DIFFERENT snapshot, which is what starts a brand new install.
+    let other = snapshot(99, b"wxyz".to_vec());
+    let mut other_sender = MatrixRaftSnapshotSender::new(transfer_config()).expect("sender");
+    other_sender.begin_send(&other, 2, 1).expect("begin send");
+    let fresh = other_sender.poll_send_requests().expect("poll").remove(0);
+    assert_eq!(fresh.chunk.offset, 0, "this is the chunk that begins one");
+    let refused_fresh = downloader.download(fresh).expect("download answers");
+    assert!(
+        !refused_fresh.accepted,
+        "a new snapshot must not start an install either"
+    );
+    assert_eq!(downloader.status().refused_chunks, 2);
+    assert!(!downloader.status().downloading);
+
+    // The sender finds out. A plain rejection spends the retry budget, so a
+    // receiver that has stopped is not pushed a whole snapshot.
+    sender
+        .record_send_response(&refused.response)
+        .expect("first retry");
+    sender
+        .record_send_response(&refused.response)
+        .expect("second retry");
+    let abandoned = sender.record_send_response(&refused.response);
+    assert!(
+        abandoned.is_err(),
+        "a budget of two should be exhausted by three rejections, got {abandoned:?}"
+    );
+    assert!(!sender.status().sending, "and the send is abandoned");
+}
+
+#[test]
+fn a_rollback_is_not_a_cancel() {
+    // The difference, asserted rather than only documented: a rollback says
+    // "that attempt was bad, send it again", so the next chunk legitimately
+    // starts a fresh install. If this ever behaved like a cancel, a transient
+    // bad chunk would stop a replica receiving snapshots at all.
+    let (mut sender, mut downloader, snap) = mid_transfer();
+
+    downloader.rollback();
+    assert!(
+        !downloader.install_cancelled(),
+        "a rollback must not close the install"
+    );
+    let rolled = downloader.status();
+    assert_eq!(rolled.rolled_back, 1);
+    assert!(!rolled.downloading);
+
+    // A rollback discards the partial, so the transfer restarts from the
+    // beginning rather than resuming mid-stream: handing the installer a
+    // chunk at offset 4 with nothing before it is an error. That is the
+    // existing contract, not anything this change introduced, and the test
+    // says so rather than asserting a continuation that never worked.
+    let mid_stream = sender.poll_send_requests().expect("poll").remove(0);
+    assert_ne!(mid_stream.chunk.offset, 0);
+    assert!(
+        downloader.download(mid_stream).is_err(),
+        "a rollback rewinds the transfer; it does not resume one"
+    );
+
+    // Restarted from offset 0 it is accepted, which is the difference from a
+    // cancel: there, even the first chunk of a new transfer is refused.
+    let mut restarted = MatrixRaftSnapshotSender::new(transfer_config()).expect("sender");
+    restarted.begin_send(&snap, 2, 1).expect("begin send");
+    let first = restarted.poll_send_requests().expect("poll").remove(0);
+    assert_eq!(first.chunk.offset, 0);
+    let accepted = downloader.download(first).expect("download");
+    assert!(
+        accepted.accepted,
+        "after a rollback a restarted transfer should be taken"
+    );
+    assert_eq!(
+        downloader.status().refused_chunks,
+        0,
+        "and nothing was refused, because the install was never closed"
+    );
+    assert!(downloader.status().downloading);
+}
+
+#[test]
+fn admit_install_lets_the_group_receive_again() {
+    let (_sender, mut downloader, snap) = mid_transfer();
+    downloader.cancel_install();
+    assert!(downloader.install_cancelled());
+
+    assert!(
+        downloader.admit_install(),
+        "it had been cancelled, so admitting should say so"
+    );
+    assert!(!downloader.install_cancelled());
+    assert!(
+        !downloader.admit_install(),
+        "admitting an open install changes nothing and says so"
+    );
+    assert!(!downloader.status().install_cancelled);
+
+    // A whole transfer now completes from the start.
+    let mut fresh_sender = MatrixRaftSnapshotSender::new(transfer_config()).expect("sender");
+    fresh_sender.begin_send(&snap, 2, 1).expect("begin send");
+    let mut installed = None;
+    for _ in 0..8 {
+        let requests = fresh_sender.poll_send_requests().expect("poll");
+        if requests.is_empty() {
+            break;
+        }
+        for request in requests {
+            let result = downloader.download(request).expect("download");
+            assert!(result.accepted, "an admitted install takes chunks again");
+            fresh_sender
+                .record_send_response(&result.response)
+                .expect("record");
+            if let Some(snapshot) = result.installed_snapshot {
+                installed = Some(snapshot);
+            }
+        }
+        // Polling a finished send is an error rather than an empty answer, so
+        // the loop stops on the snapshot and not on an empty poll.
+        if installed.is_some() {
+            break;
+        }
+    }
+    let installed = installed.expect("the transfer should complete after admitting");
+    assert_eq!(installed.meta.last_log_id.index, 21);
+    assert_eq!(
+        downloader.status().refused_chunks,
+        0,
+        "and nothing was refused along the way"
+    );
+}
+
+#[test]
+fn beginning_a_send_does_not_re_admit_a_cancelled_install() {
+    // `begin_send` rebuilds the whole status, which is the quiet route by
+    // which a cancel could be undone: both directions share one status
+    // struct, and starting to SEND says nothing about whether this group will
+    // RECEIVE.
+    //
+    // This has to be asserted on `SnapshotLifecycle` itself. The first
+    // version used a `MatrixRaftSnapshotSender` and a
+    // `MatrixRaftSnapshotDownloader`, which wrap **separate** lifecycles -- so
+    // the send rebuilt a status that had never been cancelled, and a plant
+    // that cleared the flag in `begin_send` survived the test untouched. It is
+    // a host driving `SnapshotLifecycle` directly that can reach both.
+    let config = transfer_config();
+    let mut lifecycle = SnapshotLifecycle::new(config).expect("lifecycle");
+
+    assert!(!lifecycle.cancel_install(), "nothing was installing");
+    assert!(lifecycle.install_cancelled());
+    assert!(lifecycle.status().install_cancelled);
+
+    // The same lifecycle now starts sending a snapshot out.
+    let outgoing = snapshot(31, b"mnopqrst".to_vec());
+    lifecycle
+        .begin_send(&outgoing, 2, 1)
+        .expect("a cancelled install must not block a send");
+    assert!(lifecycle.status().sending);
+
+    // Both the flag and the behaviour have to survive it.
+    assert!(
+        lifecycle.install_cancelled(),
+        "beginning a send must not reopen the install"
+    );
+    assert!(
+        lifecycle.status().install_cancelled,
+        "and the status must not report it as reopened either -- a host \
+         watching this would otherwise believe chunks were being taken"
+    );
+
+    let chunk = lifecycle.poll_send_requests().expect("poll").remove(0);
+    let refused = lifecycle.install_request(InstallSnapshotRequest {
+        group_id: chunk.group_id,
+        term: chunk.term,
+        leader_id: chunk.leader_id,
+        chunk: chunk.chunk,
+    });
+    assert!(
+        refused.is_err(),
+        "a chunk must still be refused after a send began, got {refused:?}"
+    );
+    assert_eq!(lifecycle.status().refused_chunks, 1);
+
+    // And admitting still works afterwards, so the send has not wedged it.
+    assert!(lifecycle.admit_install());
+    assert!(!lifecycle.status().install_cancelled);
+}
+
+#[test]
+fn a_refused_chunk_is_not_charged_to_the_quota() {
+    // Order matters: a chunk this node will not install should not count
+    // against the bytes it is willing to install, or a cancelled replica
+    // would exhaust the quota of a node that never took a byte.
+    let rate_limit = MatrixRaftRateLimiterConfig {
+        bytes_limit_per_sec: 4,
+        check_cycle_sec: 1,
+    };
+    let config = transfer_config();
+    let snap = snapshot(41, b"abcdefgh".to_vec());
+    let mut sender = MatrixRaftSnapshotSender::new(config).expect("sender");
+    sender.begin_send(&snap, 2, 1).expect("begin send");
+    let mut downloader =
+        MatrixRaftSnapshotDownloader::with_rate_limit(config, &rate_limit).expect("downloader");
+
+    downloader.cancel_install();
+    let before = downloader.rate_limit_available_bytes();
+    let chunk = sender.poll_send_requests().expect("poll").remove(0);
+    let refused = downloader.download(chunk).expect("download answers");
+    assert!(!refused.accepted);
+    assert!(!refused.over_quota, "it was refused, not over quota");
+    assert_eq!(
+        downloader.rate_limit_available_bytes(),
+        before,
+        "a refused chunk must not spend the install quota"
+    );
+    assert_eq!(downloader.status().refused_chunks, 1);
+}
+
+#[test]
+fn cancelling_an_idle_install_says_nothing_was_in_progress() {
+    // The return value is about the transfer, not about the flag: a host
+    // cancelling pre-emptively should be able to tell that from stopping one
+    // in flight, because only the latter means a peer is now wasting its time.
+    let mut downloader = MatrixRaftSnapshotDownloader::new(transfer_config()).expect("downloader");
+    assert!(
+        !downloader.cancel_install(),
+        "nothing was installing, so there was nothing to stop"
+    );
+    assert!(
+        downloader.install_cancelled(),
+        "but the install is closed all the same"
+    );
+    assert_eq!(downloader.status().cancelled_installs, 0);
+    assert!(downloader.status().install_cancelled);
 }

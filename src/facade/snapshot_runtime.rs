@@ -175,6 +175,19 @@ pub struct SnapshotLifecycleStatus {
     /// this and calls `cancel_send`.
     #[serde(default)]
     pub throttled_responses: u64,
+    /// Chunks refused because the install is cancelled.
+    ///
+    /// Counted apart from everything else because it is the only rejection
+    /// that says "stop sending" rather than "try again": a sender that keeps
+    /// pushing against this is wasting a whole snapshot's worth of bandwidth.
+    #[serde(default)]
+    pub refused_chunks: u64,
+    /// Installs stopped by `cancel_install` while a transfer was in progress.
+    #[serde(default)]
+    pub cancelled_installs: u64,
+    /// Whether this group is currently refusing chunks.
+    #[serde(default)]
+    pub install_cancelled: bool,
     pub rolled_back: u64,
     pub completed: bool,
     pub installed_index: LogIndex,
@@ -197,6 +210,12 @@ pub struct SnapshotLifecycle {
     sender: Option<SnapshotSendState>,
     installer: Option<SnapshotInstallState>,
     status: SnapshotLifecycleStatus,
+    /// Set by `cancel_install`, cleared by `admit_install`.
+    ///
+    /// Without it a cancel does not stick: `install_request` begins a fresh
+    /// install whenever it holds no installer, so the next chunk to arrive
+    /// would quietly resurrect the transfer that was just stopped.
+    install_closed: bool,
 }
 
 impl SnapshotLifecycle {
@@ -204,6 +223,7 @@ impl SnapshotLifecycle {
         config.validate()?;
         Ok(Self {
             config,
+            install_closed: false,
             sender: None,
             installer: None,
             status: SnapshotLifecycleStatus {
@@ -214,7 +234,10 @@ impl SnapshotLifecycle {
                 sent_chunks: 0,
                 received_chunks: 0,
                 retry_count: 0,
-            throttled_responses: 0,
+                throttled_responses: 0,
+                refused_chunks: 0,
+                cancelled_installs: 0,
+                install_cancelled: false,
                 throttled_ticks: 0,
                 rate_limited_ticks: 0,
                 rolled_back: 0,
@@ -295,6 +318,13 @@ impl SnapshotLifecycle {
             received_chunks: 0,
             retry_count: 0,
             throttled_responses: 0,
+            // Carried over, not reset. Beginning a send says nothing about
+            // whether this group is refusing snapshots, and zeroing the flag
+            // here would re-admit an install a host had cancelled -- the same
+            // resurrection `cancel_install` exists to stop, by another route.
+            refused_chunks: self.status.refused_chunks,
+            cancelled_installs: self.status.cancelled_installs,
+            install_cancelled: self.install_closed,
             throttled_ticks: 0,
             rate_limited_ticks: self.status.rate_limited_ticks,
             rolled_back: self.status.rolled_back,
@@ -479,6 +509,15 @@ impl SnapshotLifecycle {
         &mut self,
         request: InstallSnapshotRequest,
     ) -> Result<Option<RaftSnapshot>, RaftError> {
+        // A closed install refuses every chunk, including the first of a new
+        // snapshot. This is the whole point of closing it: dropping the
+        // partial install alone leaves the next chunk free to start another.
+        if self.install_closed {
+            self.status.refused_chunks += 1;
+            return Err(RaftError::InvalidRequest(
+                "snapshot install is cancelled for this group".to_string(),
+            ));
+        }
         if self.installer.is_none() {
             self.status.snapshot_id = Some(request.chunk.meta.snapshot_id.clone());
             self.status.installing = true;
@@ -506,10 +545,61 @@ impl SnapshotLifecycle {
         Ok(None)
     }
 
+    /// Throws away a partial install so the next attempt starts clean.
+    ///
+    /// **This does not stop the transfer**, and that is the difference from
+    /// [`SnapshotLifecycle::cancel_install`]: a rollback says "that attempt
+    /// was bad, send it again", so the next chunk legitimately begins a fresh
+    /// install. A host that wants the transfer to stop wants `cancel_install`.
     pub fn rollback_install(&mut self) {
         self.installer = None;
         self.status.installing = false;
         self.status.rolled_back += 1;
+    }
+
+    /// Stops installing into this group, and keeps it stopped.
+    ///
+    /// Returns whether an install was in progress. The flag matters more than
+    /// the partial state: `install_request` starts a new install whenever it
+    /// holds none, so **discarding the partial without closing the install
+    /// lets the very next chunk start over** -- which is what a host removing
+    /// a replica, or refusing a snapshot it has decided it does not want,
+    /// would have got.
+    ///
+    /// The counterpart to [`SnapshotLifecycle::cancel_send`] on the other end
+    /// of the transfer. A cancelled install refuses chunks with an error
+    /// rather than ignoring them, so a sender finds out instead of pushing a
+    /// whole snapshot at a receiver that is discarding it.
+    ///
+    /// Reopen with [`SnapshotLifecycle::admit_install`]. Nothing reopens it
+    /// implicitly, because every implicit route is the resurrection this
+    /// exists to prevent.
+    pub fn cancel_install(&mut self) -> bool {
+        let was_installing = self.installer.take().is_some();
+        self.install_closed = true;
+        self.status.installing = false;
+        self.status.install_cancelled = true;
+        if was_installing {
+            self.status.cancelled_installs += 1;
+        }
+        was_installing
+    }
+
+    /// Lets this group receive snapshots again after a cancel.
+    ///
+    /// Returns whether it had been closed. A host calls this when the replica
+    /// should receive again -- it is deliberately explicit, so that "stopped"
+    /// never ends quietly.
+    pub fn admit_install(&mut self) -> bool {
+        let was_closed = self.install_closed;
+        self.install_closed = false;
+        self.status.install_cancelled = false;
+        was_closed
+    }
+
+    /// Whether this group is refusing snapshot chunks.
+    pub fn install_cancelled(&self) -> bool {
+        self.install_closed
     }
 
     pub fn status(&self) -> SnapshotLifecycleStatus {
