@@ -4,7 +4,8 @@
 //! MatrixRaft-style heartbeat merge queue for multi-group store transports.
 
 use crate::{
-    AppendEntriesRequest, AppendEntriesResponse, DriverTickReceiver, Message, NodeId, RaftError,
+    AppendEntriesRequest, AppendEntriesResponse, Driver, DriverGroupKey, DriverTickReceiver,
+    Message, NodeId, RaftError,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -492,6 +493,32 @@ impl HeartbeatFlusher {
 
     pub fn is_enabled(&self) -> bool {
         self.merger.is_enabled()
+    }
+}
+
+impl HeartbeatFlusher {
+    /// Registers this flusher with a driver, to flush every `interval_ms`.
+    ///
+    /// The cast to `Arc<dyn DriverTickReceiver>` is the fiddly part of doing
+    /// this by hand, and getting the interval from somewhere other than the
+    /// setting that configured the merging is how a flush interval and a
+    /// configured one drift apart. `MatrixRaftRuntimeWiring::heartbeat_merge_interval_ms`
+    /// is where that interval comes from.
+    ///
+    /// Zero means the driver's own tick interval, which is what
+    /// [`Driver::register_group_every`] documents it to mean -- not a busy
+    /// loop.
+    pub fn register_every(
+        self: &Arc<Self>,
+        driver: &Driver,
+        key: DriverGroupKey,
+        interval_ms: u64,
+    ) -> Result<(), RaftError> {
+        driver.register_group_every(
+            key,
+            Arc::clone(self) as Arc<dyn DriverTickReceiver>,
+            interval_ms,
+        )
     }
 }
 
