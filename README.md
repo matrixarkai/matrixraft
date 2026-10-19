@@ -1459,6 +1459,45 @@ looks wasteful would have had nothing stop them.
 `tests/lease_membership_contract.rs` is what stops them, and each of the three
 paths has its own case: the lease drops, and one heartbeat round against the
 new membership earns it back — an invalidation, not a one-way door.
+### Telling an accepted membership change from a downgraded one
+
+Raft allows only one configuration change to be pending -- in the log and not
+yet applied -- at a time. This cluster **downgrades** a second one to an
+ordinary entry rather than refusing it: the entry is still appended and
+replicated, but it is not registered as a membership change and the membership
+does not move.
+
+That is a deliberate choice, pinned by
+`membership_proposal_downgrades_second_unapplied_change`. What it cost is that
+`propose_with_options` returns only a `LogId`, so a caller got `Ok` either way
+-- and a host that proposed a change, saw success and waited for the membership
+to move would be waiting for something that was never going to happen.
+
+```rust
+match cluster.propose_membership_change(payload)? {
+    MembershipProposalOutcome::Accepted { index } => { /* pending at index */ }
+    MembershipProposalOutcome::Downgraded { index, pending_at } => {
+        // appended at `index` as an ordinary entry; `pending_at` is in the way
+    }
+}
+```
+
+`propose_with_options` is unchanged, and a test pins that too -- the reporting
+call exists because the old one cannot say, not to replace it. The shape
+follows `transfer_leader_outcome`, which is here for the same reason.
+
+The comparable engine avoids the question by **refusing** the proposal
+outright: a change may only be proposed once the leader has applied past the
+pending one. That is arguably the better contract, and it is not what this
+changes -- reversing a deliberate decision is a different thing from making it
+legible, and the first belongs to whoever made it.
+
+**A counter was the other option and the footprint guard refused it.** A
+`downgraded_membership_proposals: u64` would have been 8 bytes on every group,
+and `tests/cluster_footprint.rs` pins `RaftCluster` at 520 bytes because every
+group pays it and a shard walks all of it between visits. The build failed with
+exactly that message. The reporting call needs no state at all, so the counter
+went and the trade is recorded where the downgrade happens.
 
 ### Heartbeats from many groups to one peer, in one batch
 

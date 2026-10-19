@@ -374,6 +374,38 @@ struct PendingSnapshotInstall {
     fence: ApplySnapshotFence,
 }
 
+/// What happened to a membership proposal.
+///
+/// Raft allows only one configuration change to be pending at a time, and this
+/// cluster **downgrades** a second one to an ordinary entry rather than
+/// refusing it. That is a real outcome a caller needs to be able to see: the
+/// entry is appended and replicated either way, and only one of the two moves
+/// the membership.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MembershipProposalOutcome {
+    /// Registered as a membership change, now pending at this index.
+    Accepted { index: LogIndex },
+    /// Appended as an ordinary entry, because the change at `pending_at` has
+    /// not been applied yet. **The membership will not move for this entry.**
+    Downgraded {
+        index: LogIndex,
+        pending_at: LogIndex,
+    },
+}
+
+impl MembershipProposalOutcome {
+    /// The index the entry was appended at, whichever happened.
+    pub fn index(&self) -> LogIndex {
+        match self {
+            Self::Accepted { index } | Self::Downgraded { index, .. } => *index,
+        }
+    }
+
+    pub fn is_accepted(&self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+}
+
 /// How far a node may apply right now, and what stopped it going further.
 ///
 /// A **command** entry may not be applied until the committed index that
@@ -2822,6 +2854,45 @@ impl RaftCluster {
         self.propose_with_options(payload, ProposeOptions::default())
     }
 
+    /// Proposes a membership change, reporting which of the two things
+    /// happened.
+    ///
+    /// Only one configuration change may be pending -- in the log and not yet
+    /// applied -- at a time. A second one is appended as an **ordinary entry**
+    /// and does not move the membership, which `propose_with_options` cannot
+    /// tell a caller because it returns only a `LogId`. A host that proposed a
+    /// change, got `Ok`, and assumed the membership was moving would wait for
+    /// something that is never going to happen.
+    ///
+    /// Shaped after [`RaftCluster::transfer_leader_outcome`], which exists for
+    /// the same reason.
+    pub fn propose_membership_change(
+        &mut self,
+        payload: Payload,
+    ) -> Result<MembershipProposalOutcome, RaftError> {
+        let pending_before = self.pending_membership_change_index;
+        let log_id = self.propose_with_options(
+            payload,
+            ProposeOptions {
+                expected_term: None,
+                is_command: false,
+                is_membership_change: true,
+            },
+        )?;
+        if self.pending_membership_change_index == Some(log_id.index) {
+            return Ok(MembershipProposalOutcome::Accepted {
+                index: log_id.index,
+            });
+        }
+        Ok(MembershipProposalOutcome::Downgraded {
+            index: log_id.index,
+            pending_at: self
+                .pending_membership_change_index
+                .or(pending_before)
+                .unwrap_or_default(),
+        })
+    }
+
     pub fn propose_with_options(
         &mut self,
         payload: Payload,
@@ -2868,8 +2939,27 @@ impl RaftCluster {
         let membership_change_is_pending = self
             .pending_membership_change_index
             .is_some_and(|pending| pending > leader_safety_applied_index);
+        // Raft allows only one configuration change to be pending -- in the log
+        // and not yet applied -- at a time. A second one is **downgraded** to an
+        // ordinary entry rather than refused: the entry is still appended and
+        // replicated, but it is not registered as a membership change and the
+        // membership does not move.
+        //
+        // That is a deliberate choice here, asserted by
+        // `membership_proposal_downgrades_second_unapplied_change`, and not one
+        // this comment is reversing. What it costs is that
+        // `propose_with_options` returns only a `LogId`, so a caller cannot
+        // tell an accepted change from a downgraded one.
+        // [`RaftCluster::propose_membership_change`] is the call that can.
+        //
+        // A counter was the other option and was dropped: `RaftCluster`'s
+        // width is guarded at 520 bytes by `tests/cluster_footprint.rs`,
+        // because every group pays it and a shard walks all of it between
+        // visits. One `u64` is 8 bytes a group for something the new call
+        // reports with no state at all.
         let proposed_as_membership_change =
             options.is_membership_change && !membership_change_is_pending;
+
         if proposed_as_membership_change {
             self.pending_membership_change_index = Some(log_id.index);
             self.membership_change_indexes.insert(log_id.index);
