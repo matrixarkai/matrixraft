@@ -1115,6 +1115,47 @@ Wire-compatible both ways, asserted on bytes: an absent payload is not written
 at all, and a stamped envelope still decodes as a bare request for a peer that
 predates both it and `cluster_id`.
 
+### A cancelled install stays cancelled
+
+`cancel_send` stopped a snapshot going out. Nothing stopped one coming in.
+
+`rollback_install` dropped the partial install, and `install_request` begins a
+fresh one whenever it holds none — so **the next chunk to arrive quietly
+started the transfer again**. A host removing a replica, or refusing a snapshot
+it had decided against, had no way to make the refusal stick.
+
+```rust
+downloader.cancel_install();   // stops it, and keeps it stopped
+// ... later, when the replica should receive again:
+downloader.admit_install();
+```
+
+- **A refused chunk is answered, not ignored**, with `throttled: false`. A
+  throttle means *later*; this means *not at all*, so it spends the sender's
+  retry budget and the send is abandoned — rather than a receiver silently
+  discarding a whole snapshot someone is still pushing at it.
+- **Refused before the quota is charged.** A chunk this node will not install
+  must not count against the bytes it is willing to install, or a cancelled
+  replica would exhaust the quota of a node that never took a byte.
+- **Nothing reopens it implicitly**, because every implicit route is the
+  resurrection this exists to prevent. `begin_send` rebuilds the whole status
+  and is the subtlest of them: the two directions share one status struct, and
+  starting to *send* says nothing about whether this group will *receive*. It
+  carries the flag over, and a test pins that.
+- `refused_chunks`, `cancelled_installs` and `install_cancelled` report it.
+  Refusals are counted apart from everything else because this is the only
+  rejection that means "stop sending" rather than "try again".
+
+**A rollback is not a cancel**, and both are needed. A rollback says "that
+attempt was bad, send it again", so the next transfer is legitimately taken; a
+cancel says stop. Making rollback behave like a cancel would let one transient
+bad chunk stop a replica receiving snapshots at all.
+
+One thing a rollback does *not* do, now asserted rather than assumed: it does
+not resume a transfer mid-stream. Handing the installer a chunk at offset 4
+with nothing before it is an error, so the sender restarts from the beginning.
+That was always true; the test says so now.
+
 ### Heartbeats from many groups to one peer, in one batch
 
 `HeartbeatMerger` buckets by destination address rather than by group, which is

@@ -2134,6 +2134,16 @@ pub struct MatrixRaftSnapshotStatus {
     /// [`SnapshotLifecycleStatus::throttled_responses`].
     #[serde(default)]
     pub throttled_responses: u64,
+    /// Chunks refused because the install is cancelled. See
+    /// [`SnapshotLifecycleStatus::refused_chunks`].
+    #[serde(default)]
+    pub refused_chunks: u64,
+    /// Installs stopped mid-transfer by a cancel.
+    #[serde(default)]
+    pub cancelled_installs: u64,
+    /// Whether this group is refusing snapshot chunks.
+    #[serde(default)]
+    pub install_cancelled: bool,
     pub rolled_back: u64,
     pub completed: bool,
     pub installed_index: LogIndex,
@@ -2150,6 +2160,9 @@ impl From<SnapshotLifecycleStatus> for MatrixRaftSnapshotStatus {
             received_chunks: status.received_chunks,
             retry_count: status.retry_count,
             throttled_responses: status.throttled_responses,
+            refused_chunks: status.refused_chunks,
+            cancelled_installs: status.cancelled_installs,
+            install_cancelled: status.install_cancelled,
             throttled_ticks: status.throttled_ticks,
             rate_limited_ticks: status.rate_limited_ticks,
             rolled_back: status.rolled_back,
@@ -2415,6 +2428,31 @@ pub struct MatrixRaftSnapshotDownloader {
 }
 
 impl MatrixRaftSnapshotDownloader {
+    /// Stops installing into this group, and keeps it stopped.
+    ///
+    /// Returns whether a transfer was in progress. Further chunks are
+    /// **answered with a rejection** rather than installed or ignored, so the
+    /// sender abandons its send instead of pushing a whole snapshot at a
+    /// receiver that is discarding it.
+    ///
+    /// See [`SnapshotLifecycle::cancel_install`] for why the flag is needed at
+    /// all: discarding the partial install alone lets the next chunk start
+    /// another one.
+    pub fn cancel_install(&mut self) -> bool {
+        self.lifecycle.cancel_install()
+    }
+
+    /// Lets this group receive snapshots again. Returns whether it had been
+    /// cancelled.
+    pub fn admit_install(&mut self) -> bool {
+        self.lifecycle.admit_install()
+    }
+
+    /// Whether this group is refusing snapshot chunks.
+    pub fn install_cancelled(&self) -> bool {
+        self.lifecycle.install_cancelled()
+    }
+
     pub fn new(config: SnapshotLifecycleConfig) -> Result<Self, RaftError> {
         Ok(Self {
             lifecycle: SnapshotLifecycle::new(config)?,
@@ -2503,6 +2541,37 @@ impl MatrixRaftSnapshotDownloader {
         let snapshot_index = request.chunk.meta.last_log_id.index;
         let chunk_bytes = request.chunk.data.len() as u64;
         let chunk_offset = request.chunk.offset;
+        // Checked before the quota is charged: a chunk this node is not going
+        // to install should not be counted against the bytes it is willing to
+        // install. And answered rather than erroring, so the sender learns to
+        // stop instead of pushing a whole snapshot at a receiver that is
+        // discarding it. `throttled: false` on purpose -- this is not "later",
+        // it is "not at all", and it should spend the retry budget and abandon
+        // the send.
+        if self.lifecycle.install_cancelled() {
+            // Routed through the lifecycle rather than answered from here, so
+            // that the refusal is recorded in exactly one place. Returning
+            // early with a hand-written reason left `refused_chunks` at zero,
+            // which is a counter that lies rather than one that is missing.
+            let reason = match self.lifecycle.install_request(request) {
+                Err(refused) => refused.to_string(),
+                Ok(_) => unreachable!("a cancelled install cannot accept a chunk"),
+            };
+            return Ok(MatrixRaftSnapshotDownloadResult {
+                accepted: false,
+                response: InstallSnapshotResponse {
+                    term: 0,
+                    accepted: false,
+                    next_offset: chunk_offset,
+                    committed_index: 0,
+                    reason,
+                    throttled: false,
+                },
+                installed_snapshot: None,
+                finish: None,
+                over_quota: false,
+            });
+        }
         let next_offset = request
             .chunk
             .offset
