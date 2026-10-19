@@ -815,7 +815,7 @@ assertion.
 
 Recorded, reported back, and reaching nothing that runs:
 
-<!-- inert-settings: reader_num, executor_num, watched_address_resolver, num_connection_group, dynamic_address_map, user_payload_callback_bound -->
+<!-- inert-settings: reader_num, executor_num, watched_address_resolver, num_connection_group, user_payload_callback_bound -->
 
 On `MatrixRaftGroupContext`:
 
@@ -826,7 +826,6 @@ On `MatrixRaftGroupContext`:
 On `MatrixRaftTransportOptions`:
 
 - `num_connection_group`
-- `dynamic_address_map`
 - `user_payload_callback_bound`
 
 The transport half of this list is new to the list rather than new to the
@@ -839,9 +838,17 @@ rather than in the marker above because `timeout_ms` is also a field on
 several live types; the guard matches on the name alone and would read those
 as this one being wired up.
 
-`cluster_id` **was** on this list and is now live — see "A cluster id that
-refuses the other cluster" below. `address_resolver_bound` is not inert
-either: `MatrixRaftTransportBuilder::build` refuses without it.
+`cluster_id` and `dynamic_address_map` **were** on this list and are now
+live — see "A cluster id that refuses the other cluster" and "Addresses that
+move" below. `address_resolver_bound` is not inert either:
+`MatrixRaftTransportBuilder::build` refuses without it.
+
+`watched_address_resolver` stays on the list even though
+`dynamic_address_map` has left it. They sound like the same setting and are
+not: the live one is on `MatrixRaftTransportOptions`, where a transport is
+built and can be given a resolver, while this one is on
+`MatrixRaftGroupContext`, which builds no transport and so has nothing to
+hand a resolver to.
 
 `store_id` belongs to `MatrixRaftNodeCreator` rather than the context. It is
 resolved into the wiring report — a group with no creator takes its `peer_id`
@@ -907,6 +914,47 @@ that predates it ignores the extra field on arrival.
 worth watching rather than merely available: a node given the wrong cluster id
 is indistinguishable from a node that is down — every RPC fails — and the
 counter is what tells the two apart.
+
+### Addresses that move
+
+A peer that moves from one host to another leaves every send to it failing at
+the connect, for ever. Nothing in Raft re-asks where a peer is, and
+`set_peer_addr` only helps a host that already knows.
+
+`dynamic_address_map` is what says addresses move. With it set, a connect that
+fails re-asks the resolver, applies a **changed** answer, and retries the send
+once:
+
+```rust
+let options = MatrixRaftTransportBuilder::new()
+    .set_dynamic_address_map()
+    .bind_address_resolver()
+    .build()?;
+
+let transport = options.into_tcp_transport_watching(peers, local_node_id, resolver);
+```
+
+Without the flag the same call builds a static map and never consults the
+resolver — which is the A/B one of its tests performs, because a flag that
+changes nothing observable is how this setting spent its first life.
+
+- **Only on failure.** Re-resolving before every send would put a host's
+  service discovery on the Raft hot path, where a slow lookup becomes a slow
+  cluster.
+- **A repeated address is not a move.** A peer that is merely down resolves to
+  where it already was; retrying that pays the connect failure twice and
+  counting it would make a down peer look like a moving one.
+- **A move drops the pool.** Connections kept open to the old host point
+  somewhere that no longer answers.
+- `refresh_peer_addr` is the half a host drives itself, for when discovery
+  knows before a send has failed. It errors rather than returning `None` when
+  there is no resolver, so "already up to date" cannot be read off a transport
+  that could never refresh.
+- `re_resolved_addresses` counts moves, not lookups.
+
+`peer_addr` now returns `Option<String>` rather than `Option<&str>`: the map
+is shared and can change under a resolver, so lending out a borrow into it
+would be lending out the answer to a question whose answer moves.
 
 ### Heartbeats from many groups to one peer, in one batch
 

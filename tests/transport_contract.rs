@@ -5,9 +5,9 @@ use matrixraft::{
     matrixraft_validate_read_index_response, matrixraft_validate_tcp_transport_request,
     matrixraft_validate_vote_request, AppendEntriesRequest, AppendEntriesResponse,
     AuthenticatedRaftTransport, ClusterRaftTransport, Driver, DriverGroupKey, DriverOptions,
-    DriverTickReceiver, HeartbeatFlusher, HeartbeatMergeMessage, HeartbeatMerger,
-    InMemoryRaftTransport, InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogId,
-    MatrixRaftRuntimeWiring, MatrixRaftTransportBuilder, MergedHeartbeatBatch,
+    DriverTickReceiver, HeartbeatAddressResolver, HeartbeatFlusher, HeartbeatMergeMessage,
+    HeartbeatMerger, InMemoryRaftTransport, InstallSnapshotRequest, InstallSnapshotResponse,
+    LogEntry, LogId, MatrixRaftRuntimeWiring, MatrixRaftTransportBuilder, MergedHeartbeatBatch,
     MergedHeartbeatSender, Message, Peer, RaftCluster, RaftError, ReadIndexRequest,
     ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState,
     StaticRaftAuthToken, TcpRaftTransport, TcpRaftTransportEnvelope, TcpRaftTransportRequest,
@@ -1321,7 +1321,7 @@ fn a_moved_peer_stops_getting_rpcs_at_its_old_address() {
 
     let mut peers = BTreeMap::new();
     peers.insert(2, old_addr.clone());
-    let mut transport = TcpRaftTransport::new(peers);
+    let transport = TcpRaftTransport::new(peers);
 
     append_one(&transport).expect("the first append opens and pools a connection");
     assert_eq!(
@@ -1329,7 +1329,7 @@ fn a_moved_peer_stops_getting_rpcs_at_its_old_address() {
         1,
         "the append should have pooled its connection"
     );
-    assert_eq!(transport.peer_addr(2), Some(old_addr.as_str()));
+    assert_eq!(transport.peer_addr(2).as_deref(), Some(old_addr.as_str()));
 
     // The peer moves. The old address is shut down, so a send that still went
     // there would fail rather than quietly succeed -- which is what makes this
@@ -1344,7 +1344,7 @@ fn a_moved_peer_stops_getting_rpcs_at_its_old_address() {
         Some(old_addr.as_str()),
         "set_peer_addr reports the address it replaced"
     );
-    assert_eq!(transport.peer_addr(2), Some(new_addr.as_str()));
+    assert_eq!(transport.peer_addr(2).as_deref(), Some(new_addr.as_str()));
     assert_eq!(
         transport.idle_connections(2),
         0,
@@ -1882,5 +1882,215 @@ fn the_recorded_cluster_id_reaches_the_transport_and_the_server_it_builds() {
     );
     assert_eq!(handler.calls(), 1, "and it did not reach the handler");
     assert_eq!(server.refused_foreign_cluster(), 1);
+    server.shutdown().expect("shutdown");
+}
+
+/// An address nothing is listening on.
+///
+/// Bound and then dropped, so it is a port the OS just confirmed was free
+/// rather than a number picked and hoped for. On loopback a connect to it
+/// fails at once with a refusal, which is the failure a moved peer produces.
+fn dead_addr() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a port to free it");
+    let addr = listener.local_addr().expect("addr").to_string();
+    drop(listener);
+    addr
+}
+
+/// A resolver that answers whatever it was last told to, and counts.
+///
+/// The count is the part that matters: "the resolver was not consulted" is
+/// the whole claim about a static address map, and it cannot be read off the
+/// transport.
+#[derive(Clone)]
+struct ScriptedResolver {
+    answer: Arc<Mutex<String>>,
+    asked: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ScriptedResolver {
+    fn new(answer: impl Into<String>) -> Self {
+        Self {
+            answer: Arc::new(Mutex::new(answer.into())),
+            asked: Arc::default(),
+        }
+    }
+
+    fn asked(&self) -> u64 {
+        self.asked.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl HeartbeatAddressResolver for ScriptedResolver {
+    fn resolve_raft_addr(&self, _from: u64, _to: u64) -> Result<String, RaftError> {
+        self.asked
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(self.answer.lock().expect("answer").clone())
+    }
+}
+
+#[test]
+fn a_peer_that_moved_is_found_again_by_the_resolver() {
+    let (mut server, handler) = counting_server(ANY_CLUSTER_ID);
+    let moved_to = server.addr().to_string();
+    let was_at = dead_addr();
+
+    let resolver = Arc::new(ScriptedResolver::new(moved_to.clone()));
+    let mut peers = BTreeMap::new();
+    peers.insert(2, was_at.clone());
+    let transport =
+        TcpRaftTransport::new(peers).watching_addresses(1, Arc::clone(&resolver) as Arc<_>);
+
+    // Nothing is listening where this transport thinks peer 2 is.
+    assert_eq!(transport.peer_addr(2).as_deref(), Some(was_at.as_str()));
+    transport
+        .append_entries(2, cluster_append())
+        .expect("a moved peer should be found again rather than failing for ever");
+
+    assert_eq!(
+        handler.calls(),
+        1,
+        "the RPC reached the peer at its new home"
+    );
+    assert_eq!(
+        transport.peer_addr(2).as_deref(),
+        Some(moved_to.as_str()),
+        "the new address should be kept, so the next send does not pay the failure again"
+    );
+    assert_eq!(resolver.asked(), 1, "asked once, on the failure");
+    assert_eq!(transport.re_resolved_addresses(), 1);
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn a_static_address_map_does_not_consult_the_resolver() {
+    // The A/B that makes `dynamic_address_map` a live setting rather than a
+    // recorded one: same resolver, same dead address, the flag the only
+    // difference.
+    let (mut server, handler) = counting_server(ANY_CLUSTER_ID);
+    let moved_to = server.addr().to_string();
+    let was_at = dead_addr();
+    let mut peers = BTreeMap::new();
+    peers.insert(2, was_at.clone());
+
+    let static_map = MatrixRaftTransportBuilder::new()
+        .bind_address_resolver()
+        .build()
+        .expect("build");
+    assert!(!static_map.dynamic_address_map);
+    let static_resolver = Arc::new(ScriptedResolver::new(moved_to.clone()));
+    let static_transport = static_map.into_tcp_transport_watching(
+        peers.clone(),
+        1,
+        Arc::clone(&static_resolver) as Arc<_>,
+    );
+    assert!(
+        static_transport
+            .append_entries(2, cluster_append())
+            .is_err(),
+        "a static address map must not chase a moved peer"
+    );
+    assert_eq!(
+        static_resolver.asked(),
+        0,
+        "and it must not consult the resolver at all"
+    );
+    assert_eq!(static_transport.re_resolved_addresses(), 0);
+    assert_eq!(handler.calls(), 0);
+
+    let dynamic_map = MatrixRaftTransportBuilder::new()
+        .set_dynamic_address_map()
+        .bind_address_resolver()
+        .build()
+        .expect("build");
+    assert!(dynamic_map.dynamic_address_map);
+    let dynamic_resolver = Arc::new(ScriptedResolver::new(moved_to));
+    let dynamic_transport =
+        dynamic_map.into_tcp_transport_watching(peers, 1, Arc::clone(&dynamic_resolver) as Arc<_>);
+    dynamic_transport
+        .append_entries(2, cluster_append())
+        .expect("the same resolver, with the flag set, finds the peer");
+    assert_eq!(dynamic_resolver.asked(), 1);
+    assert_eq!(dynamic_transport.re_resolved_addresses(), 1);
+    assert_eq!(handler.calls(), 1);
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn a_resolver_that_repeats_the_address_is_not_a_move() {
+    // A peer that is merely down resolves to where it already was. Retrying
+    // that address would pay the connect failure twice for nothing, and
+    // counting it would make a down peer look like a moving one.
+    let was_at = dead_addr();
+    let resolver = Arc::new(ScriptedResolver::new(was_at.clone()));
+    let mut peers = BTreeMap::new();
+    peers.insert(2, was_at.clone());
+    let transport =
+        TcpRaftTransport::new(peers).watching_addresses(1, Arc::clone(&resolver) as Arc<_>);
+
+    let failed = transport.append_entries(2, cluster_append());
+    assert!(failed.is_err(), "a down peer still fails");
+    let message = failed.expect_err("err").to_string();
+    assert!(
+        !message.contains("after re-resolving"),
+        "the unchanged address must not be retried, got {message}"
+    );
+    assert_eq!(resolver.asked(), 1, "asked exactly once, not in a loop");
+    assert_eq!(
+        transport.re_resolved_addresses(),
+        0,
+        "an unchanged answer is not a move"
+    );
+    assert_eq!(transport.peer_addr(2).as_deref(), Some(was_at.as_str()));
+}
+
+#[test]
+fn refresh_peer_addr_is_the_half_a_host_drives_itself() {
+    let (mut server, handler) = counting_server(ANY_CLUSTER_ID);
+    let live = server.addr().to_string();
+
+    // No resolver: an error rather than a quiet nothing, so a host cannot
+    // read "already up to date" off a transport that could never refresh.
+    let mut peers = BTreeMap::new();
+    peers.insert(2, live.clone());
+    let unresolved = TcpRaftTransport::new(peers.clone());
+    assert!(unresolved.refresh_peer_addr(2).is_err());
+
+    // Warm the pool, so the claim about dropping stale connections is about
+    // connections that exist.
+    let resolver = Arc::new(ScriptedResolver::new(live.clone()));
+    let transport =
+        TcpRaftTransport::new(peers).watching_addresses(1, Arc::clone(&resolver) as Arc<_>);
+    transport
+        .append_entries(2, cluster_append())
+        .expect("warm the pool");
+    assert_eq!(handler.calls(), 1);
+    assert_eq!(transport.idle_connections(2), 1);
+
+    // The answer is the address already held: nothing replaced, pool intact.
+    assert_eq!(
+        transport.refresh_peer_addr(2).expect("refresh"),
+        None,
+        "an unchanged answer replaces nothing"
+    );
+    assert_eq!(transport.idle_connections(2), 1, "and keeps the warm pool");
+    assert_eq!(transport.re_resolved_addresses(), 0);
+
+    // Now it moves. The old address comes back, and the connections pooled to
+    // it are gone -- they point at a host that no longer answers.
+    let elsewhere = dead_addr();
+    *resolver.answer.lock().expect("answer") = elsewhere.clone();
+    assert_eq!(
+        transport.refresh_peer_addr(2).expect("refresh"),
+        Some(live.clone()),
+        "the replaced address is returned"
+    );
+    assert_eq!(transport.peer_addr(2).as_deref(), Some(elsewhere.as_str()));
+    assert_eq!(
+        transport.idle_connections(2),
+        0,
+        "connections to the old host must not survive the move"
+    );
+    assert_eq!(transport.re_resolved_addresses(), 1);
     server.shutdown().expect("shutdown");
 }

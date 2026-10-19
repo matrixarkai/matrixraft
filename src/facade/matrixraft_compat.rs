@@ -2921,11 +2921,15 @@ impl MatrixRaftTransportOptions {
     /// The TCP transport these options describe.
     ///
     /// **This honours `cluster_id`. It does not honour `timeout_ms`,
-    /// `num_connection_group`, `dynamic_address_map` or
-    /// `user_payload_callback_bound`**, which this crate still only records --
-    /// the README's settings section lists them. Said here because a
-    /// constructor that quietly dropped four of six fields would be a worse
-    /// way to find that out.
+    /// `num_connection_group` or `user_payload_callback_bound`**, which this
+    /// crate still only records -- the README's settings section lists them.
+    /// Said here because a constructor that quietly dropped them would be a
+    /// worse way to find that out.
+    ///
+    /// `dynamic_address_map` needs a resolver to honour, so it is honoured by
+    /// [`MatrixRaftTransportOptions::into_tcp_transport_watching`] rather than
+    /// here. This constructor builds the static address map, whatever the flag
+    /// says, because there is nothing to re-resolve from.
     ///
     /// Both halves are needed for the cluster id to guard anything: a
     /// stamped request is only refused by a server that was told which
@@ -2934,6 +2938,34 @@ impl MatrixRaftTransportOptions {
     /// [`TcpRaftTransportServer::start_in_cluster`].
     pub fn into_tcp_transport(&self, peers: BTreeMap<NodeId, String>) -> TcpRaftTransport {
         TcpRaftTransport::new_in_cluster(peers, self.cluster_id)
+    }
+
+    /// The same transport, with `resolver` attached **only if
+    /// `dynamic_address_map` was set**.
+    ///
+    /// That is what the flag means and all it means: with it, a connect that
+    /// fails re-asks the resolver where the peer is and retries a changed
+    /// answer once; without it, the address map is static and the resolver is
+    /// not consulted. Passing a resolver is therefore not enough on its own --
+    /// which is deliberate, because a host that wants a static map should be
+    /// able to say so while still having a resolver to hand for
+    /// [`TcpRaftTransport::refresh_peer_addr`].
+    ///
+    /// Said plainly because the quiet version of this -- ignoring a resolver
+    /// that was passed, with nothing to show for it -- is the shape of bug
+    /// this whole knob came from.
+    pub fn into_tcp_transport_watching(
+        &self,
+        peers: BTreeMap<NodeId, String>,
+        local_node_id: NodeId,
+        resolver: Arc<dyn HeartbeatAddressResolver + Send + Sync>,
+    ) -> TcpRaftTransport {
+        let transport = TcpRaftTransport::new_in_cluster(peers, self.cluster_id);
+        if self.dynamic_address_map {
+            transport.watching_addresses(local_node_id, resolver)
+        } else {
+            transport
+        }
     }
 
     /// A server that serves only the cluster these options name.

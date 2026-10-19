@@ -415,9 +415,13 @@ pub enum TcpRaftTransportResponse {
     Batch(Vec<TcpRaftTransportResponse>),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct TcpRaftTransport {
-    peers: BTreeMap<NodeId, String>,
+    /// Behind a lock because an address can change while a send is in flight:
+    /// that is the whole point of a resolver. A send reads the address and
+    /// releases the lock before it connects, so a slow connect never blocks a
+    /// peer being moved.
+    peers: Arc<Mutex<BTreeMap<NodeId, String>>>,
     /// Connections kept open per peer, so an RPC does not pay a TCP handshake.
     ///
     /// Shared across clones on purpose: a cloned transport talks to the same
@@ -428,6 +432,28 @@ pub struct TcpRaftTransport {
     /// Stamped on every request this transport sends. [`ANY_CLUSTER_ID`]
     /// unless the host asked for one, which is why `Default` is still right.
     cluster_id: u64,
+    /// Consulted when a connect fails, if the host said addresses move.
+    /// `None` is the static map this transport has always been.
+    resolver: Option<Arc<dyn HeartbeatAddressResolver + Send + Sync>>,
+    /// The `from` a resolver is asked with. A resolver is allowed to answer
+    /// differently depending on who wants to know -- the baseline's resolver
+    /// takes both ends too, and a host behind more than one network needs it.
+    local_node_id: NodeId,
+    re_resolved: Arc<AtomicU64>,
+}
+
+// Hand-written because a resolver is not `Debug`, and requiring that of a
+// host's service discovery would be a strange thing to demand.
+impl std::fmt::Debug for TcpRaftTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpRaftTransport")
+            .field("peers", &self.peers.lock().ok().map(|peers| peers.len()))
+            .field("cluster_id", &self.cluster_id)
+            .field("resolver", &self.resolver.is_some())
+            .field("local_node_id", &self.local_node_id)
+            .field("re_resolved", &self.re_resolved.load(Ordering::Relaxed))
+            .finish()
+    }
 }
 
 /// Enough to keep a leader's concurrent RPCs to one follower off the handshake
@@ -486,10 +512,39 @@ impl TcpRaftTransport {
     /// it is the receiver that decides.
     pub fn new_in_cluster(peers: BTreeMap<NodeId, String>, cluster_id: u64) -> Self {
         Self {
-            peers,
+            peers: Arc::new(Mutex::new(peers)),
             idle: Arc::default(),
             cluster_id,
+            resolver: None,
+            local_node_id: 0,
+            re_resolved: Arc::default(),
         }
+    }
+
+    /// Re-resolves a peer's address when a connect to it fails.
+    ///
+    /// This is what makes an address *map* rather than an address list. A peer
+    /// that moved from one host to another leaves every send to it failing at
+    /// the connect, for ever, because nothing in Raft re-asks where it is --
+    /// and [`TcpRaftTransport::set_peer_addr`] only helps a host that already
+    /// knows. With a resolver attached, the first failure re-asks, applies a
+    /// changed answer (dropping the connections pooled to the old host), and
+    /// retries the send once.
+    ///
+    /// Deliberately only on failure. Re-resolving before every send would put
+    /// the host's service discovery on the Raft hot path, which is the kind of
+    /// cost that does not show up until the discovery service is slow.
+    ///
+    /// A resolver that returns the *same* address is not an error and is not
+    /// counted: it is the ordinary answer when the peer is simply down.
+    pub fn watching_addresses(
+        mut self,
+        local_node_id: NodeId,
+        resolver: Arc<dyn HeartbeatAddressResolver + Send + Sync>,
+    ) -> Self {
+        self.local_node_id = local_node_id;
+        self.resolver = Some(resolver);
+        self
     }
 
     /// Points a peer at a new address, and drops the connections pooled to its
@@ -510,15 +565,52 @@ impl TcpRaftTransport {
     /// same address is how a host that polls its service discovery would call
     /// this, and throwing away a warm pool on every poll would undo the pooling
     /// it exists for.
-    pub fn set_peer_addr(&mut self, node_id: NodeId, addr: impl Into<String>) -> Option<String> {
+    pub fn set_peer_addr(&self, node_id: NodeId, addr: impl Into<String>) -> Option<String> {
         let addr = addr.into();
-        let previous = self.peers.insert(node_id, addr.clone());
+        let previous = match self.peers.lock() {
+            Ok(mut peers) => peers.insert(node_id, addr.clone()),
+            Err(_) => return None,
+        };
         if previous.as_deref() != Some(addr.as_str()) {
             if let Ok(mut idle) = self.idle.lock() {
                 idle.remove(&node_id);
             }
         }
         previous
+    }
+
+    /// Asks the resolver where a peer is now, and applies the answer.
+    ///
+    /// The half a host drives itself: service discovery says a peer moved, and
+    /// this is how that reaches the transport without waiting for a send to
+    /// fail first. Returns the address that was replaced, as
+    /// [`TcpRaftTransport::set_peer_addr`] does, or `Ok(None)` when the answer
+    /// was the address already held.
+    ///
+    /// `Err` when there is no resolver, or when the resolver refuses: a host
+    /// calling this wants to know that nothing happened, rather than read a
+    /// quiet `None` as "already up to date".
+    pub fn refresh_peer_addr(&self, node_id: NodeId) -> Result<Option<String>, RaftError> {
+        let resolver = self.resolver.as_ref().ok_or_else(|| {
+            RaftError::Transport(
+                "this raft transport has no address resolver to refresh from".to_string(),
+            )
+        })?;
+        let resolved = resolver.resolve_raft_addr(self.local_node_id, node_id)?;
+        if self.peer_addr(node_id).as_deref() == Some(resolved.as_str()) {
+            return Ok(None);
+        }
+        self.re_resolved.fetch_add(1, Ordering::Relaxed);
+        Ok(self.set_peer_addr(node_id, resolved))
+    }
+
+    /// Times an address actually changed under a resolver.
+    ///
+    /// Counts changes, not lookups: a resolver asked about a peer that is
+    /// merely down answers with the address this transport already has, and
+    /// that is not a move.
+    pub fn re_resolved_addresses(&self) -> u64 {
+        self.re_resolved.load(Ordering::Relaxed)
     }
 
     /// Connections this transport is holding open for a peer.
@@ -535,8 +627,12 @@ impl TcpRaftTransport {
     }
 
     /// The address this transport will use for a peer, if it knows one.
-    pub fn peer_addr(&self, node_id: NodeId) -> Option<&str> {
-        self.peers.get(&node_id).map(String::as_str)
+    ///
+    /// Owned rather than borrowed because the map is shared and can change
+    /// under a resolver -- handing out a borrow into it would be lending out
+    /// the answer to a question whose answer moves.
+    pub fn peer_addr(&self, node_id: NodeId) -> Option<String> {
+        self.peers.lock().ok()?.get(&node_id).cloned()
     }
 
     /// The cluster id this transport stamps on what it sends.
@@ -549,7 +645,9 @@ impl TcpRaftTransport {
         target: NodeId,
         request: TcpRaftTransportRequest,
     ) -> Result<TcpRaftTransportResponse, RaftError> {
-        let addr = self.peers.get(&target).ok_or_else(|| {
+        // Read and release. Holding the peers lock across a connect would
+        // make a slow or blackholed address block the very call that fixes it.
+        let addr = self.peer_addr(target).ok_or_else(|| {
             RaftError::Transport(format!("raft transport target {target} has no address"))
         })?;
         let envelope = TcpRaftTransportEnvelope {
@@ -579,8 +677,33 @@ impl TcpRaftTransport {
             }
         }
 
-        let stream = TcpStream::connect(addr)
-            .map_err(|err| RaftError::Transport(format!("failed to connect to {addr}: {err}")))?;
+        let stream = match TcpStream::connect(&addr) {
+            Ok(stream) => stream,
+            Err(err) => {
+                // The peer may have moved rather than died. Re-ask, and retry
+                // only if the answer actually changed -- a resolver that
+                // repeats the address this transport already has has told us
+                // the peer is down, and connecting to it again would just pay
+                // the timeout twice.
+                let moved = match self.refresh_peer_addr(target) {
+                    Ok(Some(_)) => self.peer_addr(target),
+                    _ => None,
+                };
+                match moved {
+                    Some(moved) => TcpStream::connect(&moved).map_err(|retry| {
+                        RaftError::Transport(format!(
+                            "failed to connect to {addr}, and to {moved} after re-resolving: \
+                             {retry}"
+                        ))
+                    })?,
+                    None => {
+                        return Err(RaftError::Transport(format!(
+                            "failed to connect to {addr}: {err}"
+                        )))
+                    }
+                }
+            }
+        };
         // Raft RPCs are small request/response exchanges, which is the shape
         // Nagle delays. Without this the framing newline below can sit in the
         // sender's buffer waiting for an ACK the peer will not send until it
