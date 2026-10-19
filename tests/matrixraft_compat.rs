@@ -536,3 +536,105 @@ fn transfer_leader_report_distinguishes_an_ignored_transfer_from_a_completed_one
     let _ = fs::remove_dir_all(wal_dir);
     let _ = fs::remove_dir_all(snapshot_dir);
 }
+
+#[test]
+fn a_peer_can_move_without_a_configuration_change() {
+    // A peer that moves is the same member at a new address. Saying so used to
+    // mean removing the node and adding it again: two raft configuration
+    // changes, each needing quorum, for something that changes no membership
+    // and no role -- and on a leader the removal starts a leader transfer.
+    let wal_dir = temp_dir("peer-move-wal");
+    let snapshot_dir = temp_dir("peer-move-snapshot");
+    let options = NodeOptions {
+        group_id: 611,
+        node_id: 1,
+        raft_addr: "127.0.0.1:41611".to_string(),
+        snapshot_addr: "127.0.0.1:42611".to_string(),
+        wal_dir: wal_dir.display().to_string(),
+        snapshot_dir: snapshot_dir.display().to_string(),
+        role: ReplicaRole::Voter,
+        config: Config {
+            heartbeat_interval_ms: 10_000,
+            election_timeout_ms: 20_000,
+            leader_lease_ms: 5_000,
+            ..Default::default()
+        },
+        peers: vec![
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+        ],
+    };
+
+    let mut node = MatrixRaftNode::create(options, 1).expect("create node");
+    node.start(1).expect("start");
+
+    let before = node.resolve_address(2).expect("peer 2 is a member");
+    let membership_before = node.get_membership_members().expect("membership");
+    let roles_before: Vec<_> = membership_before
+        .iter()
+        .map(|member| (member.id, member.conf_state, member.auto_promote))
+        .collect();
+
+    let update = node
+        .update_peer_address(2, "127.0.0.1:41699", "127.0.0.1:42699")
+        .expect("peer 2 moved");
+    assert!(update.changed, "the addresses are different");
+    assert_eq!(update.node_id, 2);
+    assert_eq!(update.previous, before);
+    assert_eq!(update.current.peer_id, 2);
+    assert_eq!(update.current.raft_addr, "127.0.0.1:41699");
+    assert_eq!(update.current.snapshot_addr, "127.0.0.1:42699");
+
+    // The move is visible everywhere an address is read.
+    assert_eq!(
+        node.resolve_address(2).expect("peer 2 is still a member"),
+        update.current
+    );
+    let moved = node
+        .get_membership()
+        .expect("membership")
+        .into_iter()
+        .find(|member| member.peer_id == 2)
+        .expect("peer 2 is in the membership");
+    assert_eq!(moved.raft_addr, "127.0.0.1:41699");
+    assert_eq!(moved.snapshot_addr, "127.0.0.1:42699");
+
+    // And it is NOT a configuration change: the same members, in the same
+    // roles. This is the assertion the whole feature rests on.
+    let membership_after = node.get_membership_members().expect("membership");
+    let roles_after: Vec<_> = membership_after
+        .iter()
+        .map(|member| (member.id, member.conf_state, member.auto_promote))
+        .collect();
+    assert_eq!(
+        roles_after, roles_before,
+        "an address update must not move a member, its conf state or its promotion"
+    );
+
+    // A host polling service discovery calls this on every poll, and most
+    // polls change nothing.
+    let again = node
+        .update_peer_address(2, "127.0.0.1:41699", "127.0.0.1:42699")
+        .expect("the same addresses again");
+    assert!(
+        !again.changed,
+        "re-setting the same addresses changes nothing"
+    );
+    assert_eq!(again.previous, again.current);
+
+    // Only one of the two addresses moving is still a move.
+    let snapshot_only = node
+        .update_peer_address(2, "127.0.0.1:41699", "127.0.0.1:42700")
+        .expect("the snapshot address moved");
+    assert!(snapshot_only.changed);
+    assert_eq!(snapshot_only.current.raft_addr, "127.0.0.1:41699");
+    assert_eq!(snapshot_only.current.snapshot_addr, "127.0.0.1:42700");
+
+    // A node that is not a member has no address to update.
+    let missing = node.update_peer_address(9, "127.0.0.1:1", "127.0.0.1:2");
+    assert!(
+        matches!(missing, Err(RaftError::NodeNotFound(9))),
+        "got {missing:?}"
+    );
+}

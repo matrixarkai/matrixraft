@@ -2170,6 +2170,19 @@ pub struct MatrixRaftSnapshotDownloadResult {
     pub over_quota: bool,
 }
 
+/// What an address update changed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MatrixRaftAddressUpdate {
+    pub node_id: NodeId,
+    pub previous: MatrixRaftNodeId,
+    pub current: MatrixRaftNodeId,
+    /// False when the peer was already at these addresses.
+    ///
+    /// A host polling service discovery calls the update on every poll, and
+    /// most polls change nothing. This is how it tells a move from a poll.
+    pub changed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotCancelResult {
     pub canceled: bool,
@@ -4399,6 +4412,57 @@ impl MatrixRaftNode {
             .get(&peer_id)
             .map(MatrixRaftNodeId::from)
             .ok_or(RaftError::NodeNotFound(peer_id))
+    }
+
+    /// Points a member at new addresses, **without a configuration change**.
+    ///
+    /// A peer that moves -- restarted on another port, rescheduled onto another
+    /// host -- is the same member at a new address. Until this existed the only
+    /// way to say so was to remove the node and add it again, which is two raft
+    /// configuration changes, each needing quorum, for something that is not a
+    /// configuration change at all: the membership set is the same, every role
+    /// is the same, and the quorum never moves. On a leader the removal also
+    /// starts a leader transfer.
+    ///
+    /// It can be local precisely because **raft here holds no addresses**. A
+    /// node record in the cluster runtime carries an id, a role and replication
+    /// progress; the addresses live in this map and in the transport, and
+    /// nothing in the consensus path reads them. Nor does any snapshot restore
+    /// them -- this map is written only by membership operations, so an update
+    /// does not get reverted by an install.
+    ///
+    /// **The transport is the other half, and this cannot do it.** A node does
+    /// not own the transport its host built. Pass `current` to
+    /// [`TcpRaftTransport::set_peer_addr`], which also drops the connections
+    /// pooled to the old address -- without that the next few RPCs go to the
+    /// host the peer has left.
+    ///
+    /// Updating the local node's own entry is allowed and changes what this
+    /// node reports about itself; it does not tell the peers, which learn an
+    /// address through the membership they were given.
+    pub fn update_peer_address(
+        &mut self,
+        node_id: NodeId,
+        raft_addr: impl Into<String>,
+        snapshot_addr: impl Into<String>,
+    ) -> Result<MatrixRaftAddressUpdate, RaftError> {
+        let raft_addr = raft_addr.into();
+        let snapshot_addr = snapshot_addr.into();
+        let peer = self
+            .peers
+            .get_mut(&node_id)
+            .ok_or(RaftError::NodeNotFound(node_id))?;
+        let previous = MatrixRaftNodeId::from(&*peer);
+        let changed = peer.raft_addr != raft_addr || peer.snapshot_addr != snapshot_addr;
+        peer.raft_addr = raft_addr;
+        peer.snapshot_addr = snapshot_addr;
+        let current = MatrixRaftNodeId::from(&*peer);
+        Ok(MatrixRaftAddressUpdate {
+            node_id,
+            previous,
+            current,
+            changed,
+        })
     }
 
     pub fn leader(&self) -> Result<Option<NodeId>, RaftError> {
