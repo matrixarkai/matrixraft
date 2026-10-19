@@ -257,6 +257,18 @@ pub trait MatrixRaftFsm {
         ))
     }
 
+    /// Applies a batch, taking the iterator.
+    ///
+    /// The default body walks the iterator and calls [`Self::apply`] for each
+    /// data entry, so a state machine that only has a per-entry apply needs to
+    /// implement nothing here and one that wants to decide how far to go
+    /// overrides it.
+    ///
+    /// **This is where the flexible-apply choice is made**, rather than by a
+    /// runtime flag: `MatrixRaftNodeCreatorBuilder::flexible_apply` records a
+    /// setting and selects nothing, because selecting the driven case would
+    /// mean ignoring an override from a state machine that expected the
+    /// iterator. Its doc comment says the same thing from the other side.
     fn flexible_apply(&mut self, iterator: &mut MatrixRaftFsmIterator) -> Result<(), RaftError> {
         while let Some(entry) = iterator.current().cloned() {
             if matches!(entry.kind, MatrixRaftFsmEntryKind::Data) {
