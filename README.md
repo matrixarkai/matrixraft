@@ -4,11 +4,18 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.82-blue.svg)](Cargo.toml)
 
-MatrixRaft is the TemporalStore-owned Rust Raft readiness and parity contract
-library. It is intentionally small: the crate owns the stable public contract
-for Raft semantic requirements, readiness evidence, and parity reports, while
-TemporalStore owns the storage runtime, data-node integration, and metaserver
-integration.
+MatrixRaft is an **open-source Rust Raft consensus library**, licensed under
+Apache-2.0 and usable by anyone, in anything. It hosts many Raft groups on a
+fixed set of threads rather than a thread per group, and ships the parts a real
+deployment needs: a tick driver and worker pool, log storage and a write-ahead
+log, snapshots with bounded concurrency, membership changes, lease and
+read-index reads, heartbeat merging across groups, and a readiness contract
+that reports what the deployment can actually do.
+
+TemporalStore is its largest consumer and drove much of this design, which is
+why the crate also carries a compatibility facade and a readiness contract
+shaped for that use. Neither is a requirement: the library stands on its own,
+and a service with nothing to do with TemporalStore can depend on it.
 
 The Cargo crate is named `matrixraft`, and the naming follows from that:
 
@@ -21,7 +28,7 @@ The Cargo crate is named `matrixraft`, and the naming follows from that:
   `matrixraft_production_readiness_report` — because they are imported into a
   consumer's namespace, where a bare name would not say where it came from.
 - **The compatibility facade keeps its `MatrixRaft*` prefix**, because those
-  types mirror the reference implementation's API rather than this crate's, and
+  types mirror the API its consumers already call rather than this crate's, and
   several are genuinely distinct from the like-named type here: `NodeId` is a
   `u64` alias while `MatrixRaftNodeId` is a struct of a peer id and two
   addresses.
@@ -1054,7 +1061,15 @@ in sync with the crate API.
 
 ## Contributing
 
-Contributions are welcome — please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
+**Contributions are welcome from anyone.** You do not need to ask first and you
+do not need to be connected to this project: open an
+[issue](https://github.com/matrixarkai/matrixraft/issues) if something is wrong,
+unclear or missing, or send a
+[pull request](https://github.com/matrixarkai/matrixraft/pulls) if you would
+rather fix it yourself. Forks are expected rather than tolerated -- that is what
+an Apache-2.0 licence is for.
+
+Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). One rule matters most for this crate:
 never weaken a safety predicate to make a test pass. See
 [`docs/read_index_safety_review.md`](docs/read_index_safety_review.md) for the
