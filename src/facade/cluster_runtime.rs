@@ -750,7 +750,14 @@ impl RaftCluster {
                 lease_epoch: self.leader_lease_epoch,
             };
             let response = self.append_entries_to(peer_id, request)?;
-            self.handle_append_entries_response(leader_id, peer_id, response)?;
+            // Deferred, exactly as the propose path defers it. The public
+            // handler recomputes both group-wide aggregates per response, and
+            // `refresh_commit_index` collects and sorts a vector over every
+            // quorum node -- so a round of N responses allocated N vectors of
+            // N, which is why a heartbeat cost more per peer the more peers
+            // there were. The deferral is the one the inner function's own doc
+            // comment describes: both results depend only on the final state.
+            self.handle_append_entries_response_inner(leader_id, peer_id, response, false)?;
             if let Some(pipeline) = self.peer_pipelines.get_mut(&peer_id) {
                 pipeline.record_heartbeat_response();
             }
@@ -768,6 +775,14 @@ impl RaftCluster {
             if should_probe_tail {
                 let _ = self.catch_up_peer_with_reason(peer_id, "heartbeat_tail_probe")?;
             }
+        }
+        // The two group-wide aggregates, once for the round instead of once
+        // per response. Guarded on having sent something so a round that
+        // reached nobody changes nothing, which is what the per-response form
+        // did: with no responses there was no recompute.
+        if sent > 0 {
+            self.refresh_commit_index();
+            self.leader_lease_valid = self.leader_lease_quorum_reached();
         }
         Ok(sent)
     }

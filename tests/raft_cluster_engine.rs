@@ -5480,3 +5480,91 @@ fn wal_record_for_coverage_copies_only_the_tail_the_wal_lacks() {
     assert!(!diverged.entries_are_delta);
     assert_eq!(diverged.entries.len(), entry_count + 2);
 }
+
+#[test]
+fn a_heartbeat_round_revalidates_the_leader_lease() {
+    // The behaviour that the heartbeat's end-of-round aggregate pass exists
+    // for, and that nothing covered before: a round of heartbeats to healed
+    // followers must put the leader lease back.
+    //
+    // It was found by planting. The round's two aggregates used to be
+    // recomputed per response, which made a round O(N^2); deferring them to
+    // one pass at the end is what the propose path already did. Deleting that
+    // pass entirely passed 99 tests -- so the deferral's correctness rested on
+    // nothing the suite checked. With the pass the lease comes back; without
+    // it the lease stays invalid.
+    let mut cluster = RaftCluster::new(
+        7,
+        Config::default(),
+        vec![
+            peer(1, ReplicaRole::Voter),
+            peer(2, ReplicaRole::Voter),
+            peer(3, ReplicaRole::Voter),
+            peer(4, ReplicaRole::Voter),
+            peer(5, ReplicaRole::Voter),
+        ],
+    )
+    .expect("five node cluster");
+    cluster.start().expect("cluster starts");
+    let leader = cluster.leader_id().expect("leader");
+
+    // Lose every follower, then propose. The lease cannot hold a quorum.
+    for node_id in 1..=5u64 {
+        if node_id != leader {
+            cluster
+                .set_node_healthy(node_id, false)
+                .expect("make the follower unhealthy");
+        }
+    }
+    cluster
+        .propose(b"while the followers are down".to_vec())
+        .expect("a leader can still append alone");
+    assert!(
+        !cluster.lease_read_eligible(leader, 0).unwrap_or(false),
+        "with every follower down the lease must not be valid"
+    );
+
+    // Heal them and send one round. The round's aggregate pass is what turns
+    // the four fresh confirmations into a quorum.
+    for node_id in 1..=5u64 {
+        if node_id != leader {
+            cluster
+                .set_node_healthy(node_id, true)
+                .expect("heal the follower");
+        }
+    }
+    let sent = cluster.broadcast_heartbeat().expect("heartbeat round");
+    assert_eq!(sent, 4, "the round should reach every healed follower");
+    assert!(
+        cluster.lease_read_eligible(leader, 0).unwrap_or(false),
+        "one heartbeat round to a healed quorum must revalidate the lease; \
+         without the round's aggregate pass it does not"
+    );
+}
+
+#[test]
+fn a_heartbeat_that_reached_nobody_changes_nothing() {
+    // The other half of the round's aggregate pass: it is guarded on having
+    // sent something, because the per-response form it replaced could not run
+    // when there were no responses.
+    //
+    // A single-node cluster is the case that tells the two apart. Its
+    // heartbeat round reaches nobody, so an unguarded pass would evaluate the
+    // lease quorum anyway -- and a one-node group is trivially its own quorum,
+    // so the lease would flip to valid off a round that contacted nothing.
+    // Whether that is desirable is a separate question; it is not what the
+    // code did before, and a cost fix should not decide it.
+    let mut alone =
+        RaftCluster::new(7, Config::default(), vec![peer(1, ReplicaRole::Voter)]).expect("cluster");
+    alone.start().expect("cluster starts");
+    let leader = alone.leader_id().expect("leader");
+    let before = alone.lease_read_eligible(leader, 0).unwrap_or(false);
+
+    let sent = alone.broadcast_heartbeat().expect("heartbeat round");
+    assert_eq!(sent, 0, "a single-node cluster reaches no follower");
+    assert_eq!(
+        alone.lease_read_eligible(leader, 0).unwrap_or(false),
+        before,
+        "a round that reached nobody must leave the lease as it was"
+    );
+}
