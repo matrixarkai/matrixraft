@@ -2336,6 +2336,14 @@ pub struct SharedRuntimeStats {
     /// box running out of cores rather than of a limit in here. Heartbeats, leases and election timeouts are counted
     /// in ticks, so a shortfall here lengthens all three.
     pub ticks_skipped: u64,
+    /// Ticks the schedule produced while ticking was switched off, over every
+    /// shard.
+    ///
+    /// Zero unless a host has called [`SharedGroupRuntime::disable_ticks`].
+    /// Distinct from `ticks_skipped`, which means owed and late: these were due
+    /// on time and withheld on purpose, and counting them together would make
+    /// a maintenance window read as a runtime falling behind.
+    pub ticks_suppressed: u64,
     /// Groups the runtime holds.
     pub groups: usize,
     /// Threads it uses, whatever the group count.
@@ -2673,9 +2681,51 @@ impl SharedGroupRuntime {
                 .iter()
                 .map(|ticker| ticker.stats().ticks_skipped)
                 .sum(),
+            ticks_suppressed: self
+                .tickers
+                .iter()
+                .map(|ticker| ticker.stats().ticks_suppressed)
+                .sum(),
             groups: self.group_count(),
             threads: self.thread_count(),
         }
+    }
+
+    /// Stops delivering ticks to every group this runtime hosts.
+    ///
+    /// The shards each hold their own switch, and a host of this runtime cannot
+    /// reach them: `tickers` is private and there is no accessor, so without
+    /// this the switch exists on [`crate::Driver`] and not on the thing that
+    /// hosts groups.
+    ///
+    /// Each shard keeps its schedule running, so groups resume on the cadence
+    /// they had rather than every group in the runtime coming due at once --
+    /// see `Driver::disable_ticks` for what that buys and for the hazard, which
+    /// is that a runtime left disabled is a cluster that cannot elect.
+    ///
+    /// **Not atomic across shards.** Sixteen shards are sixteen stores, so a
+    /// group on a shard this has not reached yet can tick once more. What is
+    /// guaranteed is that no group ticks after this returns.
+    pub fn disable_ticks(&self) {
+        for ticker in &self.tickers {
+            ticker.disable_ticks();
+        }
+    }
+
+    /// Delivers ticks again, to every shard. Idempotent, like `disable_ticks`.
+    pub fn enable_ticks(&self) {
+        for ticker in &self.tickers {
+            ticker.enable_ticks();
+        }
+    }
+
+    /// True while every shard is delivering ticks.
+    ///
+    /// All of them rather than any, because a partially disabled runtime is not
+    /// a runtime that is ticking -- and the only way to reach that state is to
+    /// observe it mid-fan-out.
+    pub fn ticks_enabled(&self) -> bool {
+        self.tickers.iter().all(Driver::ticks_enabled)
     }
 
     /// How many tickers the groups are spread across.
