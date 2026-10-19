@@ -2,9 +2,10 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    LogId, MatrixRaftOldSnapshotFinishState, MatrixRaftSnapshotCreator,
-    MatrixRaftSnapshotDownloader, MatrixRaftSnapshotLoader, MatrixRaftSnapshotSender, RaftSnapshot,
-    SnapshotInstallState, SnapshotLifecycleConfig, SnapshotMetadata,
+    LogId, MatrixRaftOldSnapshotFinishState, MatrixRaftRateLimiterConfig,
+    MatrixRaftSnapshotCreator, MatrixRaftSnapshotDownloader, MatrixRaftSnapshotLoader,
+    MatrixRaftSnapshotSender, RaftSnapshot, SnapshotInstallState, SnapshotLifecycleConfig,
+    SnapshotMetadata,
 };
 
 fn snapshot(index: u64, payload: Vec<u8>) -> RaftSnapshot {
@@ -95,4 +96,76 @@ fn matrixraft_snapshot_creator_and_loader_expose_checkpoint_and_chunk_install_ro
         install.finish(snapshot.group_id).expect("finish install"),
         snapshot
     );
+}
+
+#[test]
+fn a_configured_send_limit_limits_an_ordinary_poll() {
+    // The limit used to be reachable only by a caller that passed a limiter in
+    // at every poll. A host that configured `snapshot_send_rate_limiter` and
+    // called `poll_send_requests` -- which is the obvious call and the one the
+    // other tests in this file use -- got no limit at all.
+    let rate_limit = MatrixRaftRateLimiterConfig {
+        bytes_limit_per_sec: 4,
+        check_cycle_sec: 1,
+    };
+    let config = SnapshotLifecycleConfig {
+        chunk_size: 4,
+        max_chunks_per_tick: 8,
+        max_bytes_per_tick: 1 << 20,
+        max_retry_attempts: 2,
+    };
+    let snapshot = snapshot(9, b"abcdefghijkl".to_vec());
+
+    // The control: no limit configured, so one poll carries all three chunks.
+    let mut unlimited = MatrixRaftSnapshotSender::new(config).expect("sender");
+    unlimited.begin_send(&snapshot, 2, 1).expect("begin send");
+    let all = unlimited.poll_send_requests().expect("poll");
+    assert_eq!(all.len(), 3, "an unlimited sender hands over every chunk");
+    assert!(unlimited.rate_limit_available_bytes().is_none());
+    assert!(unlimited.rate_limit_stats().is_none());
+
+    // And with the limit: one cycle is four bytes, which is one chunk.
+    let mut limited =
+        MatrixRaftSnapshotSender::with_rate_limit(config, &rate_limit).expect("sender");
+    limited.begin_send(&snapshot, 2, 1).expect("begin send");
+    assert_eq!(limited.rate_limit_available_bytes(), Some(4));
+
+    let first = limited.poll_send_requests().expect("first poll");
+    assert_eq!(first.len(), 1, "four bytes of quota is one four-byte chunk");
+    assert_eq!(first[0].chunk.offset, 0);
+    assert_eq!(limited.rate_limit_available_bytes(), Some(0));
+
+    let blocked = limited.poll_send_requests().expect("blocked poll");
+    assert!(
+        blocked.is_empty(),
+        "an exhausted quota must stop the transfer, not slow it"
+    );
+
+    // A limiter hands bytes out and never gets them back on its own, so the
+    // refill is what makes the limit a rate rather than a one-off budget.
+    assert_eq!(limited.refill_rate_limit(&rate_limit), 4);
+    let resumed = limited.poll_send_requests().expect("resumed poll");
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].chunk.offset, 4);
+
+    // The resumed poll emptied the quota again, so this restores the whole
+    // cycle.
+    assert_eq!(limited.refill_rate_limit(&rate_limit), 4);
+    assert_eq!(limited.rate_limit_available_bytes(), Some(4));
+
+    // And refilling a full quota restores nothing, which is what lets a host
+    // call this on every tick without checking first.
+    assert_eq!(limited.refill_rate_limit(&rate_limit), 0);
+    assert_eq!(limited.rate_limit_available_bytes(), Some(4));
+    let stats = limited
+        .rate_limit_stats()
+        .expect("a limited sender has stats");
+    assert!(
+        stats.total_granted_bytes >= 8,
+        "granted {} bytes across two polls",
+        stats.total_granted_bytes
+    );
+
+    // And a sender with no limit refills nothing rather than erroring.
+    assert_eq!(unlimited.refill_rate_limit(&rate_limit), 0);
 }

@@ -2219,12 +2219,54 @@ impl MatrixRaftOldSnapshotFinish {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotSender {
     lifecycle: SnapshotLifecycle,
+    /// The byte quota this sender sends under, if it was given one.
+    ///
+    /// Held by the sender rather than passed in at each poll, because a
+    /// configured limit that the caller has to remember to apply is a limit
+    /// that does not apply: `snapshot_send_rate_limiter` could be set on the
+    /// group context and on the node creator, was turned into a limiter by
+    /// `MatrixRaftRuntimeWiring::snapshot_send_limiter`, and nothing ever
+    /// handed that limiter to a send. A host that configured a snapshot
+    /// bandwidth cap got none, silently.
+    limiter: Option<ByteQuotaLimiter>,
 }
 
 impl MatrixRaftSnapshotSender {
     pub fn new(config: SnapshotLifecycleConfig) -> Result<Self, RaftError> {
         Ok(Self {
             lifecycle: SnapshotLifecycle::new(config)?,
+            limiter: None,
+        })
+    }
+
+    /// A sender that holds one cycle of the configured bytes.
+    ///
+    /// Refill it with [`Self::refill_rate_limit`] every
+    /// `MatrixRaftRateLimiterConfig::check_cycle`: a limiter hands bytes out
+    /// and never gets them back on its own, so a sender that is never refilled
+    /// throttles once and stays throttled.
+    pub fn with_rate_limit(
+        config: SnapshotLifecycleConfig,
+        rate_limit: &MatrixRaftRateLimiterConfig,
+    ) -> Result<Self, RaftError> {
+        Ok(Self {
+            lifecycle: SnapshotLifecycle::new(config)?,
+            limiter: Some(rate_limit.to_byte_quota_limiter()?),
+        })
+    }
+
+    /// A sender carrying whatever send limit the group was wired with.
+    ///
+    /// This is the route from `snapshot_send_rate_limiter` on the context or
+    /// the creator to the bytes actually leaving. A group wired without one
+    /// gets a sender with no limit, which is what it asked for.
+    pub fn from_wiring(
+        config: SnapshotLifecycleConfig,
+        wiring: &MatrixRaftRuntimeWiring,
+    ) -> Result<Self, RaftError> {
+        Ok(Self {
+            lifecycle: SnapshotLifecycle::new(config)?,
+            limiter: wiring.snapshot_send_limiter()?,
         })
     }
 
@@ -2246,15 +2288,53 @@ impl MatrixRaftSnapshotSender {
         self.begin_send(snapshot, term, leader_id)
     }
 
+    /// Polls for the next requests, under this sender's own limit if it has
+    /// one.
+    ///
+    /// A sender built by [`Self::new`] has no limit and behaves exactly as
+    /// before. One built from a configured limit applies it here, which is the
+    /// only place it can be applied without the caller remembering to.
     pub fn poll_send_requests(&mut self) -> Result<Vec<InstallSnapshotRequest>, RaftError> {
-        self.lifecycle.poll_send_requests()
+        match self.limiter.as_mut() {
+            Some(limiter) => self.lifecycle.poll_send_requests_with_limiter(limiter),
+            None => self.lifecycle.poll_send_requests(),
+        }
     }
 
+    /// Polls under a limiter the caller owns, ignoring this sender's own.
+    ///
+    /// For a host that shares one quota across several senders -- a store-wide
+    /// cap rather than a per-group one, which is what the limiter on a shared
+    /// runtime would be.
     pub fn poll_send_requests_with_limiter(
         &mut self,
         limiter: &mut impl RateLimiter,
     ) -> Result<Vec<InstallSnapshotRequest>, RaftError> {
         self.lifecycle.poll_send_requests_with_limiter(limiter)
+    }
+
+    /// Returns this sender's quota to one cycle of bytes, and reports how many
+    /// were restored.
+    ///
+    /// Zero when the sender has no limit, and zero when the quota is already
+    /// full -- so a host can call it on every tick without checking first.
+    pub fn refill_rate_limit(&mut self, rate_limit: &MatrixRaftRateLimiterConfig) -> u64 {
+        let Some(limiter) = self.limiter.as_mut() else {
+            return 0;
+        };
+        let before = limiter.available_bytes();
+        limiter.refill_bytes(rate_limit.cycle_capacity_bytes());
+        limiter.available_bytes().saturating_sub(before)
+    }
+
+    /// What this sender's own limiter has done, or `None` when it has no limit.
+    pub fn rate_limit_stats(&self) -> Option<RateLimiterStats> {
+        self.limiter.as_ref().map(ByteQuotaLimiter::stats)
+    }
+
+    /// Bytes this sender may still send in this cycle, or `None` for no limit.
+    pub fn rate_limit_available_bytes(&self) -> Option<u64> {
+        self.limiter.as_ref().map(ByteQuotaLimiter::available_bytes)
     }
 
     pub fn record_send_response(
