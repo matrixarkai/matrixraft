@@ -106,8 +106,8 @@ pub mod unique_id;
 pub mod wal;
 
 pub use applier::{
-    matrixraft_apply_task_through_index, Applier, ApplierOptions, ApplyHandler, ApplyWait,
-    GroupApplyProgress,
+    matrixraft_apply_task_through_index, Applier, ApplierOptions, ApplyHandler, ApplyReport,
+    ApplyStall, ApplyWait, GroupApplyProgress,
 };
 pub use benchmark::{
     matrixraft_production_readiness_input_with_benchmark_artifacts,
