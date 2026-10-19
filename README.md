@@ -1333,6 +1333,51 @@ trustworthy next to one of the exceptions:
 transfer exception and its reason, so the boundary is a decision rather than
 whatever happened to be true.
 
+### One aggregate pass for every heartbeat round
+
+A heartbeat is the highest-frequency thing a leader does -- every tick, to
+every peer, whether or not there is anything to replicate -- so a cost here is
+multiplied by the tick rate as well as the fan-out.
+
+`broadcast_heartbeat` called the **public** response handler, which recomputes
+both group-wide aggregates per response. `refresh_commit_index` collects and
+sorts a vector over every quorum node, so a round of N responses allocated **N
+vectors of N**. The propose path had already been given the deferral for
+exactly this reason, with the inner handler's doc comment explaining that both
+aggregates "depend only on the final state, so the intermediate passes cannot
+change the outcome". The heartbeat never got it.
+
+Allocations per round, measured with `examples/heartbeat_allocations`:
+
+| peers reached | before | after | per peer before | after |
+|---|---|---|---|---|
+| 2 | 3.00 | 2.00 | 1.50 | 1.00 |
+| 4 | 9.00 | 3.00 | 2.25 | 0.75 |
+| 6 | 14.00 | 4.00 | 2.33 | 0.67 |
+| 8 | 26.00 | 5.00 | 3.25 | 0.62 |
+
+At eight peers that is **81% fewer allocations** (26.00 to 5.00) and **83%
+fewer bytes** (1,888 to 320). The shape matters more than the ratio: the cost
+per peer was **rising** with the group and now **falls**, because what is left
+is mostly one pass for the round rather than one per peer.
+
+`tests/alloc_heartbeat.rs` asserts that **shape** -- that the per-peer cost
+does not grow -- rather than a tuned constant. The defect was the growth, so
+that is the property to pin, and it needs no threshold that could drift. A
+loose slope bound sits beside it for a regression that stays linear but gets
+much worse.
+
+The 40 lease tests in the suite are what check the deferral: moving the
+leader-lease quorum evaluation from per-response to once per round is the part
+that could have changed behaviour rather than only cost.
+
+**One hypothesis measured and refuted first.** The super-linear shape looked
+like the heartbeat's tail probe cloning the log tail per peer, so the probe was
+extended to compare a cluster whose followers were behind against one caught
+up. The two rows came back **identical**, so the probe was not the cost -- and
+the probe-vs-caught-up comparison is still in the example, because a refuted
+hypothesis is worth the same as a confirmed one to the next reader.
+
 ### Heartbeats from many groups to one peer, in one batch
 
 `HeartbeatMerger` buckets by destination address rather than by group, which is
