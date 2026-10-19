@@ -2748,7 +2748,25 @@ impl MatrixRaftNodeCreatorBuilder {
         self
     }
 
-    pub fn enable_flexible_apply(self) -> Self {
+    /// Records the flag. **It selects nothing, and that is deliberate.**
+    ///
+    /// The setting it mirrors chooses, at apply time, between handing the state
+    /// machine an iterator and driving the iterator for it entry by entry.
+    /// MatrixRaft makes that choice at the type level instead:
+    /// [`MatrixRaftFsm::flexible_apply`] has a default body that walks the
+    /// iterator and calls `apply` for each data entry, which is exactly the
+    /// driven case, and a state machine that wants the iterator overrides it.
+    ///
+    /// So reading this flag could only make things worse: with it set to false
+    /// the applier would have to ignore an override and call `apply` entry by
+    /// entry on a state machine that implemented `flexible_apply` and expected
+    /// the iterator. The flag is kept because it is part of the surface this
+    /// facade mirrors, and a host porting a configuration should not have to
+    /// delete a line to compile.
+    ///
+    /// What to do instead: implement `flexible_apply` to take the iterator, or
+    /// implement only `apply` and let the default drive it.
+pub fn enable_flexible_apply(self) -> Self {
         self.flexible_apply(true)
     }
 
@@ -3039,7 +3057,25 @@ impl MatrixRaftGroupContextBuilder {
         self
     }
 
-    pub fn enable_flexible_apply(mut self) -> Self {
+    /// Records the flag. **It selects nothing, and that is deliberate.**
+    ///
+    /// The setting it mirrors chooses, at apply time, between handing the state
+    /// machine an iterator and driving the iterator for it entry by entry.
+    /// MatrixRaft makes that choice at the type level instead:
+    /// [`MatrixRaftFsm::flexible_apply`] has a default body that walks the
+    /// iterator and calls `apply` for each data entry, which is exactly the
+    /// driven case, and a state machine that wants the iterator overrides it.
+    ///
+    /// So reading this flag could only make things worse: with it set to false
+    /// the applier would have to ignore an override and call `apply` entry by
+    /// entry on a state machine that implemented `flexible_apply` and expected
+    /// the iterator. The flag is kept because it is part of the surface this
+    /// facade mirrors, and a host porting a configuration should not have to
+    /// delete a line to compile.
+    ///
+    /// What to do instead: implement `flexible_apply` to take the iterator, or
+    /// implement only `apply` and let the default drive it.
+pub fn enable_flexible_apply(mut self) -> Self {
         self.context.flexible_apply = true;
         self
     }
