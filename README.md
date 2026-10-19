@@ -815,7 +815,7 @@ assertion.
 
 Recorded, reported back, and reaching nothing that runs:
 
-<!-- inert-settings: reader_num, executor_num, watched_address_resolver, num_connection_group, user_payload_callback_bound -->
+<!-- inert-settings: reader_num, executor_num, watched_address_resolver, user_payload_callback_bound -->
 
 On `MatrixRaftGroupContext`:
 
@@ -825,7 +825,6 @@ On `MatrixRaftGroupContext`:
 
 On `MatrixRaftTransportOptions`:
 
-- `num_connection_group`
 - `user_payload_callback_bound`
 
 The transport half of this list is new to the list rather than new to the
@@ -833,9 +832,14 @@ crate: these were as inert as the three above it while this section said
 "three settings on `MatrixRaftGroupContext`", which left the transport
 options reading as live. They are not.
 
-`cluster_id`, `dynamic_address_map` and `timeout_ms` **were** on this list
-and are now live — see "A cluster id that refuses the other cluster",
-"Addresses that move" and "A send that cannot wait for ever" below.
+`cluster_id`, `dynamic_address_map`, `timeout_ms` and
+`num_connection_group` **were** on this list and are now live — see "A
+cluster id that refuses the other cluster", "Addresses that move", "A send
+that cannot wait for ever" and "Connections kept warm per peer" below. That
+leaves one recorded-only setting on the transport options, and the reason it
+is still there is written down in "A replica that appears when a peer asks
+for one": carrying a user payload means changing the `Transport` trait, which
+is its own decision rather than a tidy-up.
 `timeout_ms` was never in the marker above even while it was inert, because
 it is also a field on several live types and the guard matches on a name
 alone; that is why its entry was a sentence rather than a list item. `address_resolver_bound` is not inert either:
@@ -1040,6 +1044,26 @@ you have.
 Its test asserts the send is **bounded**, not that it is fast: ten seconds
 against a 250ms timeout. Asserting the 250ms would be a claim about how busy
 the machine is.
+
+### Connections kept warm per peer
+
+`num_connection_group` is now `with_connections_per_peer`, which bounds how
+many connections to a peer survive their send and spare the next one a
+handshake.
+
+**It bounds what is kept, not what is in flight.** A send that finds the pool
+empty opens a connection, so concurrent sends are never serialised by this
+number — a pool of one still serves three simultaneous appends, and its test
+proves that by needing all three in flight for a barrier to release. The
+obvious reading of the name is the wrong one, which is why it is stated this
+way round.
+
+Its default from options is **1**, the baseline's, while
+`TcpRaftTransport::new` keeps `DEFAULT_CONNECTIONS_PER_PEER` (4). So a
+transport built from default options keeps fewer warm connections than one
+built with `new`, and pays more handshakes when a leader has several appends
+in flight to the same follower. A host that cares should say a number. Zero is
+raised to one, since a pool that can hold nothing is the opposite of a pool.
 
 ### Heartbeats from many groups to one peer, in one batch
 

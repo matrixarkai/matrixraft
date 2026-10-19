@@ -12,7 +12,7 @@ use matrixraft::{
     ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState,
     StaticRaftAuthToken, TcpRaftRpcResult, TcpRaftTransport, TcpRaftTransportEnvelope,
     TcpRaftTransportRequest, TcpRaftTransportResponse, TcpRaftTransportServer, Transport,
-    VoteRequest, VoteResponse, ANY_CLUSTER_ID,
+    VoteRequest, VoteResponse, ANY_CLUSTER_ID, DEFAULT_CONNECTIONS_PER_PEER,
 };
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -2358,4 +2358,194 @@ fn a_peer_that_answers_once_and_then_goes_quiet_is_still_bounded() {
 
     drop(transport);
     let _ = worker;
+}
+
+/// Echoes, but only once every caller has arrived.
+///
+/// The pool bound is about connections that exist **at the same time**, and
+/// sequential sends reuse one connection however large the bound is. A barrier
+/// is what makes "three at once" a fact rather than a hope about scheduling.
+#[derive(Debug)]
+struct BarrierEcho {
+    barrier: std::sync::Barrier,
+}
+
+impl Transport for BarrierEcho {
+    fn append_entries(
+        &self,
+        target: u64,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, RaftError> {
+        self.barrier.wait();
+        EchoTransport.append_entries(target, request)
+    }
+
+    fn vote(&self, target: u64, request: VoteRequest) -> Result<VoteResponse, RaftError> {
+        EchoTransport.vote(target, request)
+    }
+
+    fn install_snapshot(
+        &self,
+        target: u64,
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse, RaftError> {
+        EchoTransport.install_snapshot(target, request)
+    }
+
+    fn read_index(
+        &self,
+        target: u64,
+        request: ReadIndexRequest,
+    ) -> Result<ReadIndexResponse, RaftError> {
+        EchoTransport.read_index(target, request)
+    }
+}
+
+/// Sends `count` appends at once through `transport` and waits for them all,
+/// giving up after ten seconds.
+///
+/// The deadline is the point. These tests need the sends to be in flight
+/// together, so an implementation that serialised them would **deadlock on the
+/// server's barrier** rather than fail -- and a hanging test reports nothing
+/// and holds a CI job until its own timeout. `JoinHandle::join` cannot be
+/// bounded, so the results come back over a channel instead.
+fn send_together(transport: &TcpRaftTransport, count: usize) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    for _ in 0..count {
+        let sender = transport.clone();
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(sender.append_entries(2, cluster_append()));
+        });
+    }
+    drop(tx);
+    for nth in 0..count {
+        let sent = rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| {
+                panic!(
+                "only {nth} of {count} concurrent sends finished within 10s: the sends are not \
+                 running together, which is what a pool that bounded concurrency instead of \
+                 retention would do"
+            )
+            });
+        sent.expect("every concurrent send should be answered");
+    }
+}
+
+#[test]
+fn the_pool_keeps_what_it_was_told_to_and_no_more() {
+    let handler = Arc::new(BarrierEcho {
+        barrier: std::sync::Barrier::new(3),
+    });
+    let mut server =
+        TcpRaftTransportServer::start("127.0.0.1:0", Arc::clone(&handler)).expect("server");
+    let mut peers = BTreeMap::new();
+    peers.insert(2, server.addr().to_string());
+
+    // Three connections exist at once; two may be kept.
+    let bounded = TcpRaftTransport::new(peers.clone()).with_connections_per_peer(2);
+    assert_eq!(bounded.connections_per_peer(), 2);
+    send_together(&bounded, 3);
+    assert_eq!(
+        bounded.idle_connections(2),
+        2,
+        "the third connection must be dropped rather than pooled"
+    );
+
+    server.shutdown().expect("shutdown");
+
+    // The same three sends, with room for all of them.
+    let roomy_handler = Arc::new(BarrierEcho {
+        barrier: std::sync::Barrier::new(3),
+    });
+    let mut roomy_server =
+        TcpRaftTransportServer::start("127.0.0.1:0", Arc::clone(&roomy_handler)).expect("server");
+    let mut roomy_peers = BTreeMap::new();
+    roomy_peers.insert(2, roomy_server.addr().to_string());
+    let roomy = TcpRaftTransport::new(roomy_peers).with_connections_per_peer(4);
+    send_together(&roomy, 3);
+    assert_eq!(
+        roomy.idle_connections(2),
+        3,
+        "with room for four, all three are kept"
+    );
+    roomy_server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn a_pool_of_one_still_serves_concurrent_sends() {
+    // The reading this setting invites and that is wrong: that it caps
+    // parallel RPCs to a peer. Three sends have to be in flight together for
+    // the barrier to release at all, so if a pool of one serialised them this
+    // test would hang rather than fail.
+    let handler = Arc::new(BarrierEcho {
+        barrier: std::sync::Barrier::new(3),
+    });
+    let mut server =
+        TcpRaftTransportServer::start("127.0.0.1:0", Arc::clone(&handler)).expect("server");
+    let mut peers = BTreeMap::new();
+    peers.insert(2, server.addr().to_string());
+
+    let narrow = TcpRaftTransport::new(peers).with_connections_per_peer(1);
+    send_together(&narrow, 3);
+    assert_eq!(narrow.idle_connections(2), 1, "and keeps exactly one warm");
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn the_recorded_connection_count_reaches_the_transport() {
+    // `num_connection_group` was recorded and read by nothing.
+    let defaults = MatrixRaftTransportBuilder::new()
+        .bind_address_resolver()
+        .build()
+        .expect("build");
+    assert_eq!(defaults.num_connection_group, 1);
+    assert_eq!(
+        defaults
+            .into_tcp_transport(BTreeMap::new())
+            .connections_per_peer(),
+        1,
+        "a transport built from default options keeps one, not the four `new` keeps"
+    );
+
+    let configured = MatrixRaftTransportBuilder::new()
+        .set_num_connection_group(3)
+        .bind_address_resolver()
+        .build()
+        .expect("build");
+    assert_eq!(
+        configured
+            .into_tcp_transport(BTreeMap::new())
+            .connections_per_peer(),
+        3
+    );
+
+    // And through the watching constructor, which builds on the same call.
+    let watching = MatrixRaftTransportBuilder::new()
+        .set_num_connection_group(3)
+        .set_dynamic_address_map()
+        .bind_address_resolver()
+        .build()
+        .expect("build");
+    let resolver = Arc::new(ScriptedResolver::new("127.0.0.1:1"));
+    assert_eq!(
+        watching
+            .into_tcp_transport_watching(BTreeMap::new(), 1, resolver)
+            .connections_per_peer(),
+        3
+    );
+
+    // Zero would make every send pay a handshake, which is the opposite of
+    // what a pool is for, so it is raised to one.
+    assert_eq!(
+        TcpRaftTransport::new(BTreeMap::new())
+            .with_connections_per_peer(0)
+            .connections_per_peer(),
+        1
+    );
+    assert_eq!(
+        TcpRaftTransport::new(BTreeMap::new()).connections_per_peer(),
+        DEFAULT_CONNECTIONS_PER_PEER
+    );
 }
