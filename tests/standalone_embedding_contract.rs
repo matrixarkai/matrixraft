@@ -350,6 +350,7 @@ fn pass_4_non_temporalstore_app_gets_wal_snapshot_recovery_and_fences() {
             let installed = receiver.install_request(request).expect("install chunk");
             sender
                 .record_send_response(&InstallSnapshotResponse {
+                    throttled: false,
                     term: 1,
                     accepted: true,
                     next_offset: receiver.status().received_chunks,

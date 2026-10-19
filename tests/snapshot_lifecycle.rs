@@ -91,6 +91,7 @@ fn snapshot_lifecycle_throttles_retries_and_rolls_back_install() {
 
     lifecycle
         .record_send_response(&InstallSnapshotResponse {
+            throttled: false,
             term: 2,
             accepted: false,
             next_offset: 0,
@@ -221,6 +222,7 @@ fn snapshot_lifecycle_sustains_sender_and_downloader_under_quota_pressure() {
                 .expect("downloader accepts sustained chunk");
             sender
                 .record_send_response(&InstallSnapshotResponse {
+                    throttled: false,
                     term: 2,
                     accepted: true,
                     next_offset: downloader.status().received_chunks * 4,

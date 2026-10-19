@@ -80,6 +80,7 @@ impl Transport for EchoTransport {
         request: InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse, RaftError> {
         Ok(InstallSnapshotResponse {
+            throttled: false,
             term: request.term,
             accepted: true,
             next_offset: request.chunk.offset + request.chunk.data.len() as u64,

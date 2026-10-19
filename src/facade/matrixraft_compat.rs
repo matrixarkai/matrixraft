@@ -2129,6 +2129,11 @@ pub struct MatrixRaftSnapshotStatus {
     pub retry_count: u64,
     pub throttled_ticks: u64,
     pub rate_limited_ticks: u64,
+    /// Chunks a receiver declined without failing the send. Reported next to
+    /// `retry_count` and never added to it: see
+    /// [`SnapshotLifecycleStatus::throttled_responses`].
+    #[serde(default)]
+    pub throttled_responses: u64,
     pub rolled_back: u64,
     pub completed: bool,
     pub installed_index: LogIndex,
@@ -2144,6 +2149,7 @@ impl From<SnapshotLifecycleStatus> for MatrixRaftSnapshotStatus {
             sent_chunks: status.sent_chunks,
             received_chunks: status.received_chunks,
             retry_count: status.retry_count,
+            throttled_responses: status.throttled_responses,
             throttled_ticks: status.throttled_ticks,
             rate_limited_ticks: status.rate_limited_ticks,
             rolled_back: status.rolled_back,
@@ -2419,31 +2425,27 @@ impl MatrixRaftSnapshotDownloader {
     /// A downloader that charges what it installs against one cycle of the
     /// configured bytes.
     ///
-    /// **Read this before configuring one, because it does less than the name
-    /// suggests.**
+    /// A chunk that does not fit the remaining quota is **declined**: not
+    /// installed, and answered with `throttled: true` so the sender rewinds to
+    /// it and tries again without spending its retry budget.
     ///
-    /// Every chunk is still installed. What the quota does is account for the
-    /// bytes and set `over_quota` on the result once a chunk exceeds what is
-    /// left, so a host can pace its own acknowledgement. It caps the rate at
-    /// which this node *commits* snapshot bytes, which is a disk and CPU
-    /// bound, and it is a signal for pacing the sender.
+    /// That field is what makes a receiver-side quota safe. Until it existed
+    /// the only way to say no was `accepted: false`, which
+    /// `SnapshotLifecycle::record_send_response` counts as a retry -- and once
+    /// `max_retry_attempts` is exceeded, **3** by default, the send is
+    /// abandoned. So a quota that declined chunks would have killed the
+    /// transfer it was pacing, and the first version of this installed every
+    /// chunk and only reported `over_quota` for that reason.
     ///
-    /// **It does not save network bandwidth.** The bytes have already arrived
-    /// by the time this is called -- a push protocol cannot decline what it
-    /// has been sent.
+    /// **It still does not save network bandwidth.** The bytes have arrived by
+    /// the time this is called; a declined chunk crosses the wire twice. What
+    /// the quota bounds is the rate at which this node *commits* snapshot
+    /// bytes -- a disk and CPU bound -- and the rate the sender is paced at.
     ///
-    /// **And it deliberately does not refuse the chunk.** A refusal is
-    /// `accepted: false`, which `SnapshotLifecycle::record_send_response`
-    /// counts as a retry; once `max_retry_attempts` is exceeded -- **3** by
-    /// default -- the send is abandoned with "snapshot send retry budget
-    /// exhausted". Throttling by refusal would turn a slow transfer into a
-    /// failed one after three throttles, which is strictly worse than having no
-    /// limiter at all.
-    ///
-    /// Real receiver-side backpressure needs a throttle the sender can tell
-    /// apart from a failure, which means a field on `InstallSnapshotResponse`
-    /// and a change at its 31 construction sites. That is a protocol decision
-    /// rather than a tidy-up, and it is not this.
+    /// A throttle is not budgeted, so a receiver that throttles for ever makes
+    /// no progress and never fails either. Nothing here has a clock;
+    /// `SnapshotLifecycleStatus::throttled_responses` is what a host watches to
+    /// decide to `cancel_send`.
     ///
     /// Refill with [`Self::refill_rate_limit`] every
     /// `MatrixRaftRateLimiterConfig::check_cycle`.
@@ -2500,22 +2502,45 @@ impl MatrixRaftSnapshotDownloader {
     ) -> Result<MatrixRaftSnapshotDownloadResult, RaftError> {
         let snapshot_index = request.chunk.meta.last_log_id.index;
         let chunk_bytes = request.chunk.data.len() as u64;
+        let chunk_offset = request.chunk.offset;
         let next_offset = request
             .chunk
             .offset
             .saturating_add(request.chunk.data.len() as u64);
         // Charged before the install, so the accounting is of what arrived
-        // rather than of what an install happened to return. `over_quota` says
-        // the quota could not cover this chunk; the chunk is installed either
-        // way, which `with_rate_limit` explains at length because it is the
-        // surprising half.
+        // rather than of what an install happened to return.
         let over_quota = match self.limiter.as_mut() {
             Some(limiter) => !limiter.reserve_limited_bytes(chunk_bytes).allowed,
             None => false,
         };
+        if over_quota {
+            // Declined, not installed, and not a failure. `throttled` is what
+            // keeps the sender's retry budget intact: before that field
+            // existed this had to install the chunk anyway, because the only
+            // way to say no was `accepted: false` and three of those abandon
+            // the transfer the quota is pacing.
+            //
+            // `next_offset` is this chunk's own offset, so the sender rewinds
+            // to the chunk it declined rather than skipping it.
+            return Ok(MatrixRaftSnapshotDownloadResult {
+                accepted: false,
+                response: InstallSnapshotResponse {
+                    term: 0,
+                    accepted: false,
+                    next_offset: chunk_offset,
+                    committed_index: 0,
+                    reason: "snapshot download quota exhausted".to_string(),
+                    throttled: true,
+                },
+                installed_snapshot: None,
+                finish: None,
+                over_quota: true,
+            });
+        }
         let installed_snapshot = self.lifecycle.install_request(request)?;
         let accepted = true;
         let response = InstallSnapshotResponse {
+            throttled: false,
             term: installed_snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.meta.last_log_id.term)

@@ -101,6 +101,7 @@ fn transport_contract_names_owned_rpc_types_including_prevote_and_snapshot_chunk
     };
     assert!(install.chunk.done);
     let install_response = InstallSnapshotResponse {
+        throttled: false,
         term: 4,
         accepted: true,
         next_offset: 5,
