@@ -203,7 +203,29 @@ pub struct WalLifecycleEvidenceValidationReport {
     pub missing: Vec<String>,
 }
 
+/// The checksum of a record, covering the membership it carries.
+///
+/// The membership used to be left out, and while nothing read it that was
+/// harmless. It is not harmless now: recovery reconciles the cluster's members
+/// from this field, so a membership corrupted on disk silently reconfigures
+/// the group on the way back up -- a peer resurrected into the quorum, or one
+/// dropped out of it, with every other field intact and the record reporting
+/// itself as valid.
 pub fn matrixraft_wal_checksum(record: &WalRecord) -> String {
+    wal_checksum(record, true)
+}
+
+/// The checksum as it was before the membership was covered.
+///
+/// Kept so that a WAL written by an earlier build still validates:
+/// `matrixraft_wal_checksum_valid` accepts either. Records this build writes
+/// carry the covering checksum, so the exception closes behind each file as it
+/// is rewritten rather than being a permanent second format to maintain.
+fn matrixraft_wal_checksum_without_membership(record: &WalRecord) -> String {
+    wal_checksum(record, false)
+}
+
+fn wal_checksum(record: &WalRecord, cover_membership: bool) -> String {
     let mut hash = 14_695_981_039_346_656_037_u64;
     let mut mix = |value: u64| {
         for byte in value.to_le_bytes() {
@@ -237,12 +259,30 @@ pub fn matrixraft_wal_checksum(record: &WalRecord) -> String {
     mix(record.apply_snapshot_fence.commit_index);
     mix(record.apply_snapshot_fence.installed_snapshot_index);
     mix(record.apply_snapshot_fence.first_retained_log_index);
+    if cover_membership {
+        mix(record.membership.group_id);
+        mix(record.membership.epoch);
+        // Each list's length goes in before its members. Without it the three
+        // lists are one flat stream of ids, and moving a node from `voters` to
+        // `learners` -- which is exactly what a demotion is, and exactly what
+        // recovery now acts on -- leaves the hash unchanged.
+        for list in [
+            &record.membership.voters,
+            &record.membership.learners,
+            &record.membership.witnesses,
+        ] {
+            mix(list.len() as u64);
+            for node_id in list {
+                mix(*node_id);
+            }
+        }
+    }
     format!("{hash:016x}")
 }
 
 pub fn matrixraft_wal_checksum_format() -> WalChecksumFormat {
     WalChecksumFormat {
-        algorithm: "fnv1a64-rustraft-v1".to_string(),
+        algorithm: "fnv1a64-rustraft-v2".to_string(),
         encoding: "lower_hex_16".to_string(),
         covered_fields: vec![
             "group_id".to_string(),
@@ -255,11 +295,27 @@ pub fn matrixraft_wal_checksum_format() -> WalChecksumFormat {
             "entries_are_delta".to_string(),
             "installed_snapshot.last_log_id".to_string(),
             "apply_snapshot_fence".to_string(),
+            "membership".to_string(),
         ],
     }
 }
 
 pub fn matrixraft_wal_checksum_valid(record: &WalRecord) -> bool {
+    record.checksum == matrixraft_wal_checksum(record)
+        || record.checksum == matrixraft_wal_checksum_without_membership(record)
+}
+
+/// Whether this record's own checksum covers the membership it carries.
+///
+/// `matrixraft_wal_checksum_valid` accepts the pre-membership checksum so that
+/// a WAL written by an earlier build still recovers. That acceptance has a
+/// cost worth being able to see rather than infer: a record validating the old
+/// way has an **unverified** membership, and recovery acts on the membership.
+/// So this answers the question the boolean cannot -- whether what validated
+/// vouched for the member set, or only for everything else.
+///
+/// False for a record that does not validate at all.
+pub fn matrixraft_wal_checksum_covers_membership(record: &WalRecord) -> bool {
     record.checksum == matrixraft_wal_checksum(record)
 }
 

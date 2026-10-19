@@ -124,7 +124,10 @@ fn persistent_wal_writer_reports_checksum_segment_index_and_retained_range() {
     assert!(index[0].bytes > 0);
     assert_eq!(wal.retained_log_range().first_log_index, 1);
     assert_eq!(wal.retained_log_range().last_log_index, 3);
-    assert_eq!(wal.checksum_format().algorithm, "fnv1a64-rustraft-v1");
+    // v2 since the membership became covered: recovery reconciles the
+    // cluster's members from that field, so the checksum has to vouch for it.
+    // tests/wal_checksum_membership.rs is what pins the coverage itself.
+    assert_eq!(wal.checksum_format().algorithm, "fnv1a64-rustraft-v2");
 
     let _ = fs::remove_dir_all(dir);
 }
