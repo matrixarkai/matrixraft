@@ -2920,11 +2920,21 @@ impl MatrixRaftTransportBuilder {
 impl MatrixRaftTransportOptions {
     /// The TCP transport these options describe.
     ///
-    /// **This honours `cluster_id` and `timeout_ms`. It does not honour
-    /// `num_connection_group` or `user_payload_callback_bound`**, which this
-    /// crate still only records -- the README's settings section lists them.
-    /// Said here because a constructor that quietly dropped them would be a
-    /// worse way to find that out.
+    /// **This honours `cluster_id`, `timeout_ms` and `num_connection_group`.
+    /// It does not honour `user_payload_callback_bound`**, which this crate
+    /// still only records -- the README's settings section says so. Said here
+    /// because a constructor that quietly dropped it would be a worse way to
+    /// find that out.
+    ///
+    /// `num_connection_group` becomes
+    /// [`TcpRaftTransport::with_connections_per_peer`], and its default of
+    /// **1** is worth knowing: a transport built from default options keeps
+    /// *one* warm connection per peer, where [`TcpRaftTransport::new`] keeps
+    /// [`DEFAULT_CONNECTIONS_PER_PEER`]. Fewer kept connections means more
+    /// handshakes under concurrency, not fewer concurrent sends -- the pool
+    /// bounds what is kept, never what is in flight. A host that wants a
+    /// leader's concurrent appends to a follower to stay off the handshake
+    /// path should say a larger number.
     ///
     /// `timeout_ms` bounds reads and writes, and its default of **250ms** is
     /// the one a host gets by building options rather than calling
@@ -2947,6 +2957,7 @@ impl MatrixRaftTransportOptions {
     pub fn into_tcp_transport(&self, peers: BTreeMap<NodeId, String>) -> TcpRaftTransport {
         TcpRaftTransport::new_in_cluster(peers, self.cluster_id)
             .with_timeout(Duration::from_millis(u64::from(self.timeout_ms)))
+            .with_connections_per_peer(self.num_connection_group)
     }
 
     /// The same transport, with `resolver` attached **only if

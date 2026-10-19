@@ -444,6 +444,8 @@ pub struct TcpRaftTransport {
     /// `None` blocks indefinitely, which is what this transport did before the
     /// field existed and what [`TcpRaftTransport::new`] still does.
     timeout: Option<Duration>,
+    /// How many connections are kept warm per peer.
+    connections_per_peer: usize,
 }
 
 // Hand-written because a resolver is not `Debug`, and requiring that of a
@@ -457,13 +459,17 @@ impl std::fmt::Debug for TcpRaftTransport {
             .field("local_node_id", &self.local_node_id)
             .field("re_resolved", &self.re_resolved.load(Ordering::Relaxed))
             .field("timeout", &self.timeout)
+            .field("connections_per_peer", &self.connections_per_peer)
             .finish()
     }
 }
 
 /// Enough to keep a leader's concurrent RPCs to one follower off the handshake
 /// path, without holding sockets open for a peer that has gone quiet.
-const MAX_IDLE_CONNECTIONS_PER_PEER: usize = 4;
+///
+/// The default for [`TcpRaftTransport::with_connections_per_peer`], which a
+/// host can raise or lower.
+pub const DEFAULT_CONNECTIONS_PER_PEER: usize = 4;
 
 impl TcpRaftTransport {
     fn take_idle(&self, target: NodeId) -> Option<BufReader<TcpStream>> {
@@ -473,7 +479,7 @@ impl TcpRaftTransport {
     fn store_idle(&self, target: NodeId, connection: BufReader<TcpStream>) {
         if let Ok(mut idle) = self.idle.lock() {
             let pooled = idle.entry(target).or_default();
-            if pooled.len() < MAX_IDLE_CONNECTIONS_PER_PEER {
+            if pooled.len() < self.connections_per_peer {
                 pooled.push(connection);
             }
         }
@@ -542,7 +548,34 @@ impl TcpRaftTransport {
             local_node_id: 0,
             re_resolved: Arc::default(),
             timeout: None,
+            connections_per_peer: DEFAULT_CONNECTIONS_PER_PEER,
         }
+    }
+
+    /// How many connections to keep warm per peer.
+    ///
+    /// **This bounds what is kept, not what is in flight.** A send that finds
+    /// the pool empty opens a connection, so concurrent sends are never
+    /// serialised by this number; what it decides is how many of those
+    /// connections survive their send and spare the next one a handshake. One
+    /// means a peer keeps a single warm connection and any concurrent send
+    /// pays a handshake; a larger number trades idle sockets for fewer
+    /// handshakes under concurrency.
+    ///
+    /// Said that way round because the obvious reading -- a cap on parallel
+    /// RPCs to a peer -- is wrong, and a host that set it to 1 expecting
+    /// serialisation would get something quite different.
+    ///
+    /// Zero is raised to one: a pool that can hold nothing would make every
+    /// send pay a handshake, and the pooling exists to avoid exactly that.
+    pub fn with_connections_per_peer(mut self, connections: usize) -> Self {
+        self.connections_per_peer = connections.max(1);
+        self
+    }
+
+    /// How many connections this transport will keep warm per peer.
+    pub fn connections_per_peer(&self) -> usize {
+        self.connections_per_peer
     }
 
     /// Bounds how long a send will wait for a peer that has stopped answering.
@@ -607,10 +640,10 @@ impl TcpRaftTransport {
     /// not know.
     ///
     /// The pool is the part that is easy to miss. Up to
-    /// `MAX_IDLE_CONNECTIONS_PER_PEER` connections are kept open per peer, and
-    /// they are connected to the host this transport knew when they were
-    /// opened. Replacing the address without dropping them left the next
-    /// `MAX_IDLE_CONNECTIONS_PER_PEER` sends going to the **old** host -- a
+    /// [`TcpRaftTransport::connections_per_peer`] connections are kept open
+    /// per peer, and they are connected to the host this transport knew when
+    /// they were opened. Replacing the address without dropping them left the
+    /// next few sends going to the **old** host -- a
     /// peer that had moved kept receiving raft RPCs at an address it no longer
     /// answers on, until those sockets happened to break.
     ///
