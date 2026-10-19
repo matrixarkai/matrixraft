@@ -2,17 +2,18 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    matrixraft_validate_read_index_response, matrixraft_validate_tcp_transport_request,
-    matrixraft_validate_vote_request, AppendEntriesRequest, AppendEntriesResponse,
-    AuthenticatedRaftTransport, ClusterRaftTransport, Driver, DriverGroupKey, DriverOptions,
-    DriverTickReceiver, HeartbeatAddressResolver, HeartbeatFlusher, HeartbeatMergeMessage,
-    HeartbeatMerger, InMemoryRaftTransport, InstallSnapshotRequest, InstallSnapshotResponse,
-    LogEntry, LogId, MatrixRaftRuntimeWiring, MatrixRaftTransportBuilder, MergedHeartbeatBatch,
-    MergedHeartbeatSender, Message, Peer, RaftCluster, RaftError, ReadIndexRequest,
-    ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState,
-    StaticRaftAuthToken, TcpRaftRpcResult, TcpRaftTransport, TcpRaftTransportEnvelope,
-    TcpRaftTransportRequest, TcpRaftTransportResponse, TcpRaftTransportServer, Transport,
-    VoteRequest, VoteResponse, ANY_CLUSTER_ID, DEFAULT_CONNECTIONS_PER_PEER,
+    matrixraft_is_health_check_request, matrixraft_validate_read_index_response,
+    matrixraft_validate_tcp_transport_request, matrixraft_validate_vote_request,
+    AppendEntriesRequest, AppendEntriesResponse, AuthenticatedRaftTransport, ClusterRaftTransport,
+    Driver, DriverGroupKey, DriverOptions, DriverTickReceiver, HeartbeatAddressResolver,
+    HeartbeatFlusher, HeartbeatMergeMessage, HeartbeatMerger, InMemoryRaftTransport,
+    InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogId, MatrixRaftRuntimeWiring,
+    MatrixRaftTransportBuilder, MergedHeartbeatBatch, MergedHeartbeatSender, Message, Peer,
+    RaftCluster, RaftError, ReadIndexRequest, ReadIndexResponse, ReplicaRole, SnapshotChunk,
+    SnapshotMetadata, SnapshotState, StaticRaftAuthToken, TcpRaftRpcResult, TcpRaftTransport,
+    TcpRaftTransportEnvelope, TcpRaftTransportRequest, TcpRaftTransportResponse,
+    TcpRaftTransportServer, Transport, VoteRequest, VoteResponse, ANY_CLUSTER_ID,
+    DEFAULT_CONNECTIONS_PER_PEER,
 };
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -1831,6 +1832,7 @@ fn a_peer_that_sends_no_cluster_id_is_served_as_any_cluster() {
     // field.
     let stamped = TcpRaftTransportEnvelope {
         cluster_id: 7,
+        user_payload: None,
         request: bare.clone(),
     };
     let stamped_json = serde_json::to_string(&stamped).expect("encode the envelope");
@@ -2548,4 +2550,304 @@ fn the_recorded_connection_count_reaches_the_transport() {
         TcpRaftTransport::new(BTreeMap::new()).connections_per_peer(),
         DEFAULT_CONNECTIONS_PER_PEER
     );
+}
+
+fn append_with_entries() -> AppendEntriesRequest {
+    AppendEntriesRequest {
+        group_id: 1,
+        term: 2,
+        leader_id: 1,
+        prev_log_id: None,
+        entries: vec![LogEntry {
+            log_id: LogId { term: 2, index: 1 },
+            payload: b"not-a-heartbeat".to_vec(),
+            is_command: true,
+        }],
+        leader_commit: 0,
+        lease_epoch: 0,
+    }
+}
+
+fn a_vote(pre_vote: bool) -> VoteRequest {
+    VoteRequest {
+        group_id: 1,
+        term: 2,
+        candidate_id: 1,
+        last_log_id: None,
+        pre_vote,
+        force: false,
+    }
+}
+
+#[test]
+fn a_payload_rides_only_on_a_health_check() {
+    // A (pre-)vote or an empty append. These are the frames a peer sends to a
+    // peer it may not be in contact with yet, so they are the ones worth
+    // carrying host data; an append carrying entries is already the frame
+    // carrying bulk.
+    let heartbeat = TcpRaftTransportRequest::AppendEntries {
+        target: 2,
+        request: cluster_append(),
+    };
+    let carrying = TcpRaftTransportRequest::AppendEntries {
+        target: 2,
+        request: append_with_entries(),
+    };
+    let vote = TcpRaftTransportRequest::Vote {
+        target: 2,
+        request: a_vote(false),
+    };
+    let pre_vote = TcpRaftTransportRequest::Vote {
+        target: 2,
+        request: a_vote(true),
+    };
+    let read = TcpRaftTransportRequest::ReadIndex {
+        target: 2,
+        request: ReadIndexRequest {
+            group_id: 1,
+            requester_id: 1,
+            min_commit_index: 0,
+            allow_lease_read: false,
+        },
+    };
+
+    assert!(matrixraft_is_health_check_request(&heartbeat));
+    assert!(matrixraft_is_health_check_request(&vote));
+    assert!(matrixraft_is_health_check_request(&pre_vote));
+    assert!(!matrixraft_is_health_check_request(&carrying));
+    assert!(!matrixraft_is_health_check_request(&read));
+
+    // A batch counts if ANY of its requests does, which is what the comparable
+    // engine's parcel flag does too.
+    assert!(matrixraft_is_health_check_request(
+        &TcpRaftTransportRequest::Batch {
+            requests: vec![carrying.clone(), heartbeat.clone()],
+        }
+    ));
+    assert!(!matrixraft_is_health_check_request(
+        &TcpRaftTransportRequest::Batch {
+            requests: vec![carrying, read],
+        }
+    ));
+    assert!(
+        !matrixraft_is_health_check_request(&TcpRaftTransportRequest::Batch {
+            requests: Vec::new()
+        }),
+        "an empty batch carries no health check"
+    );
+}
+
+/// Starts a server that records the payloads it is shown, with its handler.
+fn observing_server(
+    answer: impl Fn(&TcpRaftTransportRequest, &str) -> Result<(), RaftError> + Send + Sync + 'static,
+) -> (
+    TcpRaftTransportServer,
+    Arc<CountingEcho>,
+    Arc<Mutex<Vec<String>>>,
+) {
+    let handler = Arc::new(CountingEcho::default());
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+    let observer = Arc::new(move |request: &TcpRaftTransportRequest, payload: &str| {
+        recorded.lock().expect("lock").push(payload.to_string());
+        answer(request, payload)
+    });
+    let server = TcpRaftTransportServer::start_with_payload_observer(
+        "127.0.0.1:0",
+        Arc::clone(&handler),
+        ANY_CLUSTER_ID,
+        Some(observer),
+    )
+    .expect("server");
+    (server, handler, seen)
+}
+
+fn payload_transport(server: &TcpRaftTransportServer, text: &'static str) -> TcpRaftTransport {
+    let mut peers = BTreeMap::new();
+    peers.insert(2, server.addr().to_string());
+    TcpRaftTransport::new(peers)
+        .with_user_payload(Arc::new(move |target| Ok(Some(format!("{text}-{target}")))))
+}
+
+#[test]
+fn what_a_peer_attaches_reaches_the_observer_and_nothing_else_does() {
+    let (mut server, handler, seen) = observing_server(|_, _| Ok(()));
+    let transport = payload_transport(&server, "hello");
+    assert!(transport.attaches_user_payload());
+
+    transport
+        .append_entries(2, cluster_append())
+        .expect("the heartbeat is served");
+    assert_eq!(handler.calls(), 1, "and the request is still served");
+    assert_eq!(server.observed_payloads(), 1);
+    assert_eq!(
+        seen.lock().expect("lock").as_slice(),
+        ["hello-2".to_string()]
+    );
+
+    // An append carrying entries attaches nothing, so the observer is not
+    // called -- the payload is not on every frame.
+    transport
+        .append_entries(2, append_with_entries())
+        .expect("served");
+    assert_eq!(handler.calls(), 2);
+    assert_eq!(
+        server.observed_payloads(),
+        1,
+        "an append with entries carries no payload"
+    );
+    assert_eq!(seen.lock().expect("lock").len(), 1);
+
+    // A transport with no callback sends the same frames with nothing on them.
+    let mut peers = BTreeMap::new();
+    peers.insert(2, server.addr().to_string());
+    let silent = TcpRaftTransport::new(peers);
+    assert!(!silent.attaches_user_payload());
+    silent.append_entries(2, cluster_append()).expect("served");
+    assert_eq!(handler.calls(), 3);
+    assert_eq!(server.observed_payloads(), 1);
+
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn an_observer_that_refuses_refuses_the_frame() {
+    // A host that could not accept what it was told must not then serve the
+    // request as though it had not been told.
+    let (mut server, handler, seen) = observing_server(|_, _| {
+        Err(RaftError::Transport(
+            "this host will not hold that group".to_string(),
+        ))
+    });
+    let transport = payload_transport(&server, "take-group-9");
+
+    let refused = transport.append_entries(2, cluster_append());
+    let message = match refused {
+        Err(err) => err.to_string(),
+        Ok(response) => panic!("a refused frame must not succeed, got {response:?}"),
+    };
+    assert!(
+        message.contains("will not hold that group"),
+        "the observer's own reason should reach the peer, got {message}"
+    );
+    assert_eq!(
+        handler.calls(),
+        0,
+        "the request must not be served after the payload was refused"
+    );
+    assert_eq!(seen.lock().expect("lock").len(), 1, "it was still shown");
+    assert_eq!(server.observed_payloads(), 0, "but not counted as observed");
+    assert_eq!(
+        server.refused_foreign_cluster(),
+        1,
+        "it is counted as a refusal"
+    );
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn a_payload_callback_that_fails_fails_the_send() {
+    // The sending half of the same principle: a host that cannot say what it
+    // needs to say would rather retry than be understood as having nothing to
+    // add, so the send fails instead of going out bare.
+    let (mut server, handler, _seen) = observing_server(|_, _| Ok(()));
+    let mut peers = BTreeMap::new();
+    peers.insert(2, server.addr().to_string());
+    let transport = TcpRaftTransport::new(peers).with_user_payload(Arc::new(|_| {
+        Err(RaftError::Transport(
+            "cannot reach the placement service".to_string(),
+        ))
+    }));
+
+    let failed = transport.append_entries(2, cluster_append());
+    assert!(
+        failed
+            .as_ref()
+            .err()
+            .map(|err| err.to_string().contains("placement service"))
+            .unwrap_or(false),
+        "the callback's own error should surface, got {failed:?}"
+    );
+    assert_eq!(handler.calls(), 0, "and nothing was sent");
+    assert_eq!(server.observed_payloads(), 0);
+
+    // But a frame that carries no payload is unaffected: the callback is only
+    // asked on a health check.
+    transport
+        .append_entries(2, append_with_entries())
+        .expect("an append with entries never asks the callback");
+    assert_eq!(handler.calls(), 1);
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn the_recorded_payload_flag_decides_whether_anything_is_attached() {
+    // `user_payload_callback_bound` was recorded and read by nothing. Passing
+    // a callback is deliberately not enough on its own.
+    let callback: matrixraft::MatrixRaftUserPayload = Arc::new(|_| Ok(Some("x".to_string())));
+
+    let unbound = MatrixRaftTransportBuilder::new()
+        .bind_address_resolver()
+        .build()
+        .expect("build");
+    assert!(!unbound.user_payload_callback_bound);
+    assert!(
+        !unbound
+            .into_tcp_transport_with_payload(BTreeMap::new(), Arc::clone(&callback))
+            .attaches_user_payload(),
+        "without the flag the callback must be ignored"
+    );
+
+    let bound = MatrixRaftTransportBuilder::new()
+        .set_get_user_payload_callback()
+        .bind_address_resolver()
+        .build()
+        .expect("build");
+    assert!(bound.user_payload_callback_bound);
+    assert!(bound
+        .into_tcp_transport_with_payload(BTreeMap::new(), callback)
+        .attaches_user_payload());
+
+    // And the plain constructor attaches nothing whatever the flag says,
+    // because it has no callback to attach.
+    assert!(!bound
+        .into_tcp_transport(BTreeMap::new())
+        .attaches_user_payload());
+}
+
+#[test]
+fn a_peer_that_sends_no_payload_is_read_as_having_none() {
+    // Wire compatibility, on bytes: a sender that predates the field writes an
+    // envelope with no `user_payload`, and that must decode as "nothing
+    // attached" rather than failing or inventing one.
+    let bare = TcpRaftTransportRequest::AppendEntries {
+        target: 2,
+        request: cluster_append(),
+    };
+    let old_shape = TcpRaftTransportEnvelope {
+        cluster_id: 7,
+        user_payload: None,
+        request: bare.clone(),
+    };
+    let encoded = serde_json::to_string(&old_shape).expect("encode");
+    assert!(
+        !encoded.contains("user_payload"),
+        "an absent payload should not be written at all, got {encoded}"
+    );
+    let decoded: TcpRaftTransportEnvelope = serde_json::from_str(&encoded).expect("decode");
+    assert_eq!(decoded.user_payload, None);
+    assert_eq!(decoded.request, bare);
+
+    // And a stamped envelope still decodes as a bare request for a peer that
+    // predates both fields.
+    let stamped = TcpRaftTransportEnvelope {
+        cluster_id: 7,
+        user_payload: Some("hold group 9".to_string()),
+        request: bare.clone(),
+    };
+    let stamped_json = serde_json::to_string(&stamped).expect("encode");
+    assert!(stamped_json.contains("hold group 9"));
+    let as_old: TcpRaftTransportRequest =
+        serde_json::from_str(&stamped_json).expect("an old peer ignores both extra fields");
+    assert_eq!(as_old, bare);
 }

@@ -2920,11 +2920,12 @@ impl MatrixRaftTransportBuilder {
 impl MatrixRaftTransportOptions {
     /// The TCP transport these options describe.
     ///
-    /// **This honours `cluster_id`, `timeout_ms` and `num_connection_group`.
-    /// It does not honour `user_payload_callback_bound`**, which this crate
-    /// still only records -- the README's settings section says so. Said here
-    /// because a constructor that quietly dropped it would be a worse way to
-    /// find that out.
+    /// **This honours `cluster_id`, `timeout_ms` and `num_connection_group`.**
+    /// `user_payload_callback_bound` needs a callback to honour, so it is
+    /// honoured by
+    /// [`MatrixRaftTransportOptions::into_tcp_transport_with_payload`] rather
+    /// than here -- this constructor attaches no payload whatever the flag
+    /// says, because there is nothing to ask.
     ///
     /// `num_connection_group` becomes
     /// [`TcpRaftTransport::with_connections_per_peer`], and its default of
@@ -2983,6 +2984,31 @@ impl MatrixRaftTransportOptions {
         let transport = self.into_tcp_transport(peers);
         if self.dynamic_address_map {
             transport.watching_addresses(local_node_id, resolver)
+        } else {
+            transport
+        }
+    }
+
+    /// The same transport, attaching `payload` to its health checks **only if
+    /// `user_payload_callback_bound` was set**.
+    ///
+    /// That is what the flag means and all it means. Passing a callback is not
+    /// enough on its own, which is deliberate: a host should be able to hold a
+    /// callback for other uses while telling this transport not to attach
+    /// anything.
+    ///
+    /// The receiving half is
+    /// [`TcpRaftTransportServer::start_with_payload_observer`]. Without it the
+    /// payload crosses the wire and is dropped -- harmless, and the reason
+    /// both halves are documented together.
+    pub fn into_tcp_transport_with_payload(
+        &self,
+        peers: BTreeMap<NodeId, String>,
+        payload: MatrixRaftUserPayload,
+    ) -> TcpRaftTransport {
+        let transport = self.into_tcp_transport(peers);
+        if self.user_payload_callback_bound {
+            transport.with_user_payload(payload)
         } else {
             transport
         }
@@ -17969,14 +17995,8 @@ impl MatrixRaftRouteResult {
 
 /// What a server knows about a request for a replica it does not host.
 ///
-/// Everything here came off the request. There is deliberately **no
-/// host-supplied payload field**: nothing on the wire carries one, and a
-/// field that is always `None` is how a setting becomes a knob that does
-/// nothing. Carrying one would mean threading it through the four `Transport`
-/// methods, which every host implementation of that trait would have to
-/// absorb -- a decision worth making on its own rather than smuggling in
-/// behind this one.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Everything here came off the request, or off the envelope it arrived in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftReplicaRequest {
     pub group_id: GroupId,
     /// The replica being asked for: this host's id in that group.
@@ -17985,6 +18005,20 @@ pub struct MatrixRaftReplicaRequest {
     /// service needs this, and it is the only identity the request carries.
     pub from_node_id: NodeId,
     pub term: Term,
+    /// What the sending host attached to the health check, if anything.
+    ///
+    /// `None` when the peer attached nothing, when it predates the field, or
+    /// when the request was not a health check -- a payload rides only on
+    /// those. See [`TcpRaftTransport::with_user_payload`] for the sending half
+    /// and [`TcpRaftTransportServer::start_with_payload_observer`] for the
+    /// receiving one.
+    ///
+    /// **#155 shipped this struct without this field**, on the grounds that
+    /// nothing on the wire carried a payload and a field that is always `None`
+    /// is how a setting becomes a knob that does nothing. That was true then.
+    /// The envelope carries one now, so it is a field.
+    #[serde(default)]
+    pub payload: Option<String>,
 }
 
 /// Creates a replica for a group this server does not host yet.
