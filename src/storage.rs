@@ -17,7 +17,21 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Persistent Raft log and snapshot storage API used by production adapters.
+/// A persistent Raft log and snapshot interface.
+///
+/// **Nothing in this crate calls it.** Its doc comment used to say it was
+/// "used by production adapters", which was not true of this repository: there
+/// is no implementation, no bound, no `dyn Storage` and no caller anywhere in
+/// the crate, and a host that implemented it would get a type the engine never
+/// touches.
+///
+/// It is kept because it is a small, honest statement of what a Raft log has
+/// to do, and because deleting an exported trait breaks anyone who named it.
+/// What it is **not** is a plug-in point: see the README's "Storage interfaces
+/// the engine does not drive".
+///
+/// The engine's own log is `wal.rs`, which is concrete -- it declares no trait,
+/// so log storage cannot be substituted from outside at all.
 pub trait Storage {
     fn append_entries(&mut self, entries: &[LogEntry]) -> Result<(), RaftError>;
     fn read_entries(&self, start: u64, end: u64) -> Result<Vec<LogEntry>, RaftError>;
@@ -129,6 +143,23 @@ pub struct MatrixRaftLogStorageOptions {
     pub sync: bool,
 }
 
+/// The log storage interface, mirroring the comparable engine's.
+///
+/// Faithful and tested: [`MatrixRaftMemoryLogStorage`] implements all of it,
+/// and `tests/matrixraft_storage_compat.rs` exercises the segment events, the
+/// compaction report and the two committed indexes against it.
+///
+/// **But nothing in this crate drives it.** The only uses of this trait are
+/// that in-memory implementation and the associated type on
+/// [`MatrixRaftGroupStorage`]; no driver, node or runtime holds one. A host
+/// that implements it gets a conformant storage engine that this crate will
+/// not call -- it has to drive it itself.
+///
+/// That is worth knowing before writing one, which is why it is said here
+/// rather than discovered afterwards. The README section "Storage interfaces
+/// the engine does not drive" carries the same note, and
+/// `tests/storage_surface_contract.rs` fails if this stops being true -- which
+/// would be good news, and a reason to update both.
 pub trait MatrixRaftLogStorage {
     fn reset(
         &mut self,
@@ -170,6 +201,14 @@ pub trait MatrixRaftLogStorage {
     fn release_segments_until(&mut self, index: LogIndex) -> Vec<MatrixRaftLogSegmentEvent>;
 }
 
+/// The group storage interface: one store shared by a host's replicas.
+///
+/// Carries the cross-group write batch (`begin`, `commit`, `overflow`,
+/// `batch_size`) that lets many groups coalesce their writes, and the replica
+/// lifecycle (`prepare`, `open`, `exists`, `delete`).
+///
+/// **Nothing in this crate drives it either** -- see
+/// [`MatrixRaftLogStorage`] for what that means and why it is said here.
 pub trait MatrixRaftGroupStorage {
     type Log: MatrixRaftLogStorage;
 
