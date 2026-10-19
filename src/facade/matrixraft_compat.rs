@@ -2920,11 +2920,19 @@ impl MatrixRaftTransportBuilder {
 impl MatrixRaftTransportOptions {
     /// The TCP transport these options describe.
     ///
-    /// **This honours `cluster_id`. It does not honour `timeout_ms`,
+    /// **This honours `cluster_id` and `timeout_ms`. It does not honour
     /// `num_connection_group` or `user_payload_callback_bound`**, which this
     /// crate still only records -- the README's settings section lists them.
     /// Said here because a constructor that quietly dropped them would be a
     /// worse way to find that out.
+    ///
+    /// `timeout_ms` bounds reads and writes, and its default of **250ms** is
+    /// the one a host gets by building options rather than calling
+    /// [`TcpRaftTransport::new`] directly, which still waits for ever. The
+    /// two differ on purpose: a transport built from options is one a host
+    /// configured, while `new` is what the crate's own tests and examples
+    /// call, and giving every one of those a 250ms deadline would make them
+    /// fail on a loaded machine rather than on a broken peer.
     ///
     /// `dynamic_address_map` needs a resolver to honour, so it is honoured by
     /// [`MatrixRaftTransportOptions::into_tcp_transport_watching`] rather than
@@ -2938,6 +2946,7 @@ impl MatrixRaftTransportOptions {
     /// [`TcpRaftTransportServer::start_in_cluster`].
     pub fn into_tcp_transport(&self, peers: BTreeMap<NodeId, String>) -> TcpRaftTransport {
         TcpRaftTransport::new_in_cluster(peers, self.cluster_id)
+            .with_timeout(Duration::from_millis(u64::from(self.timeout_ms)))
     }
 
     /// The same transport, with `resolver` attached **only if
@@ -2960,7 +2969,7 @@ impl MatrixRaftTransportOptions {
         local_node_id: NodeId,
         resolver: Arc<dyn HeartbeatAddressResolver + Send + Sync>,
     ) -> TcpRaftTransport {
-        let transport = TcpRaftTransport::new_in_cluster(peers, self.cluster_id);
+        let transport = self.into_tcp_transport(peers);
         if self.dynamic_address_map {
             transport.watching_addresses(local_node_id, resolver)
         } else {
