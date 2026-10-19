@@ -607,6 +607,46 @@ impl SnapshotLifecycle {
     }
 }
 
+/// What a stored checkpoint is, without reading the snapshot itself.
+///
+/// Written beside each checkpoint so that deciding whether to keep one costs a
+/// few hundred bytes instead of the whole snapshot. The comparable engine
+/// keeps its snapshot *desc* in a separate file from the data for the same
+/// reason.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredSnapshot {
+    pub snapshot_id: SnapshotId,
+    pub group_id: GroupId,
+    pub last_log_id: LogId,
+    /// Bytes the checkpoint file occupies on disk.
+    pub bytes: u64,
+}
+
+/// What a release swept, and what it kept.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SnapshotReleaseReport {
+    pub released: Vec<StoredSnapshot>,
+    pub retained: Vec<StoredSnapshot>,
+    pub released_bytes: u64,
+    pub retained_bytes: u64,
+}
+
+impl SnapshotReleaseReport {
+    pub fn released_ids(&self) -> Vec<&str> {
+        self.released
+            .iter()
+            .map(|stored| stored.snapshot_id.as_str())
+            .collect()
+    }
+
+    pub fn retained_ids(&self) -> Vec<&str> {
+        self.retained
+            .iter()
+            .map(|stored| stored.snapshot_id.as_str())
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistentRaftSnapshotStoreOptions {
     pub dir: PathBuf,
@@ -661,7 +701,182 @@ impl PersistentRaftSnapshotStore {
                     path.display()
                 ))
             })?;
+        // The sidecar last, and only after the checkpoint itself is synced: a
+        // sidecar without its snapshot would advertise a checkpoint that
+        // cannot be loaded, which is worse than a snapshot with no sidecar --
+        // that one is merely slower to list.
+        self.write_descriptor(snapshot, encoded.len() as u64)?;
         Ok(path)
+    }
+
+    /// Every checkpoint this store holds, oldest first.
+    ///
+    /// Reads the sidecar where there is one and falls back to the checkpoint
+    /// itself where there is not, so a store written before sidecars existed
+    /// still lists correctly -- slowly, which is the right way round.
+    pub fn list_checkpoints(&self) -> Result<Vec<StoredSnapshot>, RaftError> {
+        let entries = fs::read_dir(&self.options.dir).map_err(|err| {
+            RaftError::Storage(format!(
+                "failed to read snapshot directory {}: {err}",
+                self.options.dir.display()
+            ))
+        })?;
+        let mut stored = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|err| {
+                RaftError::Storage(format!("failed to read a snapshot directory entry: {err}"))
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("snapshot") {
+                continue;
+            }
+            let Some(snapshot_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            stored.push(self.describe(snapshot_id)?);
+        }
+        // By index, then by id, so the order is total: two checkpoints at the
+        // same index would otherwise sort by whatever the directory returned,
+        // and "the newest" has to be one thing rather than either of two.
+        stored.sort_by(|left, right| {
+            left.last_log_id
+                .index
+                .cmp(&right.last_log_id.index)
+                .then_with(|| left.snapshot_id.cmp(&right.snapshot_id))
+        });
+        Ok(stored)
+    }
+
+    /// Bytes every checkpoint in this store occupies.
+    pub fn owned_bytes(&self) -> Result<u64, RaftError> {
+        Ok(self
+            .list_checkpoints()?
+            .iter()
+            .map(|stored| stored.bytes)
+            .sum())
+    }
+
+    /// Deletes checkpoints nothing needs any more.
+    ///
+    /// **Nothing deleted a checkpoint before this.** Every snapshot a group
+    /// ever wrote stayed on disk, so a group that checkpoints on a timer grew
+    /// its snapshot directory without bound.
+    ///
+    /// A checkpoint is released only when **both** watermarks have passed it:
+    ///
+    /// - `applied_index` -- this node has applied past it, so it would never
+    ///   restore from it.
+    /// - `min_replicated_index` -- the **least** index replicated to any peer.
+    ///   A follower behind that point may still have to be caught up, and an
+    ///   in-flight send is reading a checkpoint file; deleting it mid-transfer
+    ///   breaks the transfer rather than slowing it.
+    ///
+    /// Taking the *minimum* of the two is what makes this safe to call on a
+    /// timer: a single lagging follower holds everything, which is the
+    /// conservative direction. A host that wants to stop waiting for it should
+    /// remove it from the group, not pass a higher number.
+    ///
+    /// **The newest checkpoint is never released**, whatever the watermarks
+    /// say, because a store with nothing in it cannot restore anything. That
+    /// means this can be called with any arguments without leaving the group
+    /// unable to recover.
+    pub fn release_checkpoints(
+        &self,
+        applied_index: LogIndex,
+        min_replicated_index: LogIndex,
+    ) -> Result<SnapshotReleaseReport, RaftError> {
+        let stored = self.list_checkpoints()?;
+        let watermark = applied_index.min(min_replicated_index);
+        let mut report = SnapshotReleaseReport::default();
+        // `stored` is oldest first, so the last is the newest and is kept
+        // whatever else happens.
+        let newest = stored.len().saturating_sub(1);
+        for (nth, candidate) in stored.into_iter().enumerate() {
+            let releasable = nth != newest && candidate.last_log_id.index <= watermark;
+            if releasable {
+                self.remove_checkpoint(&candidate.snapshot_id)?;
+                report.released_bytes += candidate.bytes;
+                report.released.push(candidate);
+            } else {
+                report.retained_bytes += candidate.bytes;
+                report.retained.push(candidate);
+            }
+        }
+        Ok(report)
+    }
+
+    /// Reads a checkpoint's descriptor, from its sidecar if there is one.
+    fn describe(&self, snapshot_id: &str) -> Result<StoredSnapshot, RaftError> {
+        let path = self.snapshot_path(snapshot_id);
+        let bytes = fs::metadata(&path).map(|meta| meta.len()).map_err(|err| {
+            RaftError::Storage(format!(
+                "failed to stat snapshot {}: {err}",
+                path.display()
+            ))
+        })?;
+        let descriptor_path = self.descriptor_path(snapshot_id);
+        if let Ok(raw) = fs::read(&descriptor_path) {
+            if let Ok(mut stored) = serde_json::from_slice::<StoredSnapshot>(&raw) {
+                // The file's own length wins over the recorded one: the
+                // sidecar is a hint, and a hint that disagrees with the disk
+                // would make the byte totals fiction.
+                stored.bytes = bytes;
+                return Ok(stored);
+            }
+        }
+        // No sidecar, or an unreadable one: fall back to the snapshot.
+        let snapshot = self.load_checkpoint(snapshot_id)?;
+        Ok(StoredSnapshot {
+            snapshot_id: snapshot.meta.snapshot_id,
+            group_id: snapshot.group_id,
+            last_log_id: snapshot.meta.last_log_id,
+            bytes,
+        })
+    }
+
+    fn write_descriptor(&self, snapshot: &RaftSnapshot, bytes: u64) -> Result<(), RaftError> {
+        let stored = StoredSnapshot {
+            snapshot_id: snapshot.meta.snapshot_id.clone(),
+            group_id: snapshot.group_id,
+            last_log_id: snapshot.meta.last_log_id.clone(),
+            bytes,
+        };
+        let path = self.descriptor_path(&stored.snapshot_id);
+        let encoded = serde_json::to_vec(&stored).map_err(|err| {
+            RaftError::Storage(format!("failed to encode a snapshot descriptor: {err}"))
+        })?;
+        let mut file = File::create(&path).map_err(|err| {
+            RaftError::Storage(format!(
+                "failed to create snapshot descriptor {}: {err}",
+                path.display()
+            ))
+        })?;
+        file.write_all(&encoded)
+            .and_then(|_| file.sync_data())
+            .map_err(|err| {
+                RaftError::Storage(format!(
+                    "failed to persist snapshot descriptor {}: {err}",
+                    path.display()
+                ))
+            })
+    }
+
+    /// Deletes one checkpoint and its sidecar.
+    ///
+    /// The checkpoint goes first: a sidecar left behind describes nothing and
+    /// is ignored by `list_checkpoints`, while a checkpoint left behind after
+    /// its sidecar went would be listed by the slow path and look live.
+    fn remove_checkpoint(&self, snapshot_id: &str) -> Result<(), RaftError> {
+        let path = self.snapshot_path(snapshot_id);
+        fs::remove_file(&path).map_err(|err| {
+            RaftError::Storage(format!(
+                "failed to remove snapshot {}: {err}",
+                path.display()
+            ))
+        })?;
+        // Best effort: a sidecar whose snapshot is gone is already inert.
+        let _ = fs::remove_file(self.descriptor_path(snapshot_id));
+        Ok(())
     }
 
     pub fn load_checkpoint(&self, snapshot_id: &str) -> Result<RaftSnapshot, RaftError> {
@@ -683,6 +898,10 @@ impl PersistentRaftSnapshotStore {
 
     fn snapshot_path(&self, snapshot_id: &str) -> PathBuf {
         self.options.dir.join(format!("{snapshot_id}.snapshot"))
+    }
+
+    fn descriptor_path(&self, snapshot_id: &str) -> PathBuf {
+        self.options.dir.join(format!("{snapshot_id}.descriptor"))
     }
 }
 

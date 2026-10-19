@@ -624,3 +624,202 @@ fn a_refill_on_a_full_limiter_restores_nothing() {
     assert_eq!(refiller.bytes_restored(), 0);
     assert_eq!(limiter.lock().expect("limiter").available_bytes(), 100);
 }
+
+fn retained_snapshot(index: u64, payload: &[u8]) -> RaftSnapshot {
+    RaftSnapshot {
+        group_id: 7,
+        meta: SnapshotMetadata {
+            snapshot_id: format!("checkpoint-{index:04}"),
+            last_log_id: LogId { term: 2, index },
+            membership: vec![1, 2, 3],
+            members: Vec::new(),
+        },
+        payload: payload.to_vec(),
+    }
+}
+
+/// A store holding checkpoints at 10, 20 and 30.
+fn store_with_three(name: &str) -> (PersistentRaftSnapshotStore, PathBuf) {
+    let dir = temp_snapshot_dir(name);
+    let store = PersistentRaftSnapshotStore::open(PersistentRaftSnapshotStoreOptions {
+        dir: dir.clone(),
+        chunk_size: 8,
+    })
+    .expect("open");
+    for index in [10u64, 20, 30] {
+        store
+            .save_checkpoint(&retained_snapshot(index, b"snapshot-payload-bytes"))
+            .expect("save");
+    }
+    (store, dir)
+}
+
+#[test]
+fn a_store_lists_and_measures_what_it_holds() {
+    let (store, _dir) = store_with_three("list");
+    let listed = store.list_checkpoints().expect("list");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|stored| stored.last_log_id.index)
+            .collect::<Vec<_>>(),
+        vec![10, 20, 30],
+        "oldest first, so the last is the newest"
+    );
+    assert_eq!(listed[0].group_id, 7);
+    assert!(listed.iter().all(|stored| stored.bytes > 0));
+    assert_eq!(
+        store.owned_bytes().expect("bytes"),
+        listed.iter().map(|stored| stored.bytes).sum::<u64>()
+    );
+}
+
+#[test]
+fn checkpoints_nothing_needs_are_released() {
+    // Nothing deleted a checkpoint before this: every snapshot a group ever
+    // wrote stayed on disk, so a group checkpointing on a timer grew its
+    // snapshot directory without bound.
+    let (store, dir) = store_with_three("release");
+    let before = store.owned_bytes().expect("bytes");
+
+    let report = store.release_checkpoints(30, 30).expect("release");
+    assert_eq!(
+        report.released_ids(),
+        vec!["checkpoint-0010", "checkpoint-0020"]
+    );
+    assert_eq!(report.retained_ids(), vec!["checkpoint-0030"]);
+    assert!(report.released_bytes > 0);
+    assert_eq!(report.released_bytes + report.retained_bytes, before);
+
+    // The files are actually gone, and the kept one still loads.
+    assert_eq!(store.list_checkpoints().expect("list").len(), 1);
+    assert!(store.load_checkpoint("checkpoint-0010").is_err());
+    let kept = store.load_checkpoint("checkpoint-0030").expect("load");
+    assert_eq!(kept.meta.last_log_id.index, 30);
+    assert_eq!(store.owned_bytes().expect("bytes"), report.retained_bytes);
+
+    // And a released checkpoint takes its sidecar with it, rather than
+    // leaving a descriptor that advertises a snapshot nothing can load.
+    for entry in fs::read_dir(&dir).expect("read dir") {
+        let name = entry
+            .expect("entry")
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            !name.starts_with("checkpoint-0010") && !name.starts_with("checkpoint-0020"),
+            "a released checkpoint left {name} behind"
+        );
+    }
+}
+
+#[test]
+fn the_newest_checkpoint_is_never_released() {
+    // The safety property that makes this callable on a timer with any
+    // arguments: a store with nothing in it cannot restore anything.
+    let (store, _dir) = store_with_three("keep-newest");
+    let report = store
+        .release_checkpoints(u64::MAX, u64::MAX)
+        .expect("release");
+    assert_eq!(report.retained_ids(), vec!["checkpoint-0030"]);
+    assert_eq!(report.released.len(), 2);
+    let kept = store.load_checkpoint("checkpoint-0030").expect("load");
+    assert_eq!(kept.meta.last_log_id.index, 30);
+
+    // Releasing again is a no-op rather than an emptying.
+    let again = store
+        .release_checkpoints(u64::MAX, u64::MAX)
+        .expect("release");
+    assert!(again.released.is_empty());
+    assert_eq!(again.retained_ids(), vec!["checkpoint-0030"]);
+    assert!(store.load_checkpoint("checkpoint-0030").is_ok());
+}
+
+#[test]
+fn one_lagging_follower_holds_every_checkpoint() {
+    // The minimum of the two watermarks is what makes a timer-driven release
+    // safe: a follower behind the oldest checkpoint may still have to be
+    // caught up from it, and an in-flight send is reading that very file.
+    let (store, _dir) = store_with_three("lagging");
+    let report = store.release_checkpoints(30, 5).expect("release");
+    assert!(
+        report.released.is_empty(),
+        "a follower at index 5 holds all three, got {:?}",
+        report.released_ids()
+    );
+    assert_eq!(report.retained.len(), 3);
+    assert_eq!(store.list_checkpoints().expect("list").len(), 3);
+
+    // The same store, once that follower catches up to 20.
+    let caught_up = store.release_checkpoints(30, 20).expect("release");
+    assert_eq!(
+        caught_up.released_ids(),
+        vec!["checkpoint-0010", "checkpoint-0020"],
+        "a checkpoint at exactly the watermark is no longer needed by anybody"
+    );
+}
+
+#[test]
+fn a_store_written_without_sidecars_still_lists_and_releases() {
+    // Backward compatibility, and the right way round: a snapshot with no
+    // descriptor is merely slower to list, while a descriptor with no
+    // snapshot would advertise a checkpoint that cannot be loaded.
+    let (store, dir) = store_with_three("no-sidecars");
+    let mut removed = 0;
+    for entry in fs::read_dir(&dir).expect("read dir") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("descriptor") {
+            fs::remove_file(&path).expect("remove the sidecar");
+            removed += 1;
+        }
+    }
+    assert_eq!(removed, 3, "this test is only meaningful without sidecars");
+
+    let listed = store.list_checkpoints().expect("list");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|stored| stored.last_log_id.index)
+            .collect::<Vec<_>>(),
+        vec![10, 20, 30],
+        "the fallback path reads the snapshots themselves"
+    );
+    assert!(listed.iter().all(|stored| stored.bytes > 0));
+
+    let report = store.release_checkpoints(30, 30).expect("release");
+    assert_eq!(report.released.len(), 2);
+    assert_eq!(report.retained_ids(), vec!["checkpoint-0030"]);
+}
+
+#[test]
+fn a_descriptor_that_disagrees_with_the_disk_does_not_decide_the_bytes() {
+    // The sidecar is a hint. If it could decide the byte totals, a stale one
+    // would make `owned_bytes` fiction -- and a host watches that number to
+    // decide whether to release at all.
+    let dir = temp_snapshot_dir("stale-sidecar");
+    let store = PersistentRaftSnapshotStore::open(PersistentRaftSnapshotStoreOptions {
+        dir: dir.clone(),
+        chunk_size: 8,
+    })
+    .expect("open");
+    store
+        .save_checkpoint(&retained_snapshot(10, b"payload"))
+        .expect("save");
+
+    let on_disk = fs::metadata(dir.join("checkpoint-0010.snapshot"))
+        .expect("stat")
+        .len();
+    let descriptor = dir.join("checkpoint-0010.descriptor");
+    let mut stale: serde_json::Value =
+        serde_json::from_slice(&fs::read(&descriptor).expect("read")).expect("decode");
+    stale["bytes"] = serde_json::json!(999_999);
+    fs::write(&descriptor, serde_json::to_vec(&stale).expect("encode")).expect("write");
+
+    let listed = store.list_checkpoints().expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].bytes, on_disk,
+        "the file's own length should win over the recorded one"
+    );
+    assert_eq!(store.owned_bytes().expect("bytes"), on_disk);
+}

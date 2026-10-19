@@ -1156,6 +1156,52 @@ not resume a transfer mid-stream. Handing the installer a chunk at offset 4
 with nothing before it is an error, so the sender restarts from the beginning.
 That was always true; the test says so now.
 
+### Snapshots that are released
+
+`PersistentRaftSnapshotStore` could save a checkpoint and load one. **Nothing
+could delete one.** Every snapshot a group ever wrote stayed on disk, so a
+group checkpointing on a timer grew its snapshot directory without bound.
+
+```rust
+let report = store.release_checkpoints(applied_index, min_replicated_index)?;
+```
+
+A checkpoint is released only when **both** watermarks have passed it:
+
+- `applied_index` — this node has applied past it, so it would never restore
+  from it.
+- `min_replicated_index` — the **least** index replicated to any peer. A
+  follower behind that point may still have to be caught up, and an in-flight
+  send is reading that very file; deleting it mid-transfer breaks the transfer
+  rather than slowing it.
+
+Taking the **minimum** of the two is what makes this safe to call on a timer:
+one lagging follower holds everything, which is the conservative direction. A
+host that wants to stop waiting for it should remove it from the group rather
+than pass a higher number.
+
+**The newest checkpoint is never released**, whatever the watermarks say,
+because a store with nothing in it cannot restore anything. So this can be
+called with any arguments — including `u64::MAX` — without leaving the group
+unable to recover, and calling it twice is a no-op rather than an emptying.
+
+`list_checkpoints` and `owned_bytes` are how a host sees what it is holding
+before deciding to sweep.
+
+**Each checkpoint now has a small descriptor beside it.** Deciding whether to
+keep a one-gigabyte snapshot should not mean reading a gigabyte, so the index
+and size live in a sidecar — as the comparable engine keeps its snapshot desc
+in a separate file from the data. Three details that follow:
+
+- A checkpoint written before sidecars existed still lists, by reading the
+  snapshot itself. Slower, which is the right way round: a snapshot with no
+  descriptor is merely slow, while a descriptor with no snapshot would
+  advertise a checkpoint nothing can load.
+- The sidecar is written **after** the checkpoint is synced, for that reason.
+- The file's own length wins over the recorded one. The sidecar is a hint, and
+  a stale hint would make `owned_bytes` fiction — which is the number a host
+  watches to decide whether to sweep at all.
+
 ### Heartbeats from many groups to one peer, in one batch
 
 `HeartbeatMerger` buckets by destination address rather than by group, which is
