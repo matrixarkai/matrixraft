@@ -2711,8 +2711,16 @@ impl RaftCluster {
         // than a clone per node.
         let entry = Arc::new(entry);
 
-        let mut lease_acknowledgements = vec![leader_id];
+        // Sized for every node up front. It started at capacity one and
+        // grew by doubling as peers acknowledged, which is an allocation per
+        // power of two for a length the node count already says.
+        let mut lease_acknowledgements = Vec::with_capacity(self.nodes.len());
+        lease_acknowledgements.push(leader_id);
         let node_ids: Vec<_> = self.nodes.keys().copied().collect();
+        // One buffer for every follower's flush, rather than one each. The
+        // flush result is discarded here -- it is the pipeline's own state that
+        // matters -- so this exists only to give the flush somewhere to write.
+        let mut flushed = Vec::new();
         for node_id in node_ids {
             let Some(node) = self.nodes.get_mut(&node_id) else {
                 continue;
@@ -2723,7 +2731,12 @@ impl RaftCluster {
             }
             let response = if let Some(pipeline) = self.peer_pipelines.get_mut(&node_id) {
                 pipeline.queue_append(&entry)?;
-                let _ = pipeline.flush_append_batch(64, self.config.max_payload_bytes.max(1));
+                flushed.clear();
+                let _ = pipeline.flush_append_batch_into(
+                    64,
+                    self.config.max_payload_bytes.max(1),
+                    &mut flushed,
+                );
                 if node.healthy {
                     let match_index = node.match_index();
                     let append_is_contiguous = match_index.saturating_add(1) == entry.log_id.index;

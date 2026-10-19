@@ -450,8 +450,27 @@ impl ReplicationPipeline {
         self.flush_append_batch(1, self.limits.max_apply_batch_bytes)
     }
 
-    pub fn flush_append_batch(&mut self, max_entries: u64, max_bytes: u64) -> Vec<InflightAppend> {
-        let mut flushed = Vec::new();
+    /// Flushes into a vector this pipeline does not own.
+    ///
+    /// The replication path calls this once per follower per proposal and
+    /// **discards the result**, so the vector it used to return was an
+    /// allocation per follower for a value nobody read. Lending one buffer
+    /// across the followers makes that one allocation per proposal, and none
+    /// at all once the buffer has earned its capacity.
+    ///
+    /// Appends rather than replaces, so a caller can accumulate across peers.
+    /// Clear it yourself if you want only this flush -- that is cheaper than
+    /// this deciding, because clearing keeps the capacity and a fresh vector
+    /// does not.
+    ///
+    /// Returns how many batches were appended.
+    pub fn flush_append_batch_into(
+        &mut self,
+        max_entries: u64,
+        max_bytes: u64,
+        flushed: &mut Vec<InflightAppend>,
+    ) -> usize {
+        let before = flushed.len();
         let max_entries = if self.status.progress_state == ProgressState::Probe {
             1
         } else {
@@ -518,6 +537,17 @@ impl ReplicationPipeline {
             }
         }
         self.status.append_queue_depth = self.append_queue.len() as u64;
+        flushed.len() - before
+    }
+
+    /// Flushes into a fresh vector.
+    ///
+    /// Kept for callers that want the batches: it is
+    /// [`ReplicationPipeline::flush_append_batch_into`] with a vector of its
+    /// own, which costs the allocation that one avoids.
+    pub fn flush_append_batch(&mut self, max_entries: u64, max_bytes: u64) -> Vec<InflightAppend> {
+        let mut flushed = Vec::new();
+        self.flush_append_batch_into(max_entries, max_bytes, &mut flushed);
         flushed
     }
 
