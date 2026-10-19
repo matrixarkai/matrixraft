@@ -251,3 +251,123 @@ fn a_sender_built_from_the_wiring_carries_the_configured_limit() {
     unlimited.begin_send(&snapshot, 2, 1).expect("begin send");
     assert_eq!(unlimited.poll_send_requests().expect("poll").len(), 3);
 }
+
+#[test]
+fn a_download_quota_reports_over_quota_and_still_installs() {
+    // The surprising half, asserted rather than left to the doc comment: a
+    // chunk over quota is STILL installed, and the result says so. Refusing it
+    // would count as a retry against the sender, and three of those abandon
+    // the transfer -- which would make a limiter worse than no limiter.
+    let rate_limit = MatrixRaftRateLimiterConfig {
+        bytes_limit_per_sec: 4,
+        check_cycle_sec: 1,
+    };
+    let config = SnapshotLifecycleConfig {
+        chunk_size: 4,
+        max_chunks_per_tick: 1,
+        max_bytes_per_tick: 1 << 20,
+        max_retry_attempts: 2,
+    };
+    let snapshot = snapshot(9, b"abcdefghijkl".to_vec());
+
+    let mut sender = MatrixRaftSnapshotSender::new(config).expect("sender");
+    sender.begin_send(&snapshot, 2, 1).expect("begin send");
+
+    let mut downloader =
+        MatrixRaftSnapshotDownloader::with_rate_limit(config, &rate_limit).expect("downloader");
+    assert_eq!(downloader.rate_limit_available_bytes(), Some(4));
+
+    // The first chunk fits the quota exactly.
+    let first = sender.poll_send_requests().expect("poll").remove(0);
+    let first_result = downloader.download(first).expect("download");
+    assert!(first_result.accepted);
+    assert!(
+        !first_result.over_quota,
+        "four bytes of quota covers a four-byte chunk"
+    );
+    assert_eq!(downloader.rate_limit_available_bytes(), Some(0));
+
+    // The second does not, and is installed anyway with the flag set.
+    let second = sender.poll_send_requests().expect("poll").remove(0);
+    let second_result = downloader.download(second).expect("download");
+    assert!(
+        second_result.over_quota,
+        "an exhausted quota must be reported"
+    );
+    assert!(
+        second_result.accepted,
+        "the chunk is installed anyway: refusing it would burn the sender retry budget"
+    );
+    assert_eq!(second_result.response.next_offset, 8);
+
+    // Refilled, the next chunk is inside the quota again and completes the
+    // snapshot -- so the accounting did not interfere with the transfer.
+    assert_eq!(downloader.refill_rate_limit(&rate_limit), 4);
+    let third = sender.poll_send_requests().expect("poll").remove(0);
+    let third_result = downloader.download(third).expect("download");
+    assert!(!third_result.over_quota);
+    assert!(
+        third_result.installed_snapshot.is_some(),
+        "the snapshot lands"
+    );
+    assert_eq!(
+        third_result
+            .installed_snapshot
+            .expect("snapshot")
+            .payload
+            .len(),
+        12
+    );
+
+    let stats = downloader
+        .rate_limit_stats()
+        .expect("a limited downloader has stats");
+    assert_eq!(
+        stats.total_granted_bytes + stats.total_rejected_bytes,
+        12,
+        "every arriving byte is accounted for, as granted or as rejected: {stats:?}"
+    );
+    assert_eq!(stats.rejection_count, 1, "one chunk was over quota");
+
+    // An unlimited downloader reports nothing and never flags.
+    let mut unlimited = MatrixRaftSnapshotDownloader::new(config).expect("downloader");
+    assert_eq!(unlimited.rate_limit_available_bytes(), None);
+    assert!(unlimited.rate_limit_stats().is_none());
+    assert_eq!(unlimited.refill_rate_limit(&rate_limit), 0);
+    let mut lone_sender = MatrixRaftSnapshotSender::new(config).expect("sender");
+    lone_sender.begin_send(&snapshot, 2, 1).expect("begin send");
+    let chunk = lone_sender.poll_send_requests().expect("poll").remove(0);
+    assert!(!unlimited.download(chunk).expect("download").over_quota);
+}
+
+#[test]
+fn a_downloader_built_from_the_wiring_carries_the_configured_limit() {
+    let rate_limit = MatrixRaftRateLimiterConfig {
+        bytes_limit_per_sec: 4,
+        check_cycle_sec: 1,
+    };
+    let config = SnapshotLifecycleConfig {
+        chunk_size: 4,
+        max_chunks_per_tick: 1,
+        max_bytes_per_tick: 1 << 20,
+        max_retry_attempts: 2,
+    };
+
+    let mut wired = wiring_with_send_limit(None);
+    wired.snapshot_download_rate_limiter = Some(rate_limit.clone());
+    assert_eq!(
+        wired.snapshot_download_limiter().expect("a valid limit"),
+        Some(matrixraft::ByteQuotaLimiter::new(4))
+    );
+    let downloader =
+        MatrixRaftSnapshotDownloader::from_wiring(config, &wired).expect("from the wiring");
+    assert_eq!(downloader.rate_limit_available_bytes(), Some(4));
+
+    // And a wiring with no download limit gives a downloader with none, even
+    // when a SEND limit is set -- the two are separate quotas.
+    let mut send_only = wiring_with_send_limit(Some(rate_limit));
+    send_only.snapshot_download_rate_limiter = None;
+    let unlimited =
+        MatrixRaftSnapshotDownloader::from_wiring(config, &send_only).expect("from the wiring");
+    assert_eq!(unlimited.rate_limit_available_bytes(), None);
+}
