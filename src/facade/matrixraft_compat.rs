@@ -2161,6 +2161,13 @@ pub struct MatrixRaftSnapshotDownloadResult {
     pub installed_snapshot: Option<RaftSnapshot>,
     #[serde(default)]
     pub finish: Option<MatrixRaftOldSnapshotFinish>,
+    /// This chunk was larger than the download quota had left.
+    ///
+    /// The chunk was still installed. See
+    /// [`MatrixRaftSnapshotDownloader::with_rate_limit`] for why a receiver
+    /// does not refuse it, and what a host is expected to do with this.
+    #[serde(default)]
+    pub over_quota: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2383,13 +2390,95 @@ impl Default for MatrixRaftSnapshotSender {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftSnapshotDownloader {
     lifecycle: SnapshotLifecycle,
+    /// The byte quota incoming chunks are charged to, if this downloader was
+    /// given one.
+    limiter: Option<ByteQuotaLimiter>,
 }
 
 impl MatrixRaftSnapshotDownloader {
     pub fn new(config: SnapshotLifecycleConfig) -> Result<Self, RaftError> {
         Ok(Self {
             lifecycle: SnapshotLifecycle::new(config)?,
+            limiter: None,
         })
+    }
+
+    /// A downloader that charges what it installs against one cycle of the
+    /// configured bytes.
+    ///
+    /// **Read this before configuring one, because it does less than the name
+    /// suggests.**
+    ///
+    /// Every chunk is still installed. What the quota does is account for the
+    /// bytes and set `over_quota` on the result once a chunk exceeds what is
+    /// left, so a host can pace its own acknowledgement. It caps the rate at
+    /// which this node *commits* snapshot bytes, which is a disk and CPU
+    /// bound, and it is a signal for pacing the sender.
+    ///
+    /// **It does not save network bandwidth.** The bytes have already arrived
+    /// by the time this is called -- a push protocol cannot decline what it
+    /// has been sent.
+    ///
+    /// **And it deliberately does not refuse the chunk.** A refusal is
+    /// `accepted: false`, which `SnapshotLifecycle::record_send_response`
+    /// counts as a retry; once `max_retry_attempts` is exceeded -- **3** by
+    /// default -- the send is abandoned with "snapshot send retry budget
+    /// exhausted". Throttling by refusal would turn a slow transfer into a
+    /// failed one after three throttles, which is strictly worse than having no
+    /// limiter at all.
+    ///
+    /// Real receiver-side backpressure needs a throttle the sender can tell
+    /// apart from a failure, which means a field on `InstallSnapshotResponse`
+    /// and a change at its 31 construction sites. That is a protocol decision
+    /// rather than a tidy-up, and it is not this.
+    ///
+    /// Refill with [`Self::refill_rate_limit`] every
+    /// `MatrixRaftRateLimiterConfig::check_cycle`.
+    pub fn with_rate_limit(
+        config: SnapshotLifecycleConfig,
+        rate_limit: &MatrixRaftRateLimiterConfig,
+    ) -> Result<Self, RaftError> {
+        Ok(Self {
+            lifecycle: SnapshotLifecycle::new(config)?,
+            limiter: Some(rate_limit.to_byte_quota_limiter()?),
+        })
+    }
+
+    /// A downloader carrying whatever download limit the group was wired with.
+    ///
+    /// The route from `snapshot_download_rate_limiter` on the context or the
+    /// creator to the bytes being accounted for. See
+    /// [`Self::with_rate_limit`] for what the limit does and does not do.
+    pub fn from_wiring(
+        config: SnapshotLifecycleConfig,
+        wiring: &MatrixRaftRuntimeWiring,
+    ) -> Result<Self, RaftError> {
+        Ok(Self {
+            lifecycle: SnapshotLifecycle::new(config)?,
+            limiter: wiring.snapshot_download_limiter()?,
+        })
+    }
+
+    /// Returns this downloader's quota to one cycle of bytes, reporting how
+    /// many were restored. Zero when it has no limit.
+    pub fn refill_rate_limit(&mut self, rate_limit: &MatrixRaftRateLimiterConfig) -> u64 {
+        let Some(limiter) = self.limiter.as_mut() else {
+            return 0;
+        };
+        let before = limiter.available_bytes();
+        limiter.refill_bytes(rate_limit.cycle_capacity_bytes());
+        limiter.available_bytes().saturating_sub(before)
+    }
+
+    /// What this downloader's quota has done, or `None` when it has no limit.
+    pub fn rate_limit_stats(&self) -> Option<RateLimiterStats> {
+        self.limiter.as_ref().map(ByteQuotaLimiter::stats)
+    }
+
+    /// Bytes this downloader may still install in this cycle, or `None` for no
+    /// limit.
+    pub fn rate_limit_available_bytes(&self) -> Option<u64> {
+        self.limiter.as_ref().map(ByteQuotaLimiter::available_bytes)
     }
 
     pub fn download(
@@ -2397,10 +2486,20 @@ impl MatrixRaftSnapshotDownloader {
         request: InstallSnapshotRequest,
     ) -> Result<MatrixRaftSnapshotDownloadResult, RaftError> {
         let snapshot_index = request.chunk.meta.last_log_id.index;
+        let chunk_bytes = request.chunk.data.len() as u64;
         let next_offset = request
             .chunk
             .offset
             .saturating_add(request.chunk.data.len() as u64);
+        // Charged before the install, so the accounting is of what arrived
+        // rather than of what an install happened to return. `over_quota` says
+        // the quota could not cover this chunk; the chunk is installed either
+        // way, which `with_rate_limit` explains at length because it is the
+        // surprising half.
+        let over_quota = match self.limiter.as_mut() {
+            Some(limiter) => !limiter.reserve_limited_bytes(chunk_bytes).allowed,
+            None => false,
+        };
         let installed_snapshot = self.lifecycle.install_request(request)?;
         let accepted = true;
         let response = InstallSnapshotResponse {
@@ -2428,6 +2527,7 @@ impl MatrixRaftSnapshotDownloader {
             response,
             installed_snapshot,
             finish,
+            over_quota,
         })
     }
 
