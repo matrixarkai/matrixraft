@@ -1459,6 +1459,50 @@ looks wasteful would have had nothing stop them.
 `tests/lease_membership_contract.rs` is what stops them, and each of the three
 paths has its own case: the lease drops, and one heartbeat round against the
 new membership earns it back — an invalidation, not a one-way door.
+### Recovery restores the membership the record carries
+
+Every WAL record has carried a `membership` for as long as the format has
+existed. **Nothing read it.** `restore_wal_record` took the hard state, the
+entries, the installed snapshot and the apply fence, and dropped the membership
+on the floor.
+
+So a node that had added a voter and removed another came back from its own log
+believing in the set it had been *configured* with:
+
+```
+recovered voters: [1, 2, 3]
+the record says:  [1, 3, 4]
+```
+
+Peer 2 had been removed and counted toward quorum again. Peer 4 had joined and
+was not there to count. A snapshot install had always reconciled the membership,
+through `reset_membership_from_snapshot`; the log had not.
+
+Sorting every mention of the field into writes and reads is what found it --
+the engine writes `membership` into a record at two sites, and the only reads
+anywhere are `cluster.membership()`, which is the cluster's own builder, and
+`examples/wal_record_footprint.rs`, which *measures what the field costs*.
+A field whose only reader is the thing counting its bytes is not being used.
+
+**An empty membership records nothing, and is left alone.** A record built by
+hand, or one written before anything filled the field, must not empty the
+cluster -- the same convention the comparable engine uses, where an empty
+member list in a flush task means there is no membership to write rather than a
+membership of nobody.
+
+The addresses in the reconstructed members are empty, and that is not a
+shortcut. A `RaftCluster` keeps no addresses at all: `Node::new` takes an id, a
+role and the auto-promote flag, and the transport owns the address map. A
+record's `Membership` carries ids and roles, which is exactly the part of a
+`Peer` the reset reads. `auto_promote` comes back false, because it is a
+property of how a learner was *added* rather than of the membership the log
+committed, and a record does not carry it -- false is the absence of a claim,
+not a guess.
+
+**Nothing in the suite had to change.** All 766 tests that passed before this
+passed after it, which is the measure of how undefended the loss was: no test
+recovered a record whose membership differed from the cluster's.
+
 ### A voter that grants a vote restarts its own election timer
 
 Having given its vote away, a voter that then times out campaigns against the

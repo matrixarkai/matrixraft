@@ -3165,6 +3165,11 @@ impl RaftCluster {
                 "WAL record group id mismatch".to_string(),
             ));
         }
+        // The membership the record carries is the one the log committed, and
+        // it outranks the peers this process happened to be configured with.
+        // Without this a restart resurrected a removed peer -- which then
+        // counted toward quorum again -- and lost a peer that had joined.
+        self.restore_membership_from_record(record.node_id, &record.membership);
         let node = self
             .nodes
             .get_mut(&record.node_id)
@@ -4180,6 +4185,65 @@ impl RaftCluster {
         }
         self.refresh_replication_pipelines();
         Ok(())
+    }
+
+    /// Puts the membership back to what a recovered WAL record records.
+    ///
+    /// A snapshot install has always done this, through
+    /// `reset_membership_from_snapshot`. The log did not, although every
+    /// record has carried a `membership` for as long as the format has
+    /// existed: `restore_wal_record` took the hard state, the entries, the
+    /// installed snapshot and the apply fence, and dropped the membership.
+    ///
+    /// **An empty membership records nothing, and is left alone.** A record
+    /// built by hand, or one written before anything filled the field, must
+    /// not empty the cluster -- the same convention the comparable engine
+    /// uses, where an empty member list in a flush task means there is no
+    /// membership to write rather than a membership of nobody.
+    fn restore_membership_from_record(&mut self, target: NodeId, membership: &Membership) {
+        let members = Self::record_membership_as_members(membership);
+        if members.is_empty() {
+            return;
+        }
+        let member_ids: Vec<NodeId> = members.iter().map(|peer| peer.node_id).collect();
+        self.reset_membership_from_snapshot(target, &member_ids, &members);
+    }
+
+    /// A record's membership in the shape the membership reset reads.
+    ///
+    /// The addresses are empty because a `RaftCluster` keeps none: `Node::new`
+    /// takes an id, a role and the auto-promote flag, and the transport owns
+    /// the address map. A record's `Membership` carries ids and roles and no
+    /// addresses, which is exactly the part of a `Peer` the reset reads.
+    ///
+    /// `auto_promote` is false for every one of them. It is a property of how
+    /// a learner was *added* rather than of the membership the log committed,
+    /// and a record does not carry it -- so a learner recovered from the log
+    /// comes back without it rather than with a guess.
+    fn record_membership_as_members(membership: &Membership) -> Vec<Peer> {
+        let voters = membership
+            .voters
+            .iter()
+            .map(|node_id| (*node_id, ReplicaRole::Voter));
+        let learners = membership
+            .learners
+            .iter()
+            .map(|node_id| (*node_id, ReplicaRole::Learner));
+        let witnesses = membership
+            .witnesses
+            .iter()
+            .map(|node_id| (*node_id, ReplicaRole::Witness));
+        voters
+            .chain(learners)
+            .chain(witnesses)
+            .map(|(node_id, role)| Peer {
+                node_id,
+                raft_addr: String::new(),
+                snapshot_addr: String::new(),
+                role,
+                auto_promote: false,
+            })
+            .collect()
     }
 
     fn reset_membership_from_snapshot(
