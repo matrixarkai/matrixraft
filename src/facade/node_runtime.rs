@@ -1226,6 +1226,37 @@ fn is_leader_transfer_step_message(message: &Message) -> bool {
     )
 }
 
+/// Whether stepping `message` granted a **binding** vote, which is the one
+/// thing a voter does that obliges it to hold its own election back.
+///
+/// Having given its vote away, a voter that then timed out would campaign
+/// against the candidate it voted for. The vote is already spent, so the
+/// competing election cannot win it back -- it only splits the round. Raft
+/// resets the voter's election timer on granting for exactly this reason, and
+/// the comparable engine does it on the same path.
+///
+/// A granted **pre**-vote does not count. It promises nothing and moves no
+/// state, so the voter has given nothing away and has no reason to delay its
+/// own election -- and a pre-vote that is about to be refused is often the
+/// first sign the voter should be campaigning itself.
+///
+/// The request is what decides, not the result: a pre-vote arrives as
+/// `Message::Vote` with `pre_vote` set and comes back as `StepResult::Vote`,
+/// exactly like a binding vote, so the result variant alone cannot tell them
+/// apart.
+fn step_granted_a_binding_vote(
+    message_was_a_binding_vote: bool,
+    result: &Result<StepResult, RaftError>,
+) -> bool {
+    message_was_a_binding_vote
+        && matches!(result, Ok(StepResult::Vote(response)) if response.vote_granted)
+}
+
+/// Whether `message` is a vote request that would bind the voter if granted.
+fn is_binding_vote_step_message(message: &Message) -> bool {
+    matches!(message, Message::Vote { request, .. } if !request.pre_vote)
+}
+
 fn runtime_step_operation_name(message: &Message) -> &'static str {
     match message {
         Message::Admin {
@@ -1960,6 +1991,7 @@ impl NodeCore {
                         | Message::ReadIndex { .. }
                         | Message::Membership { .. }
                 );
+                let binding_vote = is_binding_vote_step_message(&message);
                 let result = runtime_step_message(
                     cluster,
                     wal,
@@ -1968,6 +2000,9 @@ impl NodeCore {
                     message,
                     true,
                 );
+                if step_granted_a_binding_vote(binding_vote, &result) {
+                    *election_elapsed_ms = 0;
+                }
                 if result
                     .as_ref()
                     .map(|step| matches!(step, StepResult::FatalEvent(Some(_))))
@@ -2019,19 +2054,32 @@ impl NodeCore {
                 let batch_has_proposal = messages
                     .iter()
                     .any(|message| matches!(message, Message::Propose { .. }));
+                // Raised inside the closure so each result is matched against
+                // the message that produced it. Pairing them afterwards would
+                // need the messages kept alongside the results, and asking
+                // only whether the batch held a binding vote *and* granted
+                // some vote would reset the timer for a batch that granted a
+                // pre-vote while refusing the binding one.
+                let mut granted_a_binding_vote = false;
                 let stepped: Result<Vec<StepResult>, RaftError> = messages
                     .into_iter()
                     .map(|message| {
-                        runtime_step_message(
+                        let binding_vote = is_binding_vote_step_message(&message);
+                        let result = runtime_step_message(
                             cluster,
                             wal,
                             membership_executor,
                             node_id,
                             message,
                             false,
-                        )
+                        );
+                        granted_a_binding_vote |= step_granted_a_binding_vote(binding_vote, &result);
+                        result
                     })
                     .collect();
+                if granted_a_binding_vote {
+                    *election_elapsed_ms = 0;
+                }
                 // Persisted even when a message failed, so what is on disk
                 // still describes what the node applied.
                 let persisted = if batch_has_proposal {

@@ -1459,6 +1459,46 @@ looks wasteful would have had nothing stop them.
 `tests/lease_membership_contract.rs` is what stops them, and each of the three
 paths has its own case: the lease drops, and one heartbeat round against the
 new membership earns it back — an invalidation, not a one-way door.
+### A voter that grants a vote restarts its own election timer
+
+Having given its vote away, a voter that then times out campaigns against the
+candidate it voted for. The vote is already spent, so the competing election
+cannot win it back -- it only splits the round and delays whoever was going to
+win it. Raft resets the voter's election timer on granting for exactly that
+reason, and the comparable engine does it on the same path.
+
+This runtime did not. `election_elapsed_ms` was reset on three things -- a live
+leader heartbeat, firing an election, and starting -- and granting a vote was
+not one of them. Stepping a vote that came back granted left the timer exactly
+where it was: measured at 200ms before and 200ms after.
+
+Nothing noticed because **nothing read the timer**. No test in the repository
+mentioned `election_elapsed_ms` before this one, although every status report
+carries it.
+
+**A granted pre-vote still leaves the timer alone**, and that is not an
+oversight. A pre-vote promises nothing and moves no state, so the voter has
+given nothing away -- and a pre-vote it is about to refuse is often the first
+sign that the voter should be campaigning itself.
+
+That distinction is easy to get wrong here, because the two are
+indistinguishable at the point the reset happens: a pre-vote arrives as
+`Message::Vote` with `pre_vote` set and comes back as `StepResult::Vote`, just
+like a binding vote. The request decides, never the result variant. A plant
+that keys the reset off the result variant is caught by the pre-vote test and
+by nothing else.
+
+In a batch the flag is raised inside the mapping closure, so each result is
+matched against the message that produced it. The cheap alternative -- asking
+whether the batch held a binding vote *and* granted some vote -- resets the
+timer for a batch that granted a pre-vote while refusing the binding one, which
+is the one case where holding an election back is wrong.
+
+The timer lives in the node runtime rather than in `RaftCluster`, so this is
+the runtime's step path and not `vote_to` itself. A vote arriving over
+`ClusterRaftTransport` calls `vote_to` on a bare cluster, which has no election
+timer to restart; that path has no election loop of its own.
+
 ### Telling an accepted membership change from a downgraded one
 
 Raft allows only one configuration change to be pending -- in the log and not
