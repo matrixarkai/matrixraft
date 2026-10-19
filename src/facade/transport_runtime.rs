@@ -435,8 +435,51 @@ impl TcpRaftTransport {
         }
     }
 
-    pub fn set_peer_addr(&mut self, node_id: NodeId, addr: impl Into<String>) {
-        self.peers.insert(node_id, addr.into());
+    /// Points a peer at a new address, and drops the connections pooled to its
+    /// old one.
+    ///
+    /// Returns the address it replaced, or `None` for a peer this transport did
+    /// not know.
+    ///
+    /// The pool is the part that is easy to miss. Up to
+    /// `MAX_IDLE_CONNECTIONS_PER_PEER` connections are kept open per peer, and
+    /// they are connected to the host this transport knew when they were
+    /// opened. Replacing the address without dropping them left the next
+    /// `MAX_IDLE_CONNECTIONS_PER_PEER` sends going to the **old** host -- a
+    /// peer that had moved kept receiving raft RPCs at an address it no longer
+    /// answers on, until those sockets happened to break.
+    ///
+    /// Only an address that actually changes drops anything. Re-setting the
+    /// same address is how a host that polls its service discovery would call
+    /// this, and throwing away a warm pool on every poll would undo the pooling
+    /// it exists for.
+    pub fn set_peer_addr(&mut self, node_id: NodeId, addr: impl Into<String>) -> Option<String> {
+        let addr = addr.into();
+        let previous = self.peers.insert(node_id, addr.clone());
+        if previous.as_deref() != Some(addr.as_str()) {
+            if let Ok(mut idle) = self.idle.lock() {
+                idle.remove(&node_id);
+            }
+        }
+        previous
+    }
+
+    /// Connections this transport is holding open for a peer.
+    ///
+    /// Exposed because the pool is otherwise invisible, and "the stale
+    /// connections were dropped" is not a claim that can be made from the
+    /// outside without it. A host can also read it to see whether a peer has
+    /// gone quiet.
+    pub fn idle_connections(&self, node_id: NodeId) -> usize {
+        self.idle
+            .lock()
+            .map(|idle| idle.get(&node_id).map_or(0, Vec::len))
+            .unwrap_or(0)
+    }
+
+    /// The address this transport will use for a peer, if it knows one.
+    pub fn peer_addr(&self, node_id: NodeId) -> Option<&str> {
+        self.peers.get(&node_id).map(String::as_str)
     }
 
     fn send_rpc(
