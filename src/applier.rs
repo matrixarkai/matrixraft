@@ -203,10 +203,18 @@ impl DriverMailHandler<ApplyTask> for GroupApplier {
         // set from `apply_max_batch_count`. This second bound is not redundant:
         // it holds even if a caller builds the pool differently, and it is what
         // the option name promises.
-        // A group that has already stalled is not handed what is left: the
-        // chunks after the one that stalled are the entries past the one the
-        // state machine refused, and offering them would be applying out of
-        // order.
+        // A group that has already stalled takes nothing from a later call
+        // either.
+        //
+        // The reachable path is narrow and real: the stall is recorded inside
+        // this function, so a submit that read the stall as absent a moment
+        // earlier can still queue a task, and the worker will hand it over.
+        // `a_stalled_group_is_not_handed_anything_else` cannot force that --
+        // the pool hands this test its whole batch in one call, so the guard
+        // inside the chunk loop below is the one that fires, and a plant that
+        // removes this one passes. It is kept because the alternative is
+        // applying past an entry the state machine refused, which is the one
+        // thing a stall exists to prevent.
         if self
             .state
             .applied
