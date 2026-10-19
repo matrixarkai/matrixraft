@@ -374,9 +374,53 @@ pub struct TcpRaftTransportEnvelope {
     /// was not told, or when the sender predates this field.
     #[serde(default)]
     pub cluster_id: u64,
+    /// Whatever the sending host chose to tell this peer, carried beside the
+    /// request rather than inside it.
+    ///
+    /// Set only on a health check -- see
+    /// [`matrixraft_is_health_check_request`] -- because that is the frame a
+    /// peer sends whether or not it has anything to replicate, and attaching
+    /// a payload to an append that is carrying entries would add bulk to the
+    /// one frame already carrying bulk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_payload: Option<String>,
     #[serde(flatten)]
     pub request: TcpRaftTransportRequest,
 }
+
+/// Whether a request is the kind a payload rides on.
+///
+/// A (pre-)vote, or an append with no entries -- a heartbeat. These are the
+/// frames a peer sends to a peer it may not yet be in contact with, which is
+/// why they are the ones worth carrying host data: the receiver may be
+/// learning of this group for the first time, and
+/// [`MatrixRaftReplicaFactory`] is what it would do about that.
+///
+/// A batch counts if **any** of its requests does.
+pub fn matrixraft_is_health_check_request(request: &TcpRaftTransportRequest) -> bool {
+    match request {
+        TcpRaftTransportRequest::Vote { .. } => true,
+        TcpRaftTransportRequest::AppendEntries { request, .. } => request.entries.is_empty(),
+        TcpRaftTransportRequest::Batch { requests } => {
+            requests.iter().any(matrixraft_is_health_check_request)
+        }
+        TcpRaftTransportRequest::InstallSnapshot { .. }
+        | TcpRaftTransportRequest::ReadIndex { .. } => false,
+    }
+}
+
+/// Supplies what a host wants to tell a peer on a health check.
+///
+/// Asked for the **target** peer's id: the question a host answers here is
+/// "what should this peer be told", and a host that built the transport
+/// already knows which node it is itself.
+///
+/// Returning `Ok(None)` attaches nothing, which is the same frame as having no
+/// callback at all. An `Err` **fails the send** rather than sending a frame
+/// without the payload, because a host that cannot say what it needs to say
+/// would rather retry than be silently understood as having nothing to add.
+pub type MatrixRaftUserPayload =
+    Arc<dyn Fn(NodeId) -> Result<Option<String>, RaftError> + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TcpRaftRpcResult<T> {
@@ -446,6 +490,8 @@ pub struct TcpRaftTransport {
     timeout: Option<Duration>,
     /// How many connections are kept warm per peer.
     connections_per_peer: usize,
+    /// Asked for a payload on every health check, if the host set one.
+    user_payload: Option<MatrixRaftUserPayload>,
 }
 
 // Hand-written because a resolver is not `Debug`, and requiring that of a
@@ -460,6 +506,7 @@ impl std::fmt::Debug for TcpRaftTransport {
             .field("re_resolved", &self.re_resolved.load(Ordering::Relaxed))
             .field("timeout", &self.timeout)
             .field("connections_per_peer", &self.connections_per_peer)
+            .field("user_payload", &self.user_payload.is_some())
             .finish()
     }
 }
@@ -549,7 +596,26 @@ impl TcpRaftTransport {
             re_resolved: Arc::default(),
             timeout: None,
             connections_per_peer: DEFAULT_CONNECTIONS_PER_PEER,
+            user_payload: None,
         }
+    }
+
+    /// Attaches host data to every health check this transport sends.
+    ///
+    /// See [`MatrixRaftUserPayload`] for what the callback is asked and
+    /// [`matrixraft_is_health_check_request`] for which frames carry it. The
+    /// receiving half is
+    /// [`TcpRaftTransportServer::start_with_payload_observer`]; without it the
+    /// payload crosses the wire and is ignored, which is harmless and is also
+    /// why both halves are worth wiring together.
+    pub fn with_user_payload(mut self, payload: MatrixRaftUserPayload) -> Self {
+        self.user_payload = Some(payload);
+        self
+    }
+
+    /// Whether this transport attaches host data to its health checks.
+    pub fn attaches_user_payload(&self) -> bool {
+        self.user_payload.is_some()
     }
 
     /// How many connections to keep warm per peer.
@@ -736,8 +802,16 @@ impl TcpRaftTransport {
         let addr = self.peer_addr(target).ok_or_else(|| {
             RaftError::Transport(format!("raft transport target {target} has no address"))
         })?;
+        // Only a health check carries one, and only if the host asked. The
+        // callback runs before the connection is touched, so a slow one costs
+        // latency rather than holding a socket.
+        let user_payload = match self.user_payload.as_ref() {
+            Some(callback) if matrixraft_is_health_check_request(&request) => callback(target)?,
+            _ => None,
+        };
         let envelope = TcpRaftTransportEnvelope {
             cluster_id: self.cluster_id,
+            user_payload,
             request,
         };
         let mut encoded = serde_json::to_vec(&envelope)
@@ -912,7 +986,20 @@ pub struct TcpRaftTransportServer {
     worker: Option<thread::JoinHandle<()>>,
     cluster_id: u64,
     refused: Arc<AtomicU64>,
+    observed_payloads: Arc<AtomicU64>,
 }
+
+/// Shown a payload a peer attached, before the request it came with is served.
+///
+/// The request comes too, because the payload on its own says nothing about
+/// which group or node it concerns -- that is in the request, and an observer
+/// that wants to create a replica from it needs both.
+///
+/// Returning `Err` **refuses the frame**: the request is not served, and the
+/// peer is answered with that error. A host that cannot accept what it was
+/// told should not then act on the request as though it had not been told.
+pub type MatrixRaftPayloadObserver =
+    Arc<dyn Fn(&TcpRaftTransportRequest, &str) -> Result<(), RaftError> + Send + Sync>;
 
 impl TcpRaftTransportServer {
     pub fn start<T>(addr: impl Into<String>, handler: Arc<T>) -> Result<Self, RaftError>
@@ -946,6 +1033,30 @@ impl TcpRaftTransportServer {
     where
         T: Transport + Send + Sync + 'static,
     {
+        Self::start_with_payload_observer(addr, handler, cluster_id, None)
+    }
+
+    /// A server that is shown the payloads its peers attach.
+    ///
+    /// The receiving half of [`TcpRaftTransport::with_user_payload`]. Without
+    /// an observer a payload is decoded and dropped, which is why the two are
+    /// worth wiring together: the sending side alone changes nothing a
+    /// receiver can act on.
+    ///
+    /// The observer runs **after** the cluster check and **before** the
+    /// dispatch. After, because a frame from another cluster should not reach
+    /// a host's logic at all; before, because the whole point is to let the
+    /// host prepare -- create the replica, for instance -- for the request
+    /// that is about to be served.
+    pub fn start_with_payload_observer<T>(
+        addr: impl Into<String>,
+        handler: Arc<T>,
+        cluster_id: u64,
+        observer: Option<MatrixRaftPayloadObserver>,
+    ) -> Result<Self, RaftError>
+    where
+        T: Transport + Send + Sync + 'static,
+    {
         let listener = TcpListener::bind(addr.into()).map_err(|err| {
             RaftError::Transport(format!("failed to bind raft TCP server: {err}"))
         })?;
@@ -962,6 +1073,8 @@ impl TcpRaftTransportServer {
         let worker_shutdown = Arc::clone(&shutdown);
         let refused = Arc::new(AtomicU64::new(0));
         let worker_refused = Arc::clone(&refused);
+        let observed_payloads = Arc::new(AtomicU64::new(0));
+        let worker_observed = Arc::clone(&observed_payloads);
         let worker = thread::Builder::new()
             .name("rustraft-tcp-transport".to_string())
             .spawn(move || {
@@ -984,6 +1097,8 @@ impl TcpRaftTransportServer {
                             let conn_handler = Arc::clone(&handler);
                             let conn_shutdown = Arc::clone(&worker_shutdown);
                             let conn_refused = Arc::clone(&worker_refused);
+                            let conn_observer = observer.clone();
+                            let conn_observed = Arc::clone(&worker_observed);
                             let spawned = thread::Builder::new()
                                 .name("rustraft-tcp-conn".to_string())
                                 .spawn(move || {
@@ -993,6 +1108,8 @@ impl TcpRaftTransportServer {
                                         &conn_shutdown,
                                         cluster_id,
                                         &conn_refused,
+                                        conn_observer,
+                                        &conn_observed,
                                     );
                                 });
                             if spawned.is_err() {
@@ -1015,7 +1132,17 @@ impl TcpRaftTransportServer {
             worker: Some(worker),
             cluster_id,
             refused,
+            observed_payloads,
         })
+    }
+
+    /// Payloads this server has shown to its observer.
+    ///
+    /// Counts what the observer accepted. A refusal is counted as a refusal,
+    /// with [`TcpRaftTransportServer::refused_foreign_cluster`], because to
+    /// the peer the two are the same thing: a frame that was not served.
+    pub fn observed_payloads(&self) -> u64 {
+        self.observed_payloads.load(Ordering::Relaxed)
     }
 
     pub fn addr(&self) -> &str {
@@ -1059,12 +1186,15 @@ impl Drop for TcpRaftTransportServer {
 ///
 /// This used to serve exactly one request and hang up, which made every RPC pay
 /// a TCP handshake. The loop is what lets a caller keep the connection.
+#[allow(clippy::too_many_arguments)]
 fn serve_tcp_raft_connection<T>(
     stream: TcpStream,
     handler: &T,
     shutdown: &AtomicBool,
     cluster_id: u64,
     refused: &AtomicU64,
+    observer: Option<MatrixRaftPayloadObserver>,
+    observed: &AtomicU64,
 ) -> Result<(), RaftError>
 where
     T: Transport + ?Sized,
@@ -1103,11 +1233,30 @@ where
         ))?;
         // Before the dispatch, deliberately. A refusal that ran inside the
         // handler would already have appended the entries it was refusing.
-        let response = if raft_clusters_may_talk(cluster_id, envelope.cluster_id) {
-            handle_tcp_raft_request(envelope.request, handler)
-        } else {
+        let response = if !raft_clusters_may_talk(cluster_id, envelope.cluster_id) {
             refused.fetch_add(1, Ordering::Relaxed);
             refuse_foreign_cluster(&envelope.request, cluster_id, envelope.cluster_id)
+        } else {
+            // The payload, if there is one and somebody is listening. A
+            // refusal here refuses the frame: a host that could not accept
+            // what it was told should not serve the request as though it had
+            // not been told.
+            let shown = match (observer.as_ref(), envelope.user_payload.as_deref()) {
+                (Some(observer), Some(payload)) => observer(&envelope.request, payload),
+                _ => Ok(()),
+            };
+            match shown {
+                Ok(()) => {
+                    if observer.is_some() && envelope.user_payload.is_some() {
+                        observed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    handle_tcp_raft_request(envelope.request, handler)
+                }
+                Err(error) => {
+                    refused.fetch_add(1, Ordering::Relaxed);
+                    refuse_request(&envelope.request, error.to_string())
+                }
+            }
         };
         let mut encoded = serde_json::to_vec(&response).map_err(|err| {
             RaftError::Transport(format!("failed to encode raft TCP response: {err}"))
@@ -1133,33 +1282,42 @@ fn refuse_foreign_cluster(
     local: u64,
     sender: u64,
 ) -> TcpRaftTransportResponse {
+    refuse_request(
+        request,
+        format!("raft request from cluster {sender} refused by cluster {local}"),
+    )
+}
+
+/// The refusal, in the shape of the request that earned it.
+fn refuse_request(
+    request: &TcpRaftTransportRequest,
+    reason: String,
+) -> TcpRaftTransportResponse {
     // A generic function rather than a closure: a closure's return type is
     // fixed by its first use, so one shared `refusal()` would make every arm
     // an `AppendEntriesResponse`.
-    fn refusal<T>(local: u64, sender: u64) -> TcpRaftRpcResult<T> {
-        TcpRaftRpcResult::from_result(Err(RaftError::Transport(format!(
-            "raft request from cluster {sender} refused by cluster {local}"
-        ))))
+    fn refusal<T>(reason: &str) -> TcpRaftRpcResult<T> {
+        TcpRaftRpcResult::from_result(Err(RaftError::Transport(reason.to_string())))
     }
     match request {
         TcpRaftTransportRequest::AppendEntries { .. } => {
-            TcpRaftTransportResponse::AppendEntries(refusal(local, sender))
+            TcpRaftTransportResponse::AppendEntries(refusal(&reason))
         }
         TcpRaftTransportRequest::Vote { .. } => {
-            TcpRaftTransportResponse::Vote(refusal(local, sender))
+            TcpRaftTransportResponse::Vote(refusal(&reason))
         }
         TcpRaftTransportRequest::InstallSnapshot { .. } => {
-            TcpRaftTransportResponse::InstallSnapshot(refusal(local, sender))
+            TcpRaftTransportResponse::InstallSnapshot(refusal(&reason))
         }
         TcpRaftTransportRequest::ReadIndex { .. } => {
-            TcpRaftTransportResponse::ReadIndex(refusal(local, sender))
+            TcpRaftTransportResponse::ReadIndex(refusal(&reason))
         }
         // Every nested request is refused, so a batch cannot smuggle one
         // through by wrapping it.
         TcpRaftTransportRequest::Batch { requests } => TcpRaftTransportResponse::Batch(
             requests
                 .iter()
-                .map(|request| refuse_foreign_cluster(request, local, sender))
+                .map(|request| refuse_request(request, reason.clone()))
                 .collect(),
         ),
     }

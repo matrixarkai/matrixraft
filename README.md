@@ -815,31 +815,33 @@ assertion.
 
 Recorded, reported back, and reaching nothing that runs:
 
-<!-- inert-settings: reader_num, executor_num, watched_address_resolver, user_payload_callback_bound -->
+<!-- inert-settings: reader_num, executor_num, watched_address_resolver -->
 
-On `MatrixRaftGroupContext`:
+All three are on `MatrixRaftGroupContext`:
 
 - `reader_num`
 - `executor_num`
 - `watched_address_resolver`
 
-On `MatrixRaftTransportOptions`:
+**`MatrixRaftTransportOptions` has none left.** All six were inert while this
+section said "three settings on `MatrixRaftGroupContext`" and named none of
+them, which left the transport options reading as live. They are listed below
+with what each one became.
 
-- `user_payload_callback_bound`
+What the six transport settings became:
 
-The transport half of this list is new to the list rather than new to the
-crate: these were as inert as the three above it while this section said
-"three settings on `MatrixRaftGroupContext`", which left the transport
-options reading as live. They are not.
+| setting | now |
+|---|---|
+| `cluster_id` | "A cluster id that refuses the other cluster" |
+| `dynamic_address_map` | "Addresses that move" |
+| `timeout_ms` | "A send that cannot wait for ever" |
+| `num_connection_group` | "Connections kept warm per peer" |
+| `user_payload_callback_bound` | "What a peer tells a peer" |
+| `address_resolver_bound` | never inert — `MatrixRaftTransportBuilder::build` refuses without it |
 
-`cluster_id`, `dynamic_address_map`, `timeout_ms` and
-`num_connection_group` **were** on this list and are now live — see "A
-cluster id that refuses the other cluster", "Addresses that move", "A send
-that cannot wait for ever" and "Connections kept warm per peer" below. That
-leaves one recorded-only setting on the transport options, and the reason it
-is still there is written down in "A replica that appears when a peer asks
-for one": carrying a user payload means changing the `Transport` trait, which
-is its own decision rather than a tidy-up.
+`timeout_ms` was never in the machine-checked marker even while it was inert,
+because the name is also a field on several live types and the guard matches
+on a name alone; that is why its entry was a sentence rather than a list item.
 `timeout_ms` was never in the marker above even while it was inert, because
 it is also a field on several live types and the guard matches on a name
 alone; that is why its entry was a sentence rather than a list item. `address_resolver_bound` is not inert either:
@@ -1064,6 +1066,54 @@ transport built from default options keeps fewer warm connections than one
 built with `new`, and pays more handshakes when a leader has several appends
 in flight to the same follower. A host that cares should say a number. Zero is
 raised to one, since a pool that can hold nothing is the opposite of a pool.
+
+### What a peer tells a peer
+
+A replica factory ("A replica that appears when a peer asks for one") gets the
+group and node ids off the request and nothing else, so "should this host hold
+group 77" has to be answerable from a placement service the **receiver** can
+reach. The leader that contacted it already knows.
+
+`user_payload_callback_bound` is now what lets it say so. The sending
+transport asks a callback, and the answer rides in the envelope beside the
+request:
+
+```rust
+let transport = options.into_tcp_transport_with_payload(
+    peers,
+    Arc::new(|target| Ok(Some(placement.assignment_for(target)?))),
+);
+
+let server = TcpRaftTransportServer::start_with_payload_observer(
+    "0.0.0.0:7001", handler, cluster_id, Some(observer),
+)?;
+```
+
+- **Only on a health check** — a (pre-)vote or an append with no entries, which
+  `matrixraft_is_health_check_request` decides and a batch inherits if any of
+  its requests is one. Those are the frames a peer sends to a peer it may not
+  be in contact with yet; an append carrying entries is already the frame
+  carrying bulk.
+- **Both halves, or nothing happens.** A payload with no observer crosses the
+  wire and is dropped; an observer with no sender sees nothing. Neither is an
+  error, and that is why they are documented together.
+- **Either half may refuse.** A callback that fails fails the send, rather than
+  sending a frame that would be understood as "nothing to add". An observer
+  that fails refuses the frame, because a host that could not accept what it
+  was told should not serve the request as though it had not been told. The
+  refusal carries the host's own reason.
+- `observed_payloads` counts what an observer accepted; a refusal is counted
+  as a refusal, since to the peer the two are the same thing.
+
+**The observer cannot touch the server.** It runs on a connection thread, and
+`MatrixRaftMultiRaftServer` is not `Send` — `MatrixRaftNode` holds an
+`Rc<RefCell<..>>` scheduler. So a host hands the frame to the thread that owns
+its groups, which is what the end-to-end test does over a channel. There is no
+way to write it otherwise, and a test that implied there was would not compile.
+
+Wire-compatible both ways, asserted on bytes: an absent payload is not written
+at all, and a stamped envelope still decodes as a bare request for a peer that
+predates both it and `cluster_id`.
 
 ### Heartbeats from many groups to one peer, in one batch
 

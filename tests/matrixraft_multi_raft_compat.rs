@@ -3,11 +3,11 @@
 
 use matrixraft::{
     AppendEntriesRequest, AppendEntriesResponse, ApplySnapshotFence, InstallSnapshotRequest,
-    InstallSnapshotResponse, LearnerAutoPromoteState, LogId, LogRetainedRange, MailPriority,
-    MatrixRaftAdminCommand, MatrixRaftAdminCommandType, MatrixRaftAppendEntriesResponse,
-    MatrixRaftApplyResultReport, MatrixRaftAsyncGroupSummary, MatrixRaftAsyncOperation,
-    MatrixRaftAsyncResult, MatrixRaftAsyncResultStatus, MatrixRaftBatchRouteGroupSummary,
-    MatrixRaftBatchRouteResult, MatrixRaftBatchRouteResultStatus,
+    InstallSnapshotResponse, LearnerAutoPromoteState, LogEntry, LogId, LogRetainedRange,
+    MailPriority, MatrixRaftAdminCommand, MatrixRaftAdminCommandType,
+    MatrixRaftAppendEntriesResponse, MatrixRaftApplyResultReport, MatrixRaftAsyncGroupSummary,
+    MatrixRaftAsyncOperation, MatrixRaftAsyncResult, MatrixRaftAsyncResultStatus,
+    MatrixRaftBatchRouteGroupSummary, MatrixRaftBatchRouteResult, MatrixRaftBatchRouteResultStatus,
     MatrixRaftBoundedStaleReadOptions, MatrixRaftCheckpoint, MatrixRaftConfState,
     MatrixRaftConfigChange, MatrixRaftConfigChangeType, MatrixRaftConfigurationApplied,
     MatrixRaftEntry, MatrixRaftEntryType, MatrixRaftFsm, MatrixRaftFsmRuntimeBinding,
@@ -24,12 +24,14 @@ use matrixraft::{
     MatrixRaftSyncedReport, MatrixRaftTransferLeaderReport, MatrixRaftTransportBuilder,
     MembershipOperation, Peer, RaftError, RaftSnapshot, ReadIndexRequest, ReadIndexResponse,
     ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState, StateRole, StorageApplyFence,
-    TimeoutNowResponse, VoteRequest, VoteResponse, WalCompactionReport, WitnessQuorumReport,
+    TcpRaftTransportRequest, TcpRaftTransportServer, TimeoutNowResponse, Transport, VoteRequest,
+    VoteResponse, WalCompactionReport, WitnessQuorumReport,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -21371,6 +21373,7 @@ fn replica_request(group_id: u64, node_id: u64) -> MatrixRaftReplicaRequest {
         node_id,
         from_node_id: 7,
         term: 3,
+        payload: None,
     }
 }
 
@@ -21540,4 +21543,217 @@ fn the_ordinary_accessors_still_refuse_to_create() {
     );
     assert_eq!(server.on_demand_creations(), 0);
     assert_eq!(server.node_count(), 0);
+}
+
+/// Answers every RPC the same way, so a wire test can be about the wire.
+#[derive(Debug, Default)]
+struct PlainEcho;
+
+impl Transport for PlainEcho {
+    fn append_entries(
+        &self,
+        _target: u64,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, RaftError> {
+        Ok(AppendEntriesResponse {
+            term: request.term,
+            success: true,
+            match_index: request.leader_commit,
+            rejection_hint: None,
+            rejected_index: None,
+            require_snapshot: None,
+            snapshot_state: SnapshotState::None,
+            lease_confirmation_epoch: 0,
+            lease_duration_ms: 0,
+        })
+    }
+
+    fn vote(&self, _target: u64, request: VoteRequest) -> Result<VoteResponse, RaftError> {
+        Ok(VoteResponse {
+            term: request.term,
+            vote_granted: true,
+            reason: "granted".to_string(),
+        })
+    }
+
+    fn install_snapshot(
+        &self,
+        _target: u64,
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse, RaftError> {
+        Ok(InstallSnapshotResponse {
+            throttled: false,
+            term: request.term,
+            accepted: true,
+            next_offset: request.chunk.offset + request.chunk.data.len() as u64,
+            committed_index: 0,
+            reason: "accepted".to_string(),
+        })
+    }
+
+    fn read_index(
+        &self,
+        _target: u64,
+        request: ReadIndexRequest,
+    ) -> Result<ReadIndexResponse, RaftError> {
+        Ok(ReadIndexResponse {
+            safe: true,
+            read_index: request.min_commit_index,
+            lease_read: request.allow_lease_read,
+            reason: "read_index".to_string(),
+        })
+    }
+}
+
+#[test]
+fn a_peer_that_asks_for_a_replica_can_say_what_it_needs() {
+    // End to end, on a real socket: the sending transport attaches host data
+    // to a heartbeat, the receiving server shows it to an observer, and the
+    // observer hands it to the factory from #155 -- which is then given what
+    // the peer said rather than only the ids off the request.
+    //
+    // That is the point of the payload. Without it a factory has the group
+    // and node ids and nothing else, so "should this host hold group 77" has
+    // to be answerable from a placement service the *receiver* can reach;
+    // with it, the leader that already knows can simply say.
+    //
+    // **The observer hands the request on rather than acting on it.**
+    // `MatrixRaftMultiRaftServer` is not `Send` -- `MatrixRaftNode` holds an
+    // `Rc<RefCell<..>>` scheduler -- and the observer runs on a connection
+    // thread, so it cannot touch the server at all. A host sends the frame to
+    // the thread that owns its groups, and this test does exactly that over a
+    // channel, because it is the only shape available and a test that pretended
+    // otherwise would not compile.
+    let wal = temp_dir("payload-e2e-wal");
+    let snapshot = temp_dir("payload-e2e-snapshot");
+
+    let transport_options = MatrixRaftTransportBuilder::new()
+        .set_get_user_payload_callback()
+        .bind_address_resolver()
+        .build()
+        .expect("transport options");
+    let context = MatrixRaftGroupContextBuilder::new()
+        .transport(transport_options.clone())
+        .add_raft_node_creator(MatrixRaftNodeCreatorBuilder::new().store_id(9200).build())
+        .build()
+        .expect("context");
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+    let factory = move |request: &MatrixRaftReplicaRequest| {
+        // What the peer said, recorded so the test can see it arrived here.
+        if let Some(payload) = request.payload.as_deref() {
+            recorded.lock().expect("lock").push(payload.to_string());
+        }
+        let mut created = options(request.group_id, &wal, &snapshot);
+        created.peer_id = request.node_id;
+        Ok(Some((created, 1)))
+    };
+    let mut server =
+        MatrixRaftMultiRaftServer::new(context).with_replica_factory(Arc::new(factory));
+
+    // The observer's whole job: turn a frame plus a payload into the question
+    // `node_or_create` answers, and pass it to whoever can ask it.
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let observer = Arc::new(
+        move |request: &TcpRaftTransportRequest, payload: &str| match request {
+            TcpRaftTransportRequest::AppendEntries { target, request } => {
+                let replica = MatrixRaftReplicaRequest {
+                    group_id: request.group_id,
+                    node_id: *target,
+                    from_node_id: request.leader_id,
+                    term: request.term,
+                    payload: Some(payload.to_string()),
+                };
+                asked_tx
+                    .send(replica)
+                    .map_err(|_| RaftError::Transport("nobody owns the groups".to_string()))
+            }
+            _ => Ok(()),
+        },
+    );
+
+    let mut tcp = TcpRaftTransportServer::start_with_payload_observer(
+        "127.0.0.1:0",
+        Arc::new(PlainEcho),
+        0,
+        Some(observer),
+    )
+    .expect("tcp server");
+
+    let mut peers = BTreeMap::new();
+    peers.insert(4, tcp.addr().to_string());
+    let sender = transport_options.into_tcp_transport_with_payload(
+        peers,
+        Arc::new(|target| Ok(Some(format!("hold group 77 for node {target}")))),
+    );
+    assert!(
+        sender.attaches_user_payload(),
+        "the flag was set, so the callback should be attached"
+    );
+
+    // A heartbeat: an append with no entries. A payload rides on this and not
+    // on an append that is carrying entries.
+    let heartbeat = AppendEntriesRequest {
+        group_id: 77,
+        term: 5,
+        leader_id: 9,
+        prev_log_id: None,
+        entries: Vec::new(),
+        leader_commit: 0,
+        lease_epoch: 0,
+    };
+    sender
+        .append_entries(4, heartbeat.clone())
+        .expect("the heartbeat is served");
+    assert_eq!(tcp.observed_payloads(), 1);
+
+    // Now the thread that owns the groups acts on what arrived.
+    let asked = asked_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the observer should have handed the frame on");
+    assert_eq!(asked.group_id, 77);
+    assert_eq!(asked.node_id, 4);
+    assert_eq!(asked.from_node_id, 9, "the leader that asked");
+    assert_eq!(asked.term, 5);
+    assert_eq!(
+        asked.payload.as_deref(),
+        Some("hold group 77 for node 4"),
+        "the payload should cross the wire unchanged"
+    );
+
+    assert_eq!(server.node_count(), 0);
+    server
+        .node_or_create(&asked)
+        .expect("the factory should create the replica the heartbeat was for");
+    assert_eq!(server.on_demand_creations(), 1);
+    assert!(server.has_node(77, 4));
+    assert_eq!(
+        seen.lock().expect("lock").as_slice(),
+        ["hold group 77 for node 4".to_string()],
+        "and the factory was handed exactly what the peer attached"
+    );
+
+    // An append carrying entries attaches nothing, so the observer is not
+    // called again and nothing else is asked for.
+    let mut carrying = heartbeat;
+    carrying.entries = vec![LogEntry {
+        log_id: LogId { term: 5, index: 1 },
+        payload: b"not-a-heartbeat".to_vec(),
+        is_command: true,
+    }];
+    let _ = sender.append_entries(4, carrying);
+    assert_eq!(
+        tcp.observed_payloads(),
+        1,
+        "a payload rides only on a health check"
+    );
+    assert!(
+        asked_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "so nothing further should have been handed on"
+    );
+
+    tcp.shutdown().expect("shutdown");
 }
