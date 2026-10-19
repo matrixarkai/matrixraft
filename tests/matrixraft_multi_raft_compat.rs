@@ -684,6 +684,7 @@ fn matrixraft_route_summaries_expose_response_payloads_by_route() {
         rejected_index: None,
     };
     let install_response = InstallSnapshotResponse {
+        throttled: false,
         term: 4,
         accepted: true,
         next_offset: 128,
@@ -2177,6 +2178,7 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
                 2,
                 1,
                 InstallSnapshotResponse {
+                    throttled: false,
                     term: status_after_vote_response.term + 1,
                     accepted: false,
                     next_offset: 0,
@@ -20789,6 +20791,7 @@ fn matrixraft_multi_raft_server_fans_out_snapshot_chunk_rpc_by_group() {
         .all(|result| result.error.is_some()));
 
     let snapshot_response = InstallSnapshotResponse {
+        throttled: false,
         term: 2,
         accepted: false,
         next_offset: 0,

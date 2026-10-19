@@ -302,6 +302,7 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
     assert!(lease_response_message.append_entries_response.is_some());
 
     let install_response = InstallSnapshotResponse {
+        throttled: false,
         term: 6,
         accepted: true,
         next_offset: 4096,

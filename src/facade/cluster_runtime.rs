@@ -4752,6 +4752,7 @@ impl RaftCluster {
         if request.chunk.meta.last_log_id.index <= installed_snapshot_index {
             self.snapshot_installers.remove(&target);
             return Ok(InstallSnapshotResponse {
+                throttled: false,
                 term: self.current_term.max(request.term),
                 accepted: true,
                 next_offset,
@@ -4763,6 +4764,7 @@ impl RaftCluster {
         if let Some(installer) = self.snapshot_installers.get(&target) {
             if request.chunk.offset == 0 && installer.meta != request.chunk.meta {
                 return Ok(InstallSnapshotResponse {
+                    throttled: false,
                     term: self.current_term.max(request.term),
                     accepted: true,
                     next_offset: installer.next_offset,
@@ -4802,6 +4804,7 @@ impl RaftCluster {
         installer.install_chunk(request.chunk)?;
         if !installer.complete {
             return Ok(InstallSnapshotResponse {
+                throttled: false,
                 term: self.current_term.max(request.term),
                 accepted: true,
                 next_offset,
@@ -4824,6 +4827,7 @@ impl RaftCluster {
         };
         if !self.install_or_queue_completed_snapshot(target, snapshot, fence)? {
             return Ok(InstallSnapshotResponse {
+                throttled: false,
                 term: self.current_term.max(request.term),
                 accepted: true,
                 next_offset,
@@ -4832,6 +4836,7 @@ impl RaftCluster {
             });
         }
         Ok(InstallSnapshotResponse {
+            throttled: false,
             term: self.current_term.max(request.term),
             accepted: true,
             next_offset,
@@ -4875,6 +4880,7 @@ impl RaftCluster {
                 let snapshot_index = snapshot.meta.last_log_id.index;
                 if snapshot_index <= installed_snapshot_index {
                     return Ok(InstallSnapshotResponse {
+                        throttled: false,
                         term: self.current_term.max(request_term),
                         accepted: true,
                         next_offset,
@@ -4893,6 +4899,7 @@ impl RaftCluster {
                     },
                 )?;
                 Ok(InstallSnapshotResponse {
+                    throttled: false,
                     term: self.current_term.max(request_term),
                     accepted: true,
                     next_offset,
@@ -4901,6 +4908,7 @@ impl RaftCluster {
                 })
             }
             None => Ok(InstallSnapshotResponse {
+                throttled: false,
                 term: self.current_term.max(request_term),
                 accepted: true,
                 next_offset,
@@ -4931,6 +4939,7 @@ impl RaftCluster {
         let committed_index = node.commit_index;
         self.snapshot_installers.remove(&target);
         Ok(Some(InstallSnapshotResponse {
+            throttled: false,
             term: self.current_term.max(request.term),
             accepted: true,
             next_offset,
@@ -4994,6 +5003,7 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(target))?;
         if request.term < self.current_term {
             return Ok(Some(InstallSnapshotResponse {
+                throttled: false,
                 term: node.hard_state.current_term.max(self.current_term),
                 accepted: false,
                 next_offset,
@@ -5007,6 +5017,7 @@ impl RaftCluster {
             }
             Some(leader) if leader.replica_role.can_be_leader() => {
                 return Ok(Some(InstallSnapshotResponse {
+                    throttled: false,
                     term: node.hard_state.current_term.max(self.current_term),
                     accepted: false,
                     next_offset,
@@ -5017,6 +5028,7 @@ impl RaftCluster {
             _ => {}
         }
         Ok(Some(InstallSnapshotResponse {
+            throttled: false,
             term: node.hard_state.current_term.max(self.current_term),
             accepted: false,
             next_offset,

@@ -3827,6 +3827,7 @@ fn high_term_snapshot_responses_step_down() {
             2,
             1,
             InstallSnapshotResponse {
+                throttled: false,
                 term: leader_term,
                 accepted: true,
                 next_offset: 0,
@@ -3842,6 +3843,7 @@ fn high_term_snapshot_responses_step_down() {
             2,
             1,
             InstallSnapshotResponse {
+                throttled: false,
                 term: leader_term + 1,
                 accepted: false,
                 next_offset: 0,
@@ -3877,6 +3879,7 @@ fn rejected_snapshot_response_triggers_fresh_snapshot() {
             1,
             2,
             InstallSnapshotResponse {
+                throttled: false,
                 term: leader_term,
                 accepted: false,
                 next_offset: 0,
@@ -3930,6 +3933,7 @@ fn same_term_snapshot_response_finishes_send_and_resumes_catchup() {
             1,
             2,
             InstallSnapshotResponse {
+                throttled: false,
                 term: leader_term,
                 accepted: true,
                 next_offset: 0,
@@ -4004,6 +4008,7 @@ fn stopped_peer_responses_do_not_step_down_leader() {
             leader,
             2,
             InstallSnapshotResponse {
+                throttled: false,
                 term: leader_term + 3,
                 accepted: false,
                 next_offset: 0,

@@ -2,10 +2,10 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    LogId, MatrixRaftOldSnapshotFinishState, MatrixRaftRateLimiterConfig, MatrixRaftRuntimeWiring,
-    MatrixRaftSnapshotCreator, MatrixRaftSnapshotDownloader, MatrixRaftSnapshotLoader,
-    MatrixRaftSnapshotSender, RaftSnapshot, SnapshotInstallState, SnapshotLifecycleConfig,
-    SnapshotMetadata,
+    InstallSnapshotResponse, LogId, MatrixRaftOldSnapshotFinishState, MatrixRaftRateLimiterConfig,
+    MatrixRaftRuntimeWiring, MatrixRaftSnapshotCreator, MatrixRaftSnapshotDownloader,
+    MatrixRaftSnapshotLoader, MatrixRaftSnapshotSender, RaftSnapshot, SnapshotInstallState,
+    SnapshotLifecycleConfig, SnapshotMetadata,
 };
 
 fn snapshot(index: u64, payload: Vec<u8>) -> RaftSnapshot {
@@ -253,11 +253,11 @@ fn a_sender_built_from_the_wiring_carries_the_configured_limit() {
 }
 
 #[test]
-fn a_download_quota_reports_over_quota_and_still_installs() {
-    // The surprising half, asserted rather than left to the doc comment: a
-    // chunk over quota is STILL installed, and the result says so. Refusing it
-    // would count as a retry against the sender, and three of those abandon
-    // the transfer -- which would make a limiter worse than no limiter.
+fn a_download_quota_declines_a_chunk_without_failing_the_send() {
+    // The whole point of the `throttled` field: a receiver can say "not now"
+    // without the sender treating it as a failure. Until it existed the only
+    // way to decline was `accepted: false`, which spends the retry budget, so
+    // a quota had to install every chunk and merely report `over_quota`.
     let rate_limit = MatrixRaftRateLimiterConfig {
         bytes_limit_per_sec: 4,
         check_cycle_sec: 1,
@@ -275,69 +275,130 @@ fn a_download_quota_reports_over_quota_and_still_installs() {
 
     let mut downloader =
         MatrixRaftSnapshotDownloader::with_rate_limit(config, &rate_limit).expect("downloader");
-    assert_eq!(downloader.rate_limit_available_bytes(), Some(4));
 
-    // The first chunk fits the quota exactly.
+    // The first chunk fits the quota exactly and is installed.
     let first = sender.poll_send_requests().expect("poll").remove(0);
     let first_result = downloader.download(first).expect("download");
     assert!(first_result.accepted);
-    assert!(
-        !first_result.over_quota,
-        "four bytes of quota covers a four-byte chunk"
-    );
-    assert_eq!(downloader.rate_limit_available_bytes(), Some(0));
+    assert!(!first_result.over_quota);
+    assert!(!first_result.response.throttled);
+    sender
+        .record_send_response(&first_result.response)
+        .expect("record the accepted chunk");
 
-    // The second does not, and is installed anyway with the flag set.
+    // The second does not fit, and is DECLINED rather than installed.
     let second = sender.poll_send_requests().expect("poll").remove(0);
+    let second_offset = second.chunk.offset;
     let second_result = downloader.download(second).expect("download");
+    assert!(!second_result.accepted, "an over-quota chunk is declined");
+    assert!(second_result.over_quota);
     assert!(
-        second_result.over_quota,
-        "an exhausted quota must be reported"
+        second_result.response.throttled,
+        "declining without throttled set would spend the senders retry budget"
     );
-    assert!(
-        second_result.accepted,
-        "the chunk is installed anyway: refusing it would burn the sender retry budget"
+    assert!(second_result.installed_snapshot.is_none());
+    assert_eq!(
+        second_result.response.next_offset, second_offset,
+        "the sender must rewind to the chunk that was declined, not past it"
     );
-    assert_eq!(second_result.response.next_offset, 8);
 
-    // Refilled, the next chunk is inside the quota again and completes the
-    // snapshot -- so the accounting did not interfere with the transfer.
+    // And the sender treats it as a pause, not a failure.
+    sender
+        .record_send_response(&second_result.response)
+        .expect("a throttled response is not an error");
+    let status = sender.status();
+    assert_eq!(status.retry_count, 0, "a throttle is not a retry");
+    assert_eq!(status.throttled_responses, 1);
+    assert!(status.sending, "the send is still live");
+
+    // The next poll re-sends the declined chunk, and after a refill it lands.
     assert_eq!(downloader.refill_rate_limit(&rate_limit), 4);
-    let third = sender.poll_send_requests().expect("poll").remove(0);
-    let third_result = downloader.download(third).expect("download");
-    assert!(!third_result.over_quota);
-    assert!(
-        third_result.installed_snapshot.is_some(),
-        "the snapshot lands"
-    );
+    let resent = sender.poll_send_requests().expect("poll").remove(0);
     assert_eq!(
-        third_result
-            .installed_snapshot
-            .expect("snapshot")
-            .payload
-            .len(),
-        12
+        resent.chunk.offset, second_offset,
+        "the rewind should re-send the declined chunk"
     );
+    let resent_result = downloader.download(resent).expect("download");
+    assert!(resent_result.accepted);
+    assert!(!resent_result.response.throttled);
+    sender
+        .record_send_response(&resent_result.response)
+        .expect("record");
 
-    let stats = downloader
-        .rate_limit_stats()
-        .expect("a limited downloader has stats");
-    assert_eq!(
-        stats.total_granted_bytes + stats.total_rejected_bytes,
-        12,
-        "every arriving byte is accounted for, as granted or as rejected: {stats:?}"
-    );
-    assert_eq!(stats.rejection_count, 1, "one chunk was over quota");
-
-    // An unlimited downloader reports nothing and never flags.
+    // An unlimited downloader never declines.
     let mut unlimited = MatrixRaftSnapshotDownloader::new(config).expect("downloader");
     assert_eq!(unlimited.rate_limit_available_bytes(), None);
-    assert!(unlimited.rate_limit_stats().is_none());
-    assert_eq!(unlimited.refill_rate_limit(&rate_limit), 0);
-    let mut lone_sender = MatrixRaftSnapshotSender::new(config).expect("sender");
-    lone_sender.begin_send(&snapshot, 2, 1).expect("begin send");
-    let chunk = lone_sender.poll_send_requests().expect("poll").remove(0);
-    assert!(!unlimited.download(chunk).expect("download").over_quota);
+    let mut lone = MatrixRaftSnapshotSender::new(config).expect("sender");
+    lone.begin_send(&snapshot, 2, 1).expect("begin send");
+    let chunk = lone.poll_send_requests().expect("poll").remove(0);
+    let result = unlimited.download(chunk).expect("download");
+    assert!(result.accepted);
+    assert!(!result.over_quota);
+    assert!(!result.response.throttled);
+}
+
+#[test]
+fn more_throttles_than_the_retry_budget_do_not_abandon_the_send() {
+    // The hazard that made the first version of this install every chunk:
+    // `max_retry_attempts` defaults to 3 and a rejection spends one, so a
+    // receiver pacing a transfer with four declines used to kill it. This is
+    // the assertion that says it cannot.
+    let config = SnapshotLifecycleConfig {
+        chunk_size: 4,
+        max_chunks_per_tick: 1,
+        max_bytes_per_tick: 1 << 20,
+        max_retry_attempts: 2,
+    };
+    let snapshot = snapshot(9, b"abcdefghijkl".to_vec());
+    let mut sender = MatrixRaftSnapshotSender::new(config).expect("sender");
+    sender.begin_send(&snapshot, 2, 1).expect("begin send");
+
+    let first = sender.poll_send_requests().expect("poll").remove(0);
+    let offset = first.chunk.offset;
+    let throttle = InstallSnapshotResponse {
+        term: 0,
+        accepted: false,
+        next_offset: offset,
+        committed_index: 0,
+        reason: "snapshot download quota exhausted".to_string(),
+        throttled: true,
+    };
+
+    // Five throttles against a budget of two.
+    for _ in 0..5 {
+        sender
+            .record_send_response(&throttle)
+            .expect("a throttle must never exhaust the budget");
+    }
+    let status = sender.status();
+    assert_eq!(status.retry_count, 0);
+    assert_eq!(status.throttled_responses, 5);
+    assert!(
+        status.sending,
+        "the send must still be live after five throttles"
+    );
+
+    // A plain rejection still spends the budget and still abandons the send,
+    // which is the behaviour a throttle is carved out of rather than replacing.
+    let rejection = InstallSnapshotResponse {
+        term: 0,
+        accepted: false,
+        next_offset: offset,
+        committed_index: 0,
+        reason: "no".to_string(),
+        throttled: false,
+    };
+    sender
+        .record_send_response(&rejection)
+        .expect("first retry");
+    sender
+        .record_send_response(&rejection)
+        .expect("second retry");
+    let exhausted = sender.record_send_response(&rejection);
+    assert!(
+        exhausted.is_err(),
+        "a budget of two must still be exhausted by three rejections, got {exhausted:?}"
+    );
 }
 
 #[test]

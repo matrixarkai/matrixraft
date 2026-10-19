@@ -162,6 +162,19 @@ pub struct SnapshotLifecycleStatus {
     pub retry_count: u64,
     pub throttled_ticks: u64,
     pub rate_limited_ticks: u64,
+    /// Responses that declined a chunk without failing the send.
+    ///
+    /// Kept apart from `retry_count` because they mean opposite things: a retry
+    /// is progress lost and is budgeted, and a throttle is the receiver asking
+    /// for less. Adding them together would make a paced transfer look like a
+    /// failing one.
+    ///
+    /// **Not budgeted**, which is deliberate and is the one thing to watch: a
+    /// receiver that throttles for ever makes no progress and never fails
+    /// either. Nothing here has a clock, so a host that wants a ceiling watches
+    /// this and calls `cancel_send`.
+    #[serde(default)]
+    pub throttled_responses: u64,
     pub rolled_back: u64,
     pub completed: bool,
     pub installed_index: LogIndex,
@@ -201,6 +214,7 @@ impl SnapshotLifecycle {
                 sent_chunks: 0,
                 received_chunks: 0,
                 retry_count: 0,
+            throttled_responses: 0,
                 throttled_ticks: 0,
                 rate_limited_ticks: 0,
                 rolled_back: 0,
@@ -280,6 +294,7 @@ impl SnapshotLifecycle {
             sent_chunks: 0,
             received_chunks: 0,
             retry_count: 0,
+            throttled_responses: 0,
             throttled_ticks: 0,
             rate_limited_ticks: self.status.rate_limited_ticks,
             rolled_back: self.status.rolled_back,
@@ -406,14 +421,25 @@ impl SnapshotLifecycle {
             }
             return Ok(());
         }
-        sender.retry_count += 1;
-        self.status.retry_count += 1;
-        if sender.retry_count > self.config.max_retry_attempts {
-            self.sender = None;
-            self.status.sending = false;
-            return Err(RaftError::Transport(
-                "snapshot send retry budget exhausted".to_string(),
-            ));
+        // A throttle is not a failure, so it does not spend the retry budget.
+        // Before this, a receiver pacing a transfer with three declines killed
+        // it -- the thing a receiver-side limiter is supposed to prevent.
+        //
+        // The rewind below is shared: a throttled response and a rejection both
+        // resume from the offset the receiver asked for, which for a throttle is
+        // the chunk it declined.
+        if !response.throttled {
+            sender.retry_count += 1;
+            self.status.retry_count += 1;
+            if sender.retry_count > self.config.max_retry_attempts {
+                self.sender = None;
+                self.status.sending = false;
+                return Err(RaftError::Transport(
+                    "snapshot send retry budget exhausted".to_string(),
+                ));
+            }
+        } else {
+            self.status.throttled_responses += 1;
         }
         sender.next_chunk = sender
             .chunks
@@ -586,6 +612,23 @@ pub struct InstallSnapshotResponse {
     #[serde(default)]
     pub committed_index: LogIndex,
     pub reason: String,
+    /// The receiver declined this chunk **for now**, rather than failing.
+    ///
+    /// A plain `accepted: false` is a failure: `record_send_response` counts it
+    /// as a retry and abandons the send once `max_retry_attempts` is exceeded.
+    /// That is right for a rejection and wrong for a receiver asking for less,
+    /// which is why a throttle has to be something the sender can tell apart --
+    /// without this, a receiver that throttled three times killed the transfer
+    /// it was trying to pace.
+    ///
+    /// A throttled response does not consume the retry budget. It rewinds the
+    /// sender to the chunk it declined, and
+    /// [`SnapshotLifecycleStatus::throttled_responses`] counts it.
+    ///
+    /// `#[serde(default)]` so a peer that does not set it reads as a plain
+    /// rejection, which is what it was before this field existed.
+    #[serde(default)]
+    pub throttled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
