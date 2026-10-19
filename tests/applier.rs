@@ -57,6 +57,9 @@ struct Refuser {
     refuse_at: u64,
     batches: AtomicU64,
     applied: AtomicU64,
+    /// Every index this handler was handed, so a test can say what it was
+    /// offered and not merely how often.
+    seen: Mutex<Vec<u64>>,
 }
 
 impl Refuser {
@@ -65,10 +68,17 @@ impl Refuser {
             refuse_at,
             batches: AtomicU64::new(0),
             applied: AtomicU64::new(0),
+            seen: Mutex::new(Vec::new()),
         }
     }
     fn batches(&self) -> u64 {
         self.batches.load(Ordering::Relaxed)
+    }
+    fn seen(&self) -> Vec<u64> {
+        self.seen.lock().expect("seen mutex").clone()
+    }
+    fn highest_seen(&self) -> u64 {
+        self.seen().into_iter().max().unwrap_or(0)
     }
 }
 
@@ -79,6 +89,10 @@ impl ApplyHandler for Refuser {
 
     fn apply_reporting(&self, tasks: Vec<ApplyTask>) -> ApplyReport {
         self.batches.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut seen = self.seen.lock().expect("seen mutex");
+            seen.extend(tasks.iter().map(matrixraft_apply_task_through_index));
+        }
         let highest = tasks
             .iter()
             .map(matrixraft_apply_task_through_index)
@@ -498,15 +512,22 @@ fn a_stalled_group_is_not_handed_anything_else() {
         ..ApplierOptions::default()
     })
     .expect("applier");
-    let handler = Arc::new(Refuser::new(3));
+    let handler = Arc::new(Refuser::new(2));
     let key = DriverGroupKey::new(51, 1);
     applier
         .register_group(key, Arc::clone(&handler) as Arc<dyn ApplyHandler>)
         .expect("register");
 
-    applier.submit(key, task(1)).expect("the first task");
-    applier.submit(key, task(2)).expect("the second task");
-    applier.submit(key, task(3)).expect("the task it refuses");
+    // Four tasks, refusing at the second, so two are already queued behind the
+    // one that stalls. Which of the two guards stops them depends on whether
+    // the pool hands them over in one call or in several -- that is the pools
+    // decision and it is timing -- so what is asserted is the property both
+    // guards exist for: nothing past the refused entry reaches the handler.
+    for index in 1..=4 {
+        applier
+            .submit(key, task(index))
+            .expect("the queue is deep enough");
+    }
 
     assert!(
         wait_until("the group stalls", Duration::from_secs(20), || applier
@@ -516,18 +537,23 @@ fn a_stalled_group_is_not_handed_anything_else() {
     );
     let stall = applier.apply_stall(key).expect("a stall");
     assert_eq!(
-        stall.applied_index, 2,
+        stall.applied_index, 1,
         "it stopped below the entry it refused"
     );
     assert!(
-        stall.reason.contains("entry 3"),
+        stall.reason.contains("entry 2"),
         "reason was {:?}",
         stall.reason
     );
     assert_eq!(
         applier.progress(key).expect("progress").applied_index,
-        2,
+        1,
         "the applied index is what the handler got through"
+    );
+    assert!(
+        handler.highest_seen() <= 2,
+        "the handler was offered {:?}, which is past the entry it refused",
+        handler.seen()
     );
 
     // Nothing more reaches the handler, and a submit is refused rather than
