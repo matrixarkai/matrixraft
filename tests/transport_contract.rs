@@ -1307,6 +1307,72 @@ fn a_pooled_connection_the_peer_closed_is_retried_on_a_fresh_one() {
     second.shutdown().expect("shut the second server down");
 }
 
+#[test]
+fn a_moved_peer_stops_getting_rpcs_at_its_old_address() {
+    // A peer that moves -- restarted on another port, rescheduled onto another
+    // host -- is the same member at a new address. `set_peer_addr` pointed the
+    // transport at the new one and left up to four connections pooled to the
+    // old one, so the next four sends went to the host that had moved.
+    let mut old_home = tcp_server_for_a_three_node_cluster();
+    let old_addr = old_home.addr().to_string();
+
+    let mut peers = BTreeMap::new();
+    peers.insert(2, old_addr.clone());
+    let mut transport = TcpRaftTransport::new(peers);
+
+    append_one(&transport).expect("the first append opens and pools a connection");
+    assert_eq!(
+        transport.idle_connections(2),
+        1,
+        "the append should have pooled its connection"
+    );
+    assert_eq!(transport.peer_addr(2), Some(old_addr.as_str()));
+
+    // The peer moves. The old address is shut down, so a send that still went
+    // there would fail rather than quietly succeed -- which is what makes this
+    // test able to tell the difference.
+    let new_home = tcp_server_for_a_three_node_cluster();
+    let new_addr = new_home.addr().to_string();
+    assert_ne!(new_addr, old_addr, "the two servers must differ");
+
+    let replaced = transport.set_peer_addr(2, new_addr.clone());
+    assert_eq!(
+        replaced.as_deref(),
+        Some(old_addr.as_str()),
+        "set_peer_addr reports the address it replaced"
+    );
+    assert_eq!(transport.peer_addr(2), Some(new_addr.as_str()));
+    assert_eq!(
+        transport.idle_connections(2),
+        0,
+        "the connections pooled to the old address must be dropped"
+    );
+
+    old_home.shutdown().expect("shut the old home down");
+    append_one(&transport).expect("the append must reach the peer at its new address");
+
+    // Re-setting the same address keeps the warm pool: a host polling service
+    // discovery calls this on every poll, and dropping the pool each time would
+    // undo the pooling it exists for.
+    assert_eq!(
+        transport.idle_connections(2),
+        1,
+        "the append to the new address pools a connection"
+    );
+    assert_eq!(
+        transport.set_peer_addr(2, new_addr.clone()).as_deref(),
+        Some(new_addr.as_str())
+    );
+    assert_eq!(
+        transport.idle_connections(2),
+        1,
+        "an unchanged address must not throw the pool away"
+    );
+
+    // And a peer this transport did not know reports no previous address.
+    assert_eq!(transport.set_peer_addr(9, "127.0.0.1:1".to_string()), None);
+}
+
 /// The listener used to serve each connection inline, so one peer's round trip
 /// blocked every other peer's. With connections kept open that would have been
 /// a stall for as long as the connection lived, so this covers the concurrency
