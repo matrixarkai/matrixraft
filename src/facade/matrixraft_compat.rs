@@ -2917,6 +2917,41 @@ impl MatrixRaftTransportBuilder {
     }
 }
 
+impl MatrixRaftTransportOptions {
+    /// The TCP transport these options describe.
+    ///
+    /// **This honours `cluster_id`. It does not honour `timeout_ms`,
+    /// `num_connection_group`, `dynamic_address_map` or
+    /// `user_payload_callback_bound`**, which this crate still only records --
+    /// the README's settings section lists them. Said here because a
+    /// constructor that quietly dropped four of six fields would be a worse
+    /// way to find that out.
+    ///
+    /// Both halves are needed for the cluster id to guard anything: a
+    /// stamped request is only refused by a server that was told which
+    /// cluster it is in, so pair this with
+    /// [`MatrixRaftTransportOptions::start_tcp_server`] or with
+    /// [`TcpRaftTransportServer::start_in_cluster`].
+    pub fn into_tcp_transport(&self, peers: BTreeMap<NodeId, String>) -> TcpRaftTransport {
+        TcpRaftTransport::new_in_cluster(peers, self.cluster_id)
+    }
+
+    /// A server that serves only the cluster these options name.
+    ///
+    /// The receiving half of [`MatrixRaftTransportOptions::into_tcp_transport`]
+    /// and the half that does the refusing.
+    pub fn start_tcp_server<T>(
+        &self,
+        addr: impl Into<String>,
+        handler: Arc<T>,
+    ) -> Result<TcpRaftTransportServer, RaftError>
+    where
+        T: Transport + Send + Sync + 'static,
+    {
+        TcpRaftTransportServer::start_in_cluster(addr, handler, self.cluster_id)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MatrixRaftGroupContext {
     pub tick_interval_ms: u64,

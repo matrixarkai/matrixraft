@@ -7,10 +7,12 @@ use matrixraft::{
     AuthenticatedRaftTransport, ClusterRaftTransport, Driver, DriverGroupKey, DriverOptions,
     DriverTickReceiver, HeartbeatFlusher, HeartbeatMergeMessage, HeartbeatMerger,
     InMemoryRaftTransport, InstallSnapshotRequest, InstallSnapshotResponse, LogEntry, LogId,
-    MatrixRaftRuntimeWiring, MergedHeartbeatBatch, MergedHeartbeatSender, Message, Peer,
-    RaftCluster, RaftError, ReadIndexRequest, ReadIndexResponse, ReplicaRole, SnapshotChunk,
-    SnapshotMetadata, SnapshotState, StaticRaftAuthToken, TcpRaftTransport,
-    TcpRaftTransportRequest, TcpRaftTransportServer, Transport, VoteRequest, VoteResponse,
+    MatrixRaftRuntimeWiring, MatrixRaftTransportBuilder, MergedHeartbeatBatch,
+    MergedHeartbeatSender, Message, Peer, RaftCluster, RaftError, ReadIndexRequest,
+    ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState,
+    StaticRaftAuthToken, TcpRaftTransport, TcpRaftTransportEnvelope, TcpRaftTransportRequest,
+    TcpRaftTransportResponse, TcpRaftTransportServer, Transport, VoteRequest, VoteResponse,
+    ANY_CLUSTER_ID,
 };
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -1611,4 +1613,274 @@ fn the_drivers_tick_is_what_flushes() {
         "all sixteen heartbeats should arrive in the flush"
     );
     assert_eq!(sent.addresses(), vec!["10.0.0.2:9000".to_string()]);
+}
+
+/// `EchoTransport`, but it says how many times it was asked.
+///
+/// The whole claim about a refused cluster is that the handler never runs, and
+/// that cannot be asserted from the response alone: an error could equally
+/// well have come back from a handler that had already appended the entries.
+#[derive(Debug, Clone, Default)]
+struct CountingEcho {
+    calls: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl CountingEcho {
+    fn calls(&self) -> u64 {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn count(&self) {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Transport for CountingEcho {
+    fn append_entries(
+        &self,
+        target: u64,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, RaftError> {
+        self.count();
+        EchoTransport.append_entries(target, request)
+    }
+
+    fn vote(&self, target: u64, request: VoteRequest) -> Result<VoteResponse, RaftError> {
+        self.count();
+        EchoTransport.vote(target, request)
+    }
+
+    fn install_snapshot(
+        &self,
+        target: u64,
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse, RaftError> {
+        self.count();
+        EchoTransport.install_snapshot(target, request)
+    }
+
+    fn read_index(
+        &self,
+        target: u64,
+        request: ReadIndexRequest,
+    ) -> Result<ReadIndexResponse, RaftError> {
+        self.count();
+        EchoTransport.read_index(target, request)
+    }
+}
+
+fn cluster_append() -> AppendEntriesRequest {
+    AppendEntriesRequest {
+        group_id: 1,
+        term: 2,
+        leader_id: 1,
+        prev_log_id: None,
+        entries: Vec::new(),
+        leader_commit: 0,
+        lease_epoch: 0,
+    }
+}
+
+/// Starts a counting server in `cluster_id` and returns it with its handler.
+fn counting_server(cluster_id: u64) -> (TcpRaftTransportServer, Arc<CountingEcho>) {
+    let handler = Arc::new(CountingEcho::default());
+    let server =
+        TcpRaftTransportServer::start_in_cluster("127.0.0.1:0", Arc::clone(&handler), cluster_id)
+            .expect("start tcp server");
+    (server, handler)
+}
+
+fn transport_to(server: &TcpRaftTransportServer, cluster_id: u64) -> TcpRaftTransport {
+    let mut peers = BTreeMap::new();
+    peers.insert(2, server.addr().to_string());
+    TcpRaftTransport::new_in_cluster(peers, cluster_id)
+}
+
+#[test]
+fn a_server_refuses_a_request_stamped_with_another_cluster() {
+    let (mut server, handler) = counting_server(7);
+    let transport = transport_to(&server, 9);
+
+    let refused = transport.append_entries(2, cluster_append());
+    let message = match refused {
+        Err(err) => err.to_string(),
+        Ok(response) => panic!("cluster 9 must not be served by cluster 7, got {response:?}"),
+    };
+    assert!(
+        message.contains("cluster 9") && message.contains("cluster 7"),
+        "the refusal should name both clusters, got {message}"
+    );
+    assert_eq!(
+        handler.calls(),
+        0,
+        "the refusal has to happen before the dispatch: a raft node that has \
+         already appended the entries cannot un-append them"
+    );
+    assert_eq!(server.refused_foreign_cluster(), 1);
+    assert_eq!(server.cluster_id(), 7);
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn a_server_serves_its_own_cluster_and_the_any_cluster_either_way() {
+    // Three pairings have to work, or the check is not opt-in: matching ids,
+    // an unconfigured sender, and an unconfigured server.
+    let (mut same, same_handler) = counting_server(7);
+    transport_to(&same, 7)
+        .append_entries(2, cluster_append())
+        .expect("cluster 7 serves cluster 7");
+    assert_eq!(same_handler.calls(), 1);
+    assert_eq!(same.refused_foreign_cluster(), 0);
+    same.shutdown().expect("shutdown");
+
+    let (mut configured, configured_handler) = counting_server(7);
+    transport_to(&configured, ANY_CLUSTER_ID)
+        .append_entries(2, cluster_append())
+        .expect("an unstamped sender reaches a configured server");
+    assert_eq!(configured_handler.calls(), 1);
+    assert_eq!(configured.refused_foreign_cluster(), 0);
+    configured.shutdown().expect("shutdown");
+
+    let (mut anywhere, anywhere_handler) = counting_server(ANY_CLUSTER_ID);
+    assert_eq!(anywhere.cluster_id(), 0, "any-cluster is zero");
+    transport_to(&anywhere, 9)
+        .append_entries(2, cluster_append())
+        .expect("an unconfigured server serves every cluster");
+    assert_eq!(anywhere_handler.calls(), 1);
+    assert_eq!(anywhere.refused_foreign_cluster(), 0);
+    anywhere.shutdown().expect("shutdown");
+}
+
+#[test]
+fn a_batch_from_another_cluster_is_refused_in_every_slot() {
+    // A batch is the way a refusal could be smuggled past: one check on the
+    // outer frame that then dispatched the nested requests would serve them.
+    let (mut server, handler) = counting_server(7);
+    let transport = transport_to(&server, 9);
+
+    let responses = transport
+        .send_batch_rpc(
+            2,
+            vec![
+                TcpRaftTransportRequest::AppendEntries {
+                    target: 2,
+                    request: cluster_append(),
+                },
+                TcpRaftTransportRequest::AppendEntries {
+                    target: 2,
+                    request: cluster_append(),
+                },
+            ],
+        )
+        .expect("the batch itself completes; its entries are refused");
+    assert_eq!(responses.len(), 2);
+    for response in responses {
+        let result = match response {
+            TcpRaftTransportResponse::AppendEntries(result) => result,
+            other => panic!("expected an append response, got {other:?}"),
+        };
+        assert!(
+            result.ok.is_none(),
+            "a nested request must not be served either"
+        );
+    }
+    assert_eq!(handler.calls(), 0, "no nested request reached the handler");
+    assert_eq!(
+        server.refused_foreign_cluster(),
+        1,
+        "one frame refused, however many requests it carried"
+    );
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn a_peer_that_sends_no_cluster_id_is_served_as_any_cluster() {
+    // Wire compatibility, asserted on the wire rather than argued. A sender
+    // that predates the field writes the bare request with no `cluster_id`,
+    // and `serde(default)` has to read that as the any-cluster id -- not as
+    // cluster 0 being a real cluster that a configured server would refuse.
+    use std::io::{BufRead, BufReader, Write};
+
+    let (mut server, handler) = counting_server(7);
+    let bare = TcpRaftTransportRequest::AppendEntries {
+        target: 2,
+        request: cluster_append(),
+    };
+    let mut encoded = serde_json::to_vec(&bare).expect("encode the pre-field shape");
+    assert!(
+        !String::from_utf8_lossy(&encoded).contains("cluster_id"),
+        "this test is only meaningful if the bytes really carry no cluster id"
+    );
+    encoded.push(b'\n');
+
+    let mut stream = std::net::TcpStream::connect(server.addr()).expect("connect");
+    stream.write_all(&encoded).expect("write");
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read a response");
+    assert!(
+        line.contains("\"success\":true"),
+        "an unstamped request should be served, got {line}"
+    );
+    assert_eq!(handler.calls(), 1);
+    assert_eq!(server.refused_foreign_cluster(), 0);
+
+    // And the other direction: a stamped request is still the same shape plus
+    // one field, so a peer that predates it can decode one by ignoring that
+    // field.
+    let stamped = TcpRaftTransportEnvelope {
+        cluster_id: 7,
+        request: bare.clone(),
+    };
+    let stamped_json = serde_json::to_string(&stamped).expect("encode the envelope");
+    let decoded_by_an_old_peer: TcpRaftTransportRequest =
+        serde_json::from_str(&stamped_json).expect("an old peer ignores the extra field");
+    assert_eq!(decoded_by_an_old_peer, bare);
+
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
+fn the_recorded_cluster_id_reaches_the_transport_and_the_server_it_builds() {
+    // The point of the change. `set_cluster_id` used to be recorded on the
+    // builder, reported back, and read by nothing that ran, so two clusters
+    // that both numbered their nodes from 1 could append each other's
+    // entries whatever it was set to.
+    let options = MatrixRaftTransportBuilder::new()
+        .set_cluster_id(42)
+        .bind_address_resolver()
+        .build()
+        .expect("build the transport options");
+    assert_eq!(options.cluster_id, 42);
+
+    let handler = Arc::new(CountingEcho::default());
+    let mut server = options
+        .start_tcp_server("127.0.0.1:0", Arc::clone(&handler))
+        .expect("start a server in the recorded cluster");
+    assert_eq!(server.cluster_id(), 42);
+
+    let mut peers = BTreeMap::new();
+    peers.insert(2, server.addr().to_string());
+    let transport = options.into_tcp_transport(peers.clone());
+    assert_eq!(transport.cluster_id(), 42);
+    transport
+        .append_entries(2, cluster_append())
+        .expect("the cluster talks to itself");
+    assert_eq!(handler.calls(), 1);
+
+    // A transport built from different options is refused by the same server.
+    let foreign = MatrixRaftTransportBuilder::new()
+        .set_cluster_id(43)
+        .bind_address_resolver()
+        .build()
+        .expect("build")
+        .into_tcp_transport(peers);
+    assert!(
+        foreign.append_entries(2, cluster_append()).is_err(),
+        "cluster 43 must not be served by cluster 42"
+    );
+    assert_eq!(handler.calls(), 1, "and it did not reach the handler");
+    assert_eq!(server.refused_foreign_cluster(), 1);
+    server.shutdown().expect("shutdown");
 }
