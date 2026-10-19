@@ -90,6 +90,52 @@ pub fn matrixraft_apply_task_through_index(task: &ApplyTask) -> LogIndex {
         .unwrap_or(0)
 }
 
+/// How far a group got, and whether it can go further.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyReport {
+    /// Reached this index. Keep sending.
+    Reached { applied_index: LogIndex },
+    /// Reached this index and cannot go past it until the group is resumed.
+    ///
+    /// The state machine refused an entry rather than failing to keep up: a
+    /// deserialisation it cannot perform, a schema it does not know, a
+    /// corruption. Retrying the same entry will do the same thing, so the
+    /// applier stops handing this group tasks and refuses what is submitted
+    /// for it, until a host that has installed a snapshot past the entry calls
+    /// [`Applier::resume_group`].
+    ///
+    /// The distinction from a plain low `applied_index` is the one that
+    /// matters: that means "not finished, send it again", and this means
+    /// "sending it again will not help".
+    Stalled {
+        applied_index: LogIndex,
+        reason: String,
+    },
+}
+
+impl ApplyReport {
+    pub fn reached(applied_index: LogIndex) -> Self {
+        Self::Reached { applied_index }
+    }
+
+    pub fn applied_index(&self) -> LogIndex {
+        match self {
+            Self::Reached { applied_index } | Self::Stalled { applied_index, .. } => *applied_index,
+        }
+    }
+
+    pub fn is_stalled(&self) -> bool {
+        matches!(self, Self::Stalled { .. })
+    }
+}
+
+/// Why a group is not applying, and where it stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyStall {
+    pub applied_index: LogIndex,
+    pub reason: String,
+}
+
 /// What a host does when its group has entries to apply.
 ///
 /// Returns the index the group has reached. Returning a lower index than the
@@ -98,6 +144,16 @@ pub fn matrixraft_apply_task_through_index(task: &ApplyTask) -> LogIndex {
 /// waiting, which is the conservative direction.
 pub trait ApplyHandler: Send + Sync {
     fn apply(&self, tasks: Vec<ApplyTask>) -> LogIndex;
+
+    /// The same work, saying whether the group can continue.
+    ///
+    /// Defaults to [`ApplyReport::Reached`] with whatever `apply` reported, so
+    /// a host that has nothing to stall for implements nothing. A host whose
+    /// state machine can refuse an entry overrides this instead of `apply`,
+    /// and then a refusal stops the applier rather than being retried forever.
+    fn apply_reporting(&self, tasks: Vec<ApplyTask>) -> ApplyReport {
+        ApplyReport::reached(self.apply(tasks))
+    }
 }
 
 /// Where a group has got to.
@@ -116,6 +172,8 @@ struct AppliedState {
     /// Set when the group is cancelled, so a waiter stops waiting for a group
     /// that is gone instead of sitting out its whole timeout.
     cancelled: bool,
+    /// Set when the handler reported a stall, and cleared by `resume_group`.
+    stall: Option<ApplyStall>,
 }
 
 struct GroupState {
@@ -145,9 +203,32 @@ impl DriverMailHandler<ApplyTask> for GroupApplier {
         // set from `apply_max_batch_count`. This second bound is not redundant:
         // it holds even if a caller builds the pool differently, and it is what
         // the option name promises.
+        // A group that has already stalled takes nothing from a later call
+        // either.
+        //
+        // The reachable path is narrow and real: the stall is recorded inside
+        // this function, so a submit that read the stall as absent a moment
+        // earlier can still queue a task, and the worker will hand it over.
+        // `a_stalled_group_is_not_handed_anything_else` cannot force that --
+        // the pool hands this test its whole batch in one call, so the guard
+        // inside the chunk loop below is the one that fires, and a plant that
+        // removes this one passes. It is kept because the alternative is
+        // applying past an entry the state machine refused, which is the one
+        // thing a stall exists to prevent.
+        if self
+            .state
+            .applied
+            .lock()
+            .expect("applied mutex poisoned")
+            .stall
+            .is_some()
+        {
+            return;
+        }
         for batch in tasks.chunks(self.batch_limit.max(1)) {
             let count = batch.len() as u64;
-            let reached = self.handler.apply(batch.to_vec());
+            let report = self.handler.apply_reporting(batch.to_vec());
+            let reached = report.applied_index();
 
             let mut applied = self.state.applied.lock().expect("applied mutex poisoned");
             // Never moves backwards: a handler that reports an older index than
@@ -157,6 +238,21 @@ impl DriverMailHandler<ApplyTask> for GroupApplier {
             }
             applied.batches += 1;
             applied.tasks += count;
+            if let ApplyReport::Stalled {
+                applied_index,
+                reason,
+            } = report
+            {
+                applied.stall = Some(ApplyStall {
+                    applied_index,
+                    reason,
+                });
+                // Woken, because a waiter on a later index will never be
+                // reached now and should find that out from `wait_for_applied`
+                // rather than by sitting out its timeout.
+                self.state.advanced.notify_all();
+                return;
+            }
             self.state.advanced.notify_all();
         }
     }
@@ -173,6 +269,14 @@ pub enum ApplyWait {
     /// be served, and retrying will not help -- which is why this is not a
     /// timeout.
     GroupGone { applied_index: LogIndex },
+    /// The group has stalled below the index waited for. A read must not be
+    /// served, and retrying will not help until the group is resumed -- the
+    /// same reason `GroupGone` is not a timeout.
+    ///
+    /// Carries no reason, so this enum stays `Copy` and a wait does not clone a
+    /// string. [`Applier::apply_stall`] has the reason for a caller that wants
+    /// to log it.
+    Stalled { applied_index: LogIndex },
 }
 
 impl ApplyWait {
@@ -185,7 +289,8 @@ impl ApplyWait {
         match self {
             ApplyWait::Reached { applied_index }
             | ApplyWait::TimedOut { applied_index }
-            | ApplyWait::GroupGone { applied_index } => *applied_index,
+            | ApplyWait::GroupGone { applied_index }
+            | ApplyWait::Stalled { applied_index } => *applied_index,
         }
     }
 }
@@ -197,6 +302,7 @@ pub struct Applier {
     groups: Mutex<BTreeMap<DriverGroupKey, Arc<GroupState>>>,
     submitted: AtomicU64,
     refused: AtomicU64,
+    stalled_refusals: AtomicU64,
 }
 
 impl std::fmt::Debug for Applier {
@@ -220,6 +326,7 @@ impl Applier {
             groups: Mutex::new(BTreeMap::new()),
             submitted: AtomicU64::new(0),
             refused: AtomicU64::new(0),
+            stalled_refusals: AtomicU64::new(0),
         })
     }
 
@@ -286,7 +393,22 @@ impl Applier {
     }
 
     /// Queues apply work for a group.
+    /// Queues apply work for a group.
+    ///
+    /// Refused while the group is stalled, rather than queued for a handler
+    /// that has said it cannot go further. Without that, every task submitted
+    /// after a refusal would be handed over, do the same thing and fail the
+    /// same way -- a stuck state machine turned into a spin, with the queue
+    /// filling behind it.
     pub fn submit(&self, key: DriverGroupKey, task: ApplyTask) -> Result<(), RaftError> {
+        if let Some(stall) = self.apply_stall(key) {
+            self.stalled_refusals.fetch_add(1, Ordering::Relaxed);
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            return Err(RaftError::InvalidRequest(format!(
+                "group {} node {} has stalled at applied index {}: {}",
+                key.group_id, key.node_id, stall.applied_index, stall.reason
+            )));
+        }
         match self.pool.send(key, MailPriority::Normal, task) {
             Ok(()) => {
                 self.submitted.fetch_add(1, Ordering::Relaxed);
@@ -297,6 +419,56 @@ impl Applier {
                 Err(error)
             }
         }
+    }
+
+    /// Why a group is not applying, or `None` while it is.
+    pub fn apply_stall(&self, key: DriverGroupKey) -> Option<ApplyStall> {
+        let state = {
+            let groups = self.groups.lock().expect("applier groups mutex poisoned");
+            Arc::clone(groups.get(&key)?)
+        };
+        // Bound rather than returned straight out: as a tail expression the
+        // guard borrows `state` past the point `state` is dropped.
+        let stall = state
+            .applied
+            .lock()
+            .expect("applied mutex poisoned")
+            .stall
+            .clone();
+        stall
+    }
+
+    /// Lets a stalled group apply again, and says whether it was stalled.
+    ///
+    /// For a host that has installed a snapshot past the entry its state
+    /// machine refused. Nothing here checks that, because nothing here can:
+    /// the applier does not know what the state machine will accept, only what
+    /// it refused. A host that resumes a group without moving it past the
+    /// entry gets the same stall on the next batch, which is the safe way for
+    /// this to be wrong.
+    ///
+    /// Returns false for a group that is not stalled, including one that does
+    /// not exist -- resuming is idempotent and this is not an error.
+    pub fn resume_group(&self, key: DriverGroupKey) -> bool {
+        let Some(state) = ({
+            let groups = self.groups.lock().expect("applier groups mutex poisoned");
+            groups.get(&key).map(Arc::clone)
+        }) else {
+            return false;
+        };
+        let mut applied = state.applied.lock().expect("applied mutex poisoned");
+        if applied.stall.take().is_none() {
+            return false;
+        }
+        // Woken, so a waiter that saw the stall can look again.
+        state.advanced.notify_all();
+        true
+    }
+
+    /// Tasks refused because their group had stalled. A subset of
+    /// [`Self::refused_tasks`].
+    pub fn stalled_refusals(&self) -> u64 {
+        self.stalled_refusals.load(Ordering::Relaxed)
     }
 
     pub fn progress(&self, key: DriverGroupKey) -> Option<GroupApplyProgress> {
@@ -338,6 +510,11 @@ impl Applier {
         while applied.applied_index < index {
             if applied.cancelled {
                 return Ok(ApplyWait::GroupGone {
+                    applied_index: applied.applied_index,
+                });
+            }
+            if applied.stall.is_some() {
+                return Ok(ApplyWait::Stalled {
                     applied_index: applied.applied_index,
                 });
             }

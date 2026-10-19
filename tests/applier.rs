@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use matrixraft::{
-    matrixraft_apply_task_through_index, Applier, ApplierOptions, ApplyHandler, ApplyTask,
-    ApplyWait, DriverGroupKey, LogEntry, LogId,
+    matrixraft_apply_task_through_index, Applier, ApplierOptions, ApplyHandler, ApplyReport,
+    ApplyTask, ApplyWait, DriverGroupKey, LogEntry, LogId,
 };
 
 /// Applies everything it is given and reports the highest index in the batch.
@@ -47,6 +47,69 @@ impl ApplyHandler for Recorder {
             .push(tasks.len());
         self.applied.store(highest, Ordering::Relaxed);
         highest
+    }
+}
+
+/// Applies up to `refuse_at` and then says it cannot go further, the way a
+/// state machine that has met an entry it does not understand would.
+#[derive(Debug)]
+struct Refuser {
+    refuse_at: u64,
+    batches: AtomicU64,
+    applied: AtomicU64,
+    /// Every index this handler was handed, so a test can say what it was
+    /// offered and not merely how often.
+    seen: Mutex<Vec<u64>>,
+}
+
+impl Refuser {
+    fn new(refuse_at: u64) -> Self {
+        Self {
+            refuse_at,
+            batches: AtomicU64::new(0),
+            applied: AtomicU64::new(0),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+    fn batches(&self) -> u64 {
+        self.batches.load(Ordering::Relaxed)
+    }
+    fn seen(&self) -> Vec<u64> {
+        self.seen.lock().expect("seen mutex").clone()
+    }
+    fn highest_seen(&self) -> u64 {
+        self.seen().into_iter().max().unwrap_or(0)
+    }
+}
+
+impl ApplyHandler for Refuser {
+    fn apply(&self, _tasks: Vec<ApplyTask>) -> u64 {
+        unreachable!("this handler reports through apply_reporting")
+    }
+
+    fn apply_reporting(&self, tasks: Vec<ApplyTask>) -> ApplyReport {
+        self.batches.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut seen = self.seen.lock().expect("seen mutex");
+            seen.extend(tasks.iter().map(matrixraft_apply_task_through_index));
+        }
+        let highest = tasks
+            .iter()
+            .map(matrixraft_apply_task_through_index)
+            .max()
+            .unwrap_or(0);
+        if highest >= self.refuse_at {
+            // Stopped *below* the entry it refuses: the applied index is the
+            // last one it took, not the one it could not.
+            let applied_index = self.refuse_at.saturating_sub(1);
+            self.applied.store(applied_index, Ordering::Relaxed);
+            return ApplyReport::Stalled {
+                applied_index,
+                reason: format!("entry {} is not something this fsm knows", self.refuse_at),
+            };
+        }
+        self.applied.store(highest, Ordering::Relaxed);
+        ApplyReport::reached(highest)
     }
 }
 
@@ -439,4 +502,197 @@ fn a_tasks_through_index_is_its_last_entrys() {
         snapshot: None,
     };
     assert_eq!(matrixraft_apply_task_through_index(&snapshot_only), 0);
+}
+
+#[test]
+fn a_stalled_group_is_not_handed_anything_else() {
+    let applier = Applier::start(ApplierOptions {
+        applier_num: 1,
+        apply_max_batch_count: 1,
+        ..ApplierOptions::default()
+    })
+    .expect("applier");
+    let handler = Arc::new(Refuser::new(2));
+    let key = DriverGroupKey::new(51, 1);
+    applier
+        .register_group(key, Arc::clone(&handler) as Arc<dyn ApplyHandler>)
+        .expect("register");
+
+    // Four tasks, refusing at the second, so two are already queued behind the
+    // one that stalls. Which of the two guards stops them depends on whether
+    // the pool hands them over in one call or in several -- that is the pools
+    // decision and it is timing -- so what is asserted is the property both
+    // guards exist for: nothing past the refused entry reaches the handler.
+    for index in 1..=4 {
+        applier
+            .submit(key, task(index))
+            .expect("the queue is deep enough");
+    }
+
+    assert!(
+        wait_until("the group stalls", Duration::from_secs(20), || applier
+            .apply_stall(key)
+            .is_some()),
+        "the handler refused entry 3 and the applier did not notice"
+    );
+    let stall = applier.apply_stall(key).expect("a stall");
+    assert_eq!(
+        stall.applied_index, 1,
+        "it stopped below the entry it refused"
+    );
+    assert!(
+        stall.reason.contains("entry 2"),
+        "reason was {:?}",
+        stall.reason
+    );
+    assert_eq!(
+        applier.progress(key).expect("progress").applied_index,
+        1,
+        "the applied index is what the handler got through"
+    );
+    assert!(
+        handler.highest_seen() <= 2,
+        "the handler was offered {:?}, which is past the entry it refused",
+        handler.seen()
+    );
+
+    // Nothing more reaches the handler, and a submit is refused rather than
+    // queued for a group that cannot take it.
+    let batches_at_stall = handler.batches();
+    let refused = applier.submit(key, task(4));
+    assert!(refused.is_err(), "a stalled group must refuse a submit");
+    let message = format!("{:?}", refused.expect_err("an error"));
+    assert!(message.contains("stalled"), "error was {message}");
+    assert_eq!(applier.stalled_refusals(), 1);
+    assert!(
+        applier.stalled_refusals() <= applier.refused_tasks(),
+        "a stalled refusal is one of the refusals"
+    );
+
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        handler.batches(),
+        batches_at_stall,
+        "the handler was called again after it said it could not go further"
+    );
+}
+
+#[test]
+fn a_resumed_group_applies_again() {
+    let applier = Applier::start(ApplierOptions {
+        applier_num: 1,
+        apply_max_batch_count: 1,
+        ..ApplierOptions::default()
+    })
+    .expect("applier");
+    // Refuses nothing once resumed, because the index it refuses is behind the
+    // tasks that follow -- which is the shape a snapshot install produces.
+    let handler = Arc::new(Refuser::new(2));
+    let key = DriverGroupKey::new(52, 1);
+    applier
+        .register_group(key, Arc::clone(&handler) as Arc<dyn ApplyHandler>)
+        .expect("register");
+
+    applier.submit(key, task(2)).expect("the task it refuses");
+    assert!(
+        wait_until("the group stalls", Duration::from_secs(20), || applier
+            .apply_stall(key)
+            .is_some()),
+        "no stall"
+    );
+
+    assert!(applier.resume_group(key), "it was stalled");
+    assert!(
+        !applier.resume_group(key),
+        "resuming twice is idempotent and reports that nothing was stalled"
+    );
+    assert!(applier.apply_stall(key).is_none());
+
+    // And the group takes work again.
+    applier
+        .submit(key, task(1))
+        .expect("a resumed group accepts a submit");
+    assert!(
+        wait_until("it applies again", Duration::from_secs(20), || {
+            applier.progress(key).expect("progress").applied_index == 1
+        }),
+        "progress was {:?}",
+        applier.progress(key)
+    );
+}
+
+#[test]
+fn a_waiter_on_a_stalled_group_is_not_told_it_timed_out() {
+    // A timeout tells a host to try again. A stall tells it not to, and the
+    // difference is the whole reason this is a separate answer.
+    let applier = Applier::start(ApplierOptions {
+        applier_num: 1,
+        apply_max_batch_count: 1,
+        ..ApplierOptions::default()
+    })
+    .expect("applier");
+    let handler = Arc::new(Refuser::new(2));
+    let key = DriverGroupKey::new(53, 1);
+    applier
+        .register_group(key, Arc::clone(&handler) as Arc<dyn ApplyHandler>)
+        .expect("register");
+
+    applier.submit(key, task(2)).expect("submit");
+    assert!(
+        wait_until("the group stalls", Duration::from_secs(20), || applier
+            .apply_stall(key)
+            .is_some()),
+        "no stall"
+    );
+
+    // A generous timeout: the answer must come from the stall, not from the
+    // clock running out, so a long timeout is what makes the test meaningful.
+    let waited = applier
+        .wait_for_applied(key, 9, Duration::from_secs(10))
+        .expect("wait");
+    assert_eq!(
+        waited,
+        ApplyWait::Stalled { applied_index: 1 },
+        "a wait on a stalled group reported {waited:?}"
+    );
+    assert!(
+        !waited.reached(),
+        "a stalled group has not reached the index"
+    );
+
+    // Resuming wakes the waiter rather than leaving it to its timeout, so a
+    // wait started before the resume still gets its answer from the group.
+    assert!(applier.resume_group(key));
+    let after = applier
+        .wait_for_applied(key, 1, Duration::from_secs(10))
+        .expect("wait");
+    assert_eq!(after, ApplyWait::Reached { applied_index: 1 });
+}
+
+#[test]
+fn a_handler_that_only_implements_apply_never_stalls() {
+    // The default body of `apply_reporting` is what keeps every existing host
+    // working, so it is worth an assertion of its own rather than being
+    // assumed from the other tests passing.
+    let applier = Applier::start(ApplierOptions {
+        applier_num: 1,
+        ..ApplierOptions::default()
+    })
+    .expect("applier");
+    let handler = Arc::new(Recorder::default());
+    let key = DriverGroupKey::new(54, 1);
+    applier
+        .register_group(key, Arc::clone(&handler) as Arc<dyn ApplyHandler>)
+        .expect("register");
+
+    applier.submit(key, task(7)).expect("submit");
+    assert!(
+        wait_until("it applies", Duration::from_secs(20), || {
+            applier.progress(key).expect("progress").applied_index == 7
+        }),
+        "progress was {:?}",
+        applier.progress(key)
+    );
+    assert!(applier.apply_stall(key).is_none());
+    assert_eq!(applier.stalled_refusals(), 0);
 }
