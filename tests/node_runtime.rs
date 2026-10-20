@@ -2040,6 +2040,13 @@ fn node_runtime_reports_stale_snapshot_trigger_timeout() {
     options.config.heartbeat_interval_ms = 5;
     options.config.election_timeout_ms = 10;
     options.config.leader_lease_ms = 5;
+    // Set explicitly, because shrinking the election timeout no longer shrinks
+    // this. The trigger used to take its timeout from
+    // `leader_transfer_timeout_ticks`, so the three lines above happened to
+    // give it two ticks; it has its own setting now and derives 60 seconds'
+    // worth, which at a 5ms heartbeat is 12,000 ticks. Naming the knob is also
+    // what makes this test say which quantity it is exercising.
+    options.config.snapshot_trigger_timeout_ticks = 2;
     let mut runtime = NodeRuntime::create(options).expect("create runtime");
     runtime.start().expect("start runtime");
     runtime.propose(b"slow-snapshot".to_vec()).expect("propose");

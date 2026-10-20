@@ -810,6 +810,26 @@ impl RaftCluster {
             .max(1)
     }
 
+    /// Ticks a triggered snapshot gets, configured or derived.
+    ///
+    /// Resolved from `self.config` when a snapshot is triggered rather than
+    /// held as a field: `RaftCluster`'s width is guarded at 520 bytes by
+    /// `tests/cluster_footprint.rs`, every group pays it, and a trigger is not
+    /// frequent enough to be worth 8 bytes a group.
+    ///
+    /// The derived value is a **snapshot** timescale. See
+    /// [`Config::snapshot_trigger_timeout_ticks`] for what using the leader
+    /// transfer's did.
+    fn resolve_snapshot_trigger_timeout_ticks(&self) -> u64 {
+        if self.config.snapshot_trigger_timeout_ticks > 0 {
+            return u64::from(self.config.snapshot_trigger_timeout_ticks);
+        }
+        const SNAPSHOT_TIMESCALE_MS: u64 = 60_000;
+        SNAPSHOT_TIMESCALE_MS
+            .saturating_div(self.config.heartbeat_interval_ms.max(1))
+            .max(1)
+    }
+
     pub fn tick_peer_liveness(&mut self, elapsed_ms: u64) -> Vec<NodeId> {
         let Some(leader_id) = self.leader_id else {
             return Vec::new();
@@ -6127,7 +6147,7 @@ impl RaftCluster {
         self.snapshot_trigger = Some(Box::new(SnapshotTriggerState {
             meta: meta.clone(),
             elapsed_ticks: 0,
-            timeout_ticks: self.leader_transfer_timeout_ticks,
+            timeout_ticks: self.resolve_snapshot_trigger_timeout_ticks(),
             timed_out: false,
         }));
         Ok(meta)

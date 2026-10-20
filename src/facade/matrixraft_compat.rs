@@ -3604,6 +3604,25 @@ impl MatrixRaftOptions {
                 .unwrap_or(u32::MAX),
             peer_offline_timeout_ticks: u32::try_from(self.offline_timeout_tick)
                 .unwrap_or(u32::MAX),
+            // `send_snapshot_timeout_ms` has been on this struct all along,
+            // defaulted to 60,000 -- the same figure the comparable engine
+            // uses -- and it reached `snapshot_recycle_options` and the
+            // evidence artifact and nothing else. The cluster's snapshot
+            // trigger took its timeout from `leader_transfer_timeout_ticks`
+            // instead: 10 ticks, one second at the defaults. So the setting
+            // named for this governed something else, and something else
+            // governed this.
+            //
+            // In milliseconds here and ticks in `Config`, so unlike the two
+            // above there IS a conversion to get wrong. Floor of one tick,
+            // because a zero timeout would report every trigger timed out at
+            // once.
+            snapshot_trigger_timeout_ticks: u32::try_from(
+                self.send_snapshot_timeout_ms
+                    .saturating_div(self.tick_interval_ms.max(1))
+                    .max(1),
+            )
+            .unwrap_or(u32::MAX),
             // The same conversion this struct already did for its own node
             // type. Until Config carried these, a cluster built from these
             // options got PipelineLimits::default() and the reorder, inflight

@@ -81,6 +81,23 @@ pub struct Config {
     /// place it becomes a duration.
     #[serde(default)]
     pub peer_offline_timeout_ticks: u32,
+    /// Ticks a triggered snapshot may take before it is reported timed out.
+    ///
+    /// Zero derives one, and the derived value is on a **snapshot** timescale
+    /// rather than an election one: 60 seconds' worth of ticks, which is what
+    /// the comparable engine gives a snapshot in `send_snapshot_timeout_ms`
+    /// while giving a leader transfer three ticks.
+    ///
+    /// Before this existed the trigger used
+    /// [`Config::leader_transfer_timeout_ticks`], which derives
+    /// `election_timeout_ms / heartbeat_interval_ms` -- **10 ticks, a second at
+    /// the defaults.** A snapshot of real state does not finish in a second, so
+    /// the trigger was reported timed out while it was still running, which
+    /// raises a `snapshot_trigger_timeout` blocker. The two quantities also had
+    /// no business moving together: tuning a leader transfer changed how long a
+    /// snapshot was allowed to take.
+    #[serde(default)]
+    pub snapshot_trigger_timeout_ticks: u32,
     /// The replication pipeline's limits for every peer a cluster built from
     /// this config holds.
     ///
@@ -141,6 +158,7 @@ impl Default for Config {
             // exactly as it used to.
             leader_transfer_timeout_ticks: 0,
             peer_offline_timeout_ticks: 0,
+            snapshot_trigger_timeout_ticks: 0,
             pipeline: Box::default(),
         }
     }
