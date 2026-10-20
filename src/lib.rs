@@ -227,7 +227,7 @@ pub use snapshot::{
     matrixraft_snapshot_lifecycle_evidence, matrixraft_snapshot_lifecycle_evidence_artifact,
     matrixraft_validate_snapshot_floor_log_matching, matrixraft_validate_snapshot_install,
     matrixraft_validate_snapshot_lifecycle_evidence_artifact,
-    matrixraft_validate_snapshot_tail_catchup, SnapshotLifecycleEvidence,
+    matrixraft_validate_snapshot_tail_catchup, SnapshotDueReport, SnapshotLifecycleEvidence,
     SnapshotLifecycleEvidenceArtifact, SnapshotLifecycleEvidenceValidationReport,
 };
 pub use snapshot_pools::{
