@@ -377,6 +377,46 @@ pub fn matrixraft_validate_apply_snapshot_fence(record: &WalRecord) -> Result<()
             ));
         }
     }
+    matrixraft_validate_log_continues_snapshot(record)?;
+    Ok(())
+}
+
+/// Whether this record's retained log continues the snapshot it carries.
+///
+/// The fence validation relates the fence to the snapshot three ways -- the
+/// fence's snapshot index equals the snapshot's last index, the declared floor
+/// sits after the snapshot, and the committed index reaches no further than the
+/// log and snapshot together do. None of the three says where the log *begins*,
+/// so all three hold for a snapshot ending at 10 with entries from 20 and 22
+/// reported committed: indices 11 to 19 are in no snapshot and in no log, and
+/// what recovers is a node that reports 22 committed and cannot serve 15 to
+/// anyone, itself included.
+///
+/// Note that the rule is about the first **entry**, not the declared floor.
+/// Moving the floor up to meet the entries makes the record internally
+/// consistent and leaves the hole exactly where it was.
+///
+/// A delta record is exempt: its entries are only what was appended after the
+/// previous record in its segment, so they legitimately start past the
+/// snapshot. Folding clears the flag, which is why every whole-log record is
+/// still checked.
+pub fn matrixraft_validate_log_continues_snapshot(record: &WalRecord) -> Result<(), RaftError> {
+    let Some(snapshot) = &record.installed_snapshot else {
+        return Ok(());
+    };
+    if record.entries_are_delta {
+        return Ok(());
+    }
+    let Some(first_entry) = record.entries.first() else {
+        return Ok(());
+    };
+    let continues_at = snapshot.last_log_id.index.saturating_add(1);
+    if first_entry.log_id.index > continues_at {
+        return Err(RaftError::Storage(format!(
+            "retained log starts at {} instead of continuing the snapshot at {continues_at}",
+            first_entry.log_id.index
+        )));
+    }
     Ok(())
 }
 

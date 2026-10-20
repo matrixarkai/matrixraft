@@ -3474,6 +3474,13 @@ impl RaftCluster {
                 "WAL record group id mismatch".to_string(),
             ));
         }
+        // Both recovery entry points validate before they get here, but a
+        // caller restoring a record it holds does not go through them, and
+        // this installs the log verbatim. A record whose log starts past its
+        // snapshot would leave the node reporting a committed index it cannot
+        // serve -- which is where the comparable engine asserts the same
+        // relation, as it loads its log buffer rather than as it parses.
+        matrixraft_validate_log_continues_snapshot(&record)?;
         // The membership the record carries is the one the log committed, and
         // it outranks the peers this process happened to be configured with.
         // Without this a restart resurrected a removed peer -- which then

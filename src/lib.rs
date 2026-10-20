@@ -276,7 +276,7 @@ pub use wal::{
     matrixraft_fold_wal_latest_record, matrixraft_fold_wal_record_iter,
     matrixraft_fold_wal_records, matrixraft_recover_from_wal_records,
     matrixraft_recover_latest_wal_record, matrixraft_validate_apply_snapshot_fence,
-    matrixraft_validate_hard_state_persistence,
+    matrixraft_validate_hard_state_persistence, matrixraft_validate_log_continues_snapshot,
     matrixraft_validate_wal_lifecycle_evidence_artifact, matrixraft_wal_checksum,
     matrixraft_wal_checksum_covers_membership, matrixraft_wal_checksum_format,
     matrixraft_wal_checksum_valid, matrixraft_wal_delta_base, matrixraft_wal_lifecycle_evidence,
