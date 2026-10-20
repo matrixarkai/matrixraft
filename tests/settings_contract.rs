@@ -125,10 +125,10 @@ fn the_inert_settings_marker_is_the_length_it_was_last_decided_to_be() {
     let claimed = settings_the_readme_calls_inert();
     assert_eq!(
         claimed.len(),
-        5,
-        "the README's `inert-settings` marker names {} settings rather than 5: \
-         {claimed:?}.\n\nThree are on `MatrixRaftGroupContext` and two on \
-         `MatrixRaftOptions`. Removing one means a setting became live -- say so \
+        6,
+        "the README's `inert-settings` marker names {} settings rather than 6: \
+         {claimed:?}.\n\nThree are on `MatrixRaftGroupContext`, two on \
+         `MatrixRaftOptions` and one on `NodeOptions`. Removing one means a setting became live -- say so \
          in the settings section -- or that a documented shortfall is being \
          undocumented, which is the thing to stop. Then update this count.",
         claimed.len()
@@ -201,6 +201,48 @@ If the new one reaches nothing, add it to          the README's `inert-settings`
 /// named timeouts the engine ran off a different setting entirely. A count
 /// cannot decide which settings are live, and does not try to; it stops a new
 /// one being added without anyone deciding.
+/// `NodeOptions` had no field-count guard, which is the third time that hole
+/// has mattered.
+///
+/// The README records the first two: `MatrixRaftOptions` was outside the
+/// machine-checked marker until its list grew, and before that the transport
+/// options were all inert while the section named none of them. Both times a
+/// passing guard certified its own list rather than the property. This struct
+/// was the remaining one a new setting could be added to without anything
+/// noticing -- and `snapshot_dir`, which reaches nothing that runs, has been
+/// sitting on it undeclared.
+#[test]
+fn a_new_node_setting_has_to_be_considered_for_the_list() {
+    let source = include_str!("../src/facade/api_messages.rs");
+    let start = source
+        .find("pub struct NodeOptions {")
+        .expect("NodeOptions is declared in the facade");
+    let body = &source[start..];
+    let open = body.find('{').expect("no opening brace");
+    let end = body
+        .find(
+            "
+}",
+        )
+        .expect("unterminated struct");
+    // From the brace, not from `start`: the declaration line itself begins
+    // with `pub `, and counting it was an off-by-one that read 10 for 9.
+    let fields = body[open..end]
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("pub "))
+        .filter_map(|rest| rest.split(':').next())
+        .filter(|name| !name.contains(' '))
+        .count();
+    assert_eq!(
+        fields, 9,
+        "NodeOptions has {} fields rather than the 9 this list was last decided \
+         against. A new one is either live -- and then nothing here needs to \
+         change -- or it only gets recorded, and then it belongs in the \
+         README's inert-settings marker beside snapshot_dir.",
+        fields
+    );
+}
+
 #[test]
 fn a_new_options_setting_has_to_be_considered_for_the_list() {
     let compat = include_str!("../src/facade/matrixraft_compat.rs");
