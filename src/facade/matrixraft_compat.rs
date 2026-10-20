@@ -3594,6 +3594,11 @@ impl MatrixRaftOptions {
             enable_pre_vote: self.enable_pre_vote,
             enable_lease_read: true,
             assume_lease_when_start: self.assume_lease_when_start,
+            // The same conversion this struct already did for its own node
+            // type. Until Config carried these, a cluster built from these
+            // options got PipelineLimits::default() and the reorder, inflight
+            // and apply-batch options reached only MatrixRaftNode.
+            pipeline: Box::new(self.to_pipeline_limits()),
         }
     }
 
