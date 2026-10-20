@@ -2009,7 +2009,7 @@ impl NodeCore {
                         | Message::Membership { .. }
                 );
                 let binding_vote = is_binding_vote_step_message(&message);
-                let result = runtime_step_message(
+                let mut result = runtime_step_message(
                     cluster,
                     wal,
                     membership_executor,
@@ -2019,6 +2019,25 @@ impl NodeCore {
                 );
                 if step_granted_a_binding_vote(binding_vote, &result) {
                     *election_elapsed_ms = 0;
+                    // A granted vote has to be on disk before the grant goes
+                    // back. Only the proposal path wrote a record, so a voter
+                    // that granted and restarted came back with whatever vote
+                    // the last proposal happened to carry -- and granted the
+                    // same term again to a different candidate. Two leaders in
+                    // one term, from a node that did nothing wrong.
+                    //
+                    // And the grant is withheld when the record does not land,
+                    // the same way a proposal that applied but did not persist
+                    // is not acknowledged: a candidate counting a vote the
+                    // voter cannot honour after a restart is the whole defect,
+                    // so reporting the failure is the conservative direction.
+                    if let Some(wal) = wal.as_mut() {
+                        if let Err(error) = wal.append_built(|coverage| {
+                            cluster.wal_record_for_coverage(node_id, coverage)
+                        }) {
+                            result = Err(error);
+                        }
+                    }
                 }
                 if result
                     .as_ref()
@@ -2099,7 +2118,11 @@ impl NodeCore {
                 }
                 // Persisted even when a message failed, so what is on disk
                 // still describes what the node applied.
-                let persisted = if batch_has_proposal {
+                //
+                // A granted binding vote needs the record as much as a
+                // proposal does, and for a sharper reason: an unpersisted vote
+                // lets the voter grant the same term twice across a restart.
+                let persisted = if batch_has_proposal || granted_a_binding_vote {
                     match wal.as_mut() {
                         Some(wal) => wal
                             .append_built(|coverage| {
