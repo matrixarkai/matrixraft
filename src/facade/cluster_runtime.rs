@@ -565,10 +565,9 @@ impl RaftCluster {
 
         Ok(Self {
             group_id,
-            leader_transfer_timeout_ticks: config
-                .election_timeout_ms
-                .saturating_div(config.heartbeat_interval_ms.max(1))
-                .max(1),
+            leader_transfer_timeout_ticks: Self::resolve_leader_transfer_timeout_ticks(
+                &config,
+            ),
             config,
             nodes,
             peer_pipelines,
@@ -715,11 +714,41 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(node_id))
     }
 
+    /// How long a peer may go unheard before the leader marks it offline.
+    ///
+    /// `peer_offline_timeout_ticks` of zero means the election timeout, which
+    /// is what this was unconditionally until the setting that names it
+    /// reached the engine. This is the only place the tick count becomes a
+    /// duration.
+    pub fn peer_offline_timeout_ms(&self) -> u64 {
+        if self.config.peer_offline_timeout_ticks == 0 {
+            return self.config.election_timeout_ms.max(1);
+        }
+        u64::from(self.config.peer_offline_timeout_ticks)
+            .saturating_mul(self.config.heartbeat_interval_ms.max(1))
+            .max(1)
+    }
+
+    /// The configured leader-transfer timeout in ticks, or the derived one.
+    ///
+    /// Taken at construction because that is where the cluster's own
+    /// `leader_transfer_timeout_ticks` is set; a transfer in flight keeps the
+    /// timeout it was admitted with.
+    fn resolve_leader_transfer_timeout_ticks(config: &Config) -> u64 {
+        if config.leader_transfer_timeout_ticks > 0 {
+            return u64::from(config.leader_transfer_timeout_ticks);
+        }
+        config
+            .election_timeout_ms
+            .saturating_div(config.heartbeat_interval_ms.max(1))
+            .max(1)
+    }
+
     pub fn tick_peer_liveness(&mut self, elapsed_ms: u64) -> Vec<NodeId> {
         let Some(leader_id) = self.leader_id else {
             return Vec::new();
         };
-        let timeout_ms = self.config.election_timeout_ms.max(1);
+        let timeout_ms = self.peer_offline_timeout_ms();
         let mut timed_out = Vec::new();
         for (node_id, node) in self.nodes.iter_mut() {
             if *node_id == leader_id {

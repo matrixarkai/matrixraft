@@ -815,13 +815,35 @@ assertion.
 
 Recorded, reported back, and reaching nothing that runs:
 
-<!-- inert-settings: reader_num, executor_num, watched_address_resolver -->
+<!-- inert-settings: reader_num, executor_num, watched_address_resolver, max_applied_log_bytes, max_disk_replicate_log_num -->
 
-All three are on `MatrixRaftGroupContext`:
+Three are on `MatrixRaftGroupContext`:
 
 - `reader_num`
 - `executor_num`
 - `watched_address_resolver`
+
+Two are on `MatrixRaftOptions`:
+
+- `max_applied_log_bytes` — the **byte**-valued twin of
+  `Config::snapshot_threshold_entries`, which is the entry-valued one and is
+  live. Wiring both would cost a second threshold on every group for the same
+  decision, so this one stays recorded and the entry threshold is the one to
+  set. It defaults to `u64::MAX`, which is "never", so a host that leaves it
+  alone is not relying on it.
+- `max_disk_replicate_log_num` — how many log entries may be replicated from
+  disk rather than from the in-memory buffer. This crate's replication reads
+  from the log buffer, whose bound is `max_memory_replicate_log_bytes` and is
+  live; there is no separate disk path for this to bound.
+
+**`MatrixRaftOptions` was not covered by the machine-checked marker at all**
+until this list grew. Two more of its settings — `transfer_timeout_tick` and
+`offline_timeout_tick` — were recorded-only while the guard was green, because
+the guard's list and its field count were both scoped to
+`MatrixRaftGroupContext`. Both are now live: a leader transfer and a peer going
+quiet each used to time out on the election interval whatever the host set.
+That is the same failure as the transport options below, where a passing guard
+certified its own list rather than the property.
 
 **`MatrixRaftTransportOptions` has none left.** All six were inert while this
 section said "three settings on `MatrixRaftGroupContext`" and named none of

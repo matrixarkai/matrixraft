@@ -3595,6 +3595,15 @@ impl MatrixRaftOptions {
             enable_lease_read: true,
             assume_lease_when_start: self.assume_lease_when_start,
             can_trigger_snapshot: self.can_trigger_snapshot,
+            // Both are tick counts on this struct and tick counts in `Config`,
+            // so there is no conversion to get wrong -- only the width. A
+            // value that does not fit saturates rather than wrapping, because
+            // a wrapped timeout is a short one and a short one abandons work
+            // that was fine.
+            leader_transfer_timeout_ticks: u32::try_from(self.transfer_timeout_tick)
+                .unwrap_or(u32::MAX),
+            peer_offline_timeout_ticks: u32::try_from(self.offline_timeout_tick)
+                .unwrap_or(u32::MAX),
             // The same conversion this struct already did for its own node
             // type. Until Config carried these, a cluster built from these
             // options got PipelineLimits::default() and the reorder, inflight
