@@ -59,14 +59,18 @@ fn wal_record(commit_index: u64, snapshot_index: Option<u64>) -> WalRecord {
             witnesses: Vec::new(),
             epoch: 1,
         },
-        entries: vec![LogEntry {
-            log_id: LogId {
-                term: 3,
-                index: commit_index,
-            },
-            payload: b"write".to_vec(),
-            is_command: true,
-        }],
+        // From the snapshot floor through the commit index, rather than one
+        // entry sitting at the commit index. A single entry at 10 over a
+        // snapshot ending at 8 leaves index 9 in no snapshot and in no log,
+        // which is not a state a node reaches -- and the fence validation
+        // refuses it now that it checks where the log begins.
+        entries: (snapshot_index.map(|index| index + 1).unwrap_or(1)..=commit_index)
+            .map(|index| LogEntry {
+                log_id: LogId { term: 3, index },
+                payload: b"write".to_vec(),
+                is_command: true,
+            })
+            .collect(),
         installed_snapshot: snapshot,
         apply_snapshot_fence: ApplySnapshotFence {
             applied_index: commit_index,
