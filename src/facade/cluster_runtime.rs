@@ -1899,6 +1899,26 @@ impl RaftCluster {
         self.pre_vote_responses.remove(&node_id);
     }
 
+    /// Drop every cached out-of-order append.
+    ///
+    /// Called from thirteen sites, and **eleven of them are a memory tidy-up
+    /// rather than a correctness guarantee**: `drain_reordered_appends` replays
+    /// each cached request through
+    /// [`RaftCluster::append_entries_with_membership_change_indexes_to`], which
+    /// re-validates the term, so an append cached in an earlier term is refused
+    /// on replay whether or not the queue was emptied first. Deleting any one of
+    /// those eleven leaves the whole suite passing, and that is the reason --
+    /// there is nothing there to defend.
+    ///
+    /// The two that **are** load-bearing are the ones where the leader changes
+    /// and the term does not: the cached entry's term still matches, so the
+    /// replay's term check cannot refuse it and only this call drops it. They
+    /// are the append path's own leader-change branch, covered by
+    /// `append_entries_reorder_queue_is_cleared_on_leader_change`, and
+    /// `observe_snapshot_leader`'s, covered by
+    /// `tests/reorder_queue_clears.rs`. Both tests were checked by deleting the
+    /// call they defend; a test for this that advances the term instead passes
+    /// with the call gone and asserts nothing.
     fn clear_reorder_queues(&mut self) {
         self.reorder_queues.clear();
     }
