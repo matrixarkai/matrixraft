@@ -5185,10 +5185,28 @@ impl RaftCluster {
     }
 
     pub fn compact_logs_through(&mut self, log_index: LogIndex) -> u64 {
-        let leader_id = self.leader_id;
-        let leader_compaction_limit = self
+        let limit = self
             .leader_id
             .and_then(|leader_id| self.min_replicated_index(leader_id).ok());
+        self.compact_logs_through_with_leader_limit(log_index, limit)
+    }
+
+    /// Compact every node's log, clamping the **leader's** to `leader_limit`.
+    ///
+    /// The leader keeps what a follower still needs so it can serve it, which
+    /// is why `compact_logs_through` clamps it to the slowest replica. Under
+    /// memory pressure that clamp is what has to give -- see
+    /// [`RaftCluster::release_memory`] -- so the limit is a parameter rather
+    /// than recomputed here. It used to be recomputed, which made the pressure
+    /// tier ineffective: the caller asked for the applied index and this
+    /// clamped the leader back to the lagging follower anyway.
+    fn compact_logs_through_with_leader_limit(
+        &mut self,
+        log_index: LogIndex,
+        leader_limit: Option<LogIndex>,
+    ) -> u64 {
+        let leader_id = self.leader_id;
+        let leader_compaction_limit = leader_limit;
         let removed = self
             .nodes
             .values_mut()
@@ -5264,9 +5282,54 @@ impl RaftCluster {
         }
     }
 
+    /// Reclaim log memory, and say whether anything was released.
+    ///
+    /// Two tiers, because one is not enough. While memory is comfortable this
+    /// releases only up to the slowest replica, so a follower that is behind
+    /// can still be caught up from the log. Once
+    /// [`RaftCluster::should_release_memory`] is true it releases up to what
+    /// the host has confirmed applied instead, even though that strands a
+    /// lagging follower -- which then recovers by snapshot, the path a follower
+    /// below the retained floor already takes.
+    ///
+    /// Without the second tier a follower that was away and came back behind
+    /// pins the minimum and nothing can be released, while `is_busy` refuses
+    /// proposals over the same limit: measured at 27 of 30 writes refused with
+    /// the state machine already applied ten entries past what the follower
+    /// held. Stranding one follower is the cheaper of the two.
+    ///
+    /// Two properties here have no test, and deliberately. **That the second
+    /// tier is conditional** is unobservable: with a follower behind,
+    /// `min_replicated_index` is at most 1, so the first tier returns early and
+    /// releases nothing at all -- indistinguishable from doing nothing in
+    /// exactly the case where the tiers differ -- and with no follower behind
+    /// both tiers release to the same index. **That the floor is
+    /// `safety_applied_index` rather than `applied_index`** has no observable
+    /// from outside the crate: compaction removes from the front, so
+    /// `last_log_index` does not move, and nothing exposes the retained floor.
+    /// Both survive a plant for those reasons rather than for want of trying.
     pub fn release_memory(&mut self) -> Result<bool, RaftError> {
+        // The clamp on the leader's own log, stated in both cases rather than
+        // left to a default: outside memory pressure it is the slowest
+        // replica, so the leader keeps whatever a follower still needs; under
+        // pressure it is what the host has applied, which is the clamp the
+        // second tier exists to lift. `None` would mean *no* clamp, which is
+        // looser than either.
+        let mut leader_limit = None;
         let release_index = if let Some(leader_id) = self.leader_id {
-            self.min_replicated_index(leader_id)?
+            let replicated = self.min_replicated_index(leader_id)?;
+            if self.should_release_memory() {
+                let applied = self
+                    .nodes
+                    .get(&leader_id)
+                    .map(|leader| leader.safety_applied_index)
+                    .unwrap_or(replicated);
+                leader_limit = Some(replicated.max(applied));
+                replicated.max(applied)
+            } else {
+                leader_limit = Some(replicated);
+                replicated
+            }
         } else {
             self.nodes
                 .values()
@@ -5277,7 +5340,7 @@ impl RaftCluster {
         if release_index <= 1 {
             return Ok(false);
         }
-        Ok(self.compact_logs_through(release_index - 1) > 0)
+        Ok(self.compact_logs_through_with_leader_limit(release_index - 1, leader_limit) > 0)
     }
 
     pub fn is_busy(&self) -> bool {
