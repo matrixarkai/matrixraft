@@ -1459,6 +1459,66 @@ looks wasteful would have had nothing stop them.
 `tests/lease_membership_contract.rs` is what stops them, and each of the three
 paths has its own case: the lease drops, and one heartbeat round against the
 new membership earns it back — an invalidation, not a one-way door.
+### A refused read carries the index to wait for
+
+A linearizable read has to see everything committed before it was issued, so
+the read index is `max(commit_index, first index of the current term)` and the
+read may not be answered until the node has **applied** that far. When it has
+not, `read_index` refuses:
+
+```rust
+ReadIndexResponse { safe: false, read_index, reason: "applied_index_behind_read_index", .. }
+```
+
+The comparable engine makes the read **wait** instead: its read task sits in a
+queue and a callback fires when the apply catches up. This engine refuses and
+hands the index back, because it owns no thread to wake the caller on -- a host
+drives every step of it.
+
+**That is a complete story rather than a shrug, and these are the three calls
+it takes.** `PendingReadIndexQueue` is the same queue; what differs is who
+holds it:
+
+```rust
+// Refused, with the index the read is waiting for.
+let response = cluster.read_index(request.clone())?;
+if !response.safe {
+    queue.push(request, response.read_index);
+}
+// Later, as the apply advances -- `notify_applied` releases every read whose
+// fence the applied index has reached, oldest first.
+for ready in queue.notify_applied(cluster.safety_applied_index(node_id)?) {
+    answer(ready.request, ready.read_index);
+}
+```
+
+The fence is `max(read_index, min_commit_index)`, so pushing the request
+alongside the returned index is right even for a read refused because its own
+`min_commit_index` was the thing out ahead. A leadership change calls
+`release_all`, which hands every waiting read back unready with a reason rather
+than answering it from a term that is over.
+
+`tests/read_surface_contract.rs` runs exactly that sequence -- refuse, push,
+nothing ready, apply, released -- so the recipe above is executed rather than
+described. It also enforces the second half of this section:
+
+<!-- unwired-types: PendingReadIndex, PendingReadIndexResult, PendingReadIndexQueue -->
+
+- `PendingReadIndex`
+- `PendingReadIndexResult`
+- `PendingReadIndexQueue`
+
+are public, tested and **held by nothing in the engine**. If one is ever wired
+in, that test fails -- which is good news, and a reason to update this section
+rather than the test.
+
+**One thing that test had to get right**, and it is the same lesson as the
+storage surface's path-versus-bound: `pub struct X {` and `impl X {` both look
+exactly like the struct literal `X {`, so the first version of its scan read
+every declaration as a construction and reported the whole surface wired. A
+survey that cannot tell naming a type from building one will confirm whatever
+it was pointed at, so the test asserts its own matcher on both.
+
 ### Two structures a proposal rebuilt every time
 
 A proposal with **no payload at all** allocated 1,129.6 bytes. Whatever a
