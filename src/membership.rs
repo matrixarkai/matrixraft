@@ -49,6 +49,104 @@ pub struct LearnerAutoPromoteReport {
     pub reason: String,
 }
 
+/// Whether a lagging learner would catch up in time to be worth promoting.
+///
+/// A learner is promotable the moment its lag is zero -- but on a leader that
+/// keeps writing, zero lag can be a moment rather than a rate. Promoting a
+/// learner whose sustained rate is below the write rate adds a voter that
+/// immediately lags, which raises the quorum bar by one and gives nothing that
+/// can meet it.
+///
+/// So the question is not "is the lag zero now" but "how long would the rest
+/// take at the rate just measured", and the bound is the election timeout: a
+/// voter that cannot catch up within one is a voter that cannot participate.
+/// The comparable engine makes exactly this decision at the end of each
+/// catch-up turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LearnerPromotionEstimate {
+    pub learner_id: NodeId,
+    /// What the learner still has to receive.
+    pub remaining_entries: u64,
+    /// The turn the estimate is derived from: how many entries it moved, and
+    /// how long that took.
+    pub turn_entries: u64,
+    pub turn_elapsed_ms: u64,
+    /// `turn_elapsed_ms * remaining_entries / turn_entries`, zero when there is
+    /// nothing left to send.
+    pub estimated_catch_up_ms: u64,
+    pub election_timeout_ms: u64,
+    pub within_election_timeout: bool,
+    pub promote_now: bool,
+    pub reason: String,
+}
+
+/// The estimate, from measured quantities alone.
+///
+/// **The multiplication comes before the division, deliberately.** The rate is
+/// `turn_elapsed_ms / turn_entries`, and computing that first truncates to
+/// zero whenever a turn moved more entries than it took milliseconds -- which
+/// is the normal case for a fast link. A turn of 100 entries in 1ms with
+/// 100,000 still to go would estimate **zero** and promote a learner that
+/// needs a second. Multiplying first, in `u128` so the product cannot wrap,
+/// gives 1,000ms.
+pub fn matrixraft_learner_promotion_estimate(
+    learner_id: NodeId,
+    is_learner: bool,
+    learner_match_index: LogIndex,
+    leader_last_index: LogIndex,
+    turn_entries: u64,
+    turn_elapsed_ms: u64,
+    election_timeout_ms: u64,
+) -> LearnerPromotionEstimate {
+    let remaining_entries = leader_last_index.saturating_sub(learner_match_index);
+    let estimate =
+        |estimated_catch_up_ms: u64, promote_now: bool, reason: &str| LearnerPromotionEstimate {
+            learner_id,
+            remaining_entries,
+            turn_entries,
+            turn_elapsed_ms,
+            estimated_catch_up_ms,
+            election_timeout_ms,
+            within_election_timeout: estimated_catch_up_ms <= election_timeout_ms,
+            promote_now,
+            reason: reason.to_string(),
+        };
+
+    if !is_learner {
+        return estimate(0, false, "node_is_not_learner");
+    }
+    if learner_match_index == 0 {
+        // It has never confirmed an entry, so there is no rate to speak of and
+        // nothing to extrapolate from. The comparable engine returns here too.
+        return estimate(0, false, "learner_has_no_matched_log");
+    }
+    if remaining_entries == 0 {
+        return estimate(0, true, "learner_caught_up");
+    }
+    if turn_entries == 0 {
+        // A turn that moved nothing measures nothing. Refusing is the safe
+        // answer: the alternative is dividing by zero or inventing a rate.
+        return estimate(0, false, "no_turn_to_estimate_from");
+    }
+
+    let product = u128::from(turn_elapsed_ms) * u128::from(remaining_entries);
+    let estimated_catch_up_ms =
+        u64::try_from(product / u128::from(turn_entries)).unwrap_or(u64::MAX);
+    if estimated_catch_up_ms <= election_timeout_ms {
+        estimate(
+            estimated_catch_up_ms,
+            true,
+            "estimated_catch_up_within_election_timeout",
+        )
+    } else {
+        estimate(
+            estimated_catch_up_ms,
+            false,
+            "estimated_catch_up_exceeds_election_timeout",
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WitnessQuorumReport {
     pub required: u64,

@@ -1459,6 +1459,49 @@ looks wasteful would have had nothing stop them.
 `tests/lease_membership_contract.rs` is what stops them, and each of the three
 paths has its own case: the lease drops, and one heartbeat round against the
 new membership earns it back — an invalidation, not a one-way door.
+### A learner is promoted on its measured rate, not on one instant
+
+`matrixraft_learner_promotion_decision` answers the lag question: is the
+learner within `max_lag` of the commit index. That is a threshold on
+**entries**, and a threshold on entries is a guess about time -- 1,000 behind
+on a fast link is ten milliseconds, 1,000 behind on a slow one is ten seconds,
+and the threshold gives both the same answer.
+
+Promoting the second one adds a voter that immediately lags: the quorum bar
+goes up by one and nothing that can meet it arrives. So the question worth
+asking is the one the threshold stands in for -- **at the rate just measured,
+how long would the rest take, and is that under one election timeout?** A
+voter that cannot catch up within one cannot participate in the election it
+exists for.
+
+`matrixraft_learner_promotion_estimate` asks it, from measured quantities and
+nothing else:
+
+```rust
+let estimate = cluster.learner_promotion_estimate(learner_id, turn_entries, turn_elapsed_ms)?;
+if estimate.promote_now {
+    cluster.promote_peer(learner_id)?;
+}
+```
+
+The turn is the caller's measurement because the turn is the caller's: it
+decided when to start catching this learner up and when to ask. The
+alternative is three more fields on every node of every group to remember a
+window the host already has.
+
+**The multiplication comes before the division, deliberately.** The rate is
+`turn_elapsed_ms / turn_entries`, and computing that first truncates to zero
+whenever a turn moved more entries than it took milliseconds, which is the
+normal case for a fast link. A turn of 100 entries in 1ms with 100,000 still to
+go would estimate **zero** and promote a learner that needs a second.
+Multiplying first, in `u128` so the product cannot wrap, gives 1,000ms. Both
+the truncation and the wrap have their own test.
+
+The decision matches the comparable engine's, including the cases it returns
+early on: a learner that has matched nothing has no rate to extrapolate from,
+and a turn that moved no entries measures nothing -- neither is promoted, and
+neither divides by zero.
+
 ### Every refusal the pipeline counts has a series
 
 A replication pipeline keeps 54 numeric counters per peer -- how many
