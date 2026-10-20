@@ -1041,7 +1041,13 @@ impl RaftCluster {
         self.leader_lease_valid = false;
         self.leader_lease_elapsed_ms = 0;
         self.leader_lease_confirmations.clear();
-        self.leader_lease_confirmation_epochs.clear();
+        // `leader_lease_confirmation_epochs` is deliberately kept. It is the
+        // per-node monotonic counter that refuses a confirmation no newer than
+        // one already seen, and that refusal does not depend on the epoch: a
+        // promise already counted must not be counted again, whatever has
+        // happened to the lease since. Clearing it let the same confirmation be
+        // replayed across a leadership change and extend the lease on a promise
+        // that was already spent.
     }
 
     /// Declare the lease over.
@@ -1087,7 +1093,9 @@ impl RaftCluster {
         self.leader_lease_expired = false;
         self.leader_lease_elapsed_ms = 0;
         self.leader_lease_confirmations.clear();
-        self.leader_lease_confirmation_epochs.clear();
+        // Kept, for the reason in `invalidate_leader_lease`: the counter
+        // refuses a confirmation already seen, and a new epoch does not make an
+        // old promise fresh.
         self.leader_lease_valid = false;
     }
 
