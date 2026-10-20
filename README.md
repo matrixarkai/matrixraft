@@ -1459,6 +1459,52 @@ looks wasteful would have had nothing stop them.
 `tests/lease_membership_contract.rs` is what stops them, and each of the three
 paths has its own case: the lease drops, and one heartbeat round against the
 new membership earns it back — an invalidation, not a one-way door.
+### The reorder timeout is compared against an age
+
+It was not. The reorder queue was a `BTreeSet<LogIndex>` that recorded no
+arrival time, so `reorder_timeout_us` had nothing to be measured against:
+**1 and 5,000,000 behaved identically**, and the field's only use anywhere was
+`reorder_timeout_us > 0` as a liveness predicate. A file named
+`reorder_timeout_is_inert.rs` said so and pinned it.
+
+The only thing that dropped an out-of-order append was an operator calling
+`expire_reorder_queue`, which drops **all** of them -- so the counter named
+`reorder_entry_timeouts` counted operator-initiated drops, not timeouts.
+
+The queue carries an age per entry now, and `tick_reorder_queue(elapsed_us)`
+compares the two:
+
+```rust
+let dropped = cluster.tick_reorder_queues(elapsed_us);
+```
+
+The node runtime drives it from the heartbeat tick, which is the only elapsed
+time that loop has. The pipeline still keeps no clock -- the host hands time
+over, exactly as it does for the leader lease -- so time passing in the world
+is not time passing here.
+
+**A timeout of zero is off**, the convention the byte and task limits in the
+same file already use. Without it, a default-constructed limit set would expire
+every out-of-order append on the first tick.
+
+**An entry queued later is not swept out by its neighbours' waiting.** Each
+carries its own accumulated age, so a newcomer arriving when the others are
+900us into a 1,000us timeout leaves on its own schedule and not theirs. The
+comparable engine drains from the front of an arrival-ordered list while the
+front is old enough; ageing per entry is the same decision made per entry
+rather than per prefix, and it does not depend on the queue being in arrival
+order -- which a map keyed by index is not.
+
+The age costs 8 bytes an entry, bounded by `reorder_window_size`, and only
+while the queue is holding out-of-order appends. `expire_reorder_queue` is
+unchanged: a policy and an operator's override are different things, and the
+override does not consult the age.
+
+`tests/reorder_timeout_expiry.rs` replaces the file whose name was the claim,
+and keeps its control: a test that cannot see a limit bite proves nothing about
+the one that does not, so the window limit is still asserted beside the
+timeout.
+
 ### A learner is promoted on its measured rate, not on one instant
 
 `matrixraft_learner_promotion_decision` answers the lag question: is the

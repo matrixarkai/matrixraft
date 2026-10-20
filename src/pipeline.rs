@@ -3,7 +3,7 @@
 
 //! Replication pipeline evidence and BaselineRaft-style backpressure validation.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -312,7 +312,13 @@ pub struct ReplicationPipeline {
     append_queue_bytes: u64,
     inflight: VecDeque<InflightAppend>,
     apply_inflight: VecDeque<ApplyInflightTask>,
-    reorder_queue: BTreeSet<LogIndex>,
+    /// Index -> how long it has waited, in microseconds.
+    ///
+    /// It was a `BTreeSet<LogIndex>`, which is why `reorder_timeout_us` had
+    /// nothing to be compared against. The age is 8 bytes an entry and the
+    /// queue is bounded by `reorder_window_size`, so a full window costs twice
+    /// what it did -- and only while it is full of out-of-order appends.
+    reorder_queue: BTreeMap<LogIndex, u64>,
     snapshot_transfer: Option<SnapshotTransferState>,
 }
 
@@ -326,7 +332,7 @@ impl ReplicationPipeline {
             append_queue_bytes: 0,
             inflight: VecDeque::new(),
             apply_inflight: VecDeque::new(),
-            reorder_queue: BTreeSet::new(),
+            reorder_queue: BTreeMap::new(),
             snapshot_transfer: None,
         }
     }
@@ -803,9 +809,58 @@ impl ReplicationPipeline {
                 "reorder queue window is full".to_string(),
             ));
         }
-        self.reorder_queue.insert(entry.log_id.index);
+        self.reorder_queue.insert(entry.log_id.index, 0);
         self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
         Ok(())
+    }
+
+    /// Ages every queued entry by `elapsed_us` and drops the ones that have
+    /// waited longer than `reorder_timeout_us`.
+    ///
+    /// This is what makes the timeout a timeout. The pipeline keeps no clock --
+    /// the host drives time here as it does for the leader lease -- so the age
+    /// is what the caller has handed over, accumulated per entry since it was
+    /// queued. An entry queued after a tick starts at zero and is not swept out
+    /// by its neighbours' waiting.
+    ///
+    /// **A timeout of zero is off**, which is the convention the byte and task
+    /// limits in this file already use. Without that, a default-constructed
+    /// limit set would expire every out-of-order append on the first tick.
+    ///
+    /// Dropping is counted in `reorder_entry_timeouts` and
+    /// `reorder_dropped_packages`, the same counters
+    /// [`ReplicationPipeline::expire_reorder_queue`] moves -- that call remains
+    /// the operator's all-or-nothing hammer, and this is the policy.
+    ///
+    /// The comparable engine drains from the front of an arrival-ordered list
+    /// while the front is old enough. Ageing each entry is the same decision
+    /// made per entry rather than per prefix: it does not depend on the queue
+    /// being in arrival order, which a `BTreeMap` keyed by index is not.
+    pub fn tick_reorder_queue(&mut self, elapsed_us: u64) -> u64 {
+        if self.reorder_queue.is_empty() {
+            return 0;
+        }
+        let timeout_us = self.limits.reorder_timeout_us;
+        let mut expired = Vec::new();
+        for (index, age_us) in self.reorder_queue.iter_mut() {
+            *age_us = age_us.saturating_add(elapsed_us);
+            if timeout_us > 0 && *age_us >= timeout_us {
+                expired.push(*index);
+            }
+        }
+        if expired.is_empty() {
+            return 0;
+        }
+        for index in &expired {
+            self.reorder_queue.remove(index);
+        }
+        let dropped = expired.len() as u64;
+        self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
+        self.status.reorder_entry_timeouts =
+            self.status.reorder_entry_timeouts.saturating_add(dropped);
+        self.status.reorder_dropped_packages =
+            self.status.reorder_dropped_packages.saturating_add(dropped);
+        dropped
     }
 
     pub fn expire_reorder_queue(&mut self) -> u64 {
@@ -1067,7 +1122,7 @@ impl ReplicationPipeline {
 
     fn drain_reorder_queue(&mut self) {
         let mut converged = 0_u64;
-        while self.reorder_queue.remove(&self.status.next_index) {
+        while self.reorder_queue.remove(&self.status.next_index).is_some() {
             self.status.match_index = self.status.next_index;
             self.status.next_index = self.status.next_index.saturating_add(1);
             converged = converged.saturating_add(1);
@@ -1110,21 +1165,21 @@ pub struct PipelineLimits {
     pub max_apply_batch_bytes: u64,
     pub enable_reorder_queue: bool,
     pub reorder_window_size: u64,
-    /// **Its magnitude is never read.** The only use of this field is
-    /// `reorder_timeout_us > 0`, a liveness predicate inside
-    /// `matrixraft_pipeline_evidence`, so 1 and 5,000,000 behave alike.
+    /// How long an out-of-order append may wait for the hole before it to be
+    /// filled, in microseconds. **Zero is off.**
     ///
-    /// A timeout is impossible by construction: `reorder_queue` is a
-    /// `BTreeSet<LogIndex>` and records no arrival time, and nothing ages its
-    /// contents. The same file does implement elapsed-against-timeout for snapshot
-    /// transfer (`latest_receiving_elapsed_ms` against `send_timeout_ms`), so this
-    /// is a queue that keeps no clock rather than a module that has none.
+    /// Its magnitude used to be unread: the queue was a `BTreeSet<LogIndex>`
+    /// that recorded no arrival time, so 1 and 5,000,000 behaved alike and the
+    /// only use of the field was `reorder_timeout_us > 0` as a liveness
+    /// predicate in `matrixraft_pipeline_evidence`. The queue carries an age
+    /// per entry now and [`ReplicationPipeline::tick_reorder_queue`] is what
+    /// compares the two.
     ///
-    /// Entries leave the queue two ways: drained when the hole before them is
-    /// filled, or dropped when an embedder calls `expire_reorder_queue` --
-    /// reachable as `AdminCommand::ExpirePeerReorderQueue`. That manual drop is
-    /// what increments `reorder_entry_timeouts`, so the counter named for timeouts
-    /// counts operator-initiated drops. Expiry policy is the embedder-s.
+    /// Entries leave the queue three ways: drained when the hole before them is
+    /// filled, dropped by a tick once they have waited this long, or dropped
+    /// all at once when an embedder calls `expire_reorder_queue` -- reachable
+    /// as `AdminCommand::ExpirePeerReorderQueue`. All three of the latter
+    /// increment `reorder_entry_timeouts`.
     pub reorder_timeout_us: u64,
 }
 
