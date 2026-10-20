@@ -5566,7 +5566,18 @@ impl RaftCluster {
                 "snapshot install group id mismatch".to_string(),
             ));
         }
-        let next_offset = request.chunk.offset + request.chunk.data.len() as u64;
+        // Saturating because this runs before anything has validated the
+        // offset: a peer sends it, and `SnapshotInstallState::install_chunk`
+        // does not get to reject it until further down. `offset = u64::MAX`
+        // with one byte of data panicked here with "attempt to add with
+        // overflow" in any build with overflow checks, the default debug
+        // profile included -- one crafted chunk, one downed node. Saturated,
+        // the offset no longer matches `next_offset` and the chunk is refused
+        // the way any other bad offset is.
+        let next_offset = request
+            .chunk
+            .offset
+            .saturating_add(request.chunk.data.len() as u64);
         if let Some(response) =
             self.reject_snapshot_before_observe(target, &request, next_offset)?
         {
@@ -5658,7 +5669,9 @@ impl RaftCluster {
             applied_index: snapshot_index,
             commit_index: snapshot_index,
             installed_snapshot_index: snapshot_index,
-            first_retained_log_index: snapshot_index + 1,
+            // The snapshot index is the peer's `chunk.meta.last_log_id.index`,
+            // so u64::MAX panicked here too.
+            first_retained_log_index: snapshot_index.saturating_add(1),
         };
         if !self.install_or_queue_completed_snapshot(target, snapshot, fence)? {
             return Ok(InstallSnapshotResponse {
@@ -5692,7 +5705,18 @@ impl RaftCluster {
             ));
         }
         let request_term = request.term;
-        let next_offset = request.chunk.offset + request.chunk.data.len() as u64;
+        // Saturating because this runs before anything has validated the
+        // offset: a peer sends it, and `SnapshotInstallState::install_chunk`
+        // does not get to reject it until further down. `offset = u64::MAX`
+        // with one byte of data panicked here with "attempt to add with
+        // overflow" in any build with overflow checks, the default debug
+        // profile included -- one crafted chunk, one downed node. Saturated,
+        // the offset no longer matches `next_offset` and the chunk is refused
+        // the way any other bad offset is.
+        let next_offset = request
+            .chunk
+            .offset
+            .saturating_add(request.chunk.data.len() as u64);
         if let Some(response) =
             self.reject_snapshot_before_observe(target, &request, next_offset)?
         {
@@ -5730,7 +5754,9 @@ impl RaftCluster {
                         applied_index: snapshot_index,
                         commit_index: snapshot_index,
                         installed_snapshot_index: snapshot_index,
-                        first_retained_log_index: snapshot_index + 1,
+                        // The snapshot index is the peer's `chunk.meta.last_log_id.index`,
+            // so u64::MAX panicked here too.
+            first_retained_log_index: snapshot_index.saturating_add(1),
                     },
                 )?;
                 Ok(InstallSnapshotResponse {

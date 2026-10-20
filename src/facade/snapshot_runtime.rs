@@ -91,7 +91,10 @@ impl SnapshotInstallState {
                 chunk.offset, self.next_offset
             )));
         }
-        self.next_offset += chunk.data.len() as u64;
+        // Only reachable once the offset above matched, so this grows by
+        // bytes actually received and would need 2^64 of them to wrap.
+        // Saturating anyway, so the invariant does not rest on that.
+        self.next_offset = self.next_offset.saturating_add(chunk.data.len() as u64);
         self.bytes.extend_from_slice(&chunk.data);
         self.complete = chunk.done;
         Ok(())
