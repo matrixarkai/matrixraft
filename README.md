@@ -815,7 +815,7 @@ assertion.
 
 Recorded, reported back, and reaching nothing that runs:
 
-<!-- inert-settings: reader_num, executor_num, watched_address_resolver, max_applied_log_bytes, max_disk_replicate_log_num -->
+<!-- inert-settings: reader_num, executor_num, watched_address_resolver, max_applied_log_bytes, max_disk_replicate_log_num, snapshot_dir -->
 
 Three are on `MatrixRaftGroupContext`:
 
@@ -835,6 +835,22 @@ Two are on `MatrixRaftOptions`:
   disk rather than from the in-memory buffer. This crate's replication reads
   from the log buffer, whose bound is `max_memory_replicate_log_bytes` and is
   live; there is no separate disk path for this to bound.
+
+One is on `NodeOptions`:
+
+- `snapshot_dir` — where a node's snapshots would live. Nothing in this crate
+  writes one there. A snapshot here is a `RaftSnapshot` held in memory and sent
+  as chunks, and the host supplies and consumes the payload, so there is no file
+  for a directory to hold. The only reads of the setting are a readiness check
+  that different nodes were given different paths, and the benchmark harness
+  creating a directory for a subprocess.
+
+  The comparable engine does write snapshots to disk, and its create and
+  download paths both finish by touching a marker file **after** persisting the
+  descriptor, so that a directory holding a descriptor and no marker is known to
+  be incomplete. Two of its crash-injection points sit exactly there. Neither
+  has a counterpart here, and this setting is the one thing that implied
+  otherwise.
 
 **`MatrixRaftOptions` was not covered by the machine-checked marker at all**
 until this list grew. Two more of its settings — `transfer_timeout_tick` and
