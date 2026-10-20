@@ -2352,13 +2352,7 @@ impl RaftCluster {
                 StepResult::LeaderTransferAborted(self.abort_leader_transfer(reason)),
             ),
             AdminCommand::FireFatalEvent { node_id, .. } => {
-                let target = if self.leader_id() == Some(node_id) {
-                    self.step_down(None)?
-                } else {
-                    None
-                };
-                self.set_node_healthy(node_id, false)?;
-                Ok(StepResult::FatalEvent(target))
+                Ok(StepResult::FatalEvent(self.apply_fatal_event(node_id)?))
             }
             AdminCommand::StepDown { transferee } => {
                 self.step_down(transferee).map(StepResult::StepDown)
@@ -3524,6 +3518,26 @@ impl RaftCluster {
         self.refresh_cluster_indexes();
         self.refresh_replication_pipelines();
         Ok(())
+    }
+
+    /// Takes `node_id` out of service: steps it down if it is the leader, and
+    /// marks it unhealthy so it stops counting as a serving member.
+    ///
+    /// This was the body of `AdminCommand::FireFatalEvent` and is now shared
+    /// with the write path, which fires it when a durable write fails. One body
+    /// on purpose: two notions of what a fatal event does would drift, and the
+    /// whole point of firing it automatically is that it means the same thing
+    /// as a host firing it by hand.
+    ///
+    /// Returns the node leadership moved to, if it had to move.
+    pub fn apply_fatal_event(&mut self, node_id: NodeId) -> Result<Option<NodeId>, RaftError> {
+        let target = if self.leader_id() == Some(node_id) {
+            self.step_down(None)?
+        } else {
+            None
+        };
+        self.set_node_healthy(node_id, false)?;
+        Ok(target)
     }
 
     pub fn append_entries_to(

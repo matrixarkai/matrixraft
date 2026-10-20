@@ -2178,3 +2178,142 @@ mod retained_blocker_window_tests {
         assert_eq!(report.fatal_blockers_seen, 1);
     }
 }
+
+#[cfg(test)]
+mod fail_stop_after_failed_durable_write_tests {
+    use super::*;
+
+    fn peer(node_id: NodeId) -> Peer {
+        Peer {
+            node_id,
+            raft_addr: format!("127.0.0.1:{}", 19_000 + node_id),
+            snapshot_addr: format!("127.0.0.1:{}", 19_500 + node_id),
+            role: ReplicaRole::Voter,
+            auto_promote: false,
+        }
+    }
+
+    fn started() -> RaftCluster {
+        let mut cluster = RaftCluster::new(
+            91,
+            Config::default(),
+            vec![peer(1), peer(2), peer(3)],
+        )
+        .expect("build the cluster");
+        cluster.start().expect("start the cluster");
+        cluster
+    }
+
+    // These tests live inside the crate, so they read the field the policy sets
+    // rather than whichever report happens to surface it.
+    fn healthy(cluster: &RaftCluster, node_id: NodeId) -> bool {
+        cluster
+            .nodes
+            .get(&node_id)
+            .map(|node| node.healthy)
+            .expect("the node is in the group")
+    }
+
+    #[test]
+    fn a_failed_durable_write_takes_the_node_out_of_service() {
+        let mut cluster = started();
+        let leader = cluster.leader_id().expect("a leader");
+        assert!(healthy(&cluster, leader), "it starts healthy");
+
+        let outcome: Result<(), RaftError> = after_durable_write(
+            &mut cluster,
+            leader,
+            Err(RaftError::Storage("wal append failed".to_string())),
+        );
+
+        assert!(
+            matches!(outcome, Err(RaftError::Storage(_))),
+            "the storage error still reaches the caller rather than being replaced"
+        );
+        assert!(
+            !healthy(&cluster, leader),
+            "a node whose durable write failed must stop counting as a serving member"
+        );
+        assert_ne!(
+            cluster.leader_id(),
+            Some(leader),
+            "and it must not still be the leader"
+        );
+    }
+
+    #[test]
+    fn a_durable_write_that_succeeded_changes_nothing() {
+        // The other arm, and the one that stops this being "always fire".
+        let mut cluster = started();
+        let leader = cluster.leader_id().expect("a leader");
+
+        let outcome: Result<u64, RaftError> = after_durable_write(&mut cluster, leader, Ok(7));
+
+        assert_eq!(outcome.expect("passed through"), 7);
+        assert!(
+            healthy(&cluster, leader),
+            "a write that worked is not a reason to take a node out"
+        );
+        assert_eq!(
+            cluster.leader_id(),
+            Some(leader),
+            "and not a reason to move leadership"
+        );
+    }
+
+    #[test]
+    fn firing_it_twice_is_the_same_as_firing_it_once() {
+        // A node whose disk is failing will fail every write, so this runs per
+        // failed write rather than once.
+        let mut cluster = started();
+        let leader = cluster.leader_id().expect("a leader");
+        for _ in 0..3 {
+            let _: Result<(), RaftError> = after_durable_write(
+                &mut cluster,
+                leader,
+                Err(RaftError::Storage("again".to_string())),
+            );
+        }
+        assert!(!healthy(&cluster, leader));
+    }
+
+    #[test]
+    fn the_write_path_and_the_admin_command_do_the_same_thing() {
+        // Both go through `RaftCluster::apply_fatal_event`, and the reason that
+        // matters is that firing automatically has to mean what firing by hand
+        // means. Two bodies would drift.
+        let mut by_hand = started();
+        let hand_leader = by_hand.leader_id().expect("a leader");
+        by_hand
+            .step(Message::Admin {
+                command: AdminCommand::FireFatalEvent {
+                    node_id: hand_leader,
+                    reason: "by hand".to_string(),
+                },
+            })
+            .expect("the admin command");
+
+        let mut by_write = started();
+        let write_leader = by_write.leader_id().expect("a leader");
+        assert_eq!(
+            hand_leader, write_leader,
+            "the two clusters have to elect the same leader for this to compare"
+        );
+        let _: Result<(), RaftError> = after_durable_write(
+            &mut by_write,
+            write_leader,
+            Err(RaftError::Storage("failed".to_string())),
+        );
+
+        assert_eq!(
+            healthy(&by_hand, hand_leader),
+            healthy(&by_write, write_leader),
+            "health has to land the same way"
+        );
+        assert_eq!(
+            by_hand.leader_id(),
+            by_write.leader_id(),
+            "and leadership has to land the same way"
+        );
+    }
+}

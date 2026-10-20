@@ -1380,10 +1380,14 @@ fn runtime_step_message(
                 ));
             }
             let log_id = cluster.propose_with_options(payload, options)?;
-            if let Some(wal) = wal.as_mut().filter(|_| persist_proposal) {
+            if wal.as_ref().is_some_and(|_| persist_proposal) {
                 // Built against what the WAL already holds, so a proposal does
                 // not copy and hash the whole log to write one entry.
-                wal.append_built(|coverage| cluster.wal_record_for_coverage(node_id, coverage))?;
+                let appended = wal
+                    .as_mut()
+                    .expect("checked just above")
+                    .append_built(|coverage| cluster.wal_record_for_coverage(node_id, coverage));
+                after_durable_write(cluster, node_id, appended)?;
             }
             Ok(StepResult::Proposed(log_id))
         }
@@ -2023,10 +2027,11 @@ impl NodeCore {
                     // is not acknowledged: a candidate counting a vote the
                     // voter cannot honour after a restart is the whole defect,
                     // so reporting the failure is the conservative direction.
-                    if let Some(wal) = wal.as_mut() {
-                        if let Err(error) = wal.append_built(|coverage| {
+                    if let Some(open_wal) = wal.as_mut() {
+                        let appended = open_wal.append_built(|coverage| {
                             cluster.wal_record_for_coverage(node_id, coverage)
-                        }) {
+                        });
+                        if let Err(error) = after_durable_write(cluster, node_id, appended) {
                             result = Err(error);
                         }
                     }
@@ -2985,6 +2990,53 @@ fn raft_node_runtime_loop(options: NodeOptions, command_rx: mpsc::Receiver<NodeR
 /// Everything that reaches this is still recorded as an ordinary blocker, so
 /// nothing is hidden; what changes is the **severity**, and with it
 /// `FatalBlockerReport::fatal`.
+/// A durable write failed, so take this node out of service.
+///
+/// The group asked for something to be made durable and it was not, which
+/// leaves its in-memory state ahead of what survives a restart. Carrying on
+/// from there is the unsafe part: an append this node acknowledges still counts
+/// toward a commit quorum for entries its log will not have after a restart,
+/// and a term or vote it did not persist can be given away twice.
+///
+/// **The policy here is not new.** `AdminCommand::FireFatalEvent` already steps
+/// the node down if it is the leader and marks it unhealthy, which is what
+/// takes it out of the quorum; what was missing is that nothing fired it when a
+/// durable write actually failed, so a host had to notice and call it. This is
+/// the same handling, reached from the condition it was built for -- and the
+/// condition the comparable engine fires its own fatal event from, where a
+/// failed `log_storage->Write` poisons the node and every later step and
+/// proposal is refused.
+///
+/// Errors from the handling itself are deliberately swallowed. It runs because
+/// a write already failed, the caller is already being handed that error, and
+/// the alternative is replacing a storage error with a step-down error and
+/// losing the cause. `set_node_healthy` failing would mean the node is not in
+/// its own group, which `restore_wal_record` and `propose` already report.
+/// Hands back what the write returned, taking the node out of service first if
+/// the write failed.
+///
+/// The decision is a function rather than two lines at each write because the
+/// write itself cannot be made to fail from a test: the WAL is always open on a
+/// live runtime, and `tests/wal_descriptor_exhaustion.rs` can only fail the
+/// *open*. Taking the outcome as an argument is what makes both arms reachable
+/// -- fire on `Err`, and do not fire on `Ok` -- so each can be planted. A
+/// version of this written as `if let Err(..) = appended` inline at both sites
+/// would be unplantable, and a guard nothing can fail is not load-bearing.
+fn after_durable_write<T>(
+    cluster: &mut RaftCluster,
+    node_id: NodeId,
+    outcome: Result<T, RaftError>,
+) -> Result<T, RaftError> {
+    if outcome.is_err() {
+        // Errors from the handling are deliberately swallowed: it runs because
+        // a write already failed, the caller is already being handed that
+        // error, and the alternative is replacing a storage error with a
+        // step-down error and losing the cause.
+        let _ = cluster.apply_fatal_event(node_id);
+    }
+    outcome
+}
+
 fn error_is_unrecoverable(error: &RaftError) -> bool {
     match error {
         RaftError::Storage(_) => true,
