@@ -200,6 +200,9 @@ fn matrixraft_builders_capture_node_group_transport_and_option_shape() {
             enable_pre_vote: true,
             enable_lease_read: true,
             assume_lease_when_start: false,
+            // The options' own flag, which gates the entry-threshold snapshot
+            // decision. It reached only snapshot_recycle_options before.
+            can_trigger_snapshot: true,
             // The options' own pipeline conversion, which a cluster built from
             // this config now uses for every peer. It reached only
             // MatrixRaftNode before.

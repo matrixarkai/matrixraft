@@ -5570,6 +5570,80 @@ impl RaftCluster {
         }
     }
 
+    /// Whether the leader's retained log is long enough that a snapshot is due.
+    ///
+    /// This is the decision `snapshot_threshold_entries` was declared for and
+    /// never used in: the knob was defaulted, validated and read nowhere, so
+    /// a snapshot started only when a host asked for one.
+    ///
+    /// Reported rather than taken. The cluster has no thread to take it on,
+    /// and a host that wants a different policy -- a different threshold, a
+    /// quiet period, a time of day -- needs the numbers rather than the
+    /// verdict. The node runtime consults this on its heartbeat tick and calls
+    /// [`RaftCluster::trigger_snapshot`] when it says due, which is the
+    /// default policy and not the only one.
+    ///
+    /// **Not due while a trigger is in flight**, because
+    /// `trigger_snapshot` is idempotent while one is: a tick that fired every
+    /// time would count duplicate requests rather than start anything.
+    /// [`RaftCluster::snapshot_due`]'s verdict, without building the report.
+    ///
+    /// **This exists because the report allocates and a tick must not.** Its
+    /// `reason` is a `String`, so calling it on every heartbeat cost one
+    /// allocation per tick per group -- 81,920 a second at 8,192 groups on a
+    /// 100ms interval, to decide that a log below its threshold is still below
+    /// its threshold. `tests/tick_window.rs` caught it at 1.000 allocations a
+    /// tick against a ceiling of 0.05.
+    ///
+    /// The report is for a host that wants the numbers; this is for the loop
+    /// that wants the answer. `snapshot_due` is defined in terms of it so the
+    /// two cannot disagree, and a test asserts they agree in every state the
+    /// others build.
+    pub fn snapshot_is_due(&self) -> bool {
+        if !self.config.can_trigger_snapshot || self.snapshot_trigger.is_some() {
+            return false;
+        }
+        self.retained_leader_entries() >= self.config.snapshot_threshold_entries
+    }
+
+    /// How many log entries the leader is holding, or zero without a leader.
+    fn retained_leader_entries(&self) -> u64 {
+        self.leader_id
+            .and_then(|leader_id| self.nodes.get(&leader_id))
+            .map(|leader| leader.log.len() as u64)
+            .unwrap_or(0)
+    }
+
+    pub fn snapshot_due(&self) -> SnapshotDueReport {
+        let can_trigger = self.config.can_trigger_snapshot;
+        let trigger_in_flight = self.snapshot_trigger.is_some();
+        let threshold_entries = self.config.snapshot_threshold_entries;
+        let retained_entries = self.retained_leader_entries();
+        let entries_exceeded = retained_entries >= threshold_entries;
+        let due = self.snapshot_is_due();
+        let reason = if !can_trigger {
+            "snapshot_trigger_disabled"
+        } else if self.leader_id.is_none() {
+            "no_leader"
+        } else if trigger_in_flight {
+            "snapshot_trigger_in_flight"
+        } else if entries_exceeded {
+            "retained_entries_reached_threshold"
+        } else {
+            "retained_entries_below_threshold"
+        };
+        SnapshotDueReport {
+            leader_id: self.leader_id,
+            retained_entries,
+            threshold_entries,
+            entries_exceeded,
+            trigger_in_flight,
+            can_trigger,
+            due,
+            reason: reason.to_string(),
+        }
+    }
+
     pub fn tick_snapshot_trigger(&mut self) -> bool {
         let Some(trigger) = self.snapshot_trigger.as_mut() else {
             return false;

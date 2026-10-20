@@ -1652,6 +1652,18 @@ impl NodeCore {
                         blockers.push("lost_quorum_step_down".to_string());
                     }
                     *last_tick_reason = "heartbeat_tick";
+                    // The default policy for the decision
+                    // `snapshot_threshold_entries` was declared for. A host
+                    // wanting a different one reads `snapshot_due()` itself
+                    // and ignores this; a host wanting none sets
+                    // `can_trigger_snapshot` to false, which is what the
+                    // report consults first.
+                    if cluster.snapshot_is_due() {
+                        match cluster.trigger_snapshot() {
+                            Ok(_) => *last_tick_reason = "snapshot_due_tick",
+                            Err(error) => blockers.push(format!("snapshot_due:{error}")),
+                        }
+                    }
                     if cluster.tick_snapshot_trigger() {
                         let snapshot_id = cluster
                             .snapshot_trigger_status()

@@ -18,16 +18,22 @@ pub struct Config {
     pub max_payload_bytes: u64,
     #[serde(default = "default_max_log_buffer_bytes")]
     pub max_log_buffer_bytes: u64,
-    /// **Consulted by nothing.** It is declared, defaulted to 10,000, rejected
-    /// when zero, and read nowhere in the crate: there is no log-size snapshot
-    /// trigger. A snapshot starts when an embedder calls
-    /// `RaftCluster::trigger_snapshot`, and `tick_snapshot_trigger` only ages out
-    /// a trigger already in flight.
+    /// How many retained log entries the leader may hold before a snapshot is
+    /// due.
     ///
-    /// `MatrixRaftOptions::max_applied_log_bytes` is the byte-valued knob for the
-    /// same idea and is equally unread, defaulting to `u64::MAX`. Two knobs promise
-    /// automatic snapshots and neither delivers one, so treat both as the
-    /// embedder's business until a trigger exists to honour them.
+    /// Read by `RaftCluster::snapshot_due`, which the node runtime consults
+    /// on its heartbeat tick and acts on by calling
+    /// `RaftCluster::trigger_snapshot`. Gated by `can_trigger_snapshot`.
+    ///
+    /// It used to be consulted by nothing: declared, defaulted to 10,000,
+    /// rejected when zero, and read nowhere, so there was no log-size snapshot
+    /// trigger at all.
+    ///
+    /// `MatrixRaftOptions::max_applied_log_bytes` is the **byte**-valued knob
+    /// for the same idea and is still unread, defaulting to `u64::MAX`. It is
+    /// not wired here because a second threshold expressing the same decision
+    /// would cost another eight bytes on every group -- the entry threshold is
+    /// the one `Config` already carries.
     pub snapshot_threshold_entries: u64,
     pub max_segment_bytes: u64,
     pub min_keep_segment_num: u64,
@@ -35,6 +41,17 @@ pub struct Config {
     pub enable_lease_read: bool,
     #[serde(default = "default_assume_lease_when_start")]
     pub assume_lease_when_start: bool,
+    /// Whether the engine may decide on its own that the log is long enough to
+    /// warrant a snapshot.
+    ///
+    /// The comparable engine's own flag, with its own warning attached: it is
+    /// safe to turn on and **not** safe to turn back off, because a snapshot
+    /// already decided on will still be taken.
+    ///
+    /// With this off, `snapshot_threshold_entries` decides nothing and a
+    /// snapshot happens only when a host asks for one.
+    #[serde(default = "default_can_trigger_snapshot")]
+    pub can_trigger_snapshot: bool,
     /// The replication pipeline's limits for every peer a cluster built from
     /// this config holds.
     ///
@@ -66,6 +83,10 @@ fn default_assume_lease_when_start() -> bool {
     true
 }
 
+fn default_can_trigger_snapshot() -> bool {
+    true
+}
+
 fn default_max_log_buffer_bytes() -> u64 {
     64 * 1024 * 1024
 }
@@ -85,6 +106,7 @@ impl Default for Config {
             enable_pre_vote: true,
             enable_lease_read: true,
             assume_lease_when_start: true,
+            can_trigger_snapshot: true,
             pipeline: Box::default(),
         }
     }

@@ -7,13 +7,34 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::{
     ApplySnapshotFence, GenericSnapshot, GenericSnapshotChunk, InstallSnapshotRequest,
-    InstallSnapshotResponse, LogEntry, LogId, LogIndex, PeerProgress, PersistentRaftSnapshotStore,
-    PersistentRaftSnapshotStoreOptions, RaftSnapshot, SnapshotChunk, SnapshotInstallState,
-    SnapshotLifecycle, SnapshotLifecycleConfig, SnapshotLifecycleStatus, SnapshotMetadata,
-    SnapshotSendState,
+    InstallSnapshotResponse, LogEntry, LogId, LogIndex, NodeId, PeerProgress,
+    PersistentRaftSnapshotStore, PersistentRaftSnapshotStoreOptions, RaftSnapshot, SnapshotChunk,
+    SnapshotInstallState, SnapshotLifecycle, SnapshotLifecycleConfig, SnapshotLifecycleStatus,
+    SnapshotMetadata, SnapshotSendState,
 };
 
 use crate::RaftError;
+
+/// Whether the leader's retained log is long enough that a snapshot is due.
+///
+/// A snapshot used to start only when a host asked for one:
+/// `snapshot_threshold_entries` was declared, defaulted, validated and read
+/// nowhere. This is the decision it was missing, reported rather than taken,
+/// so a host can see the numbers behind it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotDueReport {
+    pub leader_id: Option<NodeId>,
+    /// Entries the leader is holding, and the threshold it is measured against.
+    pub retained_entries: u64,
+    pub threshold_entries: u64,
+    pub entries_exceeded: bool,
+    /// True when a snapshot this decision would start is already in flight.
+    pub trigger_in_flight: bool,
+    /// `Config::can_trigger_snapshot`.
+    pub can_trigger: bool,
+    pub due: bool,
+    pub reason: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotLifecycleEvidence {
