@@ -505,6 +505,20 @@ pub struct RaftCluster {
     duplicate_snapshot_trigger_requests: u64,
     vote_responses: BTreeMap<NodeId, bool>,
     pre_vote_responses: BTreeMap<NodeId, bool>,
+    /// The term the accumulated grants above were given for.
+    ///
+    /// A grant counts toward a quorum only in its own term. Eight paths used
+    /// to clear the accumulator and two did not -- `vote_to` taking a higher
+    /// term from a vote request, and the append-entries higher-term branch --
+    /// so a candidate could reach a quorum in term N+1 on grants given for N,
+    /// while the nodes that gave them were free to have voted for someone else
+    /// in N+1. Two leaders in one term.
+    ///
+    /// Holding the term here makes that structural instead of a thing every
+    /// assignment to `current_term` has to remember: a ninth path to a higher
+    /// term cannot reintroduce it.
+    #[serde(default)]
+    election_responses_term: Term,
 }
 
 impl RaftCluster {
@@ -604,6 +618,7 @@ impl RaftCluster {
             duplicate_snapshot_trigger_requests: 0,
             vote_responses: BTreeMap::new(),
             pre_vote_responses: BTreeMap::new(),
+            election_responses_term: 0,
         })
     }
 
@@ -1861,6 +1876,22 @@ impl RaftCluster {
     fn clear_election_responses(&mut self) {
         self.vote_responses.clear();
         self.pre_vote_responses.clear();
+        self.election_responses_term = self.current_term;
+    }
+
+    /// Empty the accumulator when it belongs to a term that has passed.
+    ///
+    /// Called before recording a grant, which is the one place every grant
+    /// goes through. The explicit `clear_election_responses` calls remain --
+    /// they say at each site that the election is over, which is worth reading
+    /// -- but correctness no longer depends on all of them being present.
+    fn discard_election_responses_from_an_earlier_term(&mut self) {
+        if self.election_responses_term == self.current_term {
+            return;
+        }
+        self.vote_responses.clear();
+        self.pre_vote_responses.clear();
+        self.election_responses_term = self.current_term;
     }
 
     fn remove_election_response_from(&mut self, node_id: NodeId) {
@@ -2646,6 +2677,9 @@ impl RaftCluster {
         {
             return Ok(());
         }
+        // Before anything is counted: a grant belongs to the term it was given
+        // for, and this is the single place every grant passes through.
+        self.discard_election_responses_from_an_earlier_term();
         if pre_vote {
             self.pre_vote_responses.entry(local_node_id).or_insert(true);
             self.pre_vote_responses.insert(peer_id, granted);
