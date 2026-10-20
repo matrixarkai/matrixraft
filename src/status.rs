@@ -64,6 +64,15 @@ pub enum HealthStatus {
 pub struct RuntimeTimerStatus {
     pub heartbeat_interval_ms: u64,
     pub election_timeout_ms: u64,
+    /// The timeout this node is actually waiting out, which is
+    /// `election_timeout_ms` randomised per node and per term.
+    ///
+    /// Reported because the base alone cannot answer "why did this node
+    /// campaign at 1,437ms", and because it is the value the tick compares
+    /// against -- so a test on this is a test on the tick, which is what was
+    /// missing when the randomisation was first written.
+    #[serde(default)]
+    pub effective_election_timeout_ms: u64,
     pub leader_lease_timeout_ms: u64,
     pub leader_lease_elapsed_ms: u64,
     pub leader_lease_valid: bool,

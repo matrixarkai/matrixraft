@@ -571,6 +571,41 @@ pub struct RaftCluster {
     election_responses_term: Term,
 }
 
+/// An election timeout in `[base_ms, 2 * base_ms)`, varying by node and term.
+///
+/// Raft requires election timeouts to be chosen from a random interval, and to
+/// be re-chosen each round. Without it, every node sharing a config reaches
+/// `election_timeout_ms` on the same tick -- they were all reset by the same
+/// heartbeat -- so they campaign together, each votes for itself, no one wins a
+/// majority, the term moves, and the same split repeats. The comparable engine
+/// randomises over `election_cycle_tick * 2` and has two tests for it; nothing
+/// here varied the timeout at all.
+///
+/// **Derived from a hash rather than a random source, on purpose.** The crate
+/// has no rng dependency and `unsafe_code` is forbidden, but more usefully a
+/// hash of `(node_id, term)` is *reproducible*: the same node in the same term
+/// always waits the same time, so a split is broken by the nodes differing
+/// from each other rather than by a sequence nothing can replay. `DefaultHasher`
+/// is already the idiom here -- `driver.rs` and `heartbeat_merge.rs` both pick
+/// a shard with it.
+///
+/// Re-chosen per **term**, which is what makes a repeated split terminate: the
+/// term moves on every failed round, so the next round deals a different hand.
+pub fn matrixraft_randomised_election_timeout_ms(
+    base_ms: u64,
+    node_id: NodeId,
+    term: Term,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let base = base_ms.max(1);
+    let mut hasher = DefaultHasher::new();
+    node_id.hash(&mut hasher);
+    term.hash(&mut hasher);
+    base.saturating_add(hasher.finish() % base)
+}
+
 impl RaftCluster {
     pub fn new(
         group_id: GroupId,

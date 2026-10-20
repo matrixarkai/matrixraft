@@ -1445,6 +1445,10 @@ struct NodeCore {
     heartbeat_ticks: u64,
     election_ticks: u64,
     election_elapsed_ms: u64,
+    /// The randomised timeout this node is waiting out, refreshed each time the
+    /// election tick runs. Zero until the first tick, which is what a node that
+    /// has not reached an election yet should report.
+    effective_election_timeout_ms: u64,
     pre_vote_executions: u64,
     campaign_executions: u64,
     leader_transfer_executions: u64,
@@ -1550,6 +1554,7 @@ impl NodeCore {
     let heartbeat_ticks = 0;
     let election_ticks = 0;
     let election_elapsed_ms: u64 = 0;
+    let effective_election_timeout_ms: u64 = 0;
     let pre_vote_executions = 0;
     let campaign_executions = 0;
     let leader_transfer_executions = 0_u64;
@@ -1576,6 +1581,7 @@ impl NodeCore {
             heartbeat_ticks,
             election_ticks,
             election_elapsed_ms,
+            effective_election_timeout_ms,
             pre_vote_executions,
             campaign_executions,
             leader_transfer_executions,
@@ -1602,6 +1608,7 @@ impl NodeCore {
             heartbeat_ticks,
             election_ticks,
             election_elapsed_ms,
+            effective_election_timeout_ms,
             pre_vote_executions,
             campaign_executions,
             leader_transfer_executions,
@@ -1704,7 +1711,21 @@ impl NodeCore {
                             Err(error) => blocker_log.record(format!("leader_transfer:{error}"), false),
                         }
                     }
-                    if *election_elapsed_ms >= election_timeout_ms {
+                    // Randomised per node and per term, so nodes sharing a
+                    // config do not campaign on the same tick for ever. Kept in
+                    // runtime state rather than computed here, so the value the
+                    // status reports is the value this compares against:
+                    // computing it twice would let the two drift and leave the
+                    // comparison untested, which is exactly what planting found
+                    // the first time this was written. See
+                    // `matrixraft_randomised_election_timeout_ms`.
+                    *effective_election_timeout_ms =
+                        matrixraft_randomised_election_timeout_ms(
+                            election_timeout_ms,
+                            node_id,
+                            cluster.current_term,
+                        );
+                    if *election_elapsed_ms >= *effective_election_timeout_ms {
                         *election_ticks += 1;
                         *election_elapsed_ms = 0;
                         *last_tick_reason = "election_tick";
@@ -1796,6 +1817,7 @@ impl NodeCore {
             heartbeat_ticks,
             election_ticks,
             election_elapsed_ms,
+            effective_election_timeout_ms,
             pre_vote_executions,
             campaign_executions,
             leader_transfer_executions,
@@ -1932,6 +1954,7 @@ impl NodeCore {
                     timer_status: RuntimeTimerStatus {
                         heartbeat_interval_ms,
                         election_timeout_ms,
+                        effective_election_timeout_ms: *effective_election_timeout_ms,
                         leader_lease_timeout_ms,
                         leader_lease_elapsed_ms: cluster.leader_lease_elapsed_ms,
                         leader_lease_valid: cluster.leader_lease_valid,
