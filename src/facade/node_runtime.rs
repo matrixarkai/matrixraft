@@ -1643,6 +1643,11 @@ impl NodeCore {
                     if received_live_leader_heartbeat {
                         *election_elapsed_ms = 0;
                     }
+                    // The reorder queues age by the interval that just
+                    // passed. The millisecond-to-microsecond conversion is the
+                    // cluster's, where a test can reach it.
+                    let _ = cluster
+                        .tick_reorder_queues_for_heartbeat(heartbeat_interval_ms);
                     if !cluster.leader_lease_valid && cluster.step_down_leader_if_lost_quorum() {
                         blockers.push("lost_quorum_step_down".to_string());
                     }

@@ -746,6 +746,33 @@ impl RaftCluster {
         timed_out
     }
 
+    /// Ages every peer's reorder queue by `elapsed_us` and reports how many
+    /// out-of-order appends were dropped for having waited longer than
+    /// `reorder_timeout_us`.
+    ///
+    /// The leader's own pipeline is ticked too: a reorder queue belongs to the
+    /// peer it replicates to, and skipping the leader would mean a peer that
+    /// becomes leader stops ageing what it had already queued.
+    /// [`RaftCluster::tick_reorder_queues`] for a heartbeat interval, which a
+    /// driver has in **milliseconds** while the queue's timeout is in
+    /// microseconds.
+    ///
+    /// The conversion lives here rather than at the call site because a unit
+    /// mismatch is the thing most likely to go wrong about it and a call site
+    /// in a driver loop is the hardest place to test. A plant that dropped the
+    /// factor of a thousand from the loop survived the suite; here it does not.
+    pub fn tick_reorder_queues_for_heartbeat(&mut self, heartbeat_interval_ms: u64) -> u64 {
+        self.tick_reorder_queues(heartbeat_interval_ms.saturating_mul(1_000))
+    }
+
+    pub fn tick_reorder_queues(&mut self, elapsed_us: u64) -> u64 {
+        let mut dropped = 0_u64;
+        for pipeline in self.peer_pipelines.values_mut() {
+            dropped = dropped.saturating_add(pipeline.tick_reorder_queue(elapsed_us));
+        }
+        dropped
+    }
+
     pub fn broadcast_heartbeat(&mut self) -> Result<u64, RaftError> {
         let Some(leader_id) = self.leader_id else {
             return Ok(0);
