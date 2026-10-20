@@ -5073,8 +5073,13 @@ fn leader_transfer_tracks_in_progress_duplicate_abort_and_timeout() {
         .begin_leader_transfer(3)
         .expect("begin timed transfer")
         .expect("timed transfer state");
+    // Bounded on purpose: anything that makes `leader_transfer_state` keep
+    // answering `Some` would otherwise hang this binary instead of failing it.
+    let mut ticks = 0;
     while cluster.leader_transfer_state().is_some() {
         cluster.tick_leader_transfer();
+        ticks += 1;
+        assert!(ticks <= 1_000, "the transfer did not end");
     }
     assert!(cluster.leader_transfer_state().is_none());
 }
@@ -5150,8 +5155,13 @@ fn leader_transfer_to_stopped_follower_times_out() {
         .try_complete_leader_transfer()
         .expect("stopped follower does not campaign"));
 
+    // Bounded on purpose: anything that makes `leader_transfer_state` keep
+    // answering `Some` would otherwise hang this binary instead of failing it.
+    let mut ticks = 0;
     while cluster.leader_transfer_state().is_some() {
         cluster.tick_leader_transfer();
+        ticks += 1;
+        assert!(ticks <= 1_000, "the transfer did not end");
     }
     assert_eq!(cluster.leader_id(), Some(initial_leader));
     assert!(cluster.leader_transfer_state().is_none());

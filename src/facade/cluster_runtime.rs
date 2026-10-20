@@ -1765,12 +1765,11 @@ impl RaftCluster {
         self.pre_vote_responses.clear();
         self.clear_reorder_queues();
         if let Some(transferee_id) = self
-            .leader_transfer
-            .as_ref()
+            .active_leader_transfer()
             .map(|transfer| transfer.transferee_id)
         {
             if transferee_id == candidate_id {
-                self.leader_transfer = None;
+                self.complete_leader_transfer("transferee_became_leader");
             } else {
                 self.abort_leader_transfer("leader_changed_before_transfer_complete");
             }
@@ -2780,8 +2779,7 @@ impl RaftCluster {
         }
         if response.success
             && self
-                .leader_transfer
-                .as_ref()
+                .active_leader_transfer()
                 .is_some_and(|transfer| transfer.transferee_id == peer_id)
             && response.match_index >= self.last_log_index
         {
@@ -3322,12 +3320,11 @@ impl RaftCluster {
             self.leader_id = Some(request.leader_id);
             self.clear_reorder_queues();
             if let Some(transferee_id) = self
-                .leader_transfer
-                .as_ref()
+                .active_leader_transfer()
                 .map(|transfer| transfer.transferee_id)
             {
                 if transferee_id == request.leader_id {
-                    self.leader_transfer = None;
+                    self.complete_leader_transfer("transferee_became_leader");
                 } else {
                     self.abort_leader_transfer("leader_changed_before_transfer_complete");
                 }
@@ -3903,8 +3900,7 @@ impl RaftCluster {
             return Err(RaftError::NoLeader);
         }
         let current_transferee_id = self
-            .leader_transfer
-            .as_ref()
+            .active_leader_transfer()
             .map(|transfer| transfer.transferee_id);
         let target_role = self.nodes.get(&target).map(|node| node.replica_role);
         let admission = crate::matrixraft_leader_transfer_admission(
@@ -3916,11 +3912,11 @@ impl RaftCluster {
         if admission.is_duplicate() {
             self.duplicate_leader_transfer_requests =
                 self.duplicate_leader_transfer_requests.saturating_add(1);
-            if let Some(transfer) = self.leader_transfer.as_mut() {
+            if let Some(transfer) = self.active_leader_transfer_mut() {
                 transfer.duplicate_requests = transfer.duplicate_requests.saturating_add(1);
                 transfer.reason = admission.reason;
             }
-            return Ok(self.leader_transfer.as_deref().cloned());
+            return Ok(self.active_leader_transfer().cloned());
         }
         if !admission.is_accepted() {
             return Ok(None);
@@ -3930,12 +3926,13 @@ impl RaftCluster {
             .get(&target)
             .ok_or(RaftError::NodeNotFound(target))?;
         let target_caught_up = target_node.match_index() >= self.last_log_index;
+        let replacing_a_transfer_in_flight = self.active_leader_transfer().is_some();
         let aborted_transfers =
-            self.aborted_leader_transfers + u64::from(self.leader_transfer.is_some());
-        if self.leader_transfer.is_some() {
+            self.aborted_leader_transfers + u64::from(replacing_a_transfer_in_flight);
+        if replacing_a_transfer_in_flight {
             self.aborted_leader_transfers = aborted_transfers;
         }
-        self.leader_transfer = Some(Box::new(LeaderTransferState {
+        let state = LeaderTransferState {
             transferee_id: target,
             elapsed_ticks: 0,
             timeout_ticks: self.leader_transfer_timeout_ticks,
@@ -3948,8 +3945,17 @@ impl RaftCluster {
             } else {
                 "waiting_for_transferee_catchup".to_string()
             },
-        }));
-        Ok(self.leader_transfer.as_deref().cloned())
+            conclusion: None,
+        };
+        // The slot may already hold the record of a transfer that ended. Writing
+        // through it reuses that allocation instead of freeing one Box and
+        // asking for another the same size, which is what a group that transfers
+        // repeatedly used to do once per transfer.
+        match self.leader_transfer.as_deref_mut() {
+            Some(slot) => *slot = state,
+            None => self.leader_transfer = Some(Box::new(state)),
+        }
+        Ok(self.active_leader_transfer().cloned())
     }
 
     pub fn transfer_leader(&mut self, target: NodeId) -> Result<(), RaftError> {
@@ -3972,14 +3978,15 @@ impl RaftCluster {
             return Ok(LeaderTransferOutcome::Pending);
         }
         self.campaign(target, true)?;
-        self.leader_transfer = None;
+        // `campaign` concludes it when the transferee takes leadership, so this
+        // is the belt-and-braces path for a campaign that did not get there.
+        self.complete_leader_transfer("transfer_complete");
         Ok(LeaderTransferOutcome::Transferred)
     }
 
     pub fn try_complete_leader_transfer(&mut self) -> Result<bool, RaftError> {
         let Some(target) = self
-            .leader_transfer
-            .as_ref()
+            .active_leader_transfer()
             .map(|transfer| transfer.transferee_id)
         else {
             return Ok(false);
@@ -3988,7 +3995,7 @@ impl RaftCluster {
             return Ok(false);
         }
         self.campaign(target, true)?;
-        self.leader_transfer = None;
+        self.complete_leader_transfer("transfer_complete");
         Ok(true)
     }
 
@@ -4070,22 +4077,66 @@ impl RaftCluster {
         Ok(true)
     }
 
+    /// The transfer in flight, if there is one.
+    ///
+    /// The slot also holds the record of the last transfer after it ends, so
+    /// "is the slot occupied?" and "is a transfer in flight?" are different
+    /// questions. Every caller asks this one, which is the only place the
+    /// difference is decided.
+    fn active_leader_transfer(&self) -> Option<&LeaderTransferState> {
+        self.leader_transfer
+            .as_deref()
+            .filter(|transfer| transfer.conclusion.is_none())
+    }
+
+    fn active_leader_transfer_mut(&mut self) -> Option<&mut LeaderTransferState> {
+        self.leader_transfer
+            .as_deref_mut()
+            .filter(|transfer| transfer.conclusion.is_none())
+    }
+
+    /// The last transfer this group attempted, in flight or ended.
+    ///
+    /// `leader_transfer_state` answers "what is happening now" and goes empty
+    /// the moment a transfer ends. This answers "what happened", which is the
+    /// question a host that issued a transfer and saw it disappear actually
+    /// has: the record carries the transferee, how long it ran, and which of
+    /// the paths ended it.
+    pub fn last_leader_transfer(&self) -> Option<LeaderTransferState> {
+        self.leader_transfer.as_deref().cloned()
+    }
+
     pub fn abort_leader_transfer(&mut self, reason: impl Into<String>) -> bool {
-        if let Some(mut transfer) = self.leader_transfer.take() {
-            transfer.reason = reason.into();
-            self.aborted_leader_transfers = self.aborted_leader_transfers.saturating_add(1);
-            true
-        } else {
-            false
-        }
+        let Some(transfer) = self.active_leader_transfer_mut() else {
+            return false;
+        };
+        transfer.reason = reason.into();
+        transfer.conclusion = Some(LeaderTransferConclusion::Aborted);
+        self.aborted_leader_transfers = self.aborted_leader_transfers.saturating_add(1);
+        true
+    }
+
+    /// Record that leadership reached the transferee.
+    ///
+    /// Returns false when no transfer is in flight, which is what makes it safe
+    /// to call on a path that may already have concluded one: the first
+    /// conclusion keeps its reason.
+    fn complete_leader_transfer(&mut self, reason: impl Into<String>) -> bool {
+        let Some(transfer) = self.active_leader_transfer_mut() else {
+            return false;
+        };
+        transfer.reason = reason.into();
+        transfer.conclusion = Some(LeaderTransferConclusion::Completed);
+        true
     }
 
     pub fn tick_leader_transfer(&mut self) -> bool {
-        let Some(transfer) = self.leader_transfer.as_mut() else {
+        let Some(transfer) = self.active_leader_transfer_mut() else {
             return false;
         };
         transfer.elapsed_ticks = transfer.elapsed_ticks.saturating_add(1);
-        if transfer.elapsed_ticks >= transfer.timeout_ticks {
+        let timed_out = transfer.elapsed_ticks >= transfer.timeout_ticks;
+        if timed_out {
             self.abort_leader_transfer("transfer_timeout")
         } else {
             false
@@ -4093,7 +4144,7 @@ impl RaftCluster {
     }
 
     pub fn leader_transfer_state(&self) -> Option<LeaderTransferState> {
-        self.leader_transfer.as_deref().cloned()
+        self.active_leader_transfer().cloned()
     }
 
     pub fn membership(&self) -> Membership {
@@ -4201,8 +4252,7 @@ impl RaftCluster {
         self.clear_reorder_queue_for(node_id);
         self.remove_election_response_from(node_id);
         if self
-            .leader_transfer
-            .as_ref()
+            .active_leader_transfer()
             .map(|transfer| transfer.transferee_id == node_id)
             .unwrap_or(false)
         {
@@ -4307,8 +4357,7 @@ impl RaftCluster {
             self.clear_reorder_queue_for(node_id);
             self.remove_election_response_from(node_id);
             if self
-                .leader_transfer
-                .as_ref()
+                .active_leader_transfer()
                 .is_some_and(|transfer| transfer.transferee_id == node_id)
             {
                 self.abort_leader_transfer("snapshot_membership_removed_transferee");
@@ -5456,12 +5505,11 @@ impl RaftCluster {
         }
         if self.leader_id != Some(request.leader_id) {
             if let Some(transferee_id) = self
-                .leader_transfer
-                .as_ref()
+                .active_leader_transfer()
                 .map(|transfer| transfer.transferee_id)
             {
                 if transferee_id == request.leader_id {
-                    self.leader_transfer = None;
+                    self.complete_leader_transfer("transferee_became_leader");
                 } else {
                     self.abort_leader_transfer("snapshot_leader_changed");
                 }
@@ -5527,7 +5575,7 @@ impl RaftCluster {
         Ok(matrixraft_cluster_status_report(
             self.group_id,
             self.leader_id,
-            self.leader_transfer.as_deref().cloned(),
+            self.active_leader_transfer().cloned(),
             nodes,
         ))
     }
