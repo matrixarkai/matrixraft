@@ -210,6 +210,11 @@ fn matrixraft_builders_capture_node_group_transport_and_option_shape() {
             // or still derives is visible here.
             leader_transfer_timeout_ticks: 3,
             peer_offline_timeout_ticks: 10,
+            // 60,000ms of send_snapshot_timeout_ms over this options' 100ms
+            // tick_interval_ms. The figure used to reach only
+            // snapshot_recycle_options while the trigger took its timeout from
+            // leader_transfer_timeout_ticks -- 3 ticks here.
+            snapshot_trigger_timeout_ticks: 600,
             // The options' own pipeline conversion, which a cluster built from
             // this config now uses for every peer. It reached only
             // MatrixRaftNode before.
@@ -230,6 +235,22 @@ fn matrixraft_builders_capture_node_group_transport_and_option_shape() {
     assert_eq!(
         options.snapshot_recycle_options().send_snapshot_timeout_ms,
         60_000
+    );
+
+    // `send_snapshot_timeout_ms` is milliseconds here and ticks in `Config`, so
+    // unlike `transfer_timeout_tick` and `offline_timeout_tick` there is a
+    // conversion to get wrong -- and a snapshot timeout shorter than one tick
+    // divides to zero. Zero would report every trigger timed out on its first
+    // tick, abandoning work that was fine, so the conversion floors at one.
+    let coarse = MatrixRaftOptions {
+        tick_interval_ms: 1_000,
+        send_snapshot_timeout_ms: 500,
+        ..options.clone()
+    };
+    assert_eq!(
+        coarse.to_raft_config().snapshot_trigger_timeout_ticks,
+        1,
+        "500ms over a 1,000ms tick floors at a tick rather than at zero"
     );
     let pipeline_limits = options.to_pipeline_limits();
     assert_eq!(pipeline_limits.max_inflights_replicate, 128);
