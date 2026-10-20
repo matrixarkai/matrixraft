@@ -505,6 +505,69 @@ fn a_tasks_through_index_is_its_last_entrys() {
 }
 
 #[test]
+fn a_submit_the_worker_has_already_stalled_is_refused_and_counted() {
+    // The slow-submitter case, made deterministic and kept in the suite.
+    //
+    // `a_stalled_group_is_not_handed_anything_else` tolerates a submit the
+    // worker has already stalled, because on a contended runner it loses that
+    // race -- that is what failed in CI. But the branch that tolerates it only
+    // runs when the race is lost, and the suite does not arrange for that, so
+    // the tolerance would be code no test exercises: a plant widening it to
+    // accept **any** submit error would change nothing anywhere.
+    //
+    // 50ms a task is the same thing the runner did, and it loses the race every
+    // time. So this asserts what the tolerance is allowed to tolerate: the
+    // error is the stall, the stall has really happened, and the refusal is
+    // counted as a stalled one.
+    let applier = Applier::start(ApplierOptions {
+        applier_num: 1,
+        apply_max_batch_count: 1,
+        ..ApplierOptions::default()
+    })
+    .expect("applier");
+    let handler = Arc::new(Refuser::new(2));
+    let key = DriverGroupKey::new(52, 1);
+    applier
+        .register_group(key, Arc::clone(&handler) as Arc<dyn ApplyHandler>)
+        .expect("register");
+
+    let mut refusals = Vec::new();
+    for index in 1..=4 {
+        std::thread::sleep(Duration::from_millis(50));
+        if let Err(error) = applier.submit(key, task(index)) {
+            refusals.push(format!("{error:?}"));
+        }
+    }
+
+    assert!(
+        !refusals.is_empty(),
+        "the worker has to win this race, or this test asserts nothing: a 50ms gap a \
+         task and it still kept up with the submitter"
+    );
+    for message in &refusals {
+        assert!(
+            message.contains("stalled"),
+            "the only submit a stalled group may refuse is one it refuses *because* it \
+             has stalled: {message}"
+        );
+    }
+    assert!(
+        applier.apply_stall(key).is_some(),
+        "and the stall it reported has to be a stall it is still in"
+    );
+    assert_eq!(
+        applier.stalled_refusals(),
+        refusals.len() as u64,
+        "every refusal is counted as a stalled one"
+    );
+    assert!(
+        handler.highest_seen() <= 2,
+        "nothing past the refused entry reached the handler: {:?}",
+        handler.seen()
+    );
+}
+
+#[test]
 fn a_stalled_group_is_not_handed_anything_else() {
     let applier = Applier::start(ApplierOptions {
         applier_num: 1,
@@ -523,10 +586,27 @@ fn a_stalled_group_is_not_handed_anything_else() {
     // the pool hands them over in one call or in several -- that is the pools
     // decision and it is timing -- so what is asserted is the property both
     // guards exist for: nothing past the refused entry reaches the handler.
+    //
+    // **A submit here can be refused, and that is not a failure.** The worker
+    // only has to get through task 1, refuse entry 2 and stall the group
+    // before this loop reaches task 3 -- which is this test's own subject
+    // arriving earlier than its submission loop. A stalled group refuses new
+    // work, so `submit` returns the stall. This failed in CI on a contended
+    // runner while passing locally; slowing the loop by 50ms a task reproduces
+    // it every time.
+    //
+    // It still has to be *that* refusal. A submit that fails while the group
+    // has not stalled is a real failure, and the count is carried to the
+    // refusal assertion below so an early one cannot hide there either.
+    let mut refused_while_stalled = 0;
     for index in 1..=4 {
-        applier
-            .submit(key, task(index))
-            .expect("the queue is deep enough");
+        if let Err(error) = applier.submit(key, task(index)) {
+            assert!(
+                applier.apply_stall(key).is_some(),
+                "submit {index} was refused while the group had not stalled: {error:?}"
+            );
+            refused_while_stalled += 1;
+        }
     }
 
     assert!(
@@ -563,7 +643,12 @@ fn a_stalled_group_is_not_handed_anything_else() {
     assert!(refused.is_err(), "a stalled group must refuse a submit");
     let message = format!("{:?}", refused.expect_err("an error"));
     assert!(message.contains("stalled"), "error was {message}");
-    assert_eq!(applier.stalled_refusals(), 1);
+    assert_eq!(
+        applier.stalled_refusals(),
+        refused_while_stalled + 1,
+        "every refusal has to be a stalled one: {refused_while_stalled} from the \
+         submission loop racing the worker, and the one made deliberately here"
+    );
     assert!(
         applier.stalled_refusals() <= applier.refused_tasks(),
         "a stalled refusal is one of the refusals"
