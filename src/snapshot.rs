@@ -135,12 +135,41 @@ pub fn matrixraft_validate_snapshot_tail_catchup(
     tail_entries: &[LogEntry],
 ) -> Result<(), RaftError> {
     for (offset, entry) in tail_entries.iter().enumerate() {
-        let expected_index = snapshot.last_log_id.index + 1 + offset as u64;
         if entry.log_id.index <= snapshot.last_log_id.index {
             return Err(RaftError::Storage(
                 "tail catch-up entry overlaps installed snapshot".to_string(),
             ));
         }
+        // Checked, not saturating, and after the overlap check. This is a
+        // public validator and the metadata it judges can come from a peer.
+        //
+        // Three versions of this line were wrong before this one:
+        //
+        // 1. Unchecked and computed FIRST, `last_log_id.index = u64::MAX` was
+        //    "attempt to add with overflow" -- the function faulting on
+        //    exactly what it exists to screen.
+        // 2. Unchecked but computed after the check is safe for `+ 1`, since
+        //    the check leaves the index below u64::MAX, but not for
+        //    `+ offset`: a snapshot ending one below the top with two entries
+        //    above it still overflowed at offset 1.
+        // 3. **Saturating** got the arithmetic right and the answer wrong. It
+        //    makes the expectation stop moving at the top of the range, so two
+        //    entries with the SAME index both matched it and a duplicate
+        //    validated. `the_offset_is_bounded_too_not_just_the_snapshot_index`
+        //    is that case.
+        //
+        // An expected index that cannot be represented is one no entry can
+        // have, which is a contiguity failure and not an arithmetic one.
+        let Some(expected_index) = snapshot
+            .last_log_id
+            .index
+            .checked_add(1)
+            .and_then(|first| first.checked_add(offset as u64))
+        else {
+            return Err(RaftError::Storage(
+                "tail catch-up entries are not contiguous after snapshot".to_string(),
+            ));
+        };
         if entry.log_id.index != expected_index {
             return Err(RaftError::Storage(
                 "tail catch-up entries are not contiguous after snapshot".to_string(),
