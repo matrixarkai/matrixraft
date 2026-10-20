@@ -16,8 +16,15 @@ use matrixraft::{Config, Peer, RaftCluster, ReplicaRole};
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(
-        std::mem::size_of::<RaftCluster>() == 536,
-        "RaftCluster changed width. It was 528 bytes until `Config` gained the \
+        std::mem::size_of::<RaftCluster>() == 544,
+        "RaftCluster changed width. It was 536 bytes until the accumulated vote \
+         grants gained the term they were given for, which is what stops a \
+         candidate reaching a quorum in one term on grants given for an \
+         earlier one -- eight paths cleared the accumulator and two did not, \
+         and the suite did not notice when all eight were deleted. 8 bytes, \
+         and the alternative was a term beside every grant on the heap, which \
+         changes what the struct serialises to. Before that it was 528 bytes \
+         until `Config` gained the \
          leader-transfer and peer-offline tick counts, which is what made those \
          two timeouts configurable at all -- a host set them on the options \
          struct and the engine timed both out on the election interval \
