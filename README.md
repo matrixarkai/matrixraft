@@ -1459,6 +1459,43 @@ looks wasteful would have had nothing stop them.
 `tests/lease_membership_contract.rs` is what stops them, and each of the three
 paths has its own case: the lease drops, and one heartbeat round against the
 new membership earns it back — an invalidation, not a one-way door.
+### Every refusal the pipeline counts has a series
+
+A replication pipeline keeps 54 numeric counters per peer -- how many
+appends were refused for backpressure, how many entries the reorder queue
+dropped or timed out, how many snapshot chunks were retried, how many
+pre-votes were rejected. **Three of them had a metric name.** A host wiring
+the registry to a scrape endpoint got queue depths and nothing to alert on,
+while the engine was already counting every refusal.
+
+The rule for what gets a series, and it is the comparable engine's own
+selection: **a counter that counts a refusal, a timeout, a drop or a retry.**
+Those are the ones an operator pages on. Twenty of them now have names, so the
+per-peer surface is twenty-three series rather than three.
+
+Each name is `rustraft_peer_` plus the field, with `_total` appended for a
+counter and omitted for a gauge, which is what the three that were already
+there do.
+
+<!-- peer-metrics-exported: rustraft_peer_append_queue_depth, rustraft_peer_reorder_queue_depth, rustraft_peer_snapshot_installed_index, rustraft_peer_append_rejected_total, rustraft_peer_retry_attempts_total, rustraft_peer_apply_backpressure_rejections_total, rustraft_peer_memory_backpressure_rejections_total, rustraft_peer_oversized_log_rejections_total, rustraft_peer_out_of_order_append_rejections_total, rustraft_peer_reorder_entries_rejected_total, rustraft_peer_reorder_entry_timeouts_total, rustraft_peer_reorder_dropped_packages_total, rustraft_peer_stale_term_rejections_total, rustraft_peer_packet_loss_events_total, rustraft_peer_snapshot_backpressure_rejections_total, rustraft_peer_snapshot_rate_limit_rejections_total, rustraft_peer_snapshot_send_timeouts_total, rustraft_peer_snapshot_chunk_retry_count_total, rustraft_peer_snapshot_install_rolled_back_total, rustraft_peer_transfer_leader_timeouts_total, rustraft_peer_pre_vote_rejections_total, rustraft_peer_election_rejections_total, rustraft_peer_offline_timeout_rejections_total -->
+
+<!-- peer-metrics-backlog: peer_id, match_index, next_index, append_requests, append_batches, max_append_batch_entries, max_append_batch_bytes, append_accepted, backoff_ms, next_retry_after_ms, inflight_entries, inflight_bytes, append_queue_limit, append_queue_max_depth, inflight_bytes_limit, apply_inflight_tasks, apply_inflight_limit, apply_queue_depth, apply_queue_max_depth, apply_batch_bytes_limit, reorder_entries_converged, network_error_probe_transitions, snapshot_send_attempts, snapshot_install_total_chunks, snapshot_install_progress_per_mille, required_snapshot_index, acked_snapshot_index, follower_lag, learner_catchup_rounds, witness_quorum_required, witness_quorum_acked -->
+
+**The backlog list is a backlog, not a design.** The 31 fields in it are
+not claimed to be unworthy of a series: some are configuration echoed back
+(`append_queue_limit`, `inflight_bytes_limit`), some are high-water marks the
+depth gauge already covers (`append_queue_max_depth`), and some are useful
+gauges nobody has needed yet (`follower_lag`, `inflight_bytes`). Saying which
+is which honestly would mean deciding twenty-nine separate questions; listing
+them says what is true today.
+
+What the two lists are **for** is `tests/peer_metric_surface_contract.rs`,
+which asserts they partition the struct exactly. A counter added to the
+pipeline and left out of both fails that test, so the next person to add one
+has to decide which side it is on -- the same mechanism as the inert settings
+and the unwired traits, and the same reason: a surface is only honest while
+something checks it.
+
 ### A refused read carries the index to wait for
 
 A linearizable read has to see everything committed before it was issued, so

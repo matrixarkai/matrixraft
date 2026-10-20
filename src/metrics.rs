@@ -26,6 +26,26 @@ pub struct MetricNames {
     pub peer_append_queue_depth: String,
     pub peer_reorder_queue_depth: String,
     pub peer_snapshot_installed_index: String,
+    pub peer_append_rejected_total: String,
+    pub peer_retry_attempts_total: String,
+    pub peer_apply_backpressure_rejections_total: String,
+    pub peer_memory_backpressure_rejections_total: String,
+    pub peer_oversized_log_rejections_total: String,
+    pub peer_out_of_order_append_rejections_total: String,
+    pub peer_reorder_entries_rejected_total: String,
+    pub peer_reorder_entry_timeouts_total: String,
+    pub peer_reorder_dropped_packages_total: String,
+    pub peer_stale_term_rejections_total: String,
+    pub peer_packet_loss_events_total: String,
+    pub peer_snapshot_backpressure_rejections_total: String,
+    pub peer_snapshot_rate_limit_rejections_total: String,
+    pub peer_snapshot_send_timeouts_total: String,
+    pub peer_snapshot_chunk_retry_count_total: String,
+    pub peer_snapshot_install_rolled_back_total: String,
+    pub peer_transfer_leader_timeouts_total: String,
+    pub peer_pre_vote_rejections_total: String,
+    pub peer_election_rejections_total: String,
+    pub peer_offline_timeout_rejections_total: String,
     pub wal_segment_count: String,
     pub blocker_total: String,
     pub fatal_total: String,
@@ -187,6 +207,38 @@ pub fn matrixraft_metric_names() -> MetricNames {
         peer_append_queue_depth: "rustraft_peer_append_queue_depth".to_string(),
         peer_reorder_queue_depth: "rustraft_peer_reorder_queue_depth".to_string(),
         peer_snapshot_installed_index: "rustraft_peer_snapshot_installed_index".to_string(),
+        peer_append_rejected_total: "rustraft_peer_append_rejected_total".to_string(),
+        peer_retry_attempts_total: "rustraft_peer_retry_attempts_total".to_string(),
+        peer_apply_backpressure_rejections_total:
+            "rustraft_peer_apply_backpressure_rejections_total".to_string(),
+        peer_memory_backpressure_rejections_total:
+            "rustraft_peer_memory_backpressure_rejections_total".to_string(),
+        peer_oversized_log_rejections_total: "rustraft_peer_oversized_log_rejections_total"
+            .to_string(),
+        peer_out_of_order_append_rejections_total:
+            "rustraft_peer_out_of_order_append_rejections_total".to_string(),
+        peer_reorder_entries_rejected_total: "rustraft_peer_reorder_entries_rejected_total"
+            .to_string(),
+        peer_reorder_entry_timeouts_total: "rustraft_peer_reorder_entry_timeouts_total".to_string(),
+        peer_reorder_dropped_packages_total: "rustraft_peer_reorder_dropped_packages_total"
+            .to_string(),
+        peer_stale_term_rejections_total: "rustraft_peer_stale_term_rejections_total".to_string(),
+        peer_packet_loss_events_total: "rustraft_peer_packet_loss_events_total".to_string(),
+        peer_snapshot_backpressure_rejections_total:
+            "rustraft_peer_snapshot_backpressure_rejections_total".to_string(),
+        peer_snapshot_rate_limit_rejections_total:
+            "rustraft_peer_snapshot_rate_limit_rejections_total".to_string(),
+        peer_snapshot_send_timeouts_total: "rustraft_peer_snapshot_send_timeouts_total".to_string(),
+        peer_snapshot_chunk_retry_count_total: "rustraft_peer_snapshot_chunk_retry_count_total"
+            .to_string(),
+        peer_snapshot_install_rolled_back_total: "rustraft_peer_snapshot_install_rolled_back_total"
+            .to_string(),
+        peer_transfer_leader_timeouts_total: "rustraft_peer_transfer_leader_timeouts_total"
+            .to_string(),
+        peer_pre_vote_rejections_total: "rustraft_peer_pre_vote_rejections_total".to_string(),
+        peer_election_rejections_total: "rustraft_peer_election_rejections_total".to_string(),
+        peer_offline_timeout_rejections_total: "rustraft_peer_offline_timeout_rejections_total"
+            .to_string(),
         wal_segment_count: "rustraft_wal_segment_count".to_string(),
         blocker_total: "rustraft_blocker_total".to_string(),
         fatal_total: "rustraft_fatal_total".to_string(),
