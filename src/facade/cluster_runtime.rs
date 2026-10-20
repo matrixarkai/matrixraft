@@ -1098,7 +1098,22 @@ impl RaftCluster {
         }
         self.leader_lease_epoch = self.leader_lease_epoch.saturating_add(1);
         self.leader_lease_elapsed_ms = 0;
-        self.leader_lease_confirmations.clear();
+        // The confirmations are **not** cleared, and the epoch bump above is
+        // why they do not need to be: `leader_lease_quorum_reached` counts a
+        // confirmation only when `confirmation.epoch == self.leader_lease_epoch`,
+        // so every entry left here is already inert, and the insert below
+        // overwrites the entry for each node that does acknowledge.
+        //
+        // `clear()` on a `BTreeMap` frees its nodes. With five voters this map
+        // is one node, 544 bytes for `(NodeId, LeaderLeaseConfirmation)` -- so
+        // clearing it and refilling it allocated a fresh node **on every
+        // proposal**, which was 544 of the 1,130 bytes a proposal allocated.
+        // Keeping the keys keeps the node.
+        //
+        // The entries that linger are bounded by the node count, and a
+        // departed node's cannot be counted either: the quorum loop walks
+        // `self.nodes` and looks the confirmation up by id, so an id that is
+        // no longer a member is never asked about.
         for node_id in acknowledgements {
             // Deferred: the quorum is evaluated once below, so evaluating it
             // per acknowledgement was O(N^2) for a result that only depends on
@@ -2980,10 +2995,10 @@ impl RaftCluster {
         let mut lease_acknowledgements = Vec::with_capacity(self.nodes.len());
         lease_acknowledgements.push(leader_id);
         let node_ids: Vec<_> = self.nodes.keys().copied().collect();
-        // One buffer for every follower's flush, rather than one each. The
-        // flush result is discarded here -- it is the pipeline's own state that
-        // matters -- so this exists only to give the flush somewhere to write.
-        let mut flushed = Vec::new();
+        // No buffer at all. The flush result is discarded here -- it is the
+        // pipeline's own state that matters -- and one buffer lent across the
+        // followers still allocated its minimum capacity of four, 192 bytes a
+        // proposal, for batches nobody read.
         for node_id in node_ids {
             let Some(node) = self.nodes.get_mut(&node_id) else {
                 continue;
@@ -2994,12 +3009,8 @@ impl RaftCluster {
             }
             let response = if let Some(pipeline) = self.peer_pipelines.get_mut(&node_id) {
                 pipeline.queue_append(&entry)?;
-                flushed.clear();
-                let _ = pipeline.flush_append_batch_into(
-                    64,
-                    self.config.max_payload_bytes.max(1),
-                    &mut flushed,
-                );
+                let _ = pipeline
+                    .flush_append_batch_counted(64, self.config.max_payload_bytes.max(1));
                 if node.healthy {
                     let match_index = node.match_index();
                     let append_is_contiguous = match_index.saturating_add(1) == entry.log_id.index;

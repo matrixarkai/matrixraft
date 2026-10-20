@@ -1459,6 +1459,61 @@ looks wasteful would have had nothing stop them.
 `tests/lease_membership_contract.rs` is what stops them, and each of the three
 paths has its own case: the lease drops, and one heartbeat round against the
 new membership earns it back — an invalidation, not a one-way door.
+### Two structures a proposal rebuilt every time
+
+A proposal with **no payload at all** allocated 1,129.6 bytes. Whatever a
+proposal allocates with nothing to carry is structure, and structure rebuilt
+every proposal is structure that could have been kept.
+
+Recording the **size** of every allocation and reading the histogram said which
+was which -- a size identifies a site the way a profile would:
+
+```text
+        size       count  per proposal  bytes/propose
+          32          50          1.00          32.0
+          40         100          2.00          80.0
+          64         100          2.00         128.0
+         192          50          1.00         192.0
+         544          50          1.00         544.0
+```
+
+**544 bytes is a `BTreeMap` node.** `(NodeId, LeaderLeaseConfirmation)` is
+8 + 40 bytes, and a leaf node holds eleven of them: 16 + 11x8 + 11x40 = 544.
+The leader-lease renewal was clearing the confirmations and refilling them, and
+**`clear()` frees a map's nodes** -- so every proposal freed the one node this
+map has and allocated a fresh one.
+
+It does not need to clear. The renewal bumps `leader_lease_epoch`, and
+`leader_lease_quorum_reached` counts a confirmation only when
+`confirmation.epoch == self.leader_lease_epoch`, so every entry left behind is
+already inert and the insert overwrites the ones that acknowledge. Entries that
+linger are bounded by the node count, and a departed node's cannot count
+either: the quorum loop walks the nodes and looks each confirmation up by id,
+so an id that is no longer a member is never asked about.
+
+**192 bytes is a `Vec<InflightAppend>` at its minimum capacity**, four
+elements of 48 bytes. The replication path discards the flushed batches -- what
+matters is the pipeline's own state -- so lending one buffer across the
+followers had already removed the allocation per follower, but the buffer
+itself still cost one per proposal. `flush_append_batch_counted` does the same
+flush and reports how many batches moved without collecting them.
+
+| | bytes/proposal | allocations/proposal |
+|---|---|---|
+| before | 1,129.6 | 7.20 |
+| after | **393.6** | **5.20** |
+
+Measured at five peers and a zero payload, which is the fixed cost; at a
+256-byte payload it is 1,328 to 592. **The per-peer slope does not move**: both
+were fixed costs, so `tests/alloc_propose.rs` measures the same 0.353
+allocations per additional peer before and after, and that is the point --
+these are the costs a peer sweep cannot see.
+
+`tests/alloc_propose_bytes.rs` bounds the bytes, with the bound taken from a
+measured ladder rather than guessed, each row this code with one piece put
+back. The "both put back" row reproduces the 1,129.6 that main measures
+directly, which is the check that the ladder is measuring what it claims.
+
 ### The checksum covers the membership, now that recovery trusts it
 
 The WAL checksum covered the group and node ids, the hard state, the entries,

@@ -470,7 +470,29 @@ impl ReplicationPipeline {
         max_bytes: u64,
         flushed: &mut Vec<InflightAppend>,
     ) -> usize {
-        let before = flushed.len();
+        self.flush_append_batch_core(max_entries, max_bytes, Some(flushed))
+    }
+
+    /// Flushes without collecting anything, and reports how many batches moved.
+    ///
+    /// For the caller that only wants the flush to **happen**. The replication
+    /// path in `propose` is that caller: it discards the batches because what
+    /// matters is the pipeline's own state. Lending it one buffer across the
+    /// followers removed the allocation per follower, but the buffer itself
+    /// still cost one: a `Vec<InflightAppend>` growing from empty takes its
+    /// minimum capacity of four, which at 48 bytes an element is **192 bytes
+    /// per proposal** for batches nobody reads.
+    pub fn flush_append_batch_counted(&mut self, max_entries: u64, max_bytes: u64) -> usize {
+        self.flush_append_batch_core(max_entries, max_bytes, None)
+    }
+
+    fn flush_append_batch_core(
+        &mut self,
+        max_entries: u64,
+        max_bytes: u64,
+        mut flushed: Option<&mut Vec<InflightAppend>>,
+    ) -> usize {
+        let mut moved = 0_usize;
         let max_entries = if self.status.progress_state == ProgressState::Probe {
             1
         } else {
@@ -530,14 +552,17 @@ impl ReplicationPipeline {
             self.status.inflight_entries += inflight.entry_count;
             self.status.inflight_bytes += inflight.bytes;
             self.inflight.push_back(inflight.clone());
-            flushed.push(inflight);
+            if let Some(flushed) = flushed.as_deref_mut() {
+                flushed.push(inflight);
+            }
+            moved += 1;
             if self.status.progress_state == ProgressState::Probe {
                 self.pause();
                 break;
             }
         }
         self.status.append_queue_depth = self.append_queue.len() as u64;
-        flushed.len() - before
+        moved
     }
 
     /// Flushes into a fresh vector.
