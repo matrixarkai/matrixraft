@@ -2983,6 +2983,38 @@ fn raft_node_runtime_loop(options: NodeOptions, command_rx: mpsc::Receiver<NodeR
     }
 }
 
+/// Whether this error means the group cannot be trusted to carry on, as
+/// against having refused something it was right to refuse.
+///
+/// Only a storage error qualifies. The other six variants are all a node
+/// declining to do something: a write sent to a follower (`NotLeader`), one
+/// sent while an election is running (`NoLeader`), a caller naming a node that
+/// is not there (`NodeNotFound`), a request over `max_payload_bytes` or past a
+/// queue depth (`InvalidRequest`), a misconfiguration caught at build time
+/// (`Config`), and a send that did not arrive (`Transport`, which the next
+/// heartbeat retries). A node that refuses those is working.
+///
+/// A storage error is different in kind: the group asked for something to be
+/// made durable and it was not. That is the one condition the comparable
+/// engine treats as fatal -- it fires its fatal event from a failed log write
+/// and from an apply its state machine cannot perform -- and after it the
+/// node's in-memory state is ahead of what survives a restart.
+///
+/// Everything that reaches this is still recorded as an ordinary blocker, so
+/// nothing is hidden; what changes is the **severity**, and with it
+/// `FatalBlockerReport::fatal`.
+fn error_is_unrecoverable(error: &RaftError) -> bool {
+    match error {
+        RaftError::Storage(_) => true,
+        RaftError::Config(_)
+        | RaftError::NodeNotFound(_)
+        | RaftError::NoLeader
+        | RaftError::NotLeader(_)
+        | RaftError::InvalidRequest(_)
+        | RaftError::Transport(_) => false,
+    }
+}
+
 fn record_runtime_result<T>(
     operation: &str,
     result: Result<T, RaftError>,
@@ -2993,7 +3025,13 @@ fn record_runtime_result<T>(
     if let Err(error) = &result {
         let blocker = format!("{operation}:{error}");
         blockers.push(blocker.clone());
-        if fatal_on_error {
+        // Both gates, so this can only ever narrow what was fatal before: the
+        // operation has to be one that is allowed to be fatal *and* the error
+        // has to be one that is. Without the second gate every errored step
+        // was fatal, so 25 writes sent to a follower left a node reporting
+        // `fatal=true` with 25 fatal blockers -- and `ready` false for good,
+        // because nothing empties these.
+        if fatal_on_error && error_is_unrecoverable(error) {
             fatal_blockers.push(blocker);
         }
     }
