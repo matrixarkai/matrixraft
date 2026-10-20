@@ -2009,38 +2009,43 @@ mod fatal_error_classification_tests {
 
     #[test]
     fn a_refusal_is_recorded_as_a_blocker_but_not_as_a_fatal_one() {
-        let mut blockers = Vec::new();
-        let mut fatal_blockers = Vec::new();
+        let mut log = RuntimeBlockerLog::default();
         let result: Result<(), RaftError> =
-            record_runtime_result("propose", Err(RaftError::NotLeader(1)), &mut blockers, &mut fatal_blockers, true);
+            record_runtime_result("propose", Err(RaftError::NotLeader(1)), &mut log, true);
         assert!(result.is_err(), "the error still reaches the caller");
-        assert_eq!(blockers.len(), 1, "nothing is hidden: it is still a blocker");
-        assert!(
-            fatal_blockers.is_empty(),
-            "a write sent to a follower is not a fatal event: {fatal_blockers:?}"
+        assert_eq!(
+            log.blockers.len(),
+            1,
+            "nothing is hidden: it is still a blocker"
         );
+        assert_eq!(log.blockers_seen, 1, "and it is counted");
+        assert!(
+            log.fatal_blockers.is_empty(),
+            "a write sent to a follower is not a fatal event: {:?}",
+            log.fatal_blockers
+        );
+        assert_eq!(log.fatal_blockers_seen, 0);
     }
 
     #[test]
     fn a_storage_failure_is_still_recorded_as_fatal() {
         // The positive control for the test above. `fatal_on_error` is passed
         // true here exactly as the step and propose paths pass it.
-        let mut blockers = Vec::new();
-        let mut fatal_blockers = Vec::new();
+        let mut log = RuntimeBlockerLog::default();
         let result: Result<(), RaftError> = record_runtime_result(
             "propose",
             Err(RaftError::Storage("wal append failed".to_string())),
-            &mut blockers,
-            &mut fatal_blockers,
+            &mut log,
             true,
         );
         assert!(result.is_err());
-        assert_eq!(blockers.len(), 1);
+        assert_eq!(log.blockers.len(), 1);
         assert_eq!(
-            fatal_blockers.len(),
+            log.fatal_blockers.len(),
             1,
             "a failed durable write is the one thing this severity is for"
         );
+        assert_eq!(log.fatal_blockers_seen, 1);
     }
 
     #[test]
@@ -2048,20 +2053,128 @@ mod fatal_error_classification_tests {
         // The two gates are independent, and this is the one the error kind
         // must not override: `fatal_on_step_error` is false for install
         // snapshot, read index and membership, and narrowing must not widen.
-        let mut blockers = Vec::new();
-        let mut fatal_blockers = Vec::new();
+        let mut log = RuntimeBlockerLog::default();
         let result: Result<(), RaftError> = record_runtime_result(
             "install_snapshot",
             Err(RaftError::Storage("write failed".to_string())),
-            &mut blockers,
-            &mut fatal_blockers,
+            &mut log,
             false,
         );
         assert!(result.is_err());
-        assert_eq!(blockers.len(), 1);
+        assert_eq!(log.blockers.len(), 1);
         assert!(
-            fatal_blockers.is_empty(),
-            "the operation gate still decides first: {fatal_blockers:?}"
+            log.fatal_blockers.is_empty(),
+            "the operation gate still decides first: {:?}",
+            log.fatal_blockers
         );
+    }
+}
+
+#[cfg(test)]
+mod retained_blocker_window_tests {
+    use super::*;
+
+    /// Blockers were kept for the life of the group and never emptied. On a
+    /// release build, a node handed writes it has to refuse:
+    ///
+    /// | refused | retained | string bytes | `status()` |
+    /// |---|---|---|---|
+    /// | 100 | 100 | 9,900 | 104us |
+    /// | 20,000 | 20,000 | 1,980,000 | 6,860us |
+    ///
+    /// About 99 bytes an entry and `status()` 66x slower, per group, in a store
+    /// that runs thousands. The tick path pushed too -- including on a
+    /// *successful* pre-vote -- so an idle group accumulated one per tick.
+    #[test]
+    fn the_retained_window_stops_growing_but_the_count_does_not() {
+        let mut log = RuntimeBlockerLog::default();
+        let recorded = MATRIXRAFT_RETAINED_BLOCKER_LIMIT * 3 + 7;
+        for index in 0..recorded {
+            log.record(format!("refusal:{index}"), false);
+        }
+
+        assert_eq!(
+            log.blockers.len(),
+            MATRIXRAFT_RETAINED_BLOCKER_LIMIT,
+            "the window is what bounds the memory"
+        );
+        assert_eq!(
+            log.blockers_seen, recorded as u64,
+            "and the total is what keeps the volume readable: {recorded} happened"
+        );
+    }
+
+    #[test]
+    fn the_window_keeps_the_most_recent_rather_than_the_first() {
+        // What is wrong now diagnoses better than what was wrong first, and a
+        // window that kept the first would freeze at a group's start-up noise.
+        let mut log = RuntimeBlockerLog::default();
+        for index in 0..MATRIXRAFT_RETAINED_BLOCKER_LIMIT + 10 {
+            log.record(format!("refusal:{index}"), false);
+        }
+        let last = MATRIXRAFT_RETAINED_BLOCKER_LIMIT + 9;
+        assert_eq!(
+            log.blockers.last().map(String::as_str),
+            Some(format!("refusal:{last}").as_str()),
+            "the newest has to be there"
+        );
+        assert!(
+            !log.blockers.iter().any(|blocker| blocker == "refusal:0"),
+            "and the oldest has to have gone"
+        );
+    }
+
+    #[test]
+    fn the_fatal_window_is_bounded_on_its_own() {
+        // Both vectors grow, so bounding one and not the other would leave the
+        // leak behind a storage failure that keeps failing.
+        let mut log = RuntimeBlockerLog::default();
+        let recorded = MATRIXRAFT_RETAINED_BLOCKER_LIMIT * 2;
+        for index in 0..recorded {
+            log.record(format!("storage:{index}"), true);
+        }
+        assert_eq!(log.fatal_blockers.len(), MATRIXRAFT_RETAINED_BLOCKER_LIMIT);
+        assert_eq!(log.fatal_blockers_seen, recorded as u64);
+        assert_eq!(
+            log.blockers_seen, recorded as u64,
+            "a fatal blocker is an ordinary one too, so both totals move"
+        );
+    }
+
+    #[test]
+    fn a_report_from_a_bounded_window_says_how_many_it_has_not_shown() {
+        let mut log = RuntimeBlockerLog::default();
+        let recorded = MATRIXRAFT_RETAINED_BLOCKER_LIMIT + 500;
+        for index in 0..recorded {
+            log.record(format!("refusal:{index}"), false);
+        }
+        let report = matrixraft_fatal_blocker_report_with_totals(
+            "test",
+            log.blockers.clone(),
+            log.fatal_blockers.clone(),
+            log.blockers_seen,
+            log.fatal_blockers_seen,
+        );
+        assert_eq!(report.blocker_count, MATRIXRAFT_RETAINED_BLOCKER_LIMIT as u64);
+        assert_eq!(report.blockers_seen, recorded as u64);
+        assert!(
+            !report.ready,
+            "what the report MEANS is unchanged: anything refused still leaves it not ready"
+        );
+    }
+
+    #[test]
+    fn a_report_from_an_unbounded_source_says_seen_equals_shown() {
+        // Every other caller of the plain constructor retains everything, so
+        // its totals have to agree with its list rather than read as zero.
+        let report = matrixraft_fatal_blocker_report(
+            "test",
+            vec!["one".to_string(), "two".to_string()],
+            vec!["two".to_string()],
+        );
+        assert_eq!(report.blocker_count, 2);
+        assert_eq!(report.blockers_seen, 2);
+        assert_eq!(report.fatal_count, 1);
+        assert_eq!(report.fatal_blockers_seen, 1);
     }
 }

@@ -1453,8 +1453,7 @@ struct NodeCore {
     /// that needs an owned copy is `RuntimeTimerStatus`, which is built when
     /// somebody asks for status rather than on a tick.
     last_tick_reason: &'static str,
-    blockers: Vec<String>,
-    fatal_blockers: Vec<String>,
+    blocker_log: RuntimeBlockerLog,
     membership_executor: MembershipExecutor,
     /// A command drained by proposal coalescing that turned out not to be a
     /// proposal; processed first next time round, untouched.
@@ -1551,8 +1550,7 @@ impl NodeCore {
     let campaign_executions = 0;
     let leader_transfer_executions = 0_u64;
     let last_tick_reason = "runtime_created";
-    let blockers = Vec::<String>::new();
-    let fatal_blockers = Vec::<String>::new();
+    let blocker_log = RuntimeBlockerLog::default();
     let membership_executor = MembershipExecutor::new();
     // A command drained by proposal coalescing that turned out not to be a
     // proposal; processed first on the next iteration, untouched.
@@ -1578,8 +1576,7 @@ impl NodeCore {
             campaign_executions,
             leader_transfer_executions,
             last_tick_reason,
-            blockers,
-            fatal_blockers,
+            blocker_log,
             membership_executor,
             carried_command,
             command_rx,
@@ -1605,8 +1602,7 @@ impl NodeCore {
             campaign_executions,
             leader_transfer_executions,
             last_tick_reason,
-            blockers,
-            fatal_blockers,
+            blocker_log,
             ..
         } = self;
         let node_id = *node_id;
@@ -1620,7 +1616,7 @@ impl NodeCore {
                     let _ = cluster.mark_peer_active(node_id);
                     if cluster.leader_id() == Some(node_id) {
                         for peer_id in cluster.tick_peer_liveness(heartbeat_interval_ms) {
-                            blockers.push(format!("peer_offline_timeout:{peer_id}"));
+                            blocker_log.record(format!("peer_offline_timeout:{peer_id}"), false);
                         }
                     }
                     let received_live_leader_heartbeat =
@@ -1638,7 +1634,7 @@ impl NodeCore {
                                     .unwrap_or(false)
                         });
                     if let Err(error) = cluster.broadcast_heartbeat() {
-                        blockers.push(format!("broadcast_heartbeat:{error}"));
+                        blocker_log.record(format!("broadcast_heartbeat:{error}"), false);
                     }
                     if received_live_leader_heartbeat {
                         *election_elapsed_ms = 0;
@@ -1649,7 +1645,7 @@ impl NodeCore {
                     let _ = cluster
                         .tick_reorder_queues_for_heartbeat(heartbeat_interval_ms);
                     if !cluster.leader_lease_valid && cluster.step_down_leader_if_lost_quorum() {
-                        blockers.push("lost_quorum_step_down".to_string());
+                        blocker_log.record("lost_quorum_step_down".to_string(), false);
                     }
                     *last_tick_reason = "heartbeat_tick";
                     // The default policy for the decision
@@ -1661,7 +1657,7 @@ impl NodeCore {
                     if cluster.snapshot_is_due() {
                         match cluster.trigger_snapshot() {
                             Ok(_) => *last_tick_reason = "snapshot_due_tick",
-                            Err(error) => blockers.push(format!("snapshot_due:{error}")),
+                            Err(error) => blocker_log.record(format!("snapshot_due:{error}"), false),
                         }
                     }
                     if cluster.tick_snapshot_trigger() {
@@ -1669,7 +1665,7 @@ impl NodeCore {
                             .snapshot_trigger_status()
                             .snapshot_id
                             .unwrap_or_else(|| "unknown".to_string());
-                        blockers.push(format!("snapshot_trigger_timeout:{snapshot_id}"));
+                        blocker_log.record(format!("snapshot_trigger_timeout:{snapshot_id}"), false);
                     }
                     let lagging_peers = cluster
                         .nodes
@@ -1684,11 +1680,11 @@ impl NodeCore {
                         .collect::<Vec<_>>();
                     for peer_id in lagging_peers {
                         if let Err(error) = cluster.catch_up_peer(peer_id) {
-                            blockers.push(format!("peer_catchup:{peer_id}:{error}"));
+                            blocker_log.record(format!("peer_catchup:{peer_id}:{error}"), false);
                         }
                     }
                     if let Err(error) = cluster.broadcast_commit_index_to_old_paused_peers() {
-                        blockers.push(format!("old_paused_commit_broadcast:{error}"));
+                        blocker_log.record(format!("old_paused_commit_broadcast:{error}"), false);
                     }
                     if cluster.leader_transfer_state().is_some() {
                         match cluster.try_complete_leader_transfer() {
@@ -1698,10 +1694,10 @@ impl NodeCore {
                             }
                             Ok(false) => {
                                 if cluster.tick_leader_transfer() {
-                                    blockers.push("leader_transfer_timeout".to_string());
+                                    blocker_log.record("leader_transfer_timeout".to_string(), false);
                                 }
                             }
-                            Err(error) => blockers.push(format!("leader_transfer:{error}")),
+                            Err(error) => blocker_log.record(format!("leader_transfer:{error}"), false),
                         }
                     }
                     if *election_elapsed_ms >= election_timeout_ms {
@@ -1745,14 +1741,13 @@ impl NodeCore {
                                     let result = record_runtime_result(
                                         "election_tick_campaign",
                                         cluster.campaign(node_id, false),
-                                        blockers,
-                                        fatal_blockers,
+                                        blocker_log,
                                         false,
                                     );
                                     let _ = result;
                                 }
-                                Ok(vote) => blockers.push(format!("pre_vote:{}", vote.reason)),
-                                Err(error) => blockers.push(format!("pre_vote:{error}")),
+                                Ok(vote) => blocker_log.record(format!("pre_vote:{}", vote.reason), false),
+                                Err(error) => blocker_log.record(format!("pre_vote:{error}"), false),
                             }
                         } else if lease_expired
                             && (local_replica_role == Some(ReplicaRole::Witness)
@@ -1801,8 +1796,7 @@ impl NodeCore {
             campaign_executions,
             leader_transfer_executions,
             last_tick_reason,
-            blockers,
-            fatal_blockers,
+            blocker_log,
             membership_executor,
             carried_command,
             command_rx,
@@ -1885,8 +1879,7 @@ impl NodeCore {
                         let _ = reply.send(record_runtime_result(
                             "propose",
                             result,
-                            blockers,
-                            fatal_blockers,
+                            blocker_log,
                             true,
                         ));
                     }
@@ -1905,8 +1898,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "start",
                     result,
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     false,
                 ));
             }
@@ -1918,8 +1910,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "stop",
                     result,
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     false,
                 ));
             }
@@ -1953,10 +1944,12 @@ impl NodeCore {
                         *heartbeat_ticks > 0,
                         *pre_vote_executions > 0,
                     ),
-                    fatal_blocker_report: matrixraft_fatal_blocker_report(
+                    fatal_blocker_report: matrixraft_fatal_blocker_report_with_totals(
                         "raft_node_runtime",
-                        blockers.clone(),
-                        fatal_blockers.clone(),
+                        blocker_log.blockers.clone(),
+                        blocker_log.fatal_blockers.clone(),
+                        blocker_log.blockers_seen,
+                        blocker_log.fatal_blockers_seen,
                     ),
                 };
                 let _ = reply.send(Ok(status));
@@ -1999,8 +1992,7 @@ impl NodeCore {
                 };
                 if let Some((node_id, reason)) = &fatal_event {
                     let blocker = format!("fatal_event:{node_id}:{reason}");
-                    blockers.push(blocker.clone());
-                    fatal_blockers.push(blocker);
+                    blocker_log.record(blocker, true);
                 }
                 let fatal_on_step_error = !matches!(
                     &message,
@@ -2049,8 +2041,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     operation_name,
                     result,
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     fatal_on_step_error,
                 ));
             }
@@ -2142,8 +2133,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "step_batch",
                     result,
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     true,
                 ));
             }
@@ -2164,8 +2154,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "read_index",
                     result,
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     false,
                 ));
             }
@@ -2183,8 +2172,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "bounded_stale_read_index",
                     cluster.read_path_report(request, max_stale_index_lag),
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     false,
                 ));
             }
@@ -2192,8 +2180,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "membership_workflow_with_rollback",
                     membership_executor.execute_all_with_rollback(cluster, operations),
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     false,
                 ));
             }
@@ -2204,8 +2191,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "install_snapshot",
                     cluster.install_snapshot_to(target, snapshot, fence),
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     false,
                 ));
             }
@@ -2213,8 +2199,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "peer_pipeline_status",
                     cluster.peer_pipeline_status(peer_id),
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     false,
                 ));
             }
@@ -2222,8 +2207,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "peer_pipeline_statuses",
                     Ok(cluster.peer_pipeline_statuses()),
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     false,
                 ));
             }
@@ -2231,8 +2215,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "is_busy",
                     Ok(cluster.is_busy()),
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     false,
                 ));
             }
@@ -2250,8 +2233,7 @@ impl NodeCore {
                 let _ = reply.send(record_runtime_result(
                     "shutdown",
                     result,
-                    blockers,
-                    fatal_blockers,
+                    blocker_log,
                     false,
                 ));
                 return ControlFlow::Break(());
@@ -3015,25 +2997,83 @@ fn error_is_unrecoverable(error: &RaftError) -> bool {
     }
 }
 
+/// Blockers a group retains, and how many it has seen.
+///
+/// The two vectors used to grow for the life of the group: `record_runtime_result`
+/// only ever pushed and nothing emptied them. Measured on a release build, a
+/// node handed writes it has to refuse because it is not the leader:
+///
+/// | refused | retained | string bytes | `status()` |
+/// |---|---|---|---|
+/// | 100 | 100 | 9,900 | 104us |
+/// | 1,000 | 1,000 | 99,000 | 427us |
+/// | 5,000 | 5,000 | 495,000 | 1,753us |
+/// | 20,000 | 20,000 | 1,980,000 | 6,860us |
+///
+/// About 99 bytes retained per refused request, and `status()` 66x slower at
+/// the end of that -- because it clones both vectors whole and then builds a
+/// `Blocker` with two `format!`s for each entry. Per group, and a store runs
+/// thousands of them.
+///
+/// So the window is bounded and the totals are counted. What is **not** changed
+/// is what the report means: `ready` is still `blockers.is_empty()` and so still
+/// false once anything has been refused, because
+/// `node_runtime_executes_prevote_and_reports_blockers_from_runtime_tasks` pins
+/// that deliberately -- these are a record of what the runtime's tasks did, not
+/// a description of the group right now. Keeping the most recent rather than the
+/// first follows from the same reading: what is wrong now diagnoses better than
+/// what was wrong first.
+#[derive(Debug, Default)]
+struct RuntimeBlockerLog {
+    blockers: Vec<String>,
+    fatal_blockers: Vec<String>,
+    blockers_seen: u64,
+    fatal_blockers_seen: u64,
+}
+
+/// How many blockers of each kind a group keeps.
+///
+/// At about 99 bytes an entry this is roughly 13KB a group, which leaves
+/// `status()` near the 104us it costs with no history at all. Large enough that
+/// a burst of related failures is still all there when somebody reads it.
+const MATRIXRAFT_RETAINED_BLOCKER_LIMIT: usize = 128;
+
+impl RuntimeBlockerLog {
+    fn record(&mut self, blocker: String, fatal: bool) {
+        self.blockers_seen = self.blockers_seen.saturating_add(1);
+        if fatal {
+            self.fatal_blockers_seen = self.fatal_blockers_seen.saturating_add(1);
+            Self::push_bounded(&mut self.fatal_blockers, blocker.clone());
+        }
+        Self::push_bounded(&mut self.blockers, blocker);
+    }
+
+    fn push_bounded(retained: &mut Vec<String>, blocker: String) {
+        if retained.len() >= MATRIXRAFT_RETAINED_BLOCKER_LIMIT {
+            // One at a time, because exactly one is about to go in. `remove(0)`
+            // is a move of at most 128 pointers and happens only once the
+            // window is full.
+            retained.remove(0);
+        }
+        retained.push(blocker);
+    }
+}
+
 fn record_runtime_result<T>(
     operation: &str,
     result: Result<T, RaftError>,
-    blockers: &mut Vec<String>,
-    fatal_blockers: &mut Vec<String>,
+    blocker_log: &mut RuntimeBlockerLog,
     fatal_on_error: bool,
 ) -> Result<T, RaftError> {
     if let Err(error) = &result {
         let blocker = format!("{operation}:{error}");
-        blockers.push(blocker.clone());
         // Both gates, so this can only ever narrow what was fatal before: the
         // operation has to be one that is allowed to be fatal *and* the error
         // has to be one that is. Without the second gate every errored step
         // was fatal, so 25 writes sent to a follower left a node reporting
         // `fatal=true` with 25 fatal blockers -- and `ready` false for good,
         // because nothing empties these.
-        if fatal_on_error && error_is_unrecoverable(error) {
-            fatal_blockers.push(blocker);
-        }
+        blocker_log.record(blocker, fatal_on_error && error_is_unrecoverable(error));
     }
     result
 }
