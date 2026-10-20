@@ -1719,6 +1719,31 @@ impl RaftCluster {
         Ok(range.serves(next_index))
     }
 
+    /// The lowest index any member still needs, counting members that are
+    /// currently unreachable.
+    ///
+    /// [`RaftCluster::min_replicated_index`] skips unhealthy peers, which is
+    /// right for deciding what is replicated *now* and wrong for deciding what
+    /// may be discarded: an unreachable follower comes back, and if its entries
+    /// are gone it has to be sent a snapshot. When
+    /// `can_trigger_snapshot` is false no snapshot can be produced, so those
+    /// entries are the only way to serve it and the floor has to include it.
+    fn min_index_any_member_needs(&self, leader_id: NodeId) -> Result<LogIndex, RaftError> {
+        let leader = self
+            .nodes
+            .get(&leader_id)
+            .ok_or(RaftError::NodeNotFound(leader_id))?;
+        let mut lowest = leader.safety_applied_index;
+        if leader.raft_role == StateRole::Leader {
+            for peer in self.nodes.values() {
+                if peer.id != leader_id && peer.replica_role.can_serve_data() {
+                    lowest = lowest.min(peer.match_index());
+                }
+            }
+        }
+        Ok(lowest)
+    }
+
     pub fn min_replicated_index(
         &self,
         node_id: NodeId,
@@ -5385,6 +5410,12 @@ impl RaftCluster {
     /// lagging follower -- which then recovers by snapshot, the path a follower
     /// below the retained floor already takes.
     ///
+    /// The second tier is available only when `can_trigger_snapshot` is set.
+    /// Without it the engine cannot ask the state machine for a snapshot, so a
+    /// follower whose entries were released could never be served again -- the
+    /// complete log has to be kept. That is why the option is safe to turn on
+    /// and not safe to turn back off.
+    ///
     /// Without the second tier a follower that was away and came back behind
     /// pins the minimum and nothing can be released, while `is_busy` refuses
     /// proposals over the same limit: measured at 27 of 30 writes refused with
@@ -5410,8 +5441,23 @@ impl RaftCluster {
         // looser than either.
         let mut leader_limit = None;
         let release_index = if let Some(leader_id) = self.leader_id {
-            let replicated = self.min_replicated_index(leader_id)?;
-            if self.should_release_memory() {
+            // Which floor applies depends on whether a snapshot can rescue a
+            // follower whose entries go. When it cannot, an unreachable member
+            // still counts, because the log is the only way it will ever be
+            // served.
+            let replicated = if self.config.can_trigger_snapshot {
+                self.min_replicated_index(leader_id)?
+            } else {
+                self.min_index_any_member_needs(leader_id)?
+            };
+            // The second tier needs a snapshot to be possible. With
+            // `can_trigger_snapshot` off the engine cannot ask the state
+            // machine for one -- only the host can send one -- so a follower
+            // whose entries were released can never be served again, and the
+            // complete log has to be kept at every moment. Accepting the write
+            // stall is the lesser harm: a stall ends when the follower catches
+            // up, and an unrecoverable follower does not.
+            if self.should_release_memory() && self.config.can_trigger_snapshot {
                 let applied = self
                     .nodes
                     .get(&leader_id)

@@ -157,3 +157,49 @@ fn without_pressure_the_log_is_kept_for_the_lagging_follower() {
         behind_at.saturating_add(1)
     );
 }
+
+#[test]
+fn a_cluster_that_cannot_trigger_a_snapshot_keeps_the_log_for_the_follower() {
+    // The second tier trades a lagging follower's entries for the leader's
+    // writes, and the follower recovers by snapshot. With
+    // `can_trigger_snapshot` off the engine cannot produce one -- only the host
+    // can send it -- so releasing those entries strands the follower for good.
+    // The write stall is the lesser harm: it ends when the follower catches up.
+    let mut cluster = RaftCluster::new(
+        7,
+        Config {
+            max_log_buffer_bytes: 4 * 1024,
+            max_payload_bytes: 1024,
+            can_trigger_snapshot: false,
+            ..Config::default()
+        },
+        vec![peer(1), peer(2), peer(3)],
+    )
+    .expect("valid cluster");
+    cluster.start().expect("cluster starts");
+    let leader = cluster.leader_id().expect("leader");
+    leader_with_a_follower_left_behind(&mut cluster);
+
+    let payload = vec![b'x'; PAYLOAD_BYTES];
+    for _ in 0..20 {
+        let _ = cluster.propose(payload.clone());
+        let eligible = cluster.status(leader).expect("status").applied_index;
+        let _ = cluster.submit_apply_result(leader, eligible, false);
+    }
+    assert!(
+        cluster.should_release_memory(),
+        "the buffer has to be under pressure for this to be about anything"
+    );
+
+    cluster.release_memory().expect("release memory");
+
+    assert!(
+        cluster
+            .peer_can_catch_up_from_log(3)
+            .expect("peer 3 answers"),
+        "with no way to trigger a snapshot the follower's entries have to stay: \
+         range {:?}, follower match {}",
+        cluster.retained_log_range(leader).expect("range"),
+        cluster.peer_pipeline_status(3).expect("peer 3").match_index
+    );
+}
