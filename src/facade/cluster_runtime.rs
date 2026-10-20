@@ -4419,6 +4419,34 @@ impl RaftCluster {
             .catchup_report(learner_id, node.match_index(), self.commit_index))
     }
 
+    /// [`matrixraft_learner_promotion_estimate`] for `learner_id`, with the
+    /// leader's last index and the configured election timeout filled in.
+    ///
+    /// The turn is the caller's measurement, because the turn is the caller's:
+    /// it decided when to start catching this learner up and when to ask. The
+    /// alternative is three more fields on every node of every group to
+    /// remember a window the host already has.
+    pub fn learner_promotion_estimate(
+        &self,
+        learner_id: NodeId,
+        turn_entries: u64,
+        turn_elapsed_ms: u64,
+    ) -> Result<LearnerPromotionEstimate, RaftError> {
+        let node = self
+            .nodes
+            .get(&learner_id)
+            .ok_or(RaftError::NodeNotFound(learner_id))?;
+        Ok(matrixraft_learner_promotion_estimate(
+            learner_id,
+            node.replica_role == ReplicaRole::Learner,
+            node.match_index(),
+            self.last_log_index,
+            turn_entries,
+            turn_elapsed_ms,
+            self.config.election_timeout_ms,
+        ))
+    }
+
     pub fn learner_catch_up_loop(
         &mut self,
         learner_id: NodeId,

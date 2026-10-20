@@ -149,10 +149,12 @@ pub use mailbox::{
     MATRIXRAFT_MAILBOX_MAX_TIMEOUT_MS,
 };
 pub use membership::{
-    matrixraft_learner_promotion_decision, matrixraft_membership_readiness_report,
-    matrixraft_membership_semantics_evidence_artifact, matrixraft_membership_transition_missing,
+    matrixraft_learner_promotion_decision, matrixraft_learner_promotion_estimate,
+    matrixraft_membership_readiness_report, matrixraft_membership_semantics_evidence_artifact,
+    matrixraft_membership_transition_missing,
     matrixraft_validate_membership_semantics_evidence_artifact, LearnerAutoPromoteReport,
-    LearnerAutoPromoteState, LearnerCatchUpLoopReport, WitnessQuorumReport,
+    LearnerAutoPromoteState, LearnerCatchUpLoopReport, LearnerPromotionEstimate,
+    WitnessQuorumReport,
 };
 pub use metrics::{
     matrixraft_alert_rules, matrixraft_alert_rules_json, matrixraft_debug_bundle_contract,
