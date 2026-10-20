@@ -203,6 +203,13 @@ fn matrixraft_builders_capture_node_group_transport_and_option_shape() {
             // The options' own flag, which gates the entry-threshold snapshot
             // decision. It reached only snapshot_recycle_options before.
             can_trigger_snapshot: true,
+            // The two tick-valued timeouts, which reached nothing at all
+            // before: a transfer timed out on the election interval and so did
+            // a peer going quiet. Both differ from each other AND from the
+            // derived 500 / 100 = 5, so a mapping that reads the wrong source
+            // or still derives is visible here.
+            leader_transfer_timeout_ticks: 3,
+            peer_offline_timeout_ticks: 10,
             // The options' own pipeline conversion, which a cluster built from
             // this config now uses for every peer. It reached only
             // MatrixRaftNode before.

@@ -112,6 +112,29 @@ fn the_settings_the_readme_calls_inert_really_reach_nothing() {
     );
 }
 
+/// The marker names five settings, and dropping one is not a silent act.
+///
+/// The two tests either side of this check what the list *claims* -- that each
+/// name reaches nothing, and that each name is a real field. Neither notices a
+/// name being removed, so a shortfall could be undocumented again by deleting
+/// a word. This cannot say which settings belong on the list, and does not
+/// try: that judgement is the one this file declines to automate. It says only
+/// that the list is the length someone last decided it should be.
+#[test]
+fn the_inert_settings_marker_is_the_length_it_was_last_decided_to_be() {
+    let claimed = settings_the_readme_calls_inert();
+    assert_eq!(
+        claimed.len(),
+        5,
+        "the README's `inert-settings` marker names {} settings rather than 5: \
+         {claimed:?}.\n\nThree are on `MatrixRaftGroupContext` and two on \
+         `MatrixRaftOptions`. Removing one means a setting became live -- say so \
+         in the settings section -- or that a documented shortfall is being \
+         undocumented, which is the thing to stop. Then update this count.",
+        claimed.len()
+    );
+}
+
 #[test]
 fn every_setting_the_readme_calls_inert_is_a_real_one() {
     // The other direction: a name that no longer exists, or never did,
@@ -167,6 +190,45 @@ fn a_new_context_setting_has_to_be_considered_for_the_list() {
         "`MatrixRaftGroupContext` now has {} settings rather than 21, so one was          added or removed: {fields:?}.
 
 If the new one reaches nothing, add it to          the README's `inert-settings` marker. If it reaches something, the README's          settings section should say so. Then update this count.",
+        fields.len()
+    );
+}
+
+/// The same pin on `MatrixRaftOptions`, which had none.
+///
+/// Three tests guarded the context and nothing guarded this struct, so four of
+/// its settings were recorded-only while they all passed -- including two that
+/// named timeouts the engine ran off a different setting entirely. A count
+/// cannot decide which settings are live, and does not try to; it stops a new
+/// one being added without anyone deciding.
+#[test]
+fn a_new_options_setting_has_to_be_considered_for_the_list() {
+    let compat = include_str!("../src/facade/matrixraft_compat.rs");
+    let start = compat
+        .find("pub struct MatrixRaftOptions {")
+        .expect("the options struct moved");
+    let body = &compat[start..];
+    let open = body.find('{').expect("no opening brace");
+    let end = body
+        .find(
+            "
+}",
+        )
+        .expect("unterminated struct");
+    let fields: Vec<&str> = body[open..end]
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("pub "))
+        .filter_map(|rest| rest.split(':').next())
+        .filter(|name| !name.contains(' '))
+        .collect();
+
+    assert_eq!(
+        fields.len(),
+        31,
+        "`MatrixRaftOptions` now has {} settings rather than 31, so one was \
+         added or removed: {fields:?}.\n\nIf the new one reaches nothing, add it \
+         to the README's `inert-settings` marker. If it reaches something, the \
+         README's settings section should say so. Then update this count.",
         fields.len()
     );
 }

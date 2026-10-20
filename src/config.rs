@@ -52,6 +52,35 @@ pub struct Config {
     /// snapshot happens only when a host asks for one.
     #[serde(default = "default_can_trigger_snapshot")]
     pub can_trigger_snapshot: bool,
+    /// How many ticks a leader transfer may run before it is abandoned.
+    ///
+    /// Zero derives it from the election timeout, which is what `RaftCluster`
+    /// did unconditionally: `election_timeout_ms / heartbeat_interval_ms`. So
+    /// zero is the old behaviour rather than "no timeout".
+    ///
+    /// `MatrixRaftOptions::transfer_timeout_tick` is where a host sets this,
+    /// and until this field existed that setting reached nothing at all: it
+    /// was declared, defaulted, filled in by every example, and read nowhere,
+    /// while the transfer timed out on the election interval instead.
+    #[serde(default)]
+    pub leader_transfer_timeout_ticks: u32,
+    /// How many ticks a peer may go unheard before the leader marks it
+    /// offline.
+    ///
+    /// Zero means the election timeout, which is what `tick_peer_liveness`
+    /// used unconditionally.
+    ///
+    /// `MatrixRaftOptions::offline_timeout_tick` is where a host sets this,
+    /// and it had the same shape as the transfer timeout above: recorded by
+    /// the options struct, read by nothing, with the election interval
+    /// standing in for it.
+    ///
+    /// **A tick here, not a millisecond**, because that is the unit the
+    /// options struct uses and converting in two directions is how a unit
+    /// mismatch gets in. `RaftCluster::peer_offline_timeout_ms` is the one
+    /// place it becomes a duration.
+    #[serde(default)]
+    pub peer_offline_timeout_ticks: u32,
     /// The replication pipeline's limits for every peer a cluster built from
     /// this config holds.
     ///
@@ -107,6 +136,11 @@ impl Default for Config {
             enable_lease_read: true,
             assume_lease_when_start: true,
             can_trigger_snapshot: true,
+            // Zero is "derive it", which is what the engine did before either
+            // of these existed -- so a default-constructed Config behaves
+            // exactly as it used to.
+            leader_transfer_timeout_ticks: 0,
+            peer_offline_timeout_ticks: 0,
             pipeline: Box::default(),
         }
     }
