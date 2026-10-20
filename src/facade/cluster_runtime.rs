@@ -455,6 +455,32 @@ pub struct RaftCluster {
     stabled_membership_change_index: LogIndex,
     running: bool,
     leader_lease_valid: bool,
+    /// Set by [`RaftCluster::expire_leader_lease`], cleared by the next probe.
+    ///
+    /// Expiry needs a state of its own because `leader_lease_valid` is
+    /// recomputed from scratch on every tick and confirmation, so setting it
+    /// false does not stick. It used to be expressed by pinning
+    /// `leader_lease_elapsed_ms` to the full duration -- which made that field
+    /// mean both "how long ago the probe went out" and "expired", and a
+    /// confirmation dated from it after an expiry was born already elapsed.
+    ///
+    /// Dropping the confirmations is not enough on its own: in a single-voter
+    /// group the leader is its own quorum, so it would count itself and the
+    /// lease would survive its own expiry.
+    ///
+    /// Cleared by an epoch reset and by a renewal round -- the two events that
+    /// mean a probe has gone out -- and by an accepted confirmation, which is a
+    /// fresh promise.
+    ///
+    /// The renewal round's clearing and the confirmation's are the ones with
+    /// tests; the epoch reset's has none, and deliberately. A lone leader's
+    /// lease is not held by a tick alone, so the reset's clearing cannot be
+    /// observed without a renewal round, and the renewal round clears this
+    /// itself -- so the reset's clearing is worth at most one heartbeat of
+    /// lease reads after a leadership change. It stays because it is correct,
+    /// not because anything depends on it.
+    #[serde(default)]
+    leader_lease_expired: bool,
     #[serde(default)]
     leader_lease_elapsed_ms: u64,
     follower_lease_valid: bool,
@@ -599,6 +625,7 @@ impl RaftCluster {
             stabled_membership_change_index: 0,
             running: false,
             leader_lease_valid: false,
+            leader_lease_expired: false,
             leader_lease_elapsed_ms: 0,
             follower_lease_valid,
             follower_lease_elapsed_ms: 0,
@@ -1017,9 +1044,25 @@ impl RaftCluster {
         self.leader_lease_confirmation_epochs.clear();
     }
 
+    /// Declare the lease over.
+    ///
+    /// Expiry is an epoch bump with the confirmations dropped, which is the
+    /// same shape as a new probe: nothing is confirmed for the new epoch, so
+    /// `leader_lease_quorum_reached` cannot hold, and the next confirmation to
+    /// arrive is dated from this moment.
+    ///
+    /// It used to pin `leader_lease_elapsed_ms` to the full duration instead.
+    /// That made the field mean two things -- how long ago the probe went out,
+    /// and "expired" -- and a confirmation dated from it after an expiry was
+    /// born already elapsed.
+    ///
+    /// `leader_lease_confirmation_epochs` is **not** cleared: it is the
+    /// per-node monotonic counter that refuses a confirmation older than one
+    /// already seen, and that refusal has to survive an expiry. This is why it
+    /// does not simply call `reset_leader_lease_epoch`, which does clear it.
     pub fn expire_leader_lease(&mut self) {
         self.leader_lease_valid = false;
-        self.leader_lease_elapsed_ms = self.config.leader_lease_ms;
+        self.leader_lease_expired = true;
         self.leader_lease_confirmations.clear();
     }
 
@@ -1041,6 +1084,7 @@ impl RaftCluster {
 
     fn reset_leader_lease_epoch(&mut self) {
         self.leader_lease_epoch = self.leader_lease_epoch.saturating_add(1);
+        self.leader_lease_expired = false;
         self.leader_lease_elapsed_ms = 0;
         self.leader_lease_confirmations.clear();
         self.leader_lease_confirmation_epochs.clear();
@@ -1123,7 +1167,23 @@ impl RaftCluster {
             }
         }
 
-        self.leader_lease_elapsed_ms = 0;
+        // Dated from when this epoch's probe went out, not from now.
+        //
+        // A follower promises not to campaign for `duration_ms` from the moment
+        // it SAW the probe. Starting the clock here instead gives the leader
+        // `duration_ms` from the REPLY -- one round trip longer than was
+        // promised, and in that window a lease read is served against a promise
+        // that has already lapsed. Measured before this changed: a 120ms round
+        // trip against a 500ms lease held the lease for 620ms after the probe.
+        //
+        // `leader_lease_elapsed_ms` is the age of the current epoch, because
+        // the only things that zero it are the epoch bump and the start of a
+        // renewal round -- the two moments a probe goes out. The renewal path
+        // is unaffected: it zeroes this a few lines before recording the
+        // round's confirmations.
+        // An accepted confirmation is a fresh promise, so it lifts an expiry.
+        self.leader_lease_expired = false;
+        let probe_age_ms = self.leader_lease_elapsed_ms;
         self.leader_lease_confirmations.insert(
             node_id,
             LeaderLeaseConfirmation {
@@ -1131,7 +1191,7 @@ impl RaftCluster {
                 epoch: self.leader_lease_epoch,
                 confirmation_epoch,
                 duration_ms,
-                elapsed_ms: 0,
+                elapsed_ms: probe_age_ms,
             },
         );
         if recompute_quorum {
@@ -1168,6 +1228,7 @@ impl RaftCluster {
             return false;
         }
         self.leader_lease_epoch = self.leader_lease_epoch.saturating_add(1);
+        self.leader_lease_expired = false;
         self.leader_lease_elapsed_ms = 0;
         // The confirmations are **not** cleared, and the epoch bump above is
         // why they do not need to be: `leader_lease_quorum_reached` counts a
@@ -1196,6 +1257,9 @@ impl RaftCluster {
     }
 
     fn leader_lease_quorum_reached(&self) -> bool {
+        if self.leader_lease_expired {
+            return false;
+        }
         let Some(leader_id) = self.leader_id else {
             return false;
         };
