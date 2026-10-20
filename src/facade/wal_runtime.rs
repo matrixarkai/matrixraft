@@ -47,6 +47,31 @@ pub struct LocalRaftWal {
 }
 
 impl LocalRaftWal {
+    /// The highest committed index any record has persisted.
+    ///
+    /// Read off the records rather than stored, so an existing WAL document
+    /// loads unchanged and there is no second copy of the truth to drift.
+    /// Records are appended in order, so the last one carrying a committed
+    /// index carries the highest -- which is the invariant `append` enforces.
+    ///
+    /// The walk back over earlier segments is belt-and-braces: `append` reads
+    /// this before it rolls the segment, so the last segment always holds the
+    /// previous record and the loop never needs a second one. A plant that
+    /// limits it to the active segment survives the suite for that reason, and
+    /// is reported rather than given a contorted test.
+    fn persisted_commit_index(&self) -> LogIndex {
+        self.segments
+            .iter()
+            .rev()
+            .flat_map(|segment| segment.records.iter().rev())
+            .filter_map(|record| record.hard_state.committed.as_ref())
+            .map(|committed| committed.index)
+            .next()
+            .unwrap_or_default()
+    }
+}
+
+impl LocalRaftWal {
     pub fn new(max_records_per_segment: usize) -> Result<Self, RaftError> {
         if max_records_per_segment == 0 {
             return Err(RaftError::InvalidRequest(
@@ -68,6 +93,29 @@ impl LocalRaftWal {
     }
 
     pub fn append(&mut self, mut record: WalRecord) -> Result<String, RaftError> {
+        // The persisted committed index only ever moves forward.
+        //
+        // Recovery reads the latest valid record, so a record carrying a lower
+        // committed index than one already persisted un-commits entries that
+        // were committed -- and it inverts the segment's own bounds, leaving
+        // `first_index..=last_index` meaningless. Measured before this guard
+        // existed: appending 10 and then 4 left the segment reading
+        // `(first 10, last 4)` and recovery reading 4.
+        //
+        // Only the committed index is guarded. The record index that sets the
+        // segment bounds falls back to the last ENTRY index when a record
+        // carries no committed index, and that may legitimately move back: a
+        // record whose entries end lower than the previous record's is a
+        // truncation, and a truncated segment should say so.
+        if let Some(committed) = record.hard_state.committed.as_ref() {
+            let persisted = self.persisted_commit_index();
+            if committed.index < persisted {
+                return Err(RaftError::Storage(format!(
+                    "wal record commits index {} below the persisted {persisted}",
+                    committed.index
+                )));
+            }
+        }
         record.checksum = matrixraft_wal_checksum(&record);
         if self
             .segments
