@@ -1942,3 +1942,126 @@ mod tests {
         assert!(missing.contains(&"joint_quorum_commit_proven".to_string()));
     }
 }
+
+#[cfg(test)]
+mod fatal_error_classification_tests {
+    use super::*;
+
+    /// Every `RaftError` variant, and whether it is the group's fault or the
+    /// caller's.
+    ///
+    /// Exhaustive on purpose, and matched rather than listed: a new variant
+    /// added to `RaftError` stops this compiling until somebody decides which
+    /// side it falls on. A test that listed only the interesting variants
+    /// would let a new one default to whatever the classifier happened to do.
+    fn every_variant() -> Vec<(RaftError, bool)> {
+        let all = vec![
+            RaftError::Config("bad setting".to_string()),
+            RaftError::NodeNotFound(9),
+            RaftError::NoLeader,
+            RaftError::NotLeader(1),
+            RaftError::InvalidRequest("payload too large".to_string()),
+            RaftError::Transport("send failed".to_string()),
+            RaftError::Storage("write failed".to_string()),
+        ];
+        all.into_iter()
+            .map(|error| {
+                let unrecoverable = match &error {
+                    RaftError::Storage(_) => true,
+                    RaftError::Config(_)
+                    | RaftError::NodeNotFound(_)
+                    | RaftError::NoLeader
+                    | RaftError::NotLeader(_)
+                    | RaftError::InvalidRequest(_)
+                    | RaftError::Transport(_) => false,
+                };
+                (error, unrecoverable)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_a_storage_error_is_unrecoverable() {
+        for (error, expected) in every_variant() {
+            assert_eq!(
+                error_is_unrecoverable(&error),
+                expected,
+                "{error} is classified wrongly"
+            );
+        }
+    }
+
+    #[test]
+    fn exactly_one_variant_is_unrecoverable() {
+        // Guards the direction the loop above cannot: a classifier that
+        // answered true for everything would satisfy a test written only
+        // against the storage case, and one that answered false for
+        // everything would satisfy a test written only against the refusals.
+        let unrecoverable = every_variant()
+            .into_iter()
+            .filter(|(error, _)| error_is_unrecoverable(error))
+            .count();
+        assert_eq!(
+            unrecoverable, 1,
+            "exactly one of the seven variants means the group cannot carry on"
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_recorded_as_a_blocker_but_not_as_a_fatal_one() {
+        let mut blockers = Vec::new();
+        let mut fatal_blockers = Vec::new();
+        let result: Result<(), RaftError> =
+            record_runtime_result("propose", Err(RaftError::NotLeader(1)), &mut blockers, &mut fatal_blockers, true);
+        assert!(result.is_err(), "the error still reaches the caller");
+        assert_eq!(blockers.len(), 1, "nothing is hidden: it is still a blocker");
+        assert!(
+            fatal_blockers.is_empty(),
+            "a write sent to a follower is not a fatal event: {fatal_blockers:?}"
+        );
+    }
+
+    #[test]
+    fn a_storage_failure_is_still_recorded_as_fatal() {
+        // The positive control for the test above. `fatal_on_error` is passed
+        // true here exactly as the step and propose paths pass it.
+        let mut blockers = Vec::new();
+        let mut fatal_blockers = Vec::new();
+        let result: Result<(), RaftError> = record_runtime_result(
+            "propose",
+            Err(RaftError::Storage("wal append failed".to_string())),
+            &mut blockers,
+            &mut fatal_blockers,
+            true,
+        );
+        assert!(result.is_err());
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(
+            fatal_blockers.len(),
+            1,
+            "a failed durable write is the one thing this severity is for"
+        );
+    }
+
+    #[test]
+    fn an_operation_excluded_from_fatal_stays_excluded_even_for_a_storage_error() {
+        // The two gates are independent, and this is the one the error kind
+        // must not override: `fatal_on_step_error` is false for install
+        // snapshot, read index and membership, and narrowing must not widen.
+        let mut blockers = Vec::new();
+        let mut fatal_blockers = Vec::new();
+        let result: Result<(), RaftError> = record_runtime_result(
+            "install_snapshot",
+            Err(RaftError::Storage("write failed".to_string())),
+            &mut blockers,
+            &mut fatal_blockers,
+            false,
+        );
+        assert!(result.is_err());
+        assert_eq!(blockers.len(), 1);
+        assert!(
+            fatal_blockers.is_empty(),
+            "the operation gate still decides first: {fatal_blockers:?}"
+        );
+    }
+}
