@@ -412,6 +412,30 @@ impl MembershipProposalOutcome {
 /// covers it is durable. See
 /// [`RaftCluster::apply_eligible_through`] for why.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetainedLogRange {
+    /// The lowest index still in this node's log, or zero when it holds none.
+    pub first_log_index: LogIndex,
+    /// The highest index still in this node's log, or zero when it holds none.
+    pub last_log_index: LogIndex,
+    /// The snapshot floor. An index at or below this can only be served by a
+    /// snapshot, whatever the log holds.
+    pub installed_snapshot_index: LogIndex,
+}
+
+impl RetainedLogRange {
+    /// Whether `log_index` can be served from the log rather than a snapshot.
+    ///
+    /// An empty log serves nothing, which is why the emptiness check is not
+    /// folded into the comparison: `first_log_index` and `last_log_index` are
+    /// both zero then, and index zero is not a real entry.
+    pub fn serves(&self, log_index: LogIndex) -> bool {
+        self.first_log_index > 0
+            && log_index >= self.first_log_index
+            && log_index <= self.last_log_index
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApplyEligibility {
     /// The highest index the host may apply now. Equal to `commit_index` when
     /// nothing is held back.
@@ -1624,6 +1648,75 @@ impl RaftCluster {
             .get(&node_id)
             .ok_or(RaftError::NodeNotFound(node_id))?
             .safety_applied_index)
+    }
+
+    /// What `node_id`'s log still holds, and the snapshot floor beneath it.
+    ///
+    /// The decision this answers is whether a lagging peer can be caught up
+    /// from the log or has to be sent a snapshot -- see
+    /// [`RaftCluster::peer_can_catch_up_from_log`]. Compaction removes from the
+    /// front, so the last index alone does not answer it.
+    pub fn retained_log_range(
+        &self,
+        node_id: NodeId,
+    ) -> Result<RetainedLogRange, RaftError> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or(RaftError::NodeNotFound(node_id))?;
+        Ok(RetainedLogRange {
+            first_log_index: node
+                .log
+                .first()
+                .map(|entry| entry.log_id.index)
+                .unwrap_or_default(),
+            last_log_index: node
+                .log
+                .last()
+                .map(|entry| entry.log_id.index)
+                .unwrap_or_default(),
+            installed_snapshot_index: node
+                .installed_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.last_log_id.index)
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Whether `peer_id`'s next entry is still in the leader's log.
+    ///
+    /// False means a snapshot: the entry the peer needs has been compacted
+    /// away, which is what the second tier of
+    /// [`RaftCluster::release_memory`] does deliberately under memory
+    /// pressure. Asked of the leader's log, because that is what serves a
+    /// follower.
+    ///
+    /// Note what this does **not** let anyone check: that
+    /// [`RaftCluster::release_memory`]'s pressure tier floors at
+    /// `safety_applied_index` rather than `applied_index`. Those two coincide
+    /// in every reachable state -- `submit_apply_result` refuses a value below
+    /// the safety index, so the confirmed frontier cannot be held behind the
+    /// eligible one -- which makes the two equivalent there, not merely
+    /// indistinguishable. #186 recorded that as "no observable"; the range is
+    /// the observable, and the quantities are still the same number.
+    pub fn peer_can_catch_up_from_log(&self, peer_id: NodeId) -> Result<bool, RaftError> {
+        let Some(leader_id) = self.leader_id else {
+            return Ok(false);
+        };
+        let peer = self
+            .nodes
+            .get(&peer_id)
+            .ok_or(RaftError::NodeNotFound(peer_id))?;
+        let next_index = peer.match_index().saturating_add(1);
+        let range = self.retained_log_range(leader_id)?;
+        // A peer that needs nothing is trivially catchable. Without this the
+        // answer for a peer at the frontier is false -- its next index is one
+        // past the end -- which reads as "send it a snapshot" when there is
+        // nothing to send.
+        if next_index > range.last_log_index {
+            return Ok(true);
+        }
+        Ok(range.serves(next_index))
     }
 
     pub fn min_replicated_index(
