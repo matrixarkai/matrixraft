@@ -562,6 +562,18 @@ pub struct FatalBlockerReport {
     pub blockers: Vec<Blocker>,
     pub blocker_count: u64,
     pub fatal_count: u64,
+    /// Blockers recorded since the group started, which is not the same as
+    /// `blocker_count` once a source retains only its most recent ones.
+    ///
+    /// A node runtime keeps a bounded window, so `blocker_count` plateaus at
+    /// the window size while this keeps counting. Reading one without the
+    /// other turns "twenty thousand refusals" into "a hundred and twenty
+    /// eight". Sources that retain everything report the two as equal.
+    #[serde(default)]
+    pub blockers_seen: u64,
+    /// Fatal blockers recorded since the group started. See `blockers_seen`.
+    #[serde(default)]
+    pub fatal_blockers_seen: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -634,6 +646,27 @@ pub struct OptimizationReport {
     pub hints: Vec<OptimizationHint>,
 }
 
+/// As [`matrixraft_fatal_blocker_report`], for a source that retains only its
+/// most recent blockers and counts the rest.
+///
+/// The totals are carried rather than derived because a bounded window cannot
+/// recover them: once the window is full, the length of the list says only
+/// that it is full.
+pub fn matrixraft_fatal_blocker_report_with_totals(
+    source: impl Into<String>,
+    blockers: Vec<String>,
+    fatal_blockers: Vec<String>,
+    blockers_seen: u64,
+    fatal_blockers_seen: u64,
+) -> FatalBlockerReport {
+    let mut report = matrixraft_fatal_blocker_report(source, blockers, fatal_blockers);
+    // Never below what is retained: a caller that passes a total it has not
+    // kept would otherwise report fewer seen than shown.
+    report.blockers_seen = blockers_seen.max(report.blocker_count);
+    report.fatal_blockers_seen = fatal_blockers_seen.max(report.fatal_count);
+    report
+}
+
 pub fn matrixraft_fatal_blocker_report(
     source: impl Into<String>,
     blockers: Vec<String>,
@@ -660,13 +693,17 @@ pub fn matrixraft_fatal_blocker_report(
         .iter()
         .filter(|blocker| blocker.severity == BlockerSeverity::Fatal)
         .count() as u64;
+    let blocker_count = blockers.len() as u64;
     FatalBlockerReport {
         ready: blockers.is_empty(),
         fatal: fatal_count > 0,
         source,
-        blocker_count: blockers.len() as u64,
+        blocker_count,
         fatal_count,
         blockers,
+        // A source that retains everything has seen exactly what it shows.
+        blockers_seen: blocker_count,
+        fatal_blockers_seen: fatal_count,
     }
 }
 
