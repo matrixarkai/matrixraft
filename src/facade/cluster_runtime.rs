@@ -5961,7 +5961,7 @@ impl RaftCluster {
                 .map(|peer| PeerStatus {
                     node_id: peer.id,
                     matched: peer.match_index(),
-                    next_index: peer.match_index() + 1,
+                    next_index: peer.match_index().saturating_add(1),
                     learner: peer.replica_role == ReplicaRole::Learner,
                     healthy: peer.healthy,
                     lag: node.match_index().saturating_sub(peer.match_index()),
@@ -6581,7 +6581,7 @@ impl RaftCluster {
         let limits = self.config.pipeline_limits();
         for (node_id, node) in &self.nodes {
             self.peer_pipelines.entry(*node_id).or_insert_with(|| {
-                ReplicationPipeline::new(*node_id, node.match_index() + 1, limits)
+                ReplicationPipeline::new(*node_id, node.match_index().saturating_add(1), limits)
             });
         }
         if let Some(leader_id) = self.leader_id {

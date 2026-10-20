@@ -592,16 +592,28 @@ impl ReplicationPipeline {
         if response.success {
             self.status.append_accepted += 1;
             self.status.old_paused = self.is_paused();
+            // `response.match_index` is what a FOLLOWER said, taken with
+            // `.max()` and no upper bound, and the next line used to add one to
+            // it. A follower answering `success` with `match_index = u64::MAX`
+            // panicked its leader here -- "attempt to add with overflow" --
+            // through the public `handle_append_entries_response`, in any build
+            // with overflow checks.
+            //
+            // The claim is still unbounded, and that is deliberate rather than
+            // overlooked: it paces replication and does not decide the commit.
+            // Measured -- two followers each claiming 9,000,000 left
+            // `commit_index` where it was, because the commit is computed from
+            // the leader's own node model and not from this.
             let previous_match_index = self.status.match_index;
             self.status.match_index = self.status.match_index.max(response.match_index);
-            self.status.next_index = self.status.match_index + 1;
+            self.status.next_index = self.status.match_index.saturating_add(1);
             if self.status.match_index > previous_match_index {
                 match self.status.progress_state {
                     ProgressState::Probe => {
                         self.resume();
                         self.status.progress_state = ProgressState::Replicate;
                         self.reset_inflight_window();
-                        self.status.next_index = self.status.match_index + 1;
+                        self.status.next_index = self.status.match_index.saturating_add(1);
                     }
                     ProgressState::Replicate => {
                         self.release_inflight_through(response.match_index);
@@ -684,7 +696,7 @@ impl ReplicationPipeline {
         self.status.progress_state = ProgressState::Probe;
         self.status.paused = false;
         self.reset_inflight_window();
-        self.status.next_index = self.status.match_index + 1;
+        self.status.next_index = self.status.match_index.saturating_add(1);
         self.status.next_retry_after_ms = 0;
         self.status.network_error_probe_transitions = self
             .status
@@ -973,7 +985,7 @@ impl ReplicationPipeline {
                 .max(transfer.snapshot_index);
             self.status.snapshot_install_progress_per_mille = 1000;
             self.status.match_index = self.status.match_index.max(committed_index);
-            self.status.next_index = self.status.match_index + 1;
+            self.status.next_index = self.status.match_index.saturating_add(1);
             self.ack_snapshot_require();
             return Ok(());
         }
@@ -1146,7 +1158,7 @@ impl ReplicationPipeline {
             .max(transfer.snapshot_index);
         self.status.snapshot_install_progress_per_mille = 1000;
         self.status.match_index = self.status.match_index.max(transfer.snapshot_index);
-        self.status.next_index = self.status.match_index + 1;
+        self.status.next_index = self.status.match_index.saturating_add(1);
         self.reset_apply_inflight_window();
         Ok(())
     }
