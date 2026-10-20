@@ -90,6 +90,37 @@ pub fn matrixraft_apply_task_through_index(task: &ApplyTask) -> LogIndex {
         .unwrap_or(0)
 }
 
+/// The furthest index a batch of apply tasks could legitimately carry a group.
+///
+/// The highest of each task's last entry index and, for a task that installs
+/// one, its snapshot's last index -- because a snapshot-only task moves the
+/// group by installing rather than by applying, and
+/// [`matrixraft_apply_task_through_index`] reports zero for it.
+///
+/// This exists because an [`ApplyHandler`] is implemented by the host and
+/// **returns** the index it reached, and nothing bounded that number to the
+/// work it was given. A handler that reported 9,000 for a batch carrying 1
+/// through 3 moved the group's applied index to 9,000, and
+/// `wait_for_applied(5_000)` then reported reached -- a read fence released for
+/// an index nothing had applied, which is the one thing that fence exists to
+/// prevent. The comparable engine does not trust its own state machine here
+/// either: a handler returning success with entries left unconsumed is a fatal
+/// event there.
+pub fn matrixraft_apply_batch_ceiling(tasks: &[ApplyTask]) -> LogIndex {
+    tasks
+        .iter()
+        .map(|task| {
+            matrixraft_apply_task_through_index(task).max(
+                task.snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.last_log_id.index)
+                    .unwrap_or_default(),
+            )
+        })
+        .max()
+        .unwrap_or_default()
+}
+
 /// How far a group got, and whether it can go further.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyReport {
@@ -162,6 +193,10 @@ pub struct GroupApplyProgress {
     pub applied_index: LogIndex,
     pub batches_applied: u64,
     pub tasks_applied: u64,
+    /// Times this group's handler reported an index beyond what its batch
+    /// carried. Non-zero means the host's `ApplyHandler` is returning a number
+    /// it cannot justify; the applied index above is the bounded one.
+    pub over_reported_applies: u64,
 }
 
 #[derive(Debug, Default)]
@@ -174,6 +209,12 @@ struct AppliedState {
     cancelled: bool,
     /// Set when the handler reported a stall, and cleared by `resume_group`.
     stall: Option<ApplyStall>,
+    /// Times a handler reported an index beyond what its batch carried.
+    ///
+    /// Counted rather than only clamped, because a handler doing this is a bug
+    /// in the host's own code and a silently corrected number gives it nothing
+    /// to find.
+    over_reports: u64,
 }
 
 struct GroupState {
@@ -228,9 +269,16 @@ impl DriverMailHandler<ApplyTask> for GroupApplier {
         for batch in tasks.chunks(self.batch_limit.max(1)) {
             let count = batch.len() as u64;
             let report = self.handler.apply_reporting(batch.to_vec());
-            let reached = report.applied_index();
+            // Bounded by the work the handler was actually given. See
+            // `matrixraft_apply_batch_ceiling` for what went wrong without it.
+            let ceiling = matrixraft_apply_batch_ceiling(batch);
+            let reported = report.applied_index();
+            let reached = reported.min(ceiling);
 
             let mut applied = self.state.applied.lock().expect("applied mutex poisoned");
+            if reported > ceiling {
+                applied.over_reports = applied.over_reports.saturating_add(1);
+            }
             // Never moves backwards: a handler that reports an older index than
             // the group already reached does not un-apply anything.
             if reached > applied.applied_index {
@@ -244,7 +292,10 @@ impl DriverMailHandler<ApplyTask> for GroupApplier {
             } = report
             {
                 applied.stall = Some(ApplyStall {
-                    applied_index,
+                    // Clamped as well: a stall reports where the group stopped,
+                    // and a stop beyond the batch is no more meaningful than a
+                    // success beyond it.
+                    applied_index: applied_index.min(ceiling),
                     reason,
                 });
                 // Woken, because a waiter on a later index will never be
@@ -481,6 +532,7 @@ impl Applier {
             applied_index: applied.applied_index,
             batches_applied: applied.batches,
             tasks_applied: applied.tasks,
+            over_reported_applies: applied.over_reports,
         })
     }
 
