@@ -244,9 +244,9 @@ pub use status::{
     AdminStatusSurfaceEvidence, AdminStatusSurfaceInput, ApplyHealth,
     BaselineRaftRuntimeCapabilityReport, Blocker, BlockerSeverity, CapabilityEvidence,
     ClusterStatusReport, DiagnosticLogEntry, DiagnosticSeverity, FatalBlockerReport, HealthStatus,
-    LeaderTransferAdmission, LeaderTransferAdmissionKind, LeaderTransferOutcome,
-    LeaderTransferState, OptimizationHint, OptimizationHintSeverity, OptimizationReport,
-    PeerRuntimeState, ProcessNodeEvidence, ProcessOperationalSemanticsEvidence,
+    LeaderTransferAdmission, LeaderTransferAdmissionKind, LeaderTransferConclusion,
+    LeaderTransferOutcome, LeaderTransferState, OptimizationHint, OptimizationHintSeverity,
+    OptimizationReport, PeerRuntimeState, ProcessNodeEvidence, ProcessOperationalSemanticsEvidence,
     ProcessReadinessBlocker, ReplicationHealth, RuntimeAdminReport, RuntimeLocalStatusReport,
     RuntimeTimerStatus,
 };

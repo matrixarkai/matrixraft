@@ -90,6 +90,31 @@ pub struct PeerRuntimeState {
     pub blockers: Vec<String>,
 }
 
+/// Why a leader transfer stopped being in flight.
+///
+/// A transfer ends in one of two ways, and before this existed both ways threw
+/// the record away. The abort paths wrote the reason into a value they dropped
+/// on the next line -- a probe that wrote a sentinel there instead left the
+/// whole suite green, so nothing read it -- and the completion paths emptied
+/// the slot without writing anything at all. A host that asked for a transfer
+/// and later saw none in flight could not tell "leadership moved" from "it
+/// timed out" from "quorum was lost".
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LeaderTransferConclusion {
+    /// Leadership moved to the transferee.
+    Completed,
+    /// The transfer stopped before leadership moved. The record's `reason`
+    /// says which path ended it.
+    Aborted,
+}
+
+impl LeaderTransferConclusion {
+    /// True only when leadership actually moved.
+    pub fn is_completed(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LeaderTransferState {
     pub transferee_id: NodeId,
@@ -98,6 +123,17 @@ pub struct LeaderTransferState {
     pub aborted_transfers: u64,
     pub duplicate_requests: u64,
     pub reason: String,
+    /// `None` while the transfer is in flight, `Some` once it has ended.
+    ///
+    /// A record with this set is history, not work in progress, so nothing may
+    /// treat it as a transfer in flight. A document written before this field
+    /// existed loads as an in-flight transfer, which is what it described --
+    /// serde reads a missing `Option` as `None` on its own, and the attribute
+    /// below is this crate's convention on optional fields rather than what
+    /// makes that work. A plant that removed the attribute survived the suite,
+    /// which is how that was established rather than assumed.
+    #[serde(default)]
+    pub conclusion: Option<LeaderTransferConclusion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

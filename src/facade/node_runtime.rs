@@ -3006,8 +3006,7 @@ fn raft_peer_runtime_states(
                 election_elapsed_ms,
                 pre_vote_sent,
                 transfer_leader_target: cluster
-                    .leader_transfer
-                    .as_ref()
+                    .active_leader_transfer()
                     .map(|transfer| transfer.transferee_id == node.id)
                     .unwrap_or(false),
                 blockers,
