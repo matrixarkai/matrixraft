@@ -547,7 +547,7 @@ impl RaftCluster {
             .map(|node_id| {
                 (
                     node_id,
-                    ReplicationPipeline::new(node_id, 1, PipelineLimits::default()),
+                    ReplicationPipeline::new(node_id, 1, config.pipeline_limits()),
                 )
             })
             .collect();
@@ -4130,6 +4130,7 @@ impl RaftCluster {
             )));
         }
         let peer_id = peer.node_id;
+        let limits = self.config.pipeline_limits();
         self.snapshot_installers.remove(&peer_id);
         self.pending_snapshots.remove(&peer_id);
         self.clear_reorder_queue_for(peer_id);
@@ -4139,11 +4140,7 @@ impl RaftCluster {
         );
         self.peer_pipelines.insert(
             peer_id,
-            ReplicationPipeline::new(
-                peer_id,
-                self.last_log_index + 1,
-                PipelineLimits::default(),
-            ),
+            ReplicationPipeline::new(peer_id, self.last_log_index + 1, limits),
         );
         self.reset_leader_lease_epoch();
         self.refresh_replication_pipelines();
@@ -6036,9 +6033,10 @@ impl RaftCluster {
 
     fn reset_replication_pipelines_for_leader(&mut self, leader_id: NodeId) {
         let next_index = self.last_log_index + 1;
+        let limits = self.config.pipeline_limits();
         for node_id in self.nodes.keys().copied().collect::<Vec<_>>() {
             let pipeline = self.peer_pipelines.entry(node_id).or_insert_with(|| {
-                ReplicationPipeline::new(node_id, next_index, PipelineLimits::default())
+                ReplicationPipeline::new(node_id, next_index, limits)
             });
             let is_leader = node_id == leader_id;
             pipeline.reset_for_leader_transition(
@@ -6054,13 +6052,10 @@ impl RaftCluster {
     }
 
     fn refresh_replication_pipelines(&mut self) {
+        let limits = self.config.pipeline_limits();
         for (node_id, node) in &self.nodes {
             self.peer_pipelines.entry(*node_id).or_insert_with(|| {
-                ReplicationPipeline::new(
-                    *node_id,
-                    node.match_index() + 1,
-                    PipelineLimits::default(),
-                )
+                ReplicationPipeline::new(*node_id, node.match_index() + 1, limits)
             });
         }
         if let Some(leader_id) = self.leader_id {

@@ -200,8 +200,15 @@ fn matrixraft_builders_capture_node_group_transport_and_option_shape() {
             enable_pre_vote: true,
             enable_lease_read: true,
             assume_lease_when_start: false,
+            // The options' own pipeline conversion, which a cluster built from
+            // this config now uses for every peer. It reached only
+            // MatrixRaftNode before.
+            pipeline: Box::new(options.to_pipeline_limits()),
         }
     );
+    assert_eq!(config.pipeline.reorder_timeout_us, 3_000);
+    assert_eq!(config.pipeline.reorder_window_size, 128);
+    assert_eq!(config.pipeline.max_inflights_replicate, 128);
     let node_options = options.to_node_options();
     assert_eq!(node_options.group_id, 707);
     assert_eq!(node_options.node_id, 1);

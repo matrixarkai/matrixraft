@@ -16,8 +16,13 @@ use matrixraft::{Config, Peer, RaftCluster, ReplicaRole};
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(
-        std::mem::size_of::<RaftCluster>() == 520,
-        "RaftCluster changed width. It was 680 bytes until `leader_transfer` and \
+        std::mem::size_of::<RaftCluster>() == 528,
+        "RaftCluster changed width. It was 520 bytes until `Config` gained the \
+         pipeline limits, which is what made the reorder window, the reorder \
+         timeout and the in-flight bounds configurable at all -- 8 bytes, \
+         because they are boxed; plain they were 56 and took this to 576, \
+         +10.8%. `examples/pipeline_limit_width.rs` prints all of it. Before \
+         that it was 680 bytes until `leader_transfer` and \
          `snapshot_trigger` were boxed -- both are None in the steady state and \
          were 64 and 112 bytes inline. Every group pays this, and a shard walks \
          all of it between one visit to a group and the next, so a change here is \
