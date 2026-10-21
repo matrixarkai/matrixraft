@@ -570,7 +570,7 @@ impl MatrixRaftLogStorage for MatrixRaftMemoryLogStorage {
             .keys()
             .next()
             .copied()
-            .unwrap_or(self.initial_state.index + 1)
+            .unwrap_or(self.initial_state.index.saturating_add(1))
     }
 
     fn last_index(&self) -> LogIndex {
