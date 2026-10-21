@@ -1973,7 +1973,7 @@ The intended TemporalStore adapter shape is:
 
 ```rust
 struct TemporalRaftConsensusBackend {
-    node: rustraft::node::NodeRuntime<TemporalStoreStateMachine, TemporalTransport>,
+    node: matrixraft::node::NodeRuntime<TemporalStoreStateMachine, TemporalTransport>,
     codec: TemporalCommandCodec,
     engine: TemporalEngine,
 }
