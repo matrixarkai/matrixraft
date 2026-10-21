@@ -926,6 +926,25 @@ impl ReplicationPipeline {
     }
 
     pub fn maybe_require_snapshot(&mut self, required_index: LogIndex) -> bool {
+        // This is a public entry point, so the transport validator is not
+        // necessarily in the path -- the same reason the append ceiling is
+        // enforced here as well as there.
+        //
+        // The ratchet below only ever moves up, which is what stops a snapshot
+        // being re-sent for a requirement already recorded. That also means a
+        // value it can never act on is permanent rather than merely ignored.
+        // Measured: one `require_snapshot` of `LogIndex::MAX` from a peer left
+        // `required_snapshot_index` at the ceiling, and the peer's own later
+        // request at index 40 was then refused, so it could never be given the
+        // snapshot it actually needed.
+        //
+        // The ceiling is the representable, unrecoverable case and is refused
+        // here. An overclaim that is merely too high for the leader's log is
+        // not judgeable from inside the pipeline, which does not know where the
+        // leader's log ends; that one belongs to the caller.
+        if required_index == LogIndex::MAX {
+            return false;
+        }
         if self.status.required_snapshot_index >= required_index {
             return false;
         }

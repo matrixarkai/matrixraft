@@ -32,10 +32,28 @@
 //! leader's next entry at `last + 1`, and a snapshot's first retained index at
 //! `snapshot_index + 1`. The pipeline keeps its own check as well, so a path
 //! that never ran the validator cannot fault either.
+//!
+//! ## A fourth index, reached later
+//!
+//! The rule above was written inside `validate_log_id`, so it covered the
+//! indices that happen to be wrapped in a `LogId` and no others. A follower's
+//! `require_snapshot` is an index too, and the leader turns it into an action:
+//! it drives a monotonic per-peer ratchet.
+//!
+//! That makes its failure a different shape from the three above. Nothing
+//! faults. Measured: one `require_snapshot` of `u64::MAX` left the ratchet at
+//! the ceiling, and the peer's own later request at index 40 was then refused,
+//! so the peer could never be given the snapshot it needed. A value the
+//! ratchet can never act on is permanent rather than ignored.
+//!
+//! The rules now live in `validate_log_index`, applied to this index as well,
+//! and the ratchet refuses the ceiling itself for the paths that do not run the
+//! validator.
 
 use matrixraft::{
-    matrixraft_validate_append_entries_request, AppendEntriesRequest, AppendEntriesResponse,
-    LogEntry, LogId, PipelineLimits, ReplicationPipeline, SnapshotState,
+    matrixraft_validate_append_entries_request, matrixraft_validate_append_entries_response,
+    AppendEntriesRequest, AppendEntriesResponse, LogEntry, LogId, PipelineLimits,
+    ReplicationPipeline, SnapshotState,
 };
 
 fn request(prev: Option<LogId>, entries: Vec<LogEntry>) -> AppendEntriesRequest {
@@ -196,5 +214,87 @@ fn the_pipeline_still_takes_an_ordinary_append() {
         pipeline.status().next_index,
         2,
         "and it still moves the next index one past what arrived"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The fourth index: a follower's `require_snapshot`.
+// ---------------------------------------------------------------------------
+
+fn response_requiring(required_index: u64) -> AppendEntriesResponse {
+    AppendEntriesResponse {
+        require_snapshot: Some(required_index),
+        ..response(3)
+    }
+}
+
+#[test]
+fn the_validator_refuses_a_required_snapshot_index_at_the_ceiling() {
+    let report = matrixraft_validate_append_entries_response(&response_requiring(u64::MAX));
+    assert!(
+        mentions_the_ceiling(&report.blockers, "require_snapshot"),
+        "{:?}",
+        report.blockers
+    );
+}
+
+#[test]
+fn the_validator_refuses_a_required_snapshot_index_of_zero() {
+    // Index zero is the empty snapshot, so asking to be sent it is not a
+    // request the leader can act on. The same lower bound the other indices get.
+    let report = matrixraft_validate_append_entries_response(&response_requiring(0));
+    assert!(
+        report
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "require_snapshot must be greater than zero"),
+        "{:?}",
+        report.blockers
+    );
+}
+
+#[test]
+fn the_validator_still_takes_an_ordinary_required_snapshot_index() {
+    // Positive control: the rule must not refuse the request it exists to allow.
+    let report = matrixraft_validate_append_entries_response(&response_requiring(40));
+    assert!(report.valid, "{:?}", report.blockers);
+}
+
+#[test]
+fn a_required_snapshot_index_at_the_ceiling_does_not_latch_the_ratchet() {
+    // The failure that has no fault to catch it. Before the ceiling rule, the
+    // first claim stuck and the second was refused.
+    let mut pipeline = ReplicationPipeline::new(2, 1, PipelineLimits::default());
+    pipeline
+        .handle_append_response(&response_requiring(u64::MAX))
+        .expect("the response itself is handled");
+    assert_eq!(
+        pipeline.status().required_snapshot_index,
+        0,
+        "an index the ratchet can never act on must not be recorded"
+    );
+    assert!(
+        !pipeline.is_snapshot_required(),
+        "and it must not leave a requirement outstanding"
+    );
+
+    assert!(
+        pipeline.maybe_require_snapshot(40),
+        "the peer's own honest request afterwards has to be accepted"
+    );
+    assert_eq!(pipeline.status().required_snapshot_index, 40);
+}
+
+#[test]
+fn the_ratchet_still_refuses_an_index_it_has_already_recorded() {
+    // Positive control for the ratchet: the ceiling rule must not disturb the
+    // de-duplication the ratchet exists for.
+    let mut pipeline = ReplicationPipeline::new(2, 1, PipelineLimits::default());
+    assert!(pipeline.maybe_require_snapshot(8));
+    assert!(!pipeline.maybe_require_snapshot(8), "the same index again");
+    assert!(!pipeline.maybe_require_snapshot(7), "an older index");
+    assert!(
+        pipeline.maybe_require_snapshot(12),
+        "a newer one still moves"
     );
 }
