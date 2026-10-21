@@ -41,8 +41,20 @@ fn replication_pipeline_peers(limits: PipelineLimits) -> Vec<PeerProgress> {
     peer_3.out_of_order_append_rejections = 1;
     peer_3.packet_loss_events = 2;
     peer_3.network_error_probe_transitions = 1;
+    // Recovery is the point of the probe, so the peer has to have accepted an
+    // append after it. Without this the peer counts as faulted and never as
+    // recovered, and the bundle's own validation refuses it.
+    peer_3.append_accepted = 4;
 
-    vec![peer_2, peer_3]
+    // Convergence needs a peer whose reorder queue has DRAINED, which peer 3
+    // cannot show while it holds the depth that proves the queue is enabled.
+    // It carries no packet loss, so it does not join the faulted set that has
+    // to be fully recovered.
+    let mut peer_4 = PeerProgress::new(4, 105, limits);
+    peer_4.reorder_entries_converged = 1;
+    peer_4.append_accepted = 4;
+
+    vec![peer_2, peer_3, peer_4]
 }
 
 fn snapshot_lifecycle_peers(limits: PipelineLimits) -> Vec<PeerProgress> {
@@ -56,6 +68,10 @@ fn snapshot_lifecycle_peers(limits: PipelineLimits) -> Vec<PeerProgress> {
     sender.snapshot_send_timeouts = 1;
     sender.snapshot_rate_limit_rejections = 1;
     sender.snapshot_during_membership_change = true;
+    // A sustained send is one that finished: the receiver asked for an index
+    // and acknowledged at least that far.
+    sender.required_snapshot_index = 128;
+    sender.acked_snapshot_index = 128;
 
     let mut installer = PeerProgress::new(3, 105, limits);
     installer.snapshot_installing = true;
@@ -65,7 +81,14 @@ fn snapshot_lifecycle_peers(limits: PipelineLimits) -> Vec<PeerProgress> {
     installer.snapshot_install_rolled_back = 1;
     installer.snapshot_rejoin_after_compacted_log = true;
 
-    vec![sender, installer]
+    // A finished download, which the installer above cannot show while it is
+    // still installing at 750 per mille.
+    let mut completed = PeerProgress::new(4, 105, limits);
+    completed.snapshot_install_total_chunks = 4;
+    completed.snapshot_installed_index = 160;
+    completed.snapshot_install_progress_per_mille = 1_000;
+
+    vec![sender, installer, completed]
 }
 
 fn wal_lifecycle_status() -> WalLifecycleStatus {
