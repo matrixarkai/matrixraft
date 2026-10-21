@@ -695,6 +695,13 @@ impl PersistentRaftWal {
         let record_bytes = encoded.len() as u64 + 1;
 
         let mut segment_rolled = false;
+        // `active_records > 0` is what decides where a record larger than
+        // `max_segment_bytes` goes. Without it the WAL rolls a segment it has
+        // just created and is still empty, and the record lands in the second
+        // one -- measured as segments=2 against segments=1 for the same
+        // 13,825 bytes, so a wasted segment per oversized record. The whole
+        // suite stayed green without it, which is why `tests/segment_bound.rs`
+        // now pins it.
         if rolling_by_count
             || (active_records > 0 && active_len + record_bytes > self.options.max_segment_bytes)
         {

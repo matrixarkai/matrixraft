@@ -35,6 +35,21 @@ pub struct Config {
     /// would cost another eight bytes on every group -- the entry threshold is
     /// the one `Config` already carries.
     pub snapshot_threshold_entries: u64,
+    /// When to roll the active WAL segment, which is a threshold rather than
+    /// a hard cap.
+    ///
+    /// A record is written whole or not at all, so one larger than this has to
+    /// be written past it: the roll condition only rolls a segment that
+    /// already holds records, and an empty one takes the record however large
+    /// it is. Measured with a 1,024-byte bound and a 10,000-byte payload, the
+    /// WAL holds one 13,825-byte segment.
+    ///
+    /// The defaults cannot reach that -- `max_payload_bytes` is 8 MiB against
+    /// 64 MiB here -- so it takes raising the payload bound above this one.
+    /// `validate` accepts that combination deliberately: refusing it would
+    /// remove a working configuration to tidy a bound that cannot be honoured
+    /// for a single large record anyway. `tests/segment_bound.rs` pins both
+    /// halves, and the ordinary case where the bound does roll.
     pub max_segment_bytes: u64,
     pub min_keep_segment_num: u64,
     pub enable_pre_vote: bool,
