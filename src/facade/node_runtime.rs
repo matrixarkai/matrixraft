@@ -1414,6 +1414,32 @@ fn runtime_step_operation_name(message: &Message) -> &'static str {
 /// of messages instead. A WAL record describes the log as it stands, so one
 /// record covers every proposal applied before it -- and one fsync makes them
 /// all durable, rather than one fsync each.
+/// The term this node is in and the vote it has cast.
+///
+/// Compared across a step so that any change to it is persisted, rather than
+/// enumerating the messages that can change it. A campaign is the case that
+/// made this necessary: it votes for the candidate itself, which is as binding
+/// as a vote granted to a peer, and it reaches the cluster through several
+/// routes (an admin command, a `TimeoutNow`, the election tick) none of which
+/// looked like a vote.
+///
+/// The term and the vote only -- **not** the committed index, though
+/// `HardState` carries all three. The committed index moves on nearly every
+/// proposal and append, so comparing it wrote a second record for work that had
+/// already written one; `a_batch_of_proposals_costs_one_fsync` caught that. It
+/// also does not need the record: a restart recovers the committed index from
+/// the fence, and a leader re-establishes it regardless. The term and the vote
+/// are the two a node cannot be told again.
+fn local_term_and_vote(
+    cluster: &RaftCluster,
+    node_id: NodeId,
+) -> Option<(Term, Option<NodeId>)> {
+    cluster
+        .nodes
+        .get(&node_id)
+        .map(|node| (node.hard_state.current_term, node.hard_state.voted_for))
+}
+
 /// Writes the record that backs a promise the node has just made, and fires
 /// the fatal event if it does not land.
 ///
@@ -1697,6 +1723,7 @@ impl NodeCore {
             leader_transfer_executions,
             last_tick_reason,
             blocker_log,
+            wal,
             ..
         } = self;
         let node_id = *node_id;
@@ -1852,7 +1879,22 @@ impl NodeCore {
                                         blocker_log,
                                         false,
                                     );
-                                    let _ = result;
+                                    // The campaign voted for this node in the
+                                    // new term. There is no caller to withhold
+                                    // an answer from here, so a failed record
+                                    // is recorded as a fatal blocker instead --
+                                    // `persist_after_promise` has already
+                                    // fired the fatal event.
+                                    if result.is_ok() {
+                                        if let Err(error) =
+                                            persist_after_promise(cluster, wal, node_id)
+                                        {
+                                            blocker_log.record(
+                                                format!("election_tick_campaign_persist:{error}"),
+                                                true,
+                                            );
+                                        }
+                                    }
                                 }
                                 Ok(vote) => blocker_log.record(format!("pre_vote:{}", vote.reason), false),
                                 Err(error) => blocker_log.record(format!("pre_vote:{error}"), false),
@@ -1999,6 +2041,24 @@ impl NodeCore {
         };
         match command {
             NodeRuntimeOp::Start(reply) => {
+                // Deliberately NOT persisted, though starting does elect and so
+                // does vote for this node. The start election is
+                // deterministic: it always votes for this node at the recovered
+                // term plus one, so a restart re-derives exactly the same vote
+                // and will refuse any other candidate in that term. Nothing is
+                // forgotten, so nothing has to be written.
+                //
+                // The cost of writing it anyway would not be small. A durable
+                // append is its fsync and very little else -- 224 a second
+                // against 85,014 with fsync off -- and this is once per group,
+                // against a documented mass start of 1.83s for 16,384 groups.
+                //
+                // The terms that DO have to be written are the ones a restart
+                // cannot re-derive: a campaign from the election tick, or an
+                // admin command, can walk the term several steps past what the
+                // record holds, and a node that came back at `recovered + 1`
+                // would grant terms it had already voted in. Those are
+                // persisted where they happen.
                 let result = cluster.start();
                 if result.is_ok() {
                     *state = NodeRuntimeState::Running;
@@ -2113,6 +2173,7 @@ impl NodeCore {
                 let binding_vote = is_binding_vote_step_message(&message);
                 let append_carries_entries = is_entry_bearing_append_step_message(&message);
                 let snapshot_completes_install = is_completing_snapshot_step_message(&message);
+                let term_and_vote_before = local_term_and_vote(cluster, node_id);
                 let mut result = runtime_step_message(
                     cluster,
                     wal,
@@ -2123,44 +2184,34 @@ impl NodeCore {
                 );
                 if step_granted_a_binding_vote(binding_vote, &result) {
                     *election_elapsed_ms = 0;
-                    // A granted vote has to be on disk before the grant goes
-                    // back. Only the proposal path wrote a record, so a voter
-                    // that granted and restarted came back with whatever vote
-                    // the last proposal happened to carry -- and granted the
-                    // same term again to a different candidate. Two leaders in
-                    // one term, from a node that did nothing wrong.
-                    //
-                    // And the grant is withheld when the record does not land,
-                    // the same way a proposal that applied but did not persist
-                    // is not acknowledged: a candidate counting a vote the
-                    // voter cannot honour after a restart is the whole defect,
-                    // so reporting the failure is the conservative direction.
-                    if let Some(open_wal) = wal.as_mut() {
-                        let appended = open_wal.append_built(|coverage| {
-                            cluster.wal_record_for_coverage(node_id, coverage)
-                        });
-                        if let Err(error) = after_durable_write(cluster, node_id, appended) {
-                            result = Err(error);
-                        }
-                    }
                 }
-                if step_accepted_appended_entries(append_carries_entries, &result)
+                // One record for whatever this step promised, so a step that
+                // both moves the hard state and acknowledges entries writes
+                // once rather than twice.
+                //
+                // Three things are promises here. A granted vote: a voter that
+                // granted and restarted came back with whatever vote the last
+                // proposal happened to carry, and granted the same term again
+                // to a different candidate -- two leaders in one term, from a
+                // node that did nothing wrong. An accepted append: the leader
+                // counts the ack toward the commit quorum, so a quorum of
+                // followers that acked out of memory and restarted loses a
+                // committed entry. An accepted snapshot: the leader may stop
+                // sending, and compact, everything below it.
+                //
+                // The hard state is compared rather than enumerated because a
+                // CAMPAIGN is also a vote -- for this node itself -- and it
+                // arrives by routes that do not look like one. Measured: a node
+                // that campaigned, led, and restarted recovered no record at
+                // all.
+                //
+                // Whatever the step was, it is withheld when the record does
+                // not land: a peer counting on something the node cannot honour
+                // after a restart is the whole defect.
+                if local_term_and_vote(cluster, node_id) != term_and_vote_before
+                    || step_accepted_appended_entries(append_carries_entries, &result)
                     || step_installed_a_snapshot(snapshot_completes_install, &result)
                 {
-                    // An accepted append has to be on disk before the ack goes
-                    // back, for the same reason a granted vote does. Only the
-                    // proposal and vote paths wrote a record, so a follower
-                    // answered `success` with a match index it held purely in
-                    // memory: measured, a node that acked entries 1 and 2 and
-                    // restarted came back with `surviving_records: 0`. The
-                    // leader counts that ack toward the commit quorum, so a
-                    // quorum of such followers restarting loses a committed
-                    // entry.
-                    //
-                    // The ack is withheld when the record does not land, the
-                    // same conservative direction the vote path takes: a leader
-                    // counting entries the follower cannot honour after a
-                    // restart is the whole defect.
                     if let Some(open_wal) = wal.as_mut() {
                         let appended = open_wal.append_built(|coverage| {
                             cluster.wal_record_for_coverage(node_id, coverage)
@@ -2229,6 +2280,7 @@ impl NodeCore {
                 let mut granted_a_binding_vote = false;
                 let mut accepted_appended_entries = false;
                 let mut installed_a_snapshot = false;
+                let term_and_vote_before = local_term_and_vote(cluster, node_id);
                 let stepped: Result<Vec<StepResult>, RaftError> = messages
                     .into_iter()
                     .map(|message| {
@@ -2264,6 +2316,7 @@ impl NodeCore {
                     || granted_a_binding_vote
                     || accepted_appended_entries
                     || installed_a_snapshot
+                    || local_term_and_vote(cluster, node_id) != term_and_vote_before
                 {
                     match wal.as_mut() {
                         Some(wal) => wal

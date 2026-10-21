@@ -28,8 +28,8 @@
 //! are pinned below.
 
 use matrixraft::{
-    Config, InstallSnapshotRequest, LogId, Message, NodeOptions, NodeRuntime, Peer, ReplicaRole,
-    SnapshotChunk, SnapshotMetadata, StepResult,
+    AppendEntriesRequest, Config, InstallSnapshotRequest, LogEntry, LogId, Message, NodeOptions,
+    NodeRuntime, Peer, ReplicaRole, SnapshotChunk, SnapshotMetadata, StepResult,
 };
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -180,18 +180,42 @@ fn the_restarted_follower_reports_the_committed_index_it_accepted() {
 fn a_chunk_that_does_not_complete_the_snapshot_writes_nothing() {
     // The discriminator. Buffering a chunk changes nothing durable and claims
     // nothing, so persisting per chunk would cost an fsync per 64 KiB of every
-    // transfer. A fix that dropped the completing-chunk condition passes the
-    // tests above and fails this one.
+    // transfer.
+    //
+    // The node is first moved to term 9 by an append it keeps, so the partial
+    // chunk that follows moves no term. Without that the chunk's own term 9
+    // would move the node's term, the term and the chunk share one condition,
+    // and the record written for the term would mask the one written for the
+    // chunk -- the test would pass either way.
     //
     // Checked across a RESTART, not on the live runtime: `wal_recovery_report`
     // describes the recovery performed when the WAL was opened, so asking the
-    // same runtime always answers zero and the first version of this test
+    // same runtime always answers zero and an earlier version of this test
     // passed whatever the install path wrote.
     let base = base_dir("partial");
     let _ = std::fs::remove_dir_all(&base);
     {
         let mut runtime = NodeRuntime::create(options(&base)).expect("create");
         runtime.start().expect("start");
+        runtime
+            .step(Message::AppendEntries {
+                target: 1,
+                request: AppendEntriesRequest {
+                    group_id: GROUP_ID,
+                    term: 9,
+                    leader_id: 2,
+                    prev_log_id: None,
+                    entries: vec![LogEntry {
+                        log_id: LogId { term: 9, index: 1 },
+                        payload: b"x".to_vec(),
+                        is_command: false,
+                    }],
+                    leader_commit: 1,
+                    lease_epoch: 0,
+                },
+            })
+            .expect("the append moves the node to term 9 and is recorded");
+
         // Accepted or not, it is not the last chunk, so there is nothing to keep.
         let accepted = step_install(&runtime, 7, false);
         assert!(
@@ -207,8 +231,9 @@ fn a_chunk_that_does_not_complete_the_snapshot_writes_nothing() {
     restarted.start().expect("re-start");
     assert_eq!(
         surviving_records(&restarted),
-        0,
-        "a buffered chunk must not have written a record"
+        1,
+        "one record, for the append that moved the term -- and none for the \
+         buffered chunk"
     );
     let _ = restarted.shutdown();
     let _ = std::fs::remove_dir_all(&base);

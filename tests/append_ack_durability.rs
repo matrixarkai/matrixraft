@@ -213,18 +213,37 @@ fn a_group_that_acknowledged_nothing_recovers_nothing() {
 }
 
 #[test]
-fn a_heartbeat_does_not_write_a_record() {
-    // An append with no entries is a heartbeat. Persisting one would cost an
-    // fsync per interval per group and promise nothing, so this pins that the
-    // fix stays entry-bearing.
+fn a_heartbeat_writes_nothing() {
+    // An append with no entries is a heartbeat, and persisting one for its own
+    // sake would cost an fsync per interval per group and promise nothing.
+    //
+    // At this node's CURRENT term, deliberately. A heartbeat carrying a higher
+    // term moves the term, and a term is durable state in its own right -- so
+    // sending one at term 9 would write a record for the term move and prove
+    // nothing about the entry-bearing condition. `tests/hard_state_durability`
+    // owns that behaviour; this owns the heartbeat.
     let base = base_dir("heartbeat");
     let _ = std::fs::remove_dir_all(&base);
     {
         let mut runtime = NodeRuntime::create(options(&base)).expect("create");
         runtime.start().expect("start");
-        // Accepted or refused, either way it carries no entries to keep.
-        let _ = step_append(&runtime, Vec::new());
-        let _ = step_append(&runtime, Vec::new());
+        let at_current_term = AppendEntriesRequest {
+            group_id: GROUP_ID,
+            term: 1,
+            leader_id: 2,
+            prev_log_id: None,
+            entries: Vec::new(),
+            leader_commit: 0,
+            lease_epoch: 0,
+        };
+        // Accepted or refused, either way it carries nothing to keep and moves
+        // no term.
+        for _ in 0..3 {
+            let _ = runtime.step(Message::AppendEntries {
+                target: 1,
+                request: at_current_term.clone(),
+            });
+        }
         runtime.shutdown().expect("shutdown");
     }
 
@@ -234,7 +253,7 @@ fn a_heartbeat_does_not_write_a_record() {
     let surviving = report.map(|report| report.surviving_records).unwrap_or(0);
     assert_eq!(
         surviving, 0,
-        "two heartbeats must not have written anything"
+        "three heartbeats that move no term must not have written anything"
     );
     let _ = restarted.shutdown();
     let _ = std::fs::remove_dir_all(&base);
