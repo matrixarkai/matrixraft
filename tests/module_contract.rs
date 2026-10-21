@@ -100,6 +100,7 @@ fn public_modules_expose_temporalstore_consumption_boundary() {
             last_log_id: catchup_log_id.clone(),
             membership: vec![1, 2, 3, 4],
             members: Vec::new(),
+            payload_bytes: 0,
         },
         payload: b"snapshot".to_vec(),
     };

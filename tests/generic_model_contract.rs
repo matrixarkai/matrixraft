@@ -45,6 +45,7 @@ fn default_log_and_snapshot_models_use_byte_payloads() {
             last_log_id: entry.log_id.clone(),
             membership: vec![1, 2, 3],
             members: Vec::new(),
+            payload_bytes: 0,
         },
         offset: 0,
         data: snapshot_payload,
@@ -83,6 +84,7 @@ fn generic_models_accept_domain_payload_and_group_ids() {
             last_log_id: entry.log_id,
             membership: vec![11, 12, 13],
             members: Vec::new(),
+            payload_bytes: 0,
         },
         payload: payload.clone(),
     };

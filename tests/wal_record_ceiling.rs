@@ -111,6 +111,7 @@ fn a_record_whose_snapshot_is_at_the_ceiling_is_refused() {
         },
         membership: vec![1, 2, 3],
         members: vec![peer(1), peer(2), peer(3)],
+        payload_bytes: 0,
     });
 
     let error = cluster
@@ -138,6 +139,7 @@ fn a_record_whose_snapshot_is_below_the_ceiling_still_restores() {
         },
         membership: vec![1, 2, 3],
         members: vec![peer(1), peer(2), peer(3)],
+        payload_bytes: 0,
     });
     cluster
         .restore_wal_record(record)

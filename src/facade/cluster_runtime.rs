@@ -5672,6 +5672,12 @@ impl RaftCluster {
             .get(&node_id)
             .ok_or(RaftError::NodeNotFound(node_id))?;
         let snapshot_index = node.commit_index.max(node.match_index());
+        // Encoded before the metadata is built, so the declared length is the
+        // length of the payload beside it rather than a number that has to be
+        // kept in step by hand.
+        let payload = serde_json::to_vec(&node.log).map_err(|err| {
+            RaftError::Storage(format!("failed to encode checkpoint snapshot: {err}"))
+        })?;
         Ok(RaftSnapshot {
             group_id: self.group_id,
             meta: SnapshotMetadata {
@@ -5682,10 +5688,9 @@ impl RaftCluster {
                 },
                 membership: self.node_ids(),
                 members: self.snapshot_members(),
+                payload_bytes: payload.len() as u64,
             },
-            payload: serde_json::to_vec(&node.log).map_err(|err| {
-                RaftError::Storage(format!("failed to encode checkpoint snapshot: {err}"))
-            })?,
+            payload,
         })
     }
 
@@ -6256,6 +6261,7 @@ impl RaftCluster {
             },
             membership: self.node_ids(),
             members: self.snapshot_members(),
+            payload_bytes: 0,
         };
         self.snapshot_trigger = Some(Box::new(SnapshotTriggerState {
             meta: meta.clone(),

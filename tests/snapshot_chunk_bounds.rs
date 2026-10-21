@@ -63,6 +63,7 @@ fn request(offset: u64, snapshot_index: u64, data: Vec<u8>, done: bool) -> Insta
                 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
+                payload_bytes: 0,
             },
             offset,
             data,

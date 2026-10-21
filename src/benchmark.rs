@@ -3961,6 +3961,7 @@ fn run_rustraft_runtime_workload(
                                     last_log_id: LogId { term: 1, index },
                                     membership: benchmark_voters(options.node_count),
                                     members: Vec::new(),
+                                    payload_bytes: 0,
                                 },
                                 payload: payload.clone(),
                             },

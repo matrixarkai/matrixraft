@@ -49,6 +49,7 @@ fn cluster() -> RaftCluster {
 }
 
 fn snapshot(index: u64, membership: Vec<u64>) -> RaftSnapshot {
+    let payload = format!("checkpoint-through-{index}").into_bytes();
     RaftSnapshot {
         group_id: 909,
         meta: SnapshotMetadata {
@@ -56,8 +57,9 @@ fn snapshot(index: u64, membership: Vec<u64>) -> RaftSnapshot {
             last_log_id: LogId { term: 1, index },
             membership,
             members: Vec::new(),
+            payload_bytes: payload.len() as u64,
         },
-        payload: format!("checkpoint-through-{index}").into_bytes(),
+        payload,
     }
 }
 

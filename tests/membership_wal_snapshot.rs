@@ -168,6 +168,7 @@ fn cluster_catches_up_late_learner_with_snapshot_before_membership_config_entry(
             last_log_id: LogId { term: 1, index: 4 },
             membership: vec![1, 2, 3],
             members: Vec::new(),
+            payload_bytes: 0,
         },
         payload: b"opaque-temporalstore-state".to_vec(),
     };
@@ -238,6 +239,7 @@ fn chunked_snapshot_install_validates_offsets_and_snapshot_fence() {
         last_log_id: LogId { term: 4, index: 10 },
         membership: vec![1, 2, 3],
         members: Vec::new(),
+        payload_bytes: 0,
     };
     let mut install = SnapshotInstallState::new(meta.clone());
     install

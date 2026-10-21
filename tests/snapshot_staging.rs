@@ -69,6 +69,7 @@ fn snapshot(id: &str, index: u64, payload: Vec<u8>) -> RaftSnapshot {
             last_log_id: LogId { term: 1, index },
             membership: vec![1, 2, 3],
             members: Vec::new(),
+            payload_bytes: 0,
         },
         payload,
     }

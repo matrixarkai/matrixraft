@@ -344,6 +344,7 @@ fn snapshot_applied_clears_covered_membership_change() {
                     last_log_id: LogId { term: 1, index: 5 },
                     membership: vec![1, 2, 3],
                     members: Vec::new(),
+                    payload_bytes: 0,
                 },
                 payload: b"membership snapshot".to_vec(),
             },

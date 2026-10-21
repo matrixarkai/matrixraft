@@ -83,6 +83,7 @@ fn snapshot_only(index: u64) -> ApplyTask {
             last_log_id: LogId { term: 1, index },
             membership: vec![1],
             members: Vec::new(),
+            payload_bytes: 0,
         }),
     }
 }

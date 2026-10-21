@@ -82,6 +82,7 @@ fn install_request(index: u64, done: bool) -> InstallSnapshotRequest {
                 last_log_id: LogId { term: 9, index },
                 membership: vec![1, 2, 3],
                 members: vec![peer(1), peer(2), peer(3)],
+                payload_bytes: 0,
             },
             offset: 0,
             data: b"snapshot-bytes".to_vec(),
