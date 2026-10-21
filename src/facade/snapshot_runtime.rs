@@ -492,7 +492,23 @@ impl SnapshotLifecycle {
             .ok_or_else(|| RaftError::InvalidRequest("snapshot send is not active".to_string()))?;
         if response.accepted {
             sender.accepted_chunks += 1;
-            if sender.accepted_chunks >= sender.chunks.len() as u64 {
+            // Both halves, because a count of accepts is not a record of what
+            // was sent. A response does not say which chunk it accepts, and a
+            // duplicated one is expected -- the early return above exists to
+            // absorb an accept that arrives after the send finished. Counting
+            // alone, those duplicates reach the chunk count while later chunks
+            // have never gone out. Measured: four accepts for two chunks
+            // completed a 4,096-byte transfer having sent only offsets 0 and
+            // 1,024, which leaves the leader believing a follower holds a
+            // snapshot it never received, and the follower waiting for chunks
+            // nobody will send again.
+            //
+            // `next_chunk` is the right second half: it only reaches the chunk
+            // count by stepping through every chunk, and a throttle or a
+            // rejection lowers it, so it has to climb again.
+            if sender.accepted_chunks >= sender.chunks.len() as u64
+                && sender.next_chunk >= sender.chunks.len()
+            {
                 self.status.sending = false;
                 self.status.completed = true;
                 self.sender = None;
