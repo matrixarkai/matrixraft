@@ -34,6 +34,25 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # `cargo build --all-targets` compiles the examples and runs none of
+      # them, so `baseline_raft_operational_evidence` panicked on its own
+      # bundle validation while every check stayed green. These four are the
+      # examples the README tells a reader to run with no arguments, which
+      # makes them the ones a stranger hits first.
+      #
+      # The others are left out on purpose: the scaling and throughput ones
+      # want `--release` and arguments, `metrics_exporter` serves until it is
+      # killed, `idle_tick_cost` is a soak, and the two benchmark examples
+      # need a comparable engine on the box.
+      - name: Run the documented examples
+        run: |
+          set -euo pipefail
+          for example in debug_artifacts readiness_report read_safety \
+                         baseline_raft_operational_evidence; do
+            echo "== cargo run --example $example"
+            cargo run --locked --example "$example" >/dev/null
+          done
+
       - name: Doc
         run: cargo doc --no-deps --locked
 
