@@ -1257,6 +1257,28 @@ fn is_binding_vote_step_message(message: &Message) -> bool {
     matches!(message, Message::Vote { request, .. } if !request.pre_vote)
 }
 
+/// Whether `message` is an append carrying entries a follower would have to
+/// keep in order to honour the ack it is about to send.
+///
+/// Entry-bearing only: a heartbeat carries none, and persisting on every
+/// heartbeat would write a record per interval per group for nothing.
+fn is_entry_bearing_append_step_message(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::AppendEntries { request, .. } if !request.entries.is_empty()
+    )
+}
+
+/// Whether the step accepted those entries, so the response is about to claim
+/// them to the leader.
+fn step_accepted_appended_entries(
+    message_carried_entries: bool,
+    result: &Result<StepResult, RaftError>,
+) -> bool {
+    message_carried_entries
+        && matches!(result, Ok(StepResult::AppendEntries(response)) if response.success)
+}
+
 fn runtime_step_operation_name(message: &Message) -> &'static str {
     match message {
         Message::Admin {
@@ -2028,6 +2050,7 @@ impl NodeCore {
                         | Message::Membership { .. }
                 );
                 let binding_vote = is_binding_vote_step_message(&message);
+                let append_carries_entries = is_entry_bearing_append_step_message(&message);
                 let mut result = runtime_step_message(
                     cluster,
                     wal,
@@ -2050,6 +2073,30 @@ impl NodeCore {
                     // is not acknowledged: a candidate counting a vote the
                     // voter cannot honour after a restart is the whole defect,
                     // so reporting the failure is the conservative direction.
+                    if let Some(open_wal) = wal.as_mut() {
+                        let appended = open_wal.append_built(|coverage| {
+                            cluster.wal_record_for_coverage(node_id, coverage)
+                        });
+                        if let Err(error) = after_durable_write(cluster, node_id, appended) {
+                            result = Err(error);
+                        }
+                    }
+                }
+                if step_accepted_appended_entries(append_carries_entries, &result) {
+                    // An accepted append has to be on disk before the ack goes
+                    // back, for the same reason a granted vote does. Only the
+                    // proposal and vote paths wrote a record, so a follower
+                    // answered `success` with a match index it held purely in
+                    // memory: measured, a node that acked entries 1 and 2 and
+                    // restarted came back with `surviving_records: 0`. The
+                    // leader counts that ack toward the commit quorum, so a
+                    // quorum of such followers restarting loses a committed
+                    // entry.
+                    //
+                    // The ack is withheld when the record does not land, the
+                    // same conservative direction the vote path takes: a leader
+                    // counting entries the follower cannot honour after a
+                    // restart is the whole defect.
                     if let Some(open_wal) = wal.as_mut() {
                         let appended = open_wal.append_built(|coverage| {
                             cluster.wal_record_for_coverage(node_id, coverage)
@@ -2116,10 +2163,12 @@ impl NodeCore {
                 // some vote would reset the timer for a batch that granted a
                 // pre-vote while refusing the binding one.
                 let mut granted_a_binding_vote = false;
+                let mut accepted_appended_entries = false;
                 let stepped: Result<Vec<StepResult>, RaftError> = messages
                     .into_iter()
                     .map(|message| {
                         let binding_vote = is_binding_vote_step_message(&message);
+                        let carries_entries = is_entry_bearing_append_step_message(&message);
                         let result = runtime_step_message(
                             cluster,
                             wal,
@@ -2129,6 +2178,8 @@ impl NodeCore {
                             false,
                         );
                         granted_a_binding_vote |= step_granted_a_binding_vote(binding_vote, &result);
+                        accepted_appended_entries |=
+                            step_accepted_appended_entries(carries_entries, &result);
                         result
                     })
                     .collect();
@@ -2141,7 +2192,10 @@ impl NodeCore {
                 // A granted binding vote needs the record as much as a
                 // proposal does, and for a sharper reason: an unpersisted vote
                 // lets the voter grant the same term twice across a restart.
-                let persisted = if batch_has_proposal || granted_a_binding_vote {
+                let persisted = if batch_has_proposal
+                    || granted_a_binding_vote
+                    || accepted_appended_entries
+                {
                     match wal.as_mut() {
                         Some(wal) => wal
                             .append_built(|coverage| {
