@@ -2046,9 +2046,19 @@ impl RaftCluster {
             return Ok(());
         }
 
+        // A term that cannot be incremented cannot be campaigned in. This is
+        // checked before any state is touched, so a refused campaign leaves the
+        // node exactly as it was: a single peer message can drive
+        // `current_term` to the largest representable value, and the increment
+        // below used to overflow on the next campaign.
+        let next_term = self.current_term.checked_add(1).ok_or_else(|| {
+            RaftError::InvalidRequest(
+                "cannot campaign: the term is already the largest representable value".to_string(),
+            )
+        })?;
         self.last_index_before_current_term = self.last_log_index;
         let append_leader_noop = self.running;
-        self.current_term += 1;
+        self.current_term = next_term;
         self.leader_id = Some(candidate_id);
         self.vote_responses.clear();
         self.pre_vote_responses.clear();
@@ -2603,8 +2613,19 @@ impl RaftCluster {
                 reason: "candidate_unhealthy".to_string(),
             });
         }
+        // The granted term is the one the candidate would campaign in. When it
+        // is not representable there is no term to grant, so this refuses
+        // rather than reporting the current one: a grant carrying
+        // `current_term` is a pre-vote for a term that has already been used.
+        let Some(next_term) = self.current_term.checked_add(1) else {
+            return Ok(VoteResponse {
+                term: self.current_term,
+                vote_granted: false,
+                reason: "term_exhausted".to_string(),
+            });
+        };
         Ok(VoteResponse {
-            term: self.current_term + 1,
+            term: next_term,
             vote_granted: true,
             reason: "pre_vote_granted".to_string(),
         })
