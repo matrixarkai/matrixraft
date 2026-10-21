@@ -690,20 +690,41 @@ impl PersistentRaftSnapshotStore {
         let path = self.snapshot_path(&snapshot.meta.snapshot_id);
         let encoded = serde_json::to_vec(snapshot)
             .map_err(|err| RaftError::Storage(format!("failed to encode snapshot: {err}")))?;
-        let mut file = File::create(&path).map_err(|err| {
+        // Written under a staging name and renamed into place, because
+        // `File::create` on the final path TRUNCATES it. A crash between that
+        // create and the sync left a torn checkpoint where a good one had
+        // been, and `list_checkpoints` went on advertising it -- measured: a
+        // file cut to a third of its length is still listed, and then refuses
+        // to load with "EOF while parsing a list". That is the state the
+        // sidecar ordering below exists to prevent, reached by the other
+        // route.
+        //
+        // A rename within a directory is atomic, so a reader sees the whole
+        // old checkpoint or the whole new one and never a prefix of either. A
+        // crash before the rename leaves a `.snapshot.tmp`, which listing
+        // ignores because it filters on the `.snapshot` extension, and which
+        // the next save for that id overwrites rather than accumulating.
+        let staging = self.staging_path(&snapshot.meta.snapshot_id);
+        let mut file = File::create(&staging).map_err(|err| {
             RaftError::Storage(format!(
-                "failed to create snapshot {}: {err}",
-                path.display()
+                "failed to create snapshot staging file {}: {err}",
+                staging.display()
             ))
         })?;
         file.write_all(&encoded)
             .and_then(|_| file.sync_data())
             .map_err(|err| {
                 RaftError::Storage(format!(
-                    "failed to persist snapshot {}: {err}",
-                    path.display()
+                    "failed to persist snapshot staging file {}: {err}",
+                    staging.display()
                 ))
             })?;
+        fs::rename(&staging, &path).map_err(|err| {
+            RaftError::Storage(format!(
+                "failed to move snapshot {} into place: {err}",
+                path.display()
+            ))
+        })?;
         // The sidecar last, and only after the checkpoint itself is synced: a
         // sidecar without its snapshot would advertise a checkpoint that
         // cannot be loaded, which is worse than a snapshot with no sidecar --
@@ -905,6 +926,16 @@ impl PersistentRaftSnapshotStore {
 
     fn descriptor_path(&self, snapshot_id: &str) -> PathBuf {
         self.options.dir.join(format!("{snapshot_id}.descriptor"))
+    }
+
+    /// Where a checkpoint is written before it is renamed into place.
+    ///
+    /// The extension matters: `list_checkpoints` keeps only entries whose
+    /// extension is `snapshot`, and `Path::extension` on this name answers
+    /// `tmp`, so a staging file left by a crash is never mistaken for a
+    /// checkpoint.
+    fn staging_path(&self, snapshot_id: &str) -> PathBuf {
+        self.options.dir.join(format!("{snapshot_id}.snapshot.tmp"))
     }
 }
 
