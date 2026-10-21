@@ -2086,6 +2086,21 @@ impl RaftCluster {
                 StateRole::Follower
             };
         }
+        // A new leader does not inherit the witness policy of the period
+        // before it. Without this the commit quorum kept counting witnesses
+        // across a leadership change, so a leader that CAN reach a
+        // voters-only majority still committed on a quorum that witnesses --
+        // which hold no data -- could complete, for the one lease tick until
+        // the policy was recomputed.
+        //
+        // Recomputed rather than cleared, which is strictly better than
+        // either: clearing would stall the degraded case for a tick, and a
+        // leader taking office while it still cannot reach a voters-only
+        // majority needs witnesses counted straight away.
+        //
+        // Before the no-op, not after: broadcasting it refreshes the cluster
+        // indexes, and that is one of the two readers of this policy.
+        self.refresh_witness_commit_quorum_policy();
         self.reset_replication_pipelines_for_leader(candidate_id);
         if append_leader_noop {
             self.broadcast_leader_noop()?;
