@@ -2093,11 +2093,27 @@ impl RaftCluster {
         Ok(())
     }
 
+    /// The index a new entry would take, refused when there is no such index.
+    ///
+    /// A log already standing at the largest representable index has no next
+    /// one, so minting an entry there is impossible rather than merely
+    /// awkward. `restore_wal_record` is public and installs a host's log
+    /// verbatim, which is how the log can arrive at the ceiling without any
+    /// peer having put it there.
+    fn next_log_index(&self) -> Result<LogIndex, RaftError> {
+        self.last_log_index.checked_add(1).ok_or_else(|| {
+            RaftError::InvalidRequest(
+                "the log is already at the largest representable index, so no entry can follow it"
+                    .to_string(),
+            )
+        })
+    }
+
     fn broadcast_leader_noop(&mut self) -> Result<LogId, RaftError> {
         let leader_id = self.leader_id.ok_or(RaftError::NoLeader)?;
         let log_id = LogId {
             term: self.current_term,
-            index: self.last_log_index + 1,
+            index: self.next_log_index()?,
         };
         let entry = LogEntry {
             log_id: log_id.clone(),
@@ -3317,7 +3333,7 @@ impl RaftCluster {
 
         let log_id = LogId {
             term: self.current_term,
-            index: self.last_log_index + 1,
+            index: self.next_log_index()?,
         };
         let membership_change_is_pending = self
             .pending_membership_change_index
@@ -3448,7 +3464,9 @@ impl RaftCluster {
                 commit_index: node.commit_index,
                 installed_snapshot_index: snapshot_index,
                 first_retained_log_index: if snapshot_index > 0 {
-                    snapshot_index + 1
+                    // Saturating, and the same in both record builders, which
+                    // are required to agree about where the group has got to.
+                    snapshot_index.saturating_add(1)
                 } else {
                     node.log
                         .first()
@@ -3526,7 +3544,9 @@ impl RaftCluster {
                 commit_index: node.commit_index,
                 installed_snapshot_index: snapshot_index,
                 first_retained_log_index: if snapshot_index > 0 {
-                    snapshot_index + 1
+                    // Saturating, and the same in both record builders, which
+                    // are required to agree about where the group has got to.
+                    snapshot_index.saturating_add(1)
                 } else {
                     node.log
                         .first()
@@ -3551,6 +3571,28 @@ impl RaftCluster {
         // serve -- which is where the comparable engine asserts the same
         // relation, as it loads its log buffer rather than as it parses.
         matrixraft_validate_log_continues_snapshot(&record)?;
+        // A log standing at the largest representable index can never take
+        // another entry, so a record carrying one is refused here rather than
+        // installed into a node that would then fail every proposal. The
+        // continuity rule above returns early when the record has no snapshot,
+        // so it does not cover this.
+        if let Some(index) = record
+            .entries
+            .last()
+            .map(|entry| entry.log_id.index)
+            .into_iter()
+            .chain(
+                record
+                    .installed_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.last_log_id.index),
+            )
+            .find(|index| *index == LogIndex::MAX)
+        {
+            return Err(RaftError::InvalidRequest(format!(
+                "WAL record carries index {index}, the largest representable index, so no entry could ever follow it"
+            )));
+        }
         // The membership the record carries is the one the log committed, and
         // it outranks the peers this process happened to be configured with.
         // Without this a restart resurrected a removed peer -- which then
@@ -6634,7 +6676,7 @@ impl RaftCluster {
     }
 
     fn reset_replication_pipelines_for_leader(&mut self, leader_id: NodeId) {
-        let next_index = self.last_log_index + 1;
+        let next_index = self.last_log_index.saturating_add(1);
         let limits = self.config.pipeline_limits();
         for node_id in self.nodes.keys().copied().collect::<Vec<_>>() {
             let pipeline = self.peer_pipelines.entry(node_id).or_insert_with(|| {
