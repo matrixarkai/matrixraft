@@ -51,21 +51,34 @@ fn validate_positive_id(blockers: &mut Vec<String>, field: &str, value: u64) {
     }
 }
 
-fn validate_log_id(blockers: &mut Vec<String>, field: &str, log_id: &LogId) {
-    if log_id.index == 0 {
-        blockers.push(format!("{field}.index must be greater than zero"));
+/// The index rules, on their own, so every index that crosses the wire can be
+/// held to them rather than only the ones inside a [`LogId`].
+///
+/// Keeping them inlined in `validate_log_id` meant the rules reached the three
+/// indices that happen to be wrapped in a `LogId` and no others. A follower's
+/// `require_snapshot` is just as much an index the leader acts on, and it was
+/// not covered: a claim at the ceiling latched the leader's per-peer ratchet
+/// permanently, after which the peer's own honest request for the snapshot it
+/// needed was refused.
+fn validate_log_index(blockers: &mut Vec<String>, field: &str, index: crate::LogIndex) {
+    if index == 0 {
+        blockers.push(format!("{field} must be greater than zero"));
     }
-    if log_id.index == crate::LogIndex::MAX {
+    if index == crate::LogIndex::MAX {
         // The protocol needs the index after this one to exist: a follower
         // stores `index + 1` as its next index, a leader builds its next entry
         // at `last + 1`, and a snapshot publishes `snapshot_index + 1` as the
         // first index it retains. An index at the ceiling makes all three
         // unrepresentable, so it is refused here rather than overflowed later.
         blockers.push(format!(
-            "{field}.index must be below {}, because the protocol needs the index after it",
+            "{field} must be below {}, because the protocol needs the index after it",
             crate::LogIndex::MAX
         ));
     }
+}
+
+fn validate_log_id(blockers: &mut Vec<String>, field: &str, log_id: &LogId) {
+    validate_log_index(blockers, &format!("{field}.index"), log_id.index);
 }
 
 fn validate_non_empty_reason(blockers: &mut Vec<String>, field: &str, reason: &str) {
@@ -131,6 +144,21 @@ pub fn matrixraft_validate_append_entries_response(
             "successful append response must not include rejection_hint or rejected_index"
                 .to_string(),
         );
+    }
+    // The one index on this response that the leader turns into an action. It
+    // drives a monotonic per-peer ratchet, so an unusable value is not merely
+    // ignored -- it sticks, and shuts out the peer's later honest requests.
+    //
+    // The other numbers here are deliberately not held to this rule, and the
+    // reasons are worth stating so a later sweep does not read their absence
+    // as an oversight. `match_index` is an unbounded follower claim on purpose:
+    // it paces replication and does not decide the commit, which is computed
+    // from the leader's own node model. `rejected_index` and `rejection_hint`
+    // only rewind `next_index` and are added to with `saturating_add`. A
+    // commit or read index of zero is legitimate, meaning nothing is committed
+    // yet, so the zero half of this rule would be wrong for them.
+    if let Some(required_index) = response.require_snapshot {
+        validate_log_index(&mut blockers, "require_snapshot", required_index);
     }
     TransportValidationReport::new("append_entries_response", blockers)
 }
