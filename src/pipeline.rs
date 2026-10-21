@@ -804,8 +804,19 @@ impl ReplicationPipeline {
             ));
         }
         if entry.log_id.index == self.status.next_index {
+            // A peer's append response can leave `next_index` at the ceiling
+            // (that claim is stored deliberately), so an entry arriving at it
+            // would have no representable successor. Refusing is the only
+            // honest answer: clamping would leave the next index pointing at
+            // an entry already taken.
+            let Some(next_index) = entry.log_id.index.checked_add(1) else {
+                self.status.out_of_order_append_rejections += 1;
+                return Err(RaftError::InvalidRequest(
+                    "append index is the largest representable index".to_string(),
+                ));
+            };
             self.status.match_index = entry.log_id.index;
-            self.status.next_index = entry.log_id.index + 1;
+            self.status.next_index = next_index;
             self.drain_reorder_queue();
             return Ok(());
         }

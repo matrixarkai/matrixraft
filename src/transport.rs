@@ -55,6 +55,17 @@ fn validate_log_id(blockers: &mut Vec<String>, field: &str, log_id: &LogId) {
     if log_id.index == 0 {
         blockers.push(format!("{field}.index must be greater than zero"));
     }
+    if log_id.index == crate::LogIndex::MAX {
+        // The protocol needs the index after this one to exist: a follower
+        // stores `index + 1` as its next index, a leader builds its next entry
+        // at `last + 1`, and a snapshot publishes `snapshot_index + 1` as the
+        // first index it retains. An index at the ceiling makes all three
+        // unrepresentable, so it is refused here rather than overflowed later.
+        blockers.push(format!(
+            "{field}.index must be below {}, because the protocol needs the index after it",
+            crate::LogIndex::MAX
+        ));
+    }
 }
 
 fn validate_non_empty_reason(blockers: &mut Vec<String>, field: &str, reason: &str) {
@@ -86,19 +97,26 @@ pub fn matrixraft_validate_append_entries_request(
     if let Some(prev_log_id) = &request.prev_log_id {
         validate_log_id(&mut blockers, "prev_log_id", prev_log_id);
     }
-    let mut expected_index = request
-        .prev_log_id
-        .as_ref()
-        .map_or(1, |log_id| log_id.index + 1);
+    // `checked_add`, not `saturating_add`: this is an EXPECTATION, and a
+    // clamped expectation matches an index it should have rejected. `None`
+    // means no index can follow, which the rule above has already recorded as
+    // a blocker -- the contiguity check is simply skipped rather than compared
+    // against a wrong number.
+    let mut expected_index = match request.prev_log_id.as_ref() {
+        None => Some(1),
+        Some(log_id) => log_id.index.checked_add(1),
+    };
     for entry in &request.entries {
         validate_log_id(&mut blockers, "entries[].log_id", &entry.log_id);
-        if entry.log_id.index != expected_index {
-            blockers.push(format!(
-                "entries must be contiguous: expected index {expected_index}, got {}",
-                entry.log_id.index
-            ));
+        if let Some(expected) = expected_index {
+            if entry.log_id.index != expected {
+                blockers.push(format!(
+                    "entries must be contiguous: expected index {expected}, got {}",
+                    entry.log_id.index
+                ));
+            }
         }
-        expected_index = entry.log_id.index + 1;
+        expected_index = entry.log_id.index.checked_add(1);
     }
     TransportValidationReport::new("append_entries_request", blockers)
 }
