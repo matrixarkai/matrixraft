@@ -815,7 +815,7 @@ assertion.
 
 Recorded, reported back, and reaching nothing that runs:
 
-<!-- inert-settings: reader_num, executor_num, watched_address_resolver, max_applied_log_bytes, max_disk_replicate_log_num, snapshot_dir -->
+<!-- inert-settings: reader_num, executor_num, watched_address_resolver, max_applied_log_bytes, max_disk_replicate_log_num, snapshot_dir, recover_fsm_from_snapshot -->
 
 Three are on `MatrixRaftGroupContext`:
 
@@ -835,6 +835,25 @@ Two are on `MatrixRaftOptions`:
   disk rather than from the in-memory buffer. This crate's replication reads
   from the log buffer, whose bound is `max_memory_replicate_log_bytes` and is
   live; there is no separate disk path for this to bound.
+
+One is on the node itself, and arrives as a **method parameter** rather than a
+struct field:
+
+- `recover_fsm_from_snapshot` — `MatrixRaftNode::restart` takes it, stores it,
+  and reports it back through the per-node, per-group and per-route-key
+  accessors, and nothing branches on it. It selects nothing here because this
+  engine restores *raft* state rather than state-machine state: a recovered WAL
+  record carries the installed snapshot and the retained log together, so there
+  is no second recovery mode to choose between, and the state machine's own
+  durability belongs to the host, driven by its checkpoint and its
+  `FlushedIndex`. Listing it is the honest answer rather than wiring it, because
+  wiring would mean inventing a recovery mode this engine does not have.
+
+  It is the first inert setting that is **not** a field on a settings struct,
+  which is why no field count caught it: the three counts in
+  `tests/settings_contract.rs` watch `MatrixRaftGroupContext`,
+  `MatrixRaftOptions` and `NodeOptions`, and a setting that reaches the node
+  through `restart(bool)` is invisible to all three.
 
 One is on `NodeOptions`:
 

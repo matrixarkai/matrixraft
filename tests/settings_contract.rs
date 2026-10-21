@@ -125,8 +125,8 @@ fn the_inert_settings_marker_is_the_length_it_was_last_decided_to_be() {
     let claimed = settings_the_readme_calls_inert();
     assert_eq!(
         claimed.len(),
-        6,
-        "the README's `inert-settings` marker names {} settings rather than 6: \
+        7,
+        "the README's `inert-settings` marker names {} settings rather than 7: \
          {claimed:?}.\n\nThree are on `MatrixRaftGroupContext`, two on \
          `MatrixRaftOptions` and one on `NodeOptions`. Removing one means a setting became live -- say so \
          in the settings section -- or that a documented shortfall is being \
@@ -191,6 +191,44 @@ fn a_new_context_setting_has_to_be_considered_for_the_list() {
 
 If the new one reaches nothing, add it to          the README's `inert-settings` marker. If it reaches something, the README's          settings section should say so. Then update this count.",
         fields.len()
+    );
+}
+
+/// The settings that arrive as a method parameter, which no field count sees.
+///
+/// The three counts below watch struct fields. `recover_fsm_from_snapshot`
+/// reaches the node through `MatrixRaftNode::restart(bool)`, is stored on the
+/// node, and is reported back through the per-node, per-group and
+/// per-route-key accessors -- and nothing branches on it. It was inert and
+/// unlisted while every field count passed, which is the fourth time that hole
+/// has mattered and the first time it was not a struct field.
+///
+/// Two blind spots hid it, not one. The field counts watch struct fields, and
+/// this is a parameter. And `the_settings_the_readme_calls_inert_really_reach_nothing`
+/// looks for uses *outside* the facade -- excluded deliberately, after it
+/// called `shared_runtime` inert for having its uses inside -- while every use
+/// of this one is inside the facade. So that test passes for this name without
+/// examining anything, which is worth knowing before treating it as evidence
+/// that a listed name is inert.
+///
+/// This is a named check rather than a mechanism, deliberately. Enumerating
+/// "settings that arrive as parameters" means deciding which parameters are
+/// settings, and this file already records why that judgement is not
+/// automated: an earlier attempt to decide live-vs-inert by counting name
+/// occurrences got two of its own inputs wrong. A named check cannot be wrong
+/// about the one thing it names.
+#[test]
+fn the_node_setting_that_is_not_a_struct_field_is_still_listed() {
+    let claimed = settings_the_readme_calls_inert();
+    assert!(
+        claimed
+            .iter()
+            .any(|name| name == "recover_fsm_from_snapshot"),
+        "`recover_fsm_from_snapshot` is recorded on the node, reported back by \
+         several accessors, and branched on by nothing, so the README's \
+         `inert-settings` marker has to name it. If it gets wired up, the \
+         README's settings section should say what it does and this test should \
+         go: {claimed:?}"
     );
 }
 
