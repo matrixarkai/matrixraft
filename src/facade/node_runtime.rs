@@ -1414,6 +1414,27 @@ fn runtime_step_operation_name(message: &Message) -> &'static str {
 /// of messages instead. A WAL record describes the log as it stands, so one
 /// record covers every proposal applied before it -- and one fsync makes them
 /// all durable, rather than one fsync each.
+/// Writes the record that backs a promise the node has just made, and fires
+/// the fatal event if it does not land.
+///
+/// Used by the two membership paths, which can propagate the failure with `?`.
+/// The append and snapshot paths do the same thing inline because they have to
+/// turn the failure into the step's own result instead of returning early --
+/// the ack is withheld rather than the call aborted. A node with no WAL
+/// configured persists nothing, which is the existing behaviour for proposals.
+fn persist_after_promise(
+    cluster: &mut RaftCluster,
+    wal: &mut Option<PersistentRaftWal>,
+    node_id: NodeId,
+) -> Result<(), RaftError> {
+    let Some(open_wal) = wal.as_mut() else {
+        return Ok(());
+    };
+    let appended =
+        open_wal.append_built(|coverage| cluster.wal_record_for_coverage(node_id, coverage));
+    after_durable_write(cluster, node_id, appended).map(|_| ())
+}
+
 fn runtime_step_message(
     cluster: &mut RaftCluster,
     wal: &mut Option<PersistentRaftWal>,
@@ -1441,9 +1462,21 @@ fn runtime_step_message(
             }
             Ok(StepResult::Proposed(log_id))
         }
-        Message::Membership { operation } => membership_executor
-            .execute(cluster, operation)
-            .map(StepResult::Membership),
+        Message::Membership { operation } => {
+            let report = membership_executor.execute(cluster, operation)?;
+            // An applied membership change has to reach disk before the report
+            // says it was applied. Nothing on this path wrote a record, so a
+            // removed peer came back on restart and counted toward quorum
+            // again: measured, `remove(3)` reported success with voters [1, 2]
+            // and the restarted node was back to [1, 2, 3] with no record at
+            // all. Recovery already prefers the record's membership over the
+            // configured peers -- which is exactly why the record has to carry
+            // the new one rather than a stale one.
+            if report.success {
+                persist_after_promise(cluster, wal, node_id)?;
+            }
+            Ok(StepResult::Membership(report))
+        }
         Message::Admin {
             command: AdminCommand::CompactLogsWithStorageFence { log_index, fence },
         } => {
@@ -2295,9 +2328,25 @@ impl NodeCore {
                 ));
             }
             NodeRuntimeOp::MembershipWorkflowWithRollback(operations, reply) => {
+                let mut outcome =
+                    membership_executor.execute_all_with_rollback(cluster, operations);
+                // One record for the whole workflow: a record describes the
+                // membership as it now stands, so there is nothing per-operation
+                // to write. Persisted when any operation applied, including a
+                // workflow that rolled back -- the rollback is itself a change
+                // the record has to carry.
+                let applied_any = outcome
+                    .as_ref()
+                    .map(|reports| reports.iter().any(|report| report.success))
+                    .unwrap_or(false);
+                if applied_any {
+                    if let Err(error) = persist_after_promise(cluster, wal, node_id) {
+                        outcome = Err(error);
+                    }
+                }
                 let _ = reply.send(record_runtime_result(
                     "membership_workflow_with_rollback",
-                    membership_executor.execute_all_with_rollback(cluster, operations),
+                    outcome,
                     blocker_log,
                     false,
                 ));
