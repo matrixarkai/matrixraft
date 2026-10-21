@@ -60,6 +60,7 @@ fn snapshot(index: u64, payload: &[u8]) -> RaftSnapshot {
             last_log_id: LogId { term: 2, index },
             membership: vec![1, 2, 3],
             members: Vec::new(),
+            payload_bytes: payload.len() as u64,
         },
         payload: payload.to_vec(),
     }
@@ -442,6 +443,7 @@ fn failed_replication_task_sends_snapshot_or_triggers_one() {
                     last_log_id: LogId { term: 1, index: 4 },
                     membership: vec![1, 2, 3],
                     members: Vec::new(),
+                    payload_bytes: b"leader snapshot".len() as u64,
                 },
                 payload: b"leader snapshot".to_vec(),
             },
@@ -633,6 +635,7 @@ fn retained_snapshot(index: u64, payload: &[u8]) -> RaftSnapshot {
             last_log_id: LogId { term: 2, index },
             membership: vec![1, 2, 3],
             members: Vec::new(),
+            payload_bytes: payload.len() as u64,
         },
         payload: payload.to_vec(),
     }

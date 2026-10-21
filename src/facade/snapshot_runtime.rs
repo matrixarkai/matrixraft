@@ -11,6 +11,25 @@ pub struct SnapshotMetadata {
     pub membership: Vec<NodeId>,
     #[serde(default)]
     pub members: Vec<Peer>,
+    /// How many payload bytes the sender counted, so a receiver can tell a
+    /// finished install from one that stopped early.
+    ///
+    /// An install ends when a chunk says `done`, and the offset check only
+    /// proves the chunks arrived contiguously -- it cannot see a transfer that
+    /// stopped short. Measured without this: one chunk carrying `done: true`
+    /// installed 1,024 bytes of a 4,096-byte snapshot, and the receiver then
+    /// reported `installed_snapshot` at the snapshot's full index, which is a
+    /// claim to state it does not hold.
+    ///
+    /// **Zero means not declared**, and the check is skipped. That keeps a
+    /// record or a sender written before this field worked exactly as it did,
+    /// and it also means a sender can opt out by declaring zero. So this
+    /// catches a truncated transfer, an overrun, and a sender that miscounts
+    /// -- not a peer determined to lie. That is the right scope: in raft a
+    /// follower takes its leader's word for the log by design, and a leader
+    /// willing to lie can do worse than shorten a snapshot.
+    #[serde(default)]
+    pub payload_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,7 +113,17 @@ impl SnapshotInstallState {
         // Only reachable once the offset above matched, so this grows by
         // bytes actually received and would need 2^64 of them to wrap.
         // Saturating anyway, so the invariant does not rest on that.
-        self.next_offset = self.next_offset.saturating_add(chunk.data.len() as u64);
+        let arriving = self.next_offset.saturating_add(chunk.data.len() as u64);
+        // Caught on the chunk that overruns, so the error names the chunk
+        // responsible instead of surfacing as a length mismatch at the end.
+        if self.meta.payload_bytes > 0 && arriving > self.meta.payload_bytes {
+            return Err(RaftError::InvalidRequest(format!(
+                "snapshot chunk at offset {} would carry the install to {arriving} bytes, \
+                 past the {} the sender declared",
+                chunk.offset, self.meta.payload_bytes
+            )));
+        }
+        self.next_offset = arriving;
         self.bytes.extend_from_slice(&chunk.data);
         self.complete = chunk.done;
         Ok(())
@@ -105,6 +134,15 @@ impl SnapshotInstallState {
             return Err(RaftError::InvalidRequest(
                 "snapshot install is incomplete".to_string(),
             ));
+        }
+        // `done` is the sender's word that the transfer finished; this is the
+        // only thing that checks it against what arrived.
+        if self.meta.payload_bytes > 0 && self.bytes.len() as u64 != self.meta.payload_bytes {
+            return Err(RaftError::InvalidRequest(format!(
+                "snapshot install ended with {} bytes, not the {} the sender declared",
+                self.bytes.len(),
+                self.meta.payload_bytes
+            )));
         }
         Ok(RaftSnapshot {
             group_id,
@@ -271,12 +309,19 @@ impl SnapshotLifecycle {
                 "snapshot chunk_size must be greater than zero".to_string(),
             ));
         }
+        // Derived here rather than taken from `snapshot.meta`, so a transfer
+        // declares what is actually being sent even when the stored metadata
+        // predates the field or disagrees with the payload beside it.
+        let declared = SnapshotMetadata {
+            payload_bytes: snapshot.payload.len() as u64,
+            ..snapshot.meta.clone()
+        };
         let mut chunks = Vec::new();
         let mut offset = 0;
         while offset < snapshot.payload.len() {
             let end = (offset + chunk_size as usize).min(snapshot.payload.len());
             chunks.push(SnapshotChunk {
-                meta: snapshot.meta.clone(),
+                meta: declared.clone(),
                 offset: offset as u64,
                 data: snapshot.payload[offset..end].to_vec(),
                 done: end == snapshot.payload.len(),
@@ -285,7 +330,7 @@ impl SnapshotLifecycle {
         }
         if chunks.is_empty() {
             chunks.push(SnapshotChunk {
-                meta: snapshot.meta.clone(),
+                meta: declared,
                 offset: 0,
                 data: Vec::new(),
                 done: true,

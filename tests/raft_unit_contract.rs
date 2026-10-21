@@ -39,6 +39,7 @@ fn wal_record(commit_index: u64, snapshot_index: Option<u64>) -> WalRecord {
         last_log_id: LogId { term: 3, index },
         membership: vec![1, 2, 3],
         members: Vec::new(),
+        payload_bytes: 0,
     });
     let mut record = WalRecord {
         entries_are_delta: false,

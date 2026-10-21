@@ -137,6 +137,7 @@ fn transport_aliases_cover_all_rpc_messages() {
                 last_log_id: LogId { term: 2, index: 4 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
+                payload_bytes: 0,
             },
             offset: 0,
             data: b"snapshot".to_vec(),
@@ -313,6 +314,7 @@ fn in_memory_transport_forwards_and_validates_all_rpc_messages() {
                         last_log_id: LogId { term: 2, index: 4 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
+                        payload_bytes: 0,
                     },
                     offset: 0,
                     data: b"snapshot".to_vec(),
@@ -825,6 +827,7 @@ fn cluster_installs_snapshot_from_chunked_snapshot_rpc() {
                         last_log_id: LogId { term: 1, index: 9 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
+                        payload_bytes: 0,
                     },
                     offset: 0,
                     data: b"state".to_vec(),
@@ -850,6 +853,7 @@ fn cluster_installs_snapshot_from_chunked_snapshot_rpc() {
                         last_log_id: LogId { term: 1, index: 8 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
+                        payload_bytes: 0,
                     },
                     offset: 0,
                     data: b"stale".to_vec(),
@@ -881,6 +885,7 @@ fn cluster_reassembles_multi_chunk_snapshot_rpc() {
         last_log_id: LogId { term: 1, index: 10 },
         membership: vec![1, 2, 3],
         members: Vec::new(),
+        payload_bytes: 0,
     };
 
     let first = cluster
@@ -1011,6 +1016,7 @@ fn tcp_transport_round_trips_append_snapshot_vote_and_read_index() {
                         last_log_id: LogId { term: 1, index: 4 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
+                        payload_bytes: 0,
                     },
                     offset: 0,
                     data: b"state".to_vec(),

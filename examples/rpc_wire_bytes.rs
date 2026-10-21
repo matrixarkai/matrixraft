@@ -52,6 +52,7 @@ fn snapshot_request(chunk_bytes: usize) -> TcpRaftTransportRequest {
                     },
                     membership: vec![1, 2, 3],
                     members: Vec::new(),
+                    payload_bytes: 0,
                 },
                 offset: 0,
                 data: (0..chunk_bytes).map(|byte| byte as u8).collect(),

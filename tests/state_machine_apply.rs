@@ -200,6 +200,7 @@ impl StateMachine for OpaqueBytesStateMachine {
                 last_log_id: LogId { term: 1, index: 1 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
+                payload_bytes: 0,
             },
             offset: 0,
             data: self.applied.concat(),

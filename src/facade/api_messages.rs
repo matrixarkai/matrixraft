@@ -271,6 +271,7 @@ impl MatrixRaftSnapshotDesc {
             },
             membership: members.iter().map(|peer| peer.node_id).collect(),
             members,
+            payload_bytes: 0,
         }
     }
 }

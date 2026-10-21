@@ -59,6 +59,7 @@ fn main() {
             },
             membership: vec![1, 2, 3],
             members: vec![peer(1), peer(2), peer(3)],
+            payload_bytes: 0,
         },
         payload: vec![7u8; payload_bytes],
     };

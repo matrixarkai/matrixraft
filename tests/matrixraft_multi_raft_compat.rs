@@ -752,6 +752,7 @@ fn matrixraft_route_summaries_expose_response_payloads_by_route() {
             last_log_id: proposed_log_id.clone(),
             membership: vec![1, 3, 4],
             members: Vec::new(),
+            payload_bytes: 0,
         },
         payload: b"checkpoint payload".to_vec(),
     };
@@ -2241,6 +2242,7 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
                             last_log_id: LogId { term: 1, index: 12 },
                             membership: vec![1, 2, 3],
                             members: Vec::new(),
+                            payload_bytes: 0,
                         },
                         offset: 0,
                         data: b"snapshot-route-state".to_vec(),
@@ -3386,6 +3388,7 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
         last_log_id: LogId { term: 1, index: 1 },
         membership: vec![1, 2, 3],
         members: vec![peer(810, 1), peer(810, 2), peer(810, 3)],
+        payload_bytes: 0,
     };
     let snapshot_desc = MatrixRaftSnapshotDesc::from_snapshot_meta(&snapshot_meta);
     let snapshot_result = server
@@ -3931,6 +3934,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                                 last_log_id: LogId { term: 1, index: 17 },
                                 membership: vec![1],
                                 members: vec![peer(815, 1)],
+                                payload_bytes: 0,
                             },
                             offset: 0,
                             data: b"batch route snapshot chunk".to_vec(),
@@ -4075,6 +4079,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                                     last_log_id: LogId { term: 1, index: 17 },
                                     membership: vec![1],
                                     members: vec![peer(815, 1)],
+                                    payload_bytes: 0,
                                 },
                                 offset: 0,
                                 data: b"batch route snapshot chunk".to_vec(),
@@ -4129,6 +4134,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                                 last_log_id: LogId { term: 1, index: 17 },
                                 membership: vec![1],
                                 members: vec![peer(815, 1)],
+                                payload_bytes: 0,
                             },
                             offset: 0,
                             data: b"batch route snapshot chunk".to_vec(),
@@ -4784,6 +4790,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                                     last_log_id: LogId { term: 1, index: 23 },
                                     membership: vec![1],
                                     members: vec![peer(814, 1)],
+                                    payload_bytes: 0,
                                 },
                                 offset: 0,
                                 data: b"priority route snapshot chunk".to_vec(),
@@ -4958,6 +4965,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                                     last_log_id: LogId { term: 1, index: 23 },
                                     membership: vec![1],
                                     members: vec![peer(814, 1)],
+                                    payload_bytes: 0,
                                 },
                                 offset: 0,
                                 data: b"priority route snapshot chunk".to_vec(),
@@ -5230,6 +5238,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                                     last_log_id: LogId { term: 1, index: 23 },
                                     membership: vec![1],
                                     members: vec![peer(814, 1)],
+                                    payload_bytes: 0,
                                 },
                                 offset: 0,
                                 data: b"priority route snapshot chunk".to_vec(),
@@ -5400,6 +5409,7 @@ fn matrixraft_multi_raft_server_routes_best_effort_batches() {
                                 last_log_id: LogId { term: 1, index: 23 },
                                 membership: vec![1],
                                 members: vec![peer(814, 1)],
+                                payload_bytes: 0,
                             },
                             offset: 0,
                             data: b"priority route snapshot chunk".to_vec(),
@@ -6475,6 +6485,7 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
         last_log_id: LogId { term: 1, index: 1 },
         membership: vec![1, 2, 3],
         members: vec![peer(818, 1), peer(818, 2), peer(818, 3)],
+        payload_bytes: 0,
     };
     let snapshot_desc = MatrixRaftSnapshotDesc::from_snapshot_meta(&snapshot_meta);
     server
@@ -6489,6 +6500,7 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
                 last_log_id: LogId { term: 1, index: 1 },
                 membership: vec![1, 2, 3],
                 members: vec![peer(819, 1), peer(819, 2), peer(819, 3)],
+                payload_bytes: 0,
             }),
         )
         .expect("data snapshot route");
@@ -6502,6 +6514,7 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
         last_log_id: LogId { term: 1, index: 2 },
         membership: vec![1, 2, 3],
         members: vec![peer(818, 1), peer(818, 2), peer(818, 3)],
+        payload_bytes: 0,
     });
     let meta_group_publish_plan = server
         .plan_publish_snapshot_route_on_group(818, meta_group_snapshot.clone())
@@ -6545,12 +6558,14 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
         last_log_id: LogId { term: 1, index: 3 },
         membership: vec![1, 2, 3],
         members: vec![peer(818, 1), peer(818, 2), peer(818, 3)],
+        payload_bytes: 0,
     });
     let selected_data_snapshot = MatrixRaftSnapshotDesc::from_snapshot_meta(&SnapshotMetadata {
         snapshot_id: "snap-819-selected".to_string(),
         last_log_id: LogId { term: 1, index: 3 },
         membership: vec![1, 2, 3],
         members: vec![peer(819, 1), peer(819, 2), peer(819, 3)],
+        payload_bytes: 0,
     });
     let selected_routes = server
         .publish_snapshot_routes_for_groups([
@@ -7182,6 +7197,7 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
                 last_log_id: LogId { term: 1, index: 1 },
                 membership: vec![1],
                 members: vec![peer(853, 1)],
+                payload_bytes: 0,
             }),
         )
         .expect("best-effort meta snapshot route");
@@ -7194,6 +7210,7 @@ fn matrixraft_multi_raft_server_unregisters_groups_and_cleans_routes() {
                 last_log_id: LogId { term: 1, index: 1 },
                 membership: vec![1],
                 members: vec![peer(854, 1)],
+                payload_bytes: 0,
             }),
         )
         .expect("best-effort data snapshot route");
@@ -10400,6 +10417,7 @@ fn matrixraft_multi_raft_server_reports_group_statuses_and_leaders() {
                 last_log_id: LogId { term: 1, index: 1 },
                 membership: vec![1, 2],
                 members: vec![peer(822, 1), peer(822, 2)],
+                payload_bytes: 0,
             }),
         )
         .expect("publish topology snapshot route");
@@ -17683,6 +17701,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
                 peer_with_role(836, 1, ReplicaRole::Voter),
                 peer_with_role(836, 2, ReplicaRole::Voter),
             ],
+            payload_bytes: 0,
         },
         payload: b"direct meta install snapshot".to_vec(),
     };
@@ -17712,6 +17731,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
                 peer_with_role(836, 1, ReplicaRole::Voter),
                 peer_with_role(836, 2, ReplicaRole::Voter),
             ],
+            payload_bytes: 0,
         },
         payload: b"group meta install snapshot".to_vec(),
     };
@@ -17763,6 +17783,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
                 peer_with_role(836, 1, ReplicaRole::Voter),
                 peer_with_role(836, 2, ReplicaRole::Voter),
             ],
+            payload_bytes: 0,
         },
         payload: b"selected meta install snapshot".to_vec(),
     };
@@ -17779,6 +17800,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
                 peer_with_role(837, 1, ReplicaRole::Voter),
                 peer_with_role(837, 2, ReplicaRole::Voter),
             ],
+            payload_bytes: 0,
         },
         payload: b"selected data install snapshot".to_vec(),
     };
@@ -17967,6 +17989,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
                 peer_with_role(836, 1, ReplicaRole::Voter),
                 peer_with_role(836, 2, ReplicaRole::Voter),
             ],
+            payload_bytes: 0,
         },
         payload: b"retry meta install snapshot".to_vec(),
     };
@@ -17983,6 +18006,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
                 peer_with_role(837, 1, ReplicaRole::Voter),
                 peer_with_role(837, 2, ReplicaRole::Voter),
             ],
+            payload_bytes: 0,
         },
         payload: b"retry data install snapshot".to_vec(),
     };
@@ -18240,6 +18264,7 @@ fn matrixraft_multi_raft_server_controls_snapshot_lifecycle_by_group() {
                     },
                     membership: vec![1, 2],
                     members: Vec::new(),
+                    payload_bytes: 0,
                 },
                 payload: Vec::new(),
             },
@@ -20669,6 +20694,7 @@ fn matrixraft_multi_raft_server_fans_out_snapshot_chunk_rpc_by_group() {
                     peer_with_role(846, 1, ReplicaRole::Voter),
                     peer_with_role(846, 2, ReplicaRole::Voter),
                 ],
+                payload_bytes: 0,
             },
             offset: 0,
             data: b"selected snapshot rpc state".to_vec(),
@@ -20755,6 +20781,7 @@ fn matrixraft_multi_raft_server_fans_out_snapshot_chunk_rpc_by_group() {
                 last_log_id: LogId { term: 1, index: 32 },
                 membership: vec![1, 2],
                 members: Vec::new(),
+                payload_bytes: 0,
             },
             offset: 0,
             data: b"selected snapshot rpc fanout state".to_vec(),

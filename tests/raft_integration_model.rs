@@ -123,6 +123,7 @@ fn wal_record(node: &ModelNode) -> WalRecord {
             },
             membership: vec![1, 2, 3],
             members: Vec::new(),
+            payload_bytes: 0,
         }),
         apply_snapshot_fence: ApplySnapshotFence {
             applied_index: node.applied_index,

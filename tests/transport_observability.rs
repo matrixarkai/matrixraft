@@ -88,6 +88,7 @@ fn transport_contract_names_owned_rpc_types_including_prevote_and_snapshot_chunk
             last_log_id: LogId { term: 4, index: 10 },
             membership: vec![1, 2, 3],
             members: Vec::new(),
+            payload_bytes: 0,
         },
         offset: 0,
         data: b"chunk".to_vec(),

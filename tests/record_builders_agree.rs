@@ -162,6 +162,7 @@ fn they_agree_about_the_retained_floor_once_a_snapshot_is_installed() {
                     },
                     membership: vec![1, 2, 3],
                     members: Vec::new(),
+                    payload_bytes: 0,
                 },
                 payload: b"payload".to_vec(),
             },

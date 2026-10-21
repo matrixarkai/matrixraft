@@ -812,6 +812,7 @@ fn node_runtime_installs_snapshot_with_apply_fence() {
                     last_log_id: LogId { term: 1, index: 3 },
                     membership: vec![1, 2, 3, 4],
                     members: Vec::new(),
+                    payload_bytes: 0,
                 },
                 payload: b"snapshot-payload".to_vec(),
             },
@@ -851,6 +852,7 @@ fn node_runtime_installs_snapshot_chunk_through_runtime() {
         last_log_id: LogId { term: 1, index: 3 },
         membership: vec![1, 2, 3, 4],
         members: Vec::new(),
+        payload_bytes: 0,
     };
     let accepted = runtime
         .install_snapshot_chunk_to(

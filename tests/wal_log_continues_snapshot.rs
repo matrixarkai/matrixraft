@@ -72,6 +72,7 @@ fn record(first_entry_index: u64, first_retained_log_index: u64) -> WalRecord {
             },
             membership: vec![1, 2, 3],
             members: Vec::new(),
+            payload_bytes: 0,
         }),
         apply_snapshot_fence: ApplySnapshotFence {
             applied_index: 22,

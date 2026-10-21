@@ -46,6 +46,7 @@ fn matrixraft_protocol_metadata_shapes_round_trip_to_matrixraft_types() {
         last_log_id: LogId { term: 4, index: 9 },
         membership: vec![1, 2, 3],
         members: vec![voter.clone(), learner.clone(), witness.clone()],
+        payload_bytes: 0,
     };
     let desc = MatrixRaftSnapshotDesc::from_snapshot_meta(&snapshot_meta);
     assert_eq!(desc.index, 9);
@@ -337,6 +338,7 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
                 last_log_id: LogId { term: 6, index: 12 },
                 membership: vec![1, 2, 3],
                 members: Vec::new(),
+                payload_bytes: 0,
             },
             offset: 0,
             data: b"snapshot-state".to_vec(),

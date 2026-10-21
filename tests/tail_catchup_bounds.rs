@@ -26,6 +26,7 @@ fn meta(index: u64) -> SnapshotMetadata {
         last_log_id: LogId { term: 1, index },
         membership: vec![1, 2, 3],
         members: Vec::new(),
+        payload_bytes: 0,
     }
 }
 

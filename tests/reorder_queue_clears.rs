@@ -142,6 +142,7 @@ fn a_snapshot_from_a_new_leader_in_the_same_term_drops_the_cached_append() {
                         last_log_id: LogId { term: 1, index: 1 },
                         membership: vec![1, 2, 3],
                         members: Vec::new(),
+                        payload_bytes: 0,
                     },
                     offset: 0,
                     data: b"snapshot".to_vec(),
