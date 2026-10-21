@@ -1279,6 +1279,34 @@ fn step_accepted_appended_entries(
         && matches!(result, Ok(StepResult::AppendEntries(response)) if response.success)
 }
 
+/// Whether `message` is the final chunk of a snapshot install.
+///
+/// Only the last chunk: earlier ones are buffered and change nothing durable,
+/// and a record per 64 KiB chunk would be an fsync per chunk of every transfer.
+fn is_completing_snapshot_step_message(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::InstallSnapshot { request, .. } if request.chunk.done
+    )
+}
+
+/// Whether the step accepted that final chunk, so the receiver is about to
+/// claim the snapshot's state to the leader.
+///
+/// A throttled response is the receiver asking for less rather than accepting,
+/// so it claims nothing and needs no record.
+fn step_installed_a_snapshot(
+    message_completed_a_snapshot: bool,
+    result: &Result<StepResult, RaftError>,
+) -> bool {
+    message_completed_a_snapshot
+        && matches!(
+            result,
+            Ok(StepResult::InstallSnapshot(response))
+                if response.accepted && !response.throttled
+        )
+}
+
 fn runtime_step_operation_name(message: &Message) -> &'static str {
     match message {
         Message::Admin {
@@ -2051,6 +2079,7 @@ impl NodeCore {
                 );
                 let binding_vote = is_binding_vote_step_message(&message);
                 let append_carries_entries = is_entry_bearing_append_step_message(&message);
+                let snapshot_completes_install = is_completing_snapshot_step_message(&message);
                 let mut result = runtime_step_message(
                     cluster,
                     wal,
@@ -2082,7 +2111,9 @@ impl NodeCore {
                         }
                     }
                 }
-                if step_accepted_appended_entries(append_carries_entries, &result) {
+                if step_accepted_appended_entries(append_carries_entries, &result)
+                    || step_installed_a_snapshot(snapshot_completes_install, &result)
+                {
                     // An accepted append has to be on disk before the ack goes
                     // back, for the same reason a granted vote does. Only the
                     // proposal and vote paths wrote a record, so a follower
@@ -2164,11 +2195,13 @@ impl NodeCore {
                 // pre-vote while refusing the binding one.
                 let mut granted_a_binding_vote = false;
                 let mut accepted_appended_entries = false;
+                let mut installed_a_snapshot = false;
                 let stepped: Result<Vec<StepResult>, RaftError> = messages
                     .into_iter()
                     .map(|message| {
                         let binding_vote = is_binding_vote_step_message(&message);
                         let carries_entries = is_entry_bearing_append_step_message(&message);
+                        let completes_snapshot = is_completing_snapshot_step_message(&message);
                         let result = runtime_step_message(
                             cluster,
                             wal,
@@ -2180,6 +2213,8 @@ impl NodeCore {
                         granted_a_binding_vote |= step_granted_a_binding_vote(binding_vote, &result);
                         accepted_appended_entries |=
                             step_accepted_appended_entries(carries_entries, &result);
+                        installed_a_snapshot |=
+                            step_installed_a_snapshot(completes_snapshot, &result);
                         result
                     })
                     .collect();
@@ -2195,6 +2230,7 @@ impl NodeCore {
                 let persisted = if batch_has_proposal
                     || granted_a_binding_vote
                     || accepted_appended_entries
+                    || installed_a_snapshot
                 {
                     match wal.as_mut() {
                         Some(wal) => wal
