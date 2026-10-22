@@ -294,6 +294,23 @@ pub struct PersistentRaftWal {
     /// Every fsync, not only the slow ones. An append is dominated by its
     /// fsync, so this is what says whether a batch actually amortised one.
     fsync_count: u64,
+    /// How long this writer believes the active segment is, or `None` when it
+    /// has not written to this segment yet.
+    ///
+    /// The append path already stats the file to decide whether to roll, so
+    /// comparing that length against what the last append left costs nothing.
+    /// What it buys is that a second writer on the same directory stops being
+    /// SILENT: two `PersistentRaftWal`s on one `dir` each keep their own segment
+    /// state and write the same filenames, so one overwrites the other's
+    /// segment and recovery sees well-formed files with records missing.
+    /// Measured before this: six appends through two handles recovered as three
+    /// records, with `truncated_corrupt_tail = false`.
+    ///
+    /// This does **not** make a directory safe to share -- that wants a file
+    /// lock, which needs a dependency this crate does not carry. It turns a
+    /// silent loss into an error naming both lengths, which is the part that
+    /// needs no dependency.
+    expected_active_len: Option<u64>,
     /// What the active segment's records already describe, as
     /// (first index, last index, term at the last index). `None` means the
     /// segment is empty, so the next record has to be stored whole.
@@ -415,6 +432,7 @@ impl PersistentRaftWal {
             compacted_after_slow_fsync_count: 0,
             inject_next_fsync_delay_ms: None,
             fsync_count: 0,
+            expected_active_len: None,
             active_covered: None,
         };
         wal.active_covered = wal.covered_from_segments();
@@ -691,6 +709,17 @@ impl PersistentRaftWal {
                 RaftError::Storage(format!("failed to read WAL active segment metadata: {err}"))
             })?
             .len();
+        // The length this writer left behind, if it has written here. A
+        // mismatch means the file moved under it -- another writer on the same
+        // directory -- and carrying on would silently drop records.
+        if let Some(expected) = self.expected_active_len {
+            if active_len != expected {
+                return Err(RaftError::Storage(format!(
+                    "WAL active segment is {active_len} bytes but this writer left it at {expected}: another writer is using {}",
+                    self.options.dir.display()
+                )));
+            }
+        }
         let encoded = encode_wal_record(&record)?;
         let record_bytes = encoded.len() as u64 + 1;
 
@@ -713,6 +742,15 @@ impl PersistentRaftWal {
             .write_all(encoded.as_bytes())
             .and_then(|_| self.active_segment.write_all(b"\n"))
             .map_err(|err| RaftError::Storage(format!("failed to append WAL record: {err}")))?;
+        // After a roll `active_len` describes the PREVIOUS segment, so the
+        // expectation is only computable when this append stayed put. A roll
+        // reassigns `active_segment` and clears it, and the next append adopts
+        // whatever it finds there.
+        self.expected_active_len = if segment_rolled {
+            None
+        } else {
+            Some(active_len + record_bytes)
+        };
         let mut fsync_elapsed_ms = 0;
         let mut slow_fsync_observed = false;
         if fsync {
@@ -781,6 +819,7 @@ impl PersistentRaftWal {
             segment.sealed = segment.segment_id != active_id;
         }
         self.active_segment = open_segment_for_append(&self.options.dir, active_id)?;
+        self.expected_active_len = None;
         self.next_segment_id = active_id + 1;
         self.active_covered = self.covered_from_segments();
         self.release_sealed_segment_records();
@@ -1086,6 +1125,7 @@ impl PersistentRaftWal {
         };
         write_wal_segment_file(&self.options.dir, &segment)?;
         self.active_segment = open_segment_for_append(&self.options.dir, segment_id)?;
+        self.expected_active_len = None;
         self.segments.push(segment);
         Ok(())
     }
