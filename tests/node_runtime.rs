@@ -505,7 +505,25 @@ fn node_runtime_handles_timeout_now_like_baseline_raft() {
     let learner_timeout = runtime.timeout_now(2, 4).expect("timeout-now learner");
     assert!(!learner_timeout.campaigned);
     assert_eq!(learner_timeout.reason, "timeout_now_ignored_Learner");
-    assert_eq!(learner_timeout.term, 0);
+    // The term a refusal reports is the TARGET's own, and this used to assert
+    // it was 0 -- which asserts that the learner has not yet heard from its
+    // leader. That is a race, not a property: elections are prohibited above
+    // but heartbeats are not, and the runtime ticks in the background. MEASURED
+    // by pausing between the add and the refusal: 0ms and 50ms report term 0,
+    // 200ms reports term 2, which is exactly the value CI failed on.
+    //
+    // So assert what the refusal actually owes: that it changes nothing. Asking
+    // twice pins inertness, and does not depend on how much wall time has
+    // passed.
+    let learner_again = runtime
+        .timeout_now(2, 4)
+        .expect("timeout-now the learner again");
+    assert!(!learner_again.campaigned);
+    assert_eq!(learner_again.reason, "timeout_now_ignored_Learner");
+    assert_eq!(
+        learner_again.term, learner_timeout.term,
+        "a refused timeout-now must not move the target's term"
+    );
 
     let mut witness = peer(5);
     witness.role = ReplicaRole::Witness;
@@ -515,7 +533,16 @@ fn node_runtime_handles_timeout_now_like_baseline_raft() {
     let witness_timeout = runtime.timeout_now(2, 5).expect("timeout-now witness");
     assert!(!witness_timeout.campaigned);
     assert_eq!(witness_timeout.reason, "timeout_now_ignored_Witness");
-    assert_eq!(witness_timeout.term, 0);
+    // Same as the learner above: inertness, not an absolute term.
+    let witness_again = runtime
+        .timeout_now(2, 5)
+        .expect("timeout-now the witness again");
+    assert!(!witness_again.campaigned);
+    assert_eq!(witness_again.reason, "timeout_now_ignored_Witness");
+    assert_eq!(
+        witness_again.term, witness_timeout.term,
+        "a refused timeout-now must not move the target's term"
+    );
     assert_eq!(
         runtime
             .status()
