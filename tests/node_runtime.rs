@@ -649,7 +649,9 @@ fn node_runtime_rejects_read_index_after_local_node_steps_down() {
 fn node_runtime_allows_explicit_bounded_stale_read_after_step_down() {
     let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");
-    runtime.propose(b"before-transfer".to_vec()).unwrap();
+    let proposed = runtime
+        .propose(b"before-transfer".to_vec())
+        .expect("propose before the transfer");
 
     let transferee = runtime.step_down(Some(2)).expect("step down");
     assert_eq!(transferee, Some(2));
@@ -660,7 +662,19 @@ fn node_runtime_allows_explicit_bounded_stale_read_after_step_down() {
     assert!(read.safe);
     assert!(!read.lease_read);
     assert_eq!(read.reason, "read_index_quorum");
-    assert_eq!(read.read_index, 2);
+    // Relational, not absolute. This asserted `read_index == 2`, which is an
+    // assertion that nothing else committed in the meantime -- and the runtime
+    // ticks in the background. MEASURED: under the full suite's load the read
+    // index was 3, and the whole suite failed on `left: 3, right: 2`.
+    //
+    // What the read actually owes is that it covers the entry proposed above,
+    // which is true however many entries the ticker has added since.
+    assert!(
+        read.read_index >= proposed.index,
+        "the read index {} has to cover the entry proposed at {}",
+        read.read_index,
+        proposed.index
+    );
     assert!(
         read.bounded_stale
             .as_ref()
