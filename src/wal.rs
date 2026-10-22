@@ -212,7 +212,7 @@ pub struct WalLifecycleEvidenceValidationReport {
 /// dropped out of it, with every other field intact and the record reporting
 /// itself as valid.
 pub fn matrixraft_wal_checksum(record: &WalRecord) -> String {
-    wal_checksum(record, true)
+    wal_checksum(record, true, true)
 }
 
 /// The checksum as it was before the membership was covered.
@@ -222,10 +222,20 @@ pub fn matrixraft_wal_checksum(record: &WalRecord) -> String {
 /// carry the covering checksum, so the exception closes behind each file as it
 /// is rewritten rather than being a permanent second format to maintain.
 fn matrixraft_wal_checksum_without_membership(record: &WalRecord) -> String {
-    wal_checksum(record, false)
+    wal_checksum(record, false, false)
 }
 
-fn wal_checksum(record: &WalRecord, cover_membership: bool) -> String {
+/// The checksum as it was when the membership was covered but payloads were
+/// not.
+///
+/// The third accepted form, and for the same reason as the second: a WAL
+/// written by a build between the two changes still validates. Each exception
+/// closes behind a file as it is rewritten.
+fn matrixraft_wal_checksum_without_payloads(record: &WalRecord) -> String {
+    wal_checksum(record, true, false)
+}
+
+fn wal_checksum(record: &WalRecord, cover_membership: bool, cover_payloads: bool) -> String {
     let mut hash = 14_695_981_039_346_656_037_u64;
     let mut mix = |value: u64| {
         for byte in value.to_le_bytes() {
@@ -245,6 +255,25 @@ fn wal_checksum(record: &WalRecord, cover_membership: bool) -> String {
         mix(entry.log_id.term);
         mix(entry.log_id.index);
         mix(entry.payload.len() as u64);
+        if cover_payloads {
+            // The payload's own FNV-1a digest, folded in as a single value.
+            //
+            // Mixing the bytes directly would be equivalent, but this keeps the
+            // record's byte stream for every other field exactly as it was, so
+            // the earlier checksum forms are reproduced by flipping a flag
+            // rather than by reasoning about operation order.
+            //
+            // The length above is not a substitute: a payload corrupted in
+            // place keeps its length. Measured before this -- one base64
+            // character changed inside an entry payload recovered as a valid
+            // record, with the wrong bytes handed to the state machine.
+            let mut payload_hash = 14_695_981_039_346_656_037_u64;
+            for byte in &entry.payload {
+                payload_hash ^= *byte as u64;
+                payload_hash = payload_hash.wrapping_mul(1_099_511_628_211);
+            }
+            mix(payload_hash);
+        }
     }
     if record.entries_are_delta {
         // Mixed only when set: a full record hashes exactly as it did before
@@ -296,13 +325,27 @@ pub fn matrixraft_wal_checksum_format() -> WalChecksumFormat {
             "installed_snapshot.last_log_id".to_string(),
             "apply_snapshot_fence".to_string(),
             "membership".to_string(),
+            "entries.payload".to_string(),
         ],
     }
 }
 
 pub fn matrixraft_wal_checksum_valid(record: &WalRecord) -> bool {
     record.checksum == matrixraft_wal_checksum(record)
+        || record.checksum == matrixraft_wal_checksum_without_payloads(record)
         || record.checksum == matrixraft_wal_checksum_without_membership(record)
+}
+
+/// Whether this record's own checksum covers the entry payloads it carries.
+///
+/// The counterpart of [`matrixraft_wal_checksum_covers_membership`], and it
+/// answers the question the boolean cannot: a record validating by an earlier
+/// form has **unverified payload bytes**, and recovery hands those payloads to
+/// the state machine.
+///
+/// False for a record that does not validate at all.
+pub fn matrixraft_wal_checksum_covers_payloads(record: &WalRecord) -> bool {
+    record.checksum == matrixraft_wal_checksum(record)
 }
 
 /// Whether this record's own checksum covers the membership it carries.
@@ -317,6 +360,7 @@ pub fn matrixraft_wal_checksum_valid(record: &WalRecord) -> bool {
 /// False for a record that does not validate at all.
 pub fn matrixraft_wal_checksum_covers_membership(record: &WalRecord) -> bool {
     record.checksum == matrixraft_wal_checksum(record)
+        || record.checksum == matrixraft_wal_checksum_without_payloads(record)
 }
 
 pub fn matrixraft_validate_hard_state_persistence(record: &WalRecord) -> Result<(), RaftError> {
