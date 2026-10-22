@@ -132,13 +132,11 @@ fn a_later_term_clears_the_vote() {
     //
     // **What this pins, precisely.** Two places clear `voted_for` on a higher
     // term: one keyed on the CLUSTER's term, one on the TARGET NODE's. Deleting
-    // the per-node one leaves this test green, because the cluster-keyed site
-    // already covers the case built here -- the plant run showed exactly that.
-    // So this pins the PROPERTY and not either line.
-    //
-    // Discriminating the two needs a voter whose term lags the cluster's, which
-    // is a legitimate state and is not built here. Said plainly rather than left
-    // for the next person to discover with a plant.
+    // the per-node one leaves *this* test green, because the cluster-keyed site
+    // already covers the case built here -- a plant showed exactly that. So this
+    // one pins the PROPERTY, and
+    // `a_voter_lagging_the_cluster_term_still_clears_its_vote` below pins the
+    // per-node site.
     let (mut cluster, term) = group_and_a_fresh_term();
 
     assert!(ask_for_vote(&mut cluster, CANDIDATE_A, term).vote_granted);
@@ -155,4 +153,69 @@ fn a_later_term_clears_the_vote() {
         next.reason
     );
     assert_eq!(next.term, term + 1);
+}
+
+#[test]
+fn a_voter_lagging_the_cluster_term_still_clears_its_vote() {
+    // The case that discriminates the two clearing sites, and the reason it took
+    // a second attempt to find: the obvious one does not, because the
+    // cluster-keyed site covers it.
+    //
+    // A voter can sit **behind** the cluster's term -- it simply has not been
+    // asked anything lately -- and then the cluster-keyed condition
+    // (`request.term > self.current_term`) is false while the per-node one
+    // (`request.term > target.hard_state.current_term`) is true. Only the
+    // per-node site can clear the vote here, so this is where it is pinned.
+    //
+    // MEASURED with that site removed: this grant becomes `already_voted`.
+    let (mut cluster, term) = group_and_a_fresh_term();
+
+    // The bridge spends its vote at a term below where the cluster will end up.
+    assert!(ask_for_vote(&mut cluster, CANDIDATE_A, term).vote_granted);
+
+    // Raise the CLUSTER's term by asking a different node, which also clears
+    // `leader_id` -- without that the `known_leader` rule answers first and this
+    // never reaches the clearing site at all.
+    let ahead = term + 5;
+    let other = cluster
+        .vote_to(
+            CANDIDATE_A,
+            VoteRequest {
+                group_id: GROUP,
+                term: ahead,
+                candidate_id: CANDIDATE_C,
+                last_log_id: Some(LogId { term: 1, index: 1 }),
+                pre_vote: false,
+                force: false,
+            },
+        )
+        .expect("the other node answers");
+    assert!(
+        other.vote_granted,
+        "the premise: the cluster moves to {ahead}"
+    );
+
+    // The premise, asserted rather than assumed: the bridge lags.
+    assert_eq!(
+        cluster.status(BRIDGE).expect("bridge status").term,
+        term,
+        "the bridge has not been asked anything since, so it still sits at {term}"
+    );
+    assert_eq!(
+        cluster.status(CANDIDATE_A).expect("other status").term,
+        ahead,
+        "while the cluster has moved on, which is what makes the two sites differ"
+    );
+
+    let lagging = ask_for_vote(&mut cluster, CANDIDATE_C, ahead);
+    assert!(
+        lagging.vote_granted,
+        "a term above the voter's own clears its vote even when the cluster is          already there: {}",
+        lagging.reason
+    );
+    assert_eq!(
+        cluster.status(BRIDGE).expect("bridge status").term,
+        ahead,
+        "and the voter catches up"
+    );
 }
