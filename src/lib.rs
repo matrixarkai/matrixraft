@@ -119,8 +119,9 @@ pub use channel_selector::{
     MailChannelPressureStats, MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
 };
 pub use checksum::{
-    matrixraft_checksum_file_list, matrixraft_crc32c, matrixraft_murmur32, ChecksumContext,
-    ChecksumResult, ChecksumType, FileChecksumContext, FileChecksumResult,
+    matrixraft_checksum_extend_from_reader, matrixraft_checksum_file_list, matrixraft_crc32c,
+    matrixraft_murmur32, ChecksumContext, ChecksumResult, ChecksumType, FileChecksumContext,
+    FileChecksumResult,
 };
 pub use config::{Config, ConfigError};
 pub use driver::{

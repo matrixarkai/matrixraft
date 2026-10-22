@@ -175,21 +175,41 @@ impl FileChecksumContext {
         let mut buffer = vec![0; self.block_size];
         for file in &files {
             let mut input = fs::File::open(file)?;
-            loop {
-                let read = input.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                context
-                    .extend(&buffer[..read])
-                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-            }
+            matrixraft_checksum_extend_from_reader(&mut input, &mut context, &mut buffer)?;
         }
         Ok(FileChecksumResult {
             checksum: context.finalize(),
             files,
             block_size: self.block_size,
         })
+    }
+}
+
+/// Reads `input` to its end, feeding every block into `context`.
+///
+/// **A read interrupted by a signal is retried, not reported.** `Read::read`
+/// surfaces `ErrorKind::Interrupted` to the caller rather than retrying --
+/// unlike `write_all`, `sync_data` and `set_len`, which retry internally -- so a
+/// single `read(..)?` here would abandon a whole file's checksum because a
+/// signal arrived, and report a failure for something that had not failed.
+///
+/// Separate from [`FileChecksumContext::start`] so the retry can be exercised
+/// with a reader that interrupts on demand, rather than by arranging a real
+/// signal.
+pub fn matrixraft_checksum_extend_from_reader<R: Read>(
+    input: &mut R,
+    context: &mut ChecksumContext,
+    buffer: &mut [u8],
+) -> io::Result<()> {
+    loop {
+        match input.read(buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => context
+                .extend(&buffer[..read])
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
     }
 }
 
