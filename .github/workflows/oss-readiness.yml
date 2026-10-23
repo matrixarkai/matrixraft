@@ -1,0 +1,85 @@
+name: OSS readiness
+
+# The openness guarantee, enforced rather than assumed.
+#
+# This repository is Apache-2.0 and open for anyone in the world to use, fork, file issues against
+# and send changes to. That is a property a single merge can take away: a LICENSE renamed, a
+# CONTRIBUTING deleted in a restructure, a code of conduct never put back. Nothing on this
+# repository checked it until this job, so "it is open" was a thing someone had to remember rather
+# than something that failed when it stopped being true.
+#
+# Deliberately dependency-free -- no toolchain, no secrets, no network beyond the checkout -- so it
+# stays green on any runner and cannot fail for a reason unrelated to what it is checking.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # No `branches:` filter here, deliberately. That key filters on the BASE branch, so a stacked
+    # pull request based on the branch below it would not run this at all -- and when that lower
+    # branch merges, GitHub retargets the pull request to main WITHOUT re-running anything, leaving
+    # the stale green checks from its feature-branch days. Running on every pull request is the only
+    # way this covers the changes that actually reach main.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  oss-readiness:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: The four files an outside contributor needs
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in README.md CONTRIBUTING.md LICENSE CODE_OF_CONDUCT.md; do
+            if [ -f "$f" ]; then
+              echo "  present  $f"
+            else
+              echo "  MISSING  $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo
+            echo "A repository open for contribution needs all four: a README to read first, a"
+            echo "CONTRIBUTING to say how a change lands, a LICENSE to make the code usable, and a"
+            echo "code of conduct to say how people are treated. A missing one is not a style"
+            echo "problem -- with no LICENSE the default is all rights reserved, and 'public' then"
+            echo "means only readable."
+            exit 1
+          fi
+
+      - name: The license is Apache-2.0
+        run: |
+          set -euo pipefail
+          if grep -q "Apache License" LICENSE && grep -q "Version 2.0" LICENSE; then
+            echo "  LICENSE is Apache-2.0"
+          else
+            echo "  LICENSE is no longer Apache-2.0, or no longer says so in a form this can read."
+            echo "  Its first two lines are:"
+            head -2 LICENSE
+            exit 1
+          fi
+
+      - name: Nothing claims the project is closed
+        run: |
+          set -euo pipefail
+          # A stale sentence is how an open repository starts reading as a shut one. These exact
+          # phrasings were live in another repository's deploy documents for as long as one crate
+          # had no public source, and stayed there after it did.
+          if grep -rniE "enterprise[- ]only|no public source|not open source|closed source" \
+               --include=*.md . > /tmp/claims.txt; then
+            echo "  Documents still describe part of this project as closed:"
+            sed 's/^/    /' /tmp/claims.txt
+            echo
+            echo "  If that is no longer true, correct the sentence. If it is true of a dependency"
+            echo "  rather than of this repository, say which, so a reader is not told the wrong"
+            echo "  thing about what they are allowed to do with this code."
+            exit 1
+          fi
+          echo "  no document claims any part of this project is closed"
