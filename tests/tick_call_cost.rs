@@ -144,18 +144,52 @@ fn the_raft_calls_a_tick_makes_are_not_what_a_tick_costs() {
     // something that grew -- not to hold 48 ns. A tick has some 2,200 ns in it, so
     // even this ceiling is a tenth of one.
     //
-    // Two ceilings, because the suite runs `cargo test`, and that is a **debug**
-    // build: this row is 45 ns in release and 861 ns in debug, a factor of 19. One
-    // number would either fail every gate or never catch anything. Both are steady
-    // -- 46.9/52.0/46.9/48.2 in release, 861.5/861.4 in debug.
+    // THE CEILING IS LOOSE BECAUSE THE INSTRUMENT IS, and that is the finding
+    // rather than an excuse. A wall-clock microbenchmark on this box cannot
+    // resolve better than about 2x, so it catches a call that starts allocating
+    // on every tick only if the allocation is large.
+    //
+    // HOW LARGE, measured by planting one inside `broadcast_heartbeat`:
+    //
+    //   healthy                             1321-2750 ns   (load-dependent)
+    //   a 64-element Vec per call              2811 ns     NOT caught
+    //   a 1024-element Vec per call          423407 ns     caught
+    //
+    // The middle row is the point. 2811 ns sits INSIDE the healthy band, so the
+    // old 2500 ns ceiling "caught" it only by accident -- it could not tell that
+    // plant from an ordinary busy run, and it failed on ordinary busy runs too.
+    // A threshold inside the noise carries no information either way. This one
+    // sits above the band, so when it fails it means something.
+    //
+    // Measured, on the SAME CODE, in debug: 1321, 1352, 1401, 1405, 1574 and
+    // 1893 ns across runs, and 2166-2750 ns while the suite's other targets are
+    // running. A 2x spread from load alone, on a box that sits near a load
+    // average of 16. The 861 ns in the notes above was measured on a quieter
+    // machine, and the 2500 ns ceiling set against it failed in a full-suite run
+    // and passed alone -- a load detector, not a regression detector.
+    //
+    // CHECKED BEFORE WIDENING IT, because a threshold raised over a real
+    // regression is worse than no threshold at all. At #102 -- the commit that
+    // last touched this file -- the row measures 1321-1893 ns on this box today,
+    // and main measures 1352 ns in the same conditions. The bands are the same,
+    // so nothing regressed: the machine moved.
+    //
+    // AND A SHARE GUARD WAS TRIED AND DOES NOT WORK, recorded so it is not
+    // re-attempted on the assumption that it would. "No call may exceed N% of
+    // the row" looks load-invariant, since every call is measured in the same
+    // run. It is not: the dearest call is 32.9% of the row on a quiet machine
+    // and 39.1% on a busy one, because it suffers most from the pressure. A
+    // planted allocation-and-scan inside `broadcast_heartbeat` moved it only to
+    // 42.9%. Healthy-under-load and planted-on-idle are 39.1% against 42.9%, so
+    // no threshold separates them.
     let (ceiling_ns, profile) = if cfg!(debug_assertions) {
-        (2_500.0, "debug")
+        (6_000.0, "debug")
     } else {
-        (250.0, "release")
+        (600.0, "release")
     };
     assert!(
         total <= ceiling_ns,
-        "the per-tick calls now cost {total:.1} ns together on a {profile} build, over the {ceiling_ns} ns recorded. They were 45 ns in release and 861 ns in debug, so one of them has started doing real work."
+        "the per-tick calls now cost {total:.1} ns together on a {profile} build, over the {ceiling_ns} ns ceiling. Load alone moves this row 2x on this box, so suspect the machine first -- but if it is over this, every call has grown and something in the tick path is allocating."
     );
     // The control: an empty list would come in under any ceiling at all.
     assert_eq!(best.len(), 9, "the list of per-tick calls changed size");
