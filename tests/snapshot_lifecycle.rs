@@ -116,6 +116,61 @@ fn snapshot_lifecycle_throttles_retries_and_rolls_back_install() {
 }
 
 #[test]
+fn a_timed_out_send_exhausts_its_budget_and_says_it_was_a_timeout() {
+    // The retry budget is enforced at TWO sites with two triggers: a peer
+    // rejecting a chunk, and a chunk timing out with no answer at all. Only the
+    // rejection site had a test -- measured, the timeout one could be deleted
+    // with all 191 test targets green.
+    //
+    // They are worth keeping apart because an operator reading the error needs
+    // to know which happened: a peer that rejects is talking, a peer that times
+    // out is not. The two messages differ by one word, and this asserts the one.
+    let snap = snapshot(10, b"abcdefghijklmnopqrstuvwxyz");
+    let mut lifecycle = SnapshotLifecycle::new(SnapshotLifecycleConfig {
+        chunk_size: 3,
+        max_chunks_per_tick: 4,
+        max_bytes_per_tick: 64,
+        max_retry_attempts: 2,
+    })
+    .expect("lifecycle");
+    lifecycle.begin_send(&snap, 2, 1).expect("begin send");
+
+    // Two timeouts are within the budget, and each is counted.
+    lifecycle.record_send_timeout().expect("the first timeout");
+    lifecycle.record_send_timeout().expect("the second timeout");
+    assert_eq!(lifecycle.status().retry_count, 2);
+    assert!(
+        lifecycle.status().sending,
+        "a send inside its budget is still in flight"
+    );
+
+    // The one past it abandons the send.
+    let exhausted = lifecycle
+        .record_send_timeout()
+        .expect_err("the third timeout is past a budget of two");
+    let message = exhausted.to_string();
+    assert!(
+        message.contains("timeout retry budget exhausted"),
+        "the error has to name the timeout, not just the budget -- the \
+         rejection path reports the same budget without that word: {message}"
+    );
+    assert!(
+        !lifecycle.status().sending,
+        "and the send is given up rather than left half-alive"
+    );
+
+    // Which also means there is nothing left to time out, so a further timeout
+    // is refused rather than counted against a sender that no longer exists.
+    let gone = lifecycle
+        .record_send_timeout()
+        .expect_err("no send is active any more");
+    assert!(
+        gone.to_string().contains("snapshot send is not active"),
+        "{gone:?}"
+    );
+}
+
+#[test]
 fn snapshot_lifecycle_uses_baseline_raft_style_transfer_quota_without_advancing_on_rejection() {
     let snap = snapshot(11, b"abcdefghijkl");
     let mut lifecycle = SnapshotLifecycle::new(SnapshotLifecycleConfig {
