@@ -72,8 +72,13 @@ jobs:
           # A stale sentence is how an open repository starts reading as a shut one. These exact
           # phrasings were live in another repository's deploy documents for as long as one crate
           # had no public source, and stayed there after it did.
+          #
+          # `.github` IS EXCLUDED, and not for convenience. A pull-request template asking a
+          # contributor to confirm they are adding no enterprise-only code is an instruction TO
+          # them, not a claim ABOUT the project, and this pattern could not tell those apart. It
+          # failed on exactly such a line in a sibling repository.
           if grep -rniE "enterprise[- ]only|no public source|not open source|closed source" \
-               --include=*.md . > /tmp/claims.txt; then
+               --include=*.md --exclude-dir=.github . > /tmp/claims.txt; then
             echo "  Documents still describe part of this project as closed:"
             sed 's/^/    /' /tmp/claims.txt
             echo
