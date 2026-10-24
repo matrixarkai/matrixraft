@@ -2,7 +2,7 @@
 name = "matrixraft"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.89"
 license = "Apache-2.0"
 description = "Open-source Rust Raft consensus library: many groups on a fixed thread pool, snapshots, membership changes, and lease reads."
 repository = "https://github.com/matrixarkai/matrixraft"

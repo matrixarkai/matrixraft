@@ -71,7 +71,7 @@ fn running_out_of_descriptors_says_what_a_group_costs() {
         "the OS condition is missing, so this is some other failure: {message}"
     );
     assert!(
-        message.contains("one file descriptor per group"),
+        message.contains("two file descriptors per group"),
         "the host is told the symptom and not the cause: {message}"
     );
     assert!(

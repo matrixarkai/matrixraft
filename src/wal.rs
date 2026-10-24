@@ -848,7 +848,7 @@ pub(crate) mod wal_entry_payloads {
 
     pub(crate) fn decode(input: &str) -> Result<Vec<u8>, String> {
         let bytes = input.as_bytes();
-        if bytes.len() % 4 != 0 {
+        if !bytes.len().is_multiple_of(4) {
             return Err(format!(
                 "base64 length {} is not a multiple of four",
                 bytes.len()

@@ -102,7 +102,7 @@ fn every_mail_the_pool_accepts_reaches_its_handler() {
                 ready.wait();
                 for round in 0..per_group {
                     for group_id in 1..=groups {
-                        if (group_id as usize + sender) % senders != 0 {
+                        if !(group_id as usize + sender).is_multiple_of(senders) {
                             continue;
                         }
                         let key = DriverGroupKey::new(group_id, 1);

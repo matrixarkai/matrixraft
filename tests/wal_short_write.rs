@@ -98,7 +98,12 @@ fn end_the_newest_file_early(dir: &std::path::Path, bytes: u64) -> u64 {
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .expect("read the wal directory")
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_file())
+        // Segments only. The directory also holds the writer's LOCK file,
+        // which is empty and sorts after 000000.wal, so taking "the last file"
+        // picked that instead and tried to lop bytes off nothing.
+        .filter(|path| {
+            path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("wal")
+        })
         .collect();
     files.sort();
     let victim = files.last().expect("a segment file").clone();

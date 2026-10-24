@@ -184,6 +184,12 @@ fn persistent_wal_compacts_released_segments_and_reports_lifecycle_evidence() {
     assert!(evidence.segment_lifecycle_present);
     assert!(evidence.compaction_observed);
 
+    // Dropped before reopening, which is what a restart does. The directory
+    // takes one writer at a time, so holding this handle open across the reopen
+    // would be the two-writers case the lock exists to refuse -- and this test
+    // is about recovering after compaction, not about that.
+    drop(wal);
+
     let mut reopened = PersistentRaftWal::open(PersistentRaftWalOptions {
         dir: dir.clone(),
         max_records_per_segment: 2,
