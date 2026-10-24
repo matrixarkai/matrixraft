@@ -12098,6 +12098,45 @@ fn matrixraft_forwarded_follower_read_index_is_linearizable() {
     // applied up to it. The `follower_fwd.safe == (applied >= read_index)` assertion
     // above exercises that decision for the follower's real applied state.
     assert!(!follower_local.safe && follower_fwd.read_index == leader_direct.read_index);
+
+    // THE THIRD OUTCOME this function's doc comment names, and the one nothing
+    // reached: the LEADER's own quorum read comes back unsafe, so there is no
+    // confirmed index to forward and the follower must be told so rather than
+    // falling through to compare its applied index against whatever the
+    // unconfirmed response carried. Measured: with that refusal removed, all 189
+    // test targets stayed green.
+    //
+    // A read floor past anything committed makes the leader's read unsafe
+    // deterministically -- no partition or timing needed, which is what keeps
+    // this case cheap enough to assert every run.
+    let beyond = MatrixRaftReadIndexOptions::quorum_read(log.index + 1_000);
+    let leader_unsafe = server
+        .node(900, 1)
+        .expect("node 1")
+        .read_index_with_options(beyond)
+        .expect("the leader answers");
+    assert!(
+        !leader_unsafe.safe,
+        "the premise: the leader itself cannot certify this read: {leader_unsafe:?}"
+    );
+
+    let follower_blocked = server
+        .forwarded_read_index_on_node(900, 2, beyond)
+        .expect("the follower is answered rather than erroring");
+    assert!(
+        !follower_blocked.safe,
+        "a follower must not serve a read its leader could not certify"
+    );
+    assert!(
+        !follower_blocked.lease_read,
+        "and must not claim a lease read while doing it"
+    );
+    assert_eq!(
+        follower_blocked.reason,
+        format!("leader_read_unavailable:{}", leader_unsafe.reason),
+        "the refusal carries the leader's own reason, so the cause is not lost \
+         behind a second label"
+    );
 }
 
 #[test]
