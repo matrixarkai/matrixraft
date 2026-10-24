@@ -282,6 +282,13 @@ pub struct PersistentRaftWal {
     options: PersistentRaftWalOptions,
     segments: Vec<WalSegment>,
     active_segment: File,
+    /// The directory's writer lock, held for exactly as long as this handle.
+    ///
+    /// Never read. It exists so that closing it -- which happens when this
+    /// struct drops -- releases the lock, which is what lets a caller reopen a
+    /// directory it has finished with. `tests/persistent_wal.rs` depends on
+    /// that, and so does every restart path.
+    _directory_lock: File,
     next_segment_id: u64,
     released_segment_count: u64,
     truncated_corrupt_tail: bool,
@@ -315,6 +322,72 @@ pub struct PersistentRaftWal {
     /// (first index, last index, term at the last index). `None` means the
     /// segment is empty, so the next record has to be stored whole.
     active_covered: Option<(LogIndex, LogIndex, Term)>,
+}
+
+/// The file inside a WAL directory that carries its writer lock.
+///
+/// A plain name rather than a dotfile, so that an operator listing the
+/// directory sees it, and so that it sorts away from the `*.wal` segments the
+/// recovery scan looks for.
+pub const WAL_DIRECTORY_LOCK_FILE: &str = "LOCK";
+
+/// Takes the directory's writer lock, or reports who already has it.
+///
+/// **Why a lock at all.** Two `PersistentRaftWal` handles on one directory each
+/// keep their own segment state in memory and write the same filenames, so one
+/// overwrites the other's segment. Every file is left individually well-formed,
+/// so recovery has nothing to flag: measured before this existed, six appends
+/// through two handles recovered as **three records with
+/// `truncated_corrupt_tail: false`**. For a durability component, silent loss is
+/// the worst shape a bug can take.
+///
+/// **Why this mechanism.** `File::try_lock` is an advisory whole-file lock --
+/// `flock` on Unix -- and it has the three properties this needs:
+///
+/// * it does not block, so a second writer is told immediately rather than
+///   waiting on a holder that may never let go;
+/// * the kernel releases it when the holding process dies, so a crash leaves no
+///   lock to clean up by hand. The `LOCK` file stays behind; the lock does not;
+/// * it is held per open file description, so **two handles inside one process
+///   conflict as well** -- which is the case that was actually measured, and the
+///   one a POSIX record lock (`fcntl`) would miss, since those are per process.
+///
+/// It costs one `open` and one `flock` per WAL open and nothing at all per
+/// append, which is the only hot path here.
+fn lock_wal_directory(dir: &Path) -> Result<File, RaftError> {
+    let path = dir.join(WAL_DIRECTORY_LOCK_FILE);
+    // Not `truncate`: the file's contents are never read, and emptying it would
+    // be a write to a directory this handle has not yet been granted.
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        // Through the shared helper, because this is now the FIRST file a WAL
+        // open touches: descriptor exhaustion surfaces here rather than at the
+        // segment, and the host needs the same explanation either way.
+        .map_err(|err| {
+            wal_file_error(
+                &format!("failed to open WAL lock file {}", path.display()),
+                &err,
+            )
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        // The two cases are kept apart because they call for different actions:
+        // another writer is a deployment mistake, an I/O error is a sick disk.
+        Err(TryLockError::WouldBlock) => Err(RaftError::Storage(format!(
+            "WAL directory {} is already open for writing by another handle; its lock file {} is held",
+            dir.display(),
+            path.display()
+        ))),
+        Err(TryLockError::Error(err)) => Err(RaftError::Storage(format!(
+            "failed to lock WAL directory {} through {}: {err}",
+            dir.display(),
+            path.display()
+        ))),
+    }
 }
 
 impl PersistentRaftWal {
@@ -368,6 +441,10 @@ impl PersistentRaftWal {
                 options.dir.display()
             ))
         })?;
+        // Before anything is read, and certainly before anything is written: a
+        // second writer must be turned away while the directory still looks
+        // exactly as the first one left it.
+        let directory_lock = lock_wal_directory(&options.dir)?;
         let (mut segments, truncated_corrupt_tail) = read_wal_segments_from_dir(&options.dir)?;
         // Read off here, before the empty-segment push and before sealing drops
         // any records out of memory: this is what the directory held. `recover`
@@ -422,6 +499,7 @@ impl PersistentRaftWal {
             options,
             segments,
             active_segment,
+            _directory_lock: directory_lock,
             next_segment_id,
             released_segment_count: 0,
             truncated_corrupt_tail,
@@ -1223,9 +1301,10 @@ fn wal_file_error(context: &str, err: &std::io::Error) -> RaftError {
         return RaftError::Storage(format!("{context}: {err}"));
     }
     RaftError::Storage(format!(
-        "{context}: {err}. Every raft group holds its own WAL open, so this \
-         process pays about one file descriptor per group: raise RLIMIT_NOFILE \
-         above the number of groups it hosts."
+        "{context}: {err}. Every raft group holds its own WAL open -- its active \
+         segment and its directory lock -- so this process pays about two file \
+         descriptors per group: raise RLIMIT_NOFILE above twice the number of \
+         groups it hosts."
     ))
 }
 
@@ -1266,7 +1345,7 @@ mod wal_file_error_tests {
                 "os error {code} lost its context: {message}"
             );
             assert!(
-                message.contains("one file descriptor per group"),
+                message.contains("two file descriptors per group"),
                 "os error {code} was not explained: {message}"
             );
             assert!(

@@ -128,8 +128,13 @@ impl ChecksumContext {
         combined.extend_from_slice(data);
 
         let body_len = combined.len() / 4 * 4;
-        for chunk in combined[..body_len].chunks_exact(4) {
-            let block = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        // `as_chunks` over a length that is already a multiple of four yields
+        // exactly the blocks `chunks_exact(4)` did, with an empty remainder, so
+        // the digest is unchanged -- and it hands back `[u8; 4]` directly
+        // instead of a slice to index four times.
+        let (blocks, _) = combined[..body_len].as_chunks::<4>();
+        for chunk in blocks {
+            let block = u32::from_le_bytes(*chunk);
             self.value = murmur3_x86_32_mix_block(self.value, block);
         }
         self.body_bytes = self.body_bytes.saturating_add(body_len as u64);
@@ -260,8 +265,9 @@ fn crc32c_extend(crc: u32, data: &[u8]) -> u32 {
 fn murmur3_x86_32(data: &[u8], seed: u32) -> u32 {
     let mut hash = seed;
     let body_len = data.len() / 4 * 4;
-    for chunk in data[..body_len].chunks_exact(4) {
-        let block = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    let (blocks, _) = data[..body_len].as_chunks::<4>();
+    for chunk in blocks {
+        let block = u32::from_le_bytes(*chunk);
         hash = murmur3_x86_32_mix_block(hash, block);
     }
     murmur3_x86_32_finalize(hash, &data[body_len..], data.len() as u64)
