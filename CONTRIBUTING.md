@@ -38,7 +38,7 @@ cargo clippy --all-targets
 cargo doc --no-deps
 ```
 
-The Minimum Supported Rust Version (MSRV) is **1.82**. CI runs formatting, a
+The Minimum Supported Rust Version (MSRV) is **1.89**. CI runs formatting, a
 warnings-as-errors build, the test suite, doc generation, the MSRV check, and
 `cargo-deny` (license + advisory) — all must pass.
 
