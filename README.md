@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/matrixarkai/matrixraft/actions/workflows/ci.yml/badge.svg)](https://github.com/matrixarkai/matrixraft/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.82-blue.svg)](Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.89-blue.svg)](Cargo.toml)
 
 MatrixRaft is an **open-source Rust Raft consensus library**, licensed under
 Apache-2.0 and usable by anyone, in anything. It hosts many Raft groups on a
@@ -2134,7 +2134,7 @@ never weaken a safety predicate to make a test pass. See
 [`docs/read_index_safety_review.md`](docs/read_index_safety_review.md) for the
 read-index safety model and the invariants that must never regress.
 
-The Minimum Supported Rust Version (MSRV) is **1.82**.
+The Minimum Supported Rust Version (MSRV) is **1.89**.
 
 ## Security
 
