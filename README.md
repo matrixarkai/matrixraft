@@ -2160,3 +2160,11 @@ Third-party dependency licenses and attributions are listed in
 
 Product and crate names are trademarks of MatrixArkAI; see
 [`TRADEMARKS.md`](TRADEMARKS.md).
+
+## Independent durable peer API
+
+The optional `peer-runtime` feature adds one-voter-per-instance consensus backed
+by a pinned raft-rs core, binary protobuf packets, and a synchronized binary WAL.
+It does not synthesize remote acknowledgments. See [the integration contract and
+remaining production requirements](docs/peer-runtime.md) before embedding it.
+The existing local cluster facade is unchanged.
