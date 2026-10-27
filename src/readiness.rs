@@ -943,7 +943,8 @@ pub fn matrixraft_public_api_contract() -> PublicApiContract {
 /// shown just stopped growing with the crate.
 pub fn matrixraft_public_module_names() -> Vec<String> {
     [
-        // The raft runtime.
+        // The raft runtime, including the optional peer-runtime feature.
+        "peer_runtime",
         "node",
         "cluster",
         "driver",
