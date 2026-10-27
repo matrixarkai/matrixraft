@@ -4,7 +4,10 @@
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# The optional peer runtime pins upstream raft-rs. Its remaining advisory is
+# maintenance-only; the affected protobuf decoder is absent from this graph.
+# Revisit this exception when updating the pinned core. See docs/peer-runtime.md.
+ignore = [{ id = "RUSTSEC-2025-0057", reason = "Pinned raft-rs uses fxhash internally; maintenance advisory, no reported vulnerability. Replace with upstream when available." }]
 
 [licenses]
 version = 2
@@ -25,3 +28,4 @@ wildcards = "warn"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-git = ["https://github.com/tikv/raft-rs"]

@@ -56,6 +56,24 @@ jobs:
       - name: Doc
         run: cargo doc --no-deps --locked
 
+  durable-peer:
+    name: durable peer core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protocol build tools
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler autoconf automake libtool
+      - name: Peer quorum and recovery tests
+        run: |
+          cargo test --locked --features peer-runtime --test durable_peer_runtime
+          cargo test --locked --features peer-runtime --lib peer_runtime::tests
+      - name: Build and document the peer API
+        run: |
+          cargo check --locked --all-features --all-targets
+          cargo doc --locked --all-features --no-deps
+
   msrv:
     name: msrv (1.89)
     runs-on: ubuntu-latest
@@ -75,6 +93,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check bans licenses sources advisories
+          arguments: --all-features
 
   coverage:
     name: coverage (informational)

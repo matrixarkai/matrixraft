@@ -73,6 +73,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+#[cfg(feature = "peer-runtime")]
+pub mod peer_runtime;
+
 pub mod applier;
 pub mod benchmark;
 pub mod channel_selector;

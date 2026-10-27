@@ -13,7 +13,14 @@ homepage = "https://github.com/matrixarkai/matrixraft"
 documentation = "https://docs.rs/matrixraft"
 exclude = ["/scripts", "/.github"]
 
+[features]
+peer-runtime = ["dep:raft-core", "dep:prost", "dep:slog", "dep:fs2"]
+
 [dependencies]
+raft-core = { package = "raft", git = "https://github.com/tikv/raft-rs", rev = "ad13f3d90780f53aea2488c6a4b76c0d334bf136", optional = true, default-features = false, features = ["prost-codec"] }
+prost = { version = "0.11.9", optional = true }
+slog = { version = "2", optional = true }
+fs2 = { version = "0.4.3", optional = true }
 # "rc" lets `Arc<LogEntry>` derive Serialize/Deserialize. A node's log holds
 # entries behind an `Arc` so that the peers a `RaftCluster` models share one
 # copy of each payload instead of one per node. Note that serde does not
