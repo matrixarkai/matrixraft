@@ -215,3 +215,108 @@ fn application_failure_stops_peer_and_committed_data_replays() {
     .unwrap();
     assert!(payloads.iter().any(|p| p == b"retry after restart"));
 }
+
+#[test]
+fn quorum_reads_wait_for_messages_without_growing_any_wal() {
+    let dir = Directory::new();
+    let mut peers = peers(&dir);
+    let mut applied = Applied::new();
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut peers, &mut applied, None);
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .propose(b"visible".to_vec())
+        .unwrap();
+    pump(&mut peers, &mut applied, None);
+    for _ in 0..3 {
+        peers.get_mut(&1).unwrap().tick().unwrap();
+        pump(&mut peers, &mut applied, None);
+    }
+    assert_eq!(applied[&1], applied[&2]);
+    assert_eq!(applied[&1], applied[&3]);
+    let before = applied.clone();
+    let files: Vec<_> = (1..=3)
+        .map(|id| std::fs::read(dir.options(id, vec![1, 2, 3]).wal_path).unwrap())
+        .collect();
+    let token = peers.get_mut(&1).unwrap().begin_read().unwrap();
+    assert!(peers.get_mut(&1).unwrap().begin_read().is_err());
+    assert!(peers.get_mut(&2).unwrap().begin_read().is_err());
+    pump(&mut peers, &mut applied, Some(1));
+    assert!(!peers.get_mut(&1).unwrap().poll_read(token).unwrap());
+    assert!(peers.get_mut(&1).unwrap().poll_read(token + 1).is_err());
+    for _ in 0..3 {
+        peers.get_mut(&1).unwrap().tick().unwrap();
+        pump(&mut peers, &mut applied, None);
+    }
+    assert!(peers.get_mut(&1).unwrap().poll_read(token).unwrap());
+    assert!(peers.get_mut(&1).unwrap().poll_read(token).is_err());
+    for _ in 0..64 {
+        let next = peers.get_mut(&1).unwrap().begin_read().unwrap();
+        assert_ne!(next, token);
+        assert!(!peers.get_mut(&1).unwrap().poll_read(next).unwrap());
+        pump(&mut peers, &mut applied, None);
+        assert!(peers.get_mut(&1).unwrap().poll_read(next).unwrap());
+    }
+    assert_eq!(applied, before);
+    for (id, bytes) in (1..=3).zip(files) {
+        assert_eq!(
+            std::fs::read(dir.options(id, vec![1, 2, 3]).wal_path).unwrap(),
+            bytes
+        );
+    }
+}
+#[test]
+fn read_confirmation_is_invalid_after_leadership_changes() {
+    let dir = Directory::new();
+    let mut peers = peers(&dir);
+    let mut applied = Applied::new();
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut peers, &mut applied, None);
+    let token = peers.get_mut(&1).unwrap().begin_read().unwrap();
+    // Even a completed confirmation cannot survive a later leadership change.
+    pump(&mut peers, &mut applied, None);
+    let mut replacement = None;
+    for _ in 0..100 {
+        for peer in peers.values_mut() {
+            peer.tick().unwrap();
+        }
+        pump(&mut peers, &mut applied, Some(1));
+        replacement = (2..=3).find(|id| peers[id].is_leader());
+        if replacement.is_some() {
+            break;
+        }
+    }
+    let leader = replacement.unwrap();
+    peers
+        .get_mut(&leader)
+        .unwrap()
+        .propose(b"new term".to_vec())
+        .unwrap();
+    pump(&mut peers, &mut applied, None);
+    assert!(peers.get_mut(&1).unwrap().poll_read(token).is_err());
+    let token = peers.get_mut(&leader).unwrap().begin_read().unwrap();
+    pump(&mut peers, &mut applied, None);
+    assert!(peers.get_mut(&leader).unwrap().poll_read(token).unwrap());
+}
+#[test]
+fn read_confirmation_requires_successful_local_application() {
+    let dir = Directory::new();
+    let mut peer = DurablePeer::open(dir.options(1, vec![1])).unwrap();
+    peer.campaign().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    peer.propose(b"must apply".to_vec()).unwrap();
+    let token = peer.begin_read().unwrap();
+    assert!(!peer.poll_read(token).unwrap());
+    assert!(peer
+        .process_ready(|_, payload| {
+            if payload.is_empty() {
+                Ok(())
+            } else {
+                Err(RaftError::Storage("injected apply failure".into()))
+            }
+        })
+        .is_err());
+    assert!(peer.poll_read(token).is_err());
+    assert!(peer.begin_read().is_err());
+}
