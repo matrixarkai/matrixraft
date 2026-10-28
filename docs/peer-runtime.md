@@ -147,3 +147,12 @@ restore before completion packets can escape. The final decoder, outgoing
 snapshot and installed application checkpoint still use complete in-memory
 buffers, and the 256 MiB application bound remains. File staging alone does not
 provide larger checkpoints or a fully streaming restore API.
+
+### Checkpoint publication durability
+
+A replacement WAL is written in full, including any retained log suffix, and
+synced once before its atomic publication. Individual records in that temporary
+file do not each require a sync: recovery continues to use the previous WAL until
+the rename. Live WAL appends still sync before returning. Publication retains the
+stable runtime lock and the parent-directory sync. A write or sync failure stops
+checkpoint publication and leaves the peer failed until restart.

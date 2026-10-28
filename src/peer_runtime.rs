@@ -395,7 +395,7 @@ impl Journal {
         first.version = 2;
         first.snapshot = snapshot.encode_to_vec();
         if snapshot.data.len() <= INLINE_CHECKPOINT_BYTES {
-            replacement.append(&first)?;
+            replacement.write_record(&first)?;
         } else {
             let encoded = std::mem::take(&mut first.snapshot);
             first.version = 3;
@@ -407,17 +407,22 @@ impl Journal {
                 if number != 0 {
                     first.hard_state.clear();
                 }
-                replacement.append(&first)?;
+                replacement.write_record(&first)?;
                 #[cfg(test)]
                 checkpoint_crash_point("during_write");
             }
         }
         for entry in entries {
-            replacement.append(&batch(options, None, std::slice::from_ref(entry)))?;
+            replacement.write_record(&batch(options, None, std::slice::from_ref(entry)))?;
         }
         if hs != &floor_state {
-            replacement.append(&batch(options, Some(hs), &[]))?;
+            replacement.write_record(&batch(options, Some(hs), &[]))?;
         }
+        // No replacement record is observable until publication. Flush the
+        // complete image and retained suffix once, before replacing the live WAL.
+        #[cfg(test)]
+        checkpoint_crash_point("before_sync");
+        replacement.file.sync_all().map_err(storage_error)?;
         #[cfg(test)]
         checkpoint_crash_point("before_publish");
         // The replacement inode is synced and locked before it becomes the WAL.
@@ -439,6 +444,11 @@ impl Journal {
         Ok(())
     }
     fn append(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
+        self.write_record(batch)?;
+        self.file.sync_all().map_err(storage_error)
+    }
+    // Only rewrite may defer durability until the entire replacement is written.
+    fn write_record(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
         let size = batch.encoded_len();
         if size > LIMIT || self.length.saturating_add(24 + size as u64) > WAL_LIMIT {
             return Err(storage_error(
@@ -451,10 +461,7 @@ impl Journal {
         record.extend_from_slice(&digest(&record).to_be_bytes());
         record.extend_from_slice(&digest(&bytes).to_be_bytes());
         record.extend_from_slice(&bytes);
-        self.file
-            .write_all(&record)
-            .and_then(|_| self.file.sync_all())
-            .map_err(storage_error)?;
+        self.file.write_all(&record).map_err(storage_error)?;
         self.length += record.len() as u64;
         Ok(())
     }
@@ -1176,9 +1183,11 @@ mod tests {
         drop(peer);
         let original = std::fs::read(&wal).unwrap();
         for (phase, size) in [
+            ("before_sync", 0),
             ("before_publish", 0),
             ("after_publish", 0),
             ("during_write", 9 * 1024 * 1024),
+            ("before_sync", 9 * 1024 * 1024),
             ("before_publish", 9 * 1024 * 1024),
             ("after_publish", 9 * 1024 * 1024),
         ] {
