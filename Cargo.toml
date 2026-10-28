@@ -18,7 +18,7 @@ peer-runtime = ["dep:raft-core", "dep:prost", "dep:slog", "dep:fs2", "dep:tempfi
 
 [dependencies]
 raft-core = { package = "raft", git = "https://github.com/tikv/raft-rs", rev = "ad13f3d90780f53aea2488c6a4b76c0d334bf136", optional = true, default-features = false, features = ["prost-codec"] }
-prost = { version = "0.11.9", optional = true }
+prost = { version = "0.14.4", optional = true }
 slog = { version = "2", optional = true }
 fs2 = { version = "0.4.3", optional = true }
 tempfile = { version = "3.27.0", optional = true }
