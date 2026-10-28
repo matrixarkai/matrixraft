@@ -19,8 +19,8 @@ Supply a fresh application, or an explicitly idempotent applier. An application 
 and recover before serving. Keep the WAL file intact for the life of the group.
 
 The initial voter set, group, and node identity are recorded and checked during
-recovery. Membership is fixed. Transport threads, authentication, large snapshot
-streaming, and graceful worker lifecycle integration remain required before
+recovery. Membership is fixed. Transport threads, authentication, and graceful
+worker lifecycle integration remain required before
 production use. The WAL is bounded to 512 MiB,
 individual frames to 8 MiB, and proposals to 4 MiB. Reaching the WAL bound stops
 writes; it does not discard history.
@@ -87,20 +87,47 @@ packet transport and publishes its new WAL before restoring application state or
 acknowledging Raft progress. Failure to persist or restore stops that peer. The
 older `process_ready` method refuses a checkpoint that needs restoration.
 
-`MAX_CHECKPOINT_BYTES` is currently 4 MiB so one complete snapshot fits within the
-existing 8 MiB packet and WAL-record bounds. Larger state is refused before any
-history changes; multi-frame snapshot streaming remains necessary for larger
-applications. Upgrade every voter to a runtime that supports snapshot packets
-before enabling checkpoints; older runtimes refuse snapshot packets and version-2 WAL records.
-Storage nodes must adopt the restore callback and choose a checkpoint policy
-before this API reclaims their history automatically. This library change alone
-does not enable automatic compaction in those applications. An outstanding snapshot
-is retried after ten local ticks if no successful append acknowledgment arrives;
-duplicate delivery does not restore an already-applied snapshot twice.
+`MAX_CHECKPOINT_BYTES` is 256 MiB. Checkpoints up to 4 MiB retain the inline
+snapshot packet and version-2 WAL encoding. Larger checkpoints use version-2
+transport packets containing acknowledged 1 MiB fragments and version-3 WAL
+records. Every packet and WAL record still fits the existing 8 MiB frame bound.
+The segmented WAL prefix is accepted only when contiguous, complete, and checksum
+verified; an interrupted prefix is refused without truncating the file. The old
+WAL remains authoritative until the complete replacement is synced and renamed.
+
+Each peer retains at most one outgoing and one incoming large transfer. Other
+lagging voters remain on the consensus retry path until the outgoing slot is free.
+A sender advances one fragment per acknowledgment and retries after ten local
+ticks. A transfer without progress expires after 100 ticks. A receiver that
+restarts requests retransmission from offset zero. Repeated delivery after
+completion does not restore state twice. Transport completion only resumes Raft
+probing: it never advances a follower's matched index or commits a proposal.
+Checkpoint acknowledgments leave the runtime only after processing persistence
+and application work successfully.
+
+The application snapshot and assembled transfer remain memory-backed; this is
+bounded packet transport, not constant-memory application snapshotting. Plan for
+snapshot copies during encoding, validation and restoration. Checkpoints larger
+than 256 MiB are refused before history replacement. Applications whose state can
+exceed that limit need a file-backed snapshot API before enabling automatic
+compaction; the runtime must not discard their history to fit the bound.
+
+Upgrade every voter to a runtime supporting segmented checkpoints before enabling
+them. Older runtimes refuse the new packet and WAL versions. Storage nodes must
+adopt complete application capture/restore and choose a checkpoint policy before
+this API reclaims their history automatically. This library change alone does
+not enable automatic compaction in those applications.
 
 Tests cover lagging-voter transfer, replay after total restart, preserved undecided
 suffixes, repeated history reclamation, replacement locking, failed publication,
-restore failure, every truncated checkpoint prefix, and byte corruption. Child
-processes exit immediately before and after the atomic replacement to verify that
-reopening sees complete old or new history. These are process-crash tests, not
+restore failure, every truncated inline checkpoint prefix, segmented record
+boundaries, and byte corruption. Child processes exit during segmented writing
+and immediately before and after the atomic replacement to verify that reopening
+sees complete old or new history. These are process-crash tests, not
 power-loss or filesystem fault-injection claims.
+
+Large-checkpoint tests transfer 9 MiB state through packet loss, duplicates, a
+receiver restart, and multiple lagging voters. They verify a subsequent write and
+total restart. Decoder tests cover conflicting senders, reordered extents, stale
+terms, and corrupt streams. These tests do not establish deployment-scale memory
+or throughput limits.

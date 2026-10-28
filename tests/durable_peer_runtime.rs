@@ -641,3 +641,298 @@ fn lost_snapshots_and_acknowledgments_are_retried_without_reapplying_state() {
         assert_eq!(apps[&3].value, 33);
     }
 }
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct TestFragment {
+    #[prost(uint64, tag = "1")]
+    from: u64,
+    #[prost(uint64, tag = "2")]
+    to: u64,
+    #[prost(uint64, tag = "3")]
+    term: u64,
+    #[prost(uint64, tag = "4")]
+    index: u64,
+    #[prost(uint64, tag = "5")]
+    total: u64,
+    #[prost(fixed64, tag = "6")]
+    checksum: u64,
+    #[prost(uint64, tag = "7")]
+    offset: u64,
+    #[prost(bytes = "vec", tag = "8")]
+    data: Vec<u8>,
+    #[prost(bool, tag = "9")]
+    ack: bool,
+}
+#[derive(Default)]
+struct LargeApp {
+    bytes: Vec<u8>,
+    restored: usize,
+}
+struct TransferFault {
+    kind: u8,
+    fired: bool,
+    duplicate: bool,
+    fragments: usize,
+}
+fn pump_large(
+    dir: &Directory,
+    peers: &mut BTreeMap<u64, DurablePeer>,
+    apps: &mut BTreeMap<u64, LargeApp>,
+    isolated: &[u64],
+    fault: &mut TransferFault,
+) {
+    for _ in 0..500 {
+        let mut packets = Vec::new();
+        for (id, peer) in peers.iter_mut() {
+            let app = std::cell::RefCell::new(apps.entry(*id).or_default());
+            for packet in peer
+                .process_ready_with_snapshot(
+                    |_, bytes| {
+                        app.borrow_mut().bytes.extend_from_slice(bytes);
+                        Ok(())
+                    },
+                    |_, bytes| {
+                        let mut app = app.borrow_mut();
+                        app.bytes = bytes.to_vec();
+                        app.restored += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap()
+            {
+                assert!(packet.bytes.len() <= 8 * 1024 * 1024);
+                if !isolated.contains(id) && !isolated.contains(&packet.to) {
+                    packets.push(packet);
+                }
+            }
+        }
+        if packets.is_empty() {
+            return;
+        }
+        for packet in packets {
+            let envelope = TestPacket::decode(packet.bytes.as_slice()).unwrap();
+            if envelope.version == 2 {
+                let part = TestFragment::decode(envelope.message.as_slice()).unwrap();
+                assert!(part.data.len() <= 1024 * 1024);
+                if !part.ack {
+                    fault.fragments += 1;
+                }
+                if fault.kind == 6 && part.ack && part.offset == part.total {
+                    fault.fired = true;
+                    continue;
+                }
+                let middle = !part.ack && part.offset == 2 * 1024 * 1024;
+                if !fault.fired
+                    && ((fault.kind == 1 && !part.ack && part.offset == 0)
+                        || (fault.kind == 2 && middle)
+                        || (fault.kind == 3 && part.ack && part.offset == part.total))
+                {
+                    fault.fired = true;
+                    continue;
+                }
+                if !fault.fired && fault.kind == 4 && middle {
+                    assert_eq!(packet.to, 3);
+                    peers.remove(&3);
+                    apps.remove(&3);
+                    peers.insert(3, DurablePeer::open(dir.options(3, vec![1, 2, 3])).unwrap());
+                    fault.fired = true;
+                }
+                if fault.duplicate {
+                    peers
+                        .get_mut(&packet.to)
+                        .unwrap()
+                        .step(&packet.bytes)
+                        .unwrap();
+                }
+            } else if (fault.kind == 5 && !fault.fired) || fault.kind == 6 {
+                let message =
+                    raft_core::eraftpb::Message::decode(envelope.message.as_slice()).unwrap();
+                if message.from == 3
+                    && message.get_msg_type() == raft_core::eraftpb::MessageType::MsgAppendResponse
+                    && apps.get(&3).is_some_and(|a| a.restored != 0)
+                {
+                    fault.fired = true;
+                    continue;
+                }
+            }
+            peers
+                .get_mut(&packet.to)
+                .unwrap()
+                .step(&packet.bytes)
+                .unwrap();
+        }
+    }
+    panic!("large checkpoint exchange did not settle");
+}
+#[test]
+fn streamed_checkpoints_survive_packet_loss_duplicates_and_receiver_restart() {
+    for kind in 0..=6 {
+        let dir = Directory::new();
+        let mut peers = peers(&dir);
+        let mut apps = BTreeMap::new();
+        let mut fault = TransferFault {
+            kind: 0,
+            fired: false,
+            duplicate: false,
+            fragments: 0,
+        };
+        peers.get_mut(&1).unwrap().campaign().unwrap();
+        pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+        let mut expected = Vec::new();
+        for value in 1..=9u8 {
+            let data = vec![value; 1024 * 1024];
+            expected.extend_from_slice(&data);
+            peers.get_mut(&1).unwrap().propose(data).unwrap();
+            pump_large(&dir, &mut peers, &mut apps, &[3], &mut fault);
+        }
+        assert_eq!(apps[&1].bytes, expected);
+        assert!(apps[&3].bytes.is_empty());
+        peers
+            .get_mut(&1)
+            .unwrap()
+            .checkpoint(expected.clone())
+            .unwrap();
+        fault.kind = kind;
+        fault.duplicate = true;
+        for tick in 0..35 {
+            if kind == 6 && tick == 24 {
+                fault.kind = 0;
+            }
+            peers.get_mut(&1).unwrap().tick().unwrap();
+            pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+        }
+        assert_eq!(apps[&3].bytes, expected, "scenario {kind}");
+        assert_eq!(apps[&3].restored, 1, "scenario {kind}");
+        assert!(fault.fragments >= 10);
+        assert!(kind == 0 || fault.fired, "fault not exercised: {kind}");
+        peers
+            .get_mut(&1)
+            .unwrap()
+            .propose(b"suffix".to_vec())
+            .unwrap();
+        pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+        for _ in 0..3 {
+            peers.get_mut(&1).unwrap().tick().unwrap();
+            pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+        }
+        expected.extend_from_slice(b"suffix");
+        drop(peers);
+        apps.clear();
+        let mut peers = self::peers(&dir);
+        pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+        for id in 1..=3 {
+            assert_eq!(apps[&id].bytes, expected, "scenario {kind} voter {id}");
+        }
+    }
+}
+
+#[test]
+fn segmented_checkpoint_recovery_refuses_missing_records_and_corruption() {
+    let dir = Directory::new();
+    let options = dir.options(1, vec![1]);
+    let mut peer = DurablePeer::open(options.clone()).unwrap();
+    peer.campaign().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    let data = vec![77; 9 * 1024 * 1024];
+    peer.checkpoint(data.clone()).unwrap();
+    drop(peer);
+    let complete = std::fs::read(&options.wal_path).unwrap();
+    let mut boundaries = vec![0];
+    let mut pos = 0;
+    while pos < complete.len() {
+        let len = u32::from_be_bytes(complete[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        assert!(len <= 8 * 1024 * 1024);
+        pos += 24 + len;
+        boundaries.push(pos);
+    }
+    assert!(boundaries.len() > 9);
+    for boundary in boundaries {
+        for cut in [
+            boundary.saturating_sub(1),
+            boundary,
+            (boundary + 1).min(complete.len()),
+        ] {
+            if cut == complete.len() {
+                continue;
+            }
+            std::fs::write(&options.wal_path, &complete[..cut]).unwrap();
+            assert!(DurablePeer::open(options.clone()).is_err(), "cut {cut}");
+            assert_eq!(std::fs::read(&options.wal_path).unwrap(), complete[..cut]);
+        }
+    }
+    for offset in [24, 1024 * 1024 + 100, complete.len() - 1] {
+        let mut damaged = complete.clone();
+        damaged[offset] ^= 1;
+        std::fs::write(&options.wal_path, &damaged).unwrap();
+        assert!(DurablePeer::open(options.clone()).is_err());
+        assert_eq!(std::fs::read(&options.wal_path).unwrap(), damaged);
+    }
+    std::fs::write(&options.wal_path, &complete).unwrap();
+    let mut peer = DurablePeer::open(options).unwrap();
+    let mut restored = false;
+    peer.process_ready_with_snapshot(
+        |_, _| Ok(()),
+        |_, bytes| {
+            assert_eq!(bytes, data);
+            restored = true;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(restored);
+}
+
+#[test]
+fn streamed_checkpoint_slot_serves_multiple_lagging_voters() {
+    let dir = Directory::new();
+    let voters = vec![1, 2, 3, 4, 5];
+    let mut peers: BTreeMap<_, _> = voters
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                DurablePeer::open(dir.options(*id, voters.clone())).unwrap(),
+            )
+        })
+        .collect();
+    let mut apps = BTreeMap::new();
+    let mut fault = TransferFault {
+        kind: 0,
+        fired: false,
+        duplicate: false,
+        fragments: 0,
+    };
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    let mut expected = Vec::new();
+    for value in 1..=9u8 {
+        let data = vec![value; 1024 * 1024];
+        expected.extend_from_slice(&data);
+        peers.get_mut(&1).unwrap().propose(data).unwrap();
+        pump_large(&dir, &mut peers, &mut apps, &[4, 5], &mut fault);
+    }
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint(expected.clone())
+        .unwrap();
+    for _ in 0..150 {
+        peers.get_mut(&1).unwrap().tick().unwrap();
+        pump_large(&dir, &mut peers, &mut apps, &[4], &mut fault);
+    }
+    assert_eq!(
+        apps[&5].bytes, expected,
+        "an unavailable voter must not block another repair"
+    );
+    assert_eq!(apps[&5].restored, 1);
+    assert!(apps[&4].bytes.is_empty());
+    for _ in 0..35 {
+        peers.get_mut(&1).unwrap().tick().unwrap();
+        pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    }
+    for id in [4, 5] {
+        assert_eq!(apps[&id].bytes, expected);
+        assert_eq!(apps[&id].restored, 1);
+    }
+    assert!(fault.fragments >= 20);
+}

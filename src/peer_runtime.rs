@@ -23,9 +23,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "peer_snapshot_stream.rs"]
+mod snapshot_stream;
+
 const LIMIT: usize = 8 * 1024 * 1024;
-/// Maximum application checkpoint size within one bounded peer packet.
-pub const MAX_CHECKPOINT_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum application checkpoint size. Transfers and WAL records are segmented.
+pub const MAX_CHECKPOINT_BYTES: usize = 256 * 1024 * 1024;
+const INLINE_CHECKPOINT_BYTES: usize = 4 * 1024 * 1024;
+const SNAPSHOT_ENCODED_LIMIT: usize = MAX_CHECKPOINT_BYTES + 64 * 1024;
+const SNAPSHOT_FRAGMENT_BYTES: usize = 1024 * 1024;
 const WAL_LIMIT: u64 = 512 * 1024 * 1024;
 const MAGIC: &[u8; 4] = b"MRPW";
 
@@ -69,6 +75,12 @@ struct WalBatch {
     entries: Vec<Vec<u8>>,
     #[prost(bytes = "vec", tag = "7")]
     snapshot: Vec<u8>,
+    #[prost(uint64, tag = "8")]
+    snapshot_offset: u64,
+    #[prost(uint64, tag = "9")]
+    snapshot_total: u64,
+    #[prost(uint64, tag = "10")]
+    snapshot_digest: u64,
 }
 fn invalid(s: impl ToString) -> RaftError {
     RaftError::InvalidRequest(s.to_string())
@@ -90,6 +102,9 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         hard_state: hs.map(ProstMessage::encode_to_vec).unwrap_or_default(),
         entries: entries.iter().map(ProstMessage::encode_to_vec).collect(),
         snapshot: Vec::new(),
+        snapshot_offset: 0,
+        snapshot_total: 0,
+        snapshot_digest: 0,
     }
 }
 #[derive(Clone)]
@@ -149,6 +164,7 @@ fn validate_snapshot(snapshot: &Snapshot, voters: &[u64]) -> Result<(), RaftErro
         || meta.term == u64::MAX
         || meta.get_conf_state() != &expected
         || snapshot.data.len() > MAX_CHECKPOINT_BYTES
+        || snapshot.encoded_len() > SNAPSHOT_ENCODED_LIMIT - 1024
     {
         return Err(invalid("invalid peer snapshot identity, position or size"));
     }
@@ -274,6 +290,7 @@ impl Journal {
             return Err(storage_error("peer WAL exceeds size limit"));
         }
         let mut offset = 0;
+        let mut assembly = snapshot_stream::WalAssembly::default();
         while offset < length {
             let remaining = length - offset;
             if remaining < 24 {
@@ -313,7 +330,7 @@ impl Journal {
             let record = WalBatch::decode(bytes.as_slice()).map_err(storage_error)?;
             if !matches!(
                 (record.version, record.snapshot.is_empty()),
-                (1, true) | (2, false)
+                (1, true) | (2, false) | (3, false)
             ) || record.group != options.group_id
                 || record.node != options.node_id
                 || record.voters != options.voters
@@ -321,9 +338,12 @@ impl Journal {
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
             }
-            install(store, &record)?;
+            if let Some(record) = assembly.accept(record, offset)? {
+                install(store, &record)?;
+            }
             offset += 24 + size as u64;
         }
+        assembly.finish()?;
         if offset != length {
             file.set_len(offset).map_err(storage_error)?;
         }
@@ -374,7 +394,24 @@ impl Journal {
         let mut first = batch(options, Some(&floor_state), &[]);
         first.version = 2;
         first.snapshot = snapshot.encode_to_vec();
-        replacement.append(&first)?;
+        if snapshot.data.len() <= INLINE_CHECKPOINT_BYTES {
+            replacement.append(&first)?;
+        } else {
+            let encoded = std::mem::take(&mut first.snapshot);
+            first.version = 3;
+            first.snapshot_total = encoded.len() as u64;
+            first.snapshot_digest = digest(&encoded);
+            for (number, fragment) in encoded.chunks(SNAPSHOT_FRAGMENT_BYTES).enumerate() {
+                first.snapshot_offset = (number * SNAPSHOT_FRAGMENT_BYTES) as u64;
+                first.snapshot = fragment.to_vec();
+                if number != 0 {
+                    first.hard_state.clear();
+                }
+                replacement.append(&first)?;
+                #[cfg(test)]
+                checkpoint_crash_point("during_write");
+            }
+        }
         for entry in entries {
             replacement.append(&batch(options, None, std::slice::from_ref(entry)))?;
         }
@@ -455,6 +492,7 @@ pub struct DurablePeer {
     pending_read: Option<PendingRead>,
     restore_on_open: Option<Snapshot>,
     snapshot_flights: BTreeMap<u64, (u64, u64, u8)>,
+    stream: snapshot_stream::Stream,
 }
 impl DurablePeer {
     pub fn open(mut options: PeerOptions) -> Result<Self, RaftError> {
@@ -501,6 +539,7 @@ impl DurablePeer {
             pending_read: None,
             restore_on_open,
             snapshot_flights: BTreeMap::new(),
+            stream: snapshot_stream::Stream::default(),
         })
     }
     fn healthy(&self) -> Result<(), RaftError> {
@@ -537,10 +576,16 @@ impl DurablePeer {
             self.snapshot_flights.clear();
         }
         let term = self.term();
+        self.stream
+            .tick(term, self.raw.raft.state == StateRole::Leader);
         let mut expired = Vec::new();
         self.snapshot_flights.retain(|id, (sent_term, _, ticks)| {
             if *sent_term != term {
                 return false;
+            }
+            if self.stream.sending_to(*id) {
+                *ticks = 0;
+                return true;
             }
             *ticks += 1;
             if *ticks >= 10 {
@@ -608,6 +653,7 @@ impl DurablePeer {
                 }),
             }),
         };
+        validate_snapshot(&snapshot, &self.options.voters)?;
         let first = self.store.first_index().map_err(storage_error)?;
         if index < first {
             return Err(invalid("applied state is already checkpointed"));
@@ -703,13 +749,54 @@ impl DurablePeer {
             return Err(invalid("peer packet exceeds size limit"));
         }
         let packet = Packet::decode(bytes).map_err(invalid)?;
-        if packet.version != 1
+        if !matches!(packet.version, 1 | 2)
             || packet.group != self.options.group_id
             || packet.encode_to_vec() != bytes
         {
             return Err(invalid("peer packet identity or encoding mismatch"));
         }
+        if packet.version == 2 {
+            let part =
+                snapshot_stream::Fragment::decode(packet.message.as_slice()).map_err(invalid)?;
+            part.validate(&self.options, self.term())?;
+            if part.encode_to_vec() != packet.message {
+                return Err(invalid("noncanonical checkpoint fragment"));
+            }
+            if part.ack {
+                if self.stream.acknowledge(&part) {
+                    // Transport completion only unpauses probing. It never
+                    // advances the follower match index or commits an entry.
+                    self.raw
+                        .report_snapshot(part.from, raft_core::SnapshotStatus::Finish);
+                }
+                return Ok(());
+            }
+            let from = part.from;
+            let term = part.term;
+            if let Some(message) = self.stream.receive(part, &self.options.voters)? {
+                self.step_message(message)?;
+            } else {
+                // Keep the recognized sender's term and election timer current
+                // while its checkpoint travels through bounded transport frames.
+                self.raw
+                    .step(Message {
+                        from,
+                        to: self.options.node_id,
+                        term,
+                        msg_type: MessageType::MsgHeartbeat as i32,
+                        ..Default::default()
+                    })
+                    .map_err(invalid)?;
+            }
+            return Ok(());
+        }
         let message = Message::decode(packet.message.as_slice()).map_err(invalid)?;
+        if message.encode_to_vec() != packet.message {
+            return Err(invalid("noncanonical peer message"));
+        }
+        self.step_message(message)
+    }
+    fn step_message(&mut self, message: Message) -> Result<(), RaftError> {
         let kind = message.get_msg_type();
         let allowed = matches!(
             kind,
@@ -723,12 +810,7 @@ impl DurablePeer {
                 | MessageType::MsgRequestPreVoteResponse
                 | MessageType::MsgSnapshot
         );
-        if !allowed
-            || message.term == 0
-            || message.term == u64::MAX
-            || message.index == u64::MAX
-            || message.encode_to_vec() != packet.message
-        {
+        if !allowed || message.term == 0 || message.term == u64::MAX || message.index == u64::MAX {
             return Err(invalid("unsupported or malformed peer message"));
         }
         if message.to != self.options.node_id
@@ -787,34 +869,42 @@ impl DurablePeer {
                 .is_some_and(|(term, index, _)| message.term == *term && message.index >= *index)
         {
             self.snapshot_flights.remove(&message.from);
+            self.stream.completed_send(message.from);
         }
         self.raw.step(message).map_err(invalid)
     }
     fn packets(&mut self, messages: Vec<Message>) -> Result<Vec<PeerPacket>, RaftError> {
-        messages
-            .into_iter()
-            .map(|message| {
-                let to = message.to;
-                if message.get_msg_type() == MessageType::MsgSnapshot {
-                    self.snapshot_flights.insert(
-                        to,
-                        (message.term, message.get_snapshot().get_metadata().index, 0),
-                    );
-                }
-                let packet = Packet {
-                    version: 1,
-                    group: self.options.group_id,
-                    message: message.encode_to_vec(),
-                };
-                if packet.encoded_len() > LIMIT {
-                    return Err(invalid("outgoing peer packet exceeds size limit"));
-                }
-                Ok(PeerPacket {
+        let mut output = Vec::new();
+        for message in messages {
+            let to = message.to;
+            if message.get_msg_type() == MessageType::MsgSnapshot {
+                self.snapshot_flights.insert(
                     to,
-                    bytes: packet.encode_to_vec(),
-                })
-            })
-            .collect()
+                    (message.term, message.get_snapshot().get_metadata().index, 0),
+                );
+                if message.get_snapshot().data.len() > INLINE_CHECKPOINT_BYTES {
+                    if !self.stream.start(message)? {
+                        self.raw
+                            .report_snapshot(to, raft_core::SnapshotStatus::Failure);
+                        self.snapshot_flights.remove(&to);
+                    }
+                    continue;
+                }
+            }
+            let packet = Packet {
+                version: 1,
+                group: self.options.group_id,
+                message: message.encode_to_vec(),
+            };
+            if packet.encoded_len() > LIMIT {
+                return Err(invalid("outgoing peer packet exceeds size limit"));
+            }
+            output.push(PeerPacket {
+                to,
+                bytes: packet.encode_to_vec(),
+            });
+        }
+        Ok(output)
     }
     /// Persist before returning packets or applying committed entries. Empty payloads
     /// are election no-ops and still carry an application position. On restart the
@@ -850,7 +940,9 @@ impl DurablePeer {
                     &snapshot.data,
                 )?;
             }
-            self.process_inner(&mut apply, &mut restore)
+            let mut output = self.process_inner(&mut apply, &mut restore)?;
+            output.extend(self.stream.packets(self.options.group_id));
+            Ok(output)
         })();
         if result.is_err() {
             self.failed = true;
@@ -1040,7 +1132,16 @@ mod tests {
         };
         let mut peer = DurablePeer::open(options(PathBuf::from(path))).unwrap();
         peer.process_ready(|_, _| Ok(())).unwrap();
-        peer.checkpoint(7u64.to_be_bytes().to_vec()).unwrap();
+        let size: usize = std::env::var("MATRIXRAFT_CHECKPOINT_TEST_SIZE")
+            .unwrap_or_default()
+            .parse()
+            .unwrap_or(0);
+        let bytes = if size == 0 {
+            7u64.to_be_bytes().to_vec()
+        } else {
+            vec![7; size]
+        };
+        peer.checkpoint(bytes).unwrap();
         panic!("checkpoint crash hook did not run");
     }
     #[test]
@@ -1058,7 +1159,13 @@ mod tests {
         }
         drop(peer);
         let original = std::fs::read(&wal).unwrap();
-        for phase in ["before_publish", "after_publish"] {
+        for (phase, size) in [
+            ("before_publish", 0),
+            ("after_publish", 0),
+            ("during_write", 9 * 1024 * 1024),
+            ("before_publish", 9 * 1024 * 1024),
+            ("after_publish", 9 * 1024 * 1024),
+        ] {
             std::fs::write(&wal, &original).unwrap();
             let child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -1069,13 +1176,14 @@ mod tests {
                 ])
                 .env("MATRIXRAFT_CHECKPOINT_TEST_PHASE", phase)
                 .env("MATRIXRAFT_CHECKPOINT_TEST_WAL", &wal)
+                .env("MATRIXRAFT_CHECKPOINT_TEST_SIZE", size.to_string())
                 .output()
                 .unwrap();
             assert!(child.status.success());
             assert!(String::from_utf8_lossy(&child.stdout).contains("CHECKPOINT_CRASH_REACHED"));
-            if phase == "before_publish" {
+            if phase != "after_publish" {
                 assert_eq!(std::fs::read(&wal).unwrap(), original);
-            } else {
+            } else if size == 0 {
                 assert!(std::fs::metadata(&wal).unwrap().len() < original.len() as u64);
             }
             let mut peer = DurablePeer::open(config.clone()).unwrap();
@@ -1089,7 +1197,13 @@ mod tests {
                     Ok(())
                 },
                 |_, bytes| {
-                    value.set(u64::from_be_bytes(bytes.try_into().unwrap()));
+                    if size == 0 {
+                        value.set(u64::from_be_bytes(bytes.try_into().unwrap()));
+                    } else {
+                        assert_eq!(bytes.len(), size);
+                        assert!(bytes.iter().all(|b| *b == 7));
+                        value.set(7);
+                    }
                     restored.set(true);
                     Ok(())
                 },
@@ -1098,6 +1212,91 @@ mod tests {
             assert_eq!(value.get(), 7);
             assert_eq!(restored.get(), phase == "after_publish");
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn streamed_restore_failure_is_durable_and_emits_no_completion() {
+        let root = path("stream-restore-directory");
+        std::fs::create_dir(&root).unwrap();
+        let config = PeerOptions {
+            group_id: 1,
+            node_id: 2,
+            voters: vec![1, 2, 3],
+            wal_path: root.join("peer.wal"),
+        };
+        let data = vec![42; 9 * 1024 * 1024];
+        let message = Message {
+            from: 1,
+            to: 2,
+            term: 5,
+            msg_type: MessageType::MsgSnapshot as i32,
+            snapshot: Some(Snapshot {
+                data: data.clone(),
+                metadata: Some(SnapshotMetadata {
+                    index: 9,
+                    term: 4,
+                    conf_state: Some(ConfState {
+                        voters: vec![1, 2, 3],
+                        ..Default::default()
+                    }),
+                }),
+            }),
+            ..Default::default()
+        };
+        let mut sender = snapshot_stream::Stream::default();
+        sender.start(message).unwrap();
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        let mut failed = false;
+        for _ in 0..20 {
+            let packets = sender.packets(1);
+            assert_eq!(packets.len(), 1);
+            peer.step(&packets[0].bytes).unwrap();
+            match peer.process_ready_with_snapshot(
+                |_, _| Ok(()),
+                |_, _| Err(storage_error("injected streamed restore failure")),
+            ) {
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+                Ok(packets) => {
+                    for packet in packets {
+                        let envelope = Packet::decode(packet.bytes.as_slice()).unwrap();
+                        if envelope.version == 2 {
+                            let part =
+                                snapshot_stream::Fragment::decode(envelope.message.as_slice())
+                                    .unwrap();
+                            assert!(part.ack);
+                            assert!(
+                                !sender.acknowledge(&part),
+                                "completion must not escape a failed restore"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failed);
+        assert!(peer.tick().is_err());
+        assert!(peer
+            .process_ready_with_snapshot(|_, _| Ok(()), |_, _| Ok(()))
+            .is_err());
+        drop(peer);
+        let mut peer = DurablePeer::open(config).unwrap();
+        let mut restored = false;
+        peer.process_ready_with_snapshot(
+            |_, _| Ok(()),
+            |id, bytes| {
+                assert_eq!(id.index, 9);
+                assert_eq!(bytes, data);
+                restored = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(restored);
+        drop(peer);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
