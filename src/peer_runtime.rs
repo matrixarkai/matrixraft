@@ -1032,6 +1032,11 @@ impl DurablePeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // A spawned child can briefly retain another thread's file locks before
+    // exec closes inherited descriptors. Keep process creation exclusive with
+    // these WAL fixtures; ordinary file tests can still run together.
+    static PROCESS_FIXTURE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
     fn path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "peer-wal-{label}-{}-{}",
@@ -1052,6 +1057,7 @@ mod tests {
     }
     #[test]
     fn incoming_snapshot_restore_failure_is_durable_and_returns_no_acknowledgment() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
         let root = path("restore-directory");
         std::fs::create_dir(&root).unwrap();
         let wal = root.join("peer.wal");
@@ -1127,6 +1133,7 @@ mod tests {
     #[test]
     #[ignore = "child process used by checkpoint crash-boundary test"]
     fn checkpoint_crash_child() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
         let Some(path) = std::env::var_os("MATRIXRAFT_CHECKPOINT_TEST_WAL") else {
             return;
         };
@@ -1146,6 +1153,7 @@ mod tests {
     }
     #[test]
     fn checkpoint_process_crashes_preserve_old_or_new_complete_history() {
+        let _fixture = PROCESS_FIXTURE.write().unwrap();
         let root = path("crash-directory");
         std::fs::create_dir(&root).unwrap();
         let wal = root.join("peer.wal");
@@ -1217,6 +1225,7 @@ mod tests {
 
     #[test]
     fn streamed_restore_failure_is_durable_and_emits_no_completion() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
         let root = path("stream-restore-directory");
         std::fs::create_dir(&root).unwrap();
         let config = PeerOptions {
@@ -1301,6 +1310,7 @@ mod tests {
     }
     #[test]
     fn wal_failure_returns_no_packets_or_application_and_stops_peer() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
         let path = path("failure");
         let options = options(path.clone());
         let mut peer = DurablePeer::open(options.clone()).unwrap();
@@ -1332,6 +1342,7 @@ mod tests {
     }
     #[test]
     fn wal_corruption_and_each_torn_final_append_are_handled_safely() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
         let path = path("damage");
         let options = options(path.clone());
         let mut peer = DurablePeer::open(options.clone()).unwrap();
@@ -1364,6 +1375,7 @@ mod tests {
     }
     #[test]
     fn packet_decoder_rejects_local_commands_and_deep_unknown_groups() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
         let path = path("packets");
         let mut options = options(path.clone());
         options.voters = vec![1, 2, 3];
