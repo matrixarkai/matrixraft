@@ -14,14 +14,14 @@ only its matching committed log position after successful application.
 
 The application callback receives election no-ops as empty payloads. On reopen,
 the WAL restores term, vote, log, and commit state, and committed entries replay
-from the beginning. Supply a fresh application, or an explicitly idempotent
-applier. An application or persistence failure stops that peer instance; restart
+from the beginning, or from the latest application checkpoint and its suffix.
+Supply a fresh application, or an explicitly idempotent applier. An application or persistence failure stops that peer instance; restart
 and recover before serving. Keep the WAL file intact for the life of the group.
 
 The initial voter set, group, and node identity are recorded and checked during
-recovery. Membership is fixed. Snapshot installation, log compaction, transport
-threads, authentication, and graceful worker lifecycle
-integration remain required before production use. The WAL is bounded to 512 MiB,
+recovery. Membership is fixed. Transport threads, authentication, large snapshot
+streaming, and graceful worker lifecycle integration remain required before
+production use. The WAL is bounded to 512 MiB,
 individual frames to 8 MiB, and proposals to 4 MiB. Reaching the WAL bound stops
 writes; it does not discard history.
 
@@ -49,7 +49,8 @@ isolated peer cannot elect itself, a missing quorum cannot commit, a new majorit
 can replace an isolated leader's uncommitted tail, and restart replays committed
 data. Additional tests exercise storage failure, application failure, durable
 identity, exclusive locking, every truncated final append, and record corruption.
-They are not socket, multi-process, scale, or power-loss tests.
+These packet-exchange tests do not establish socket transport, multi-host scale,
+or power-loss safety. Checkpoint process-crash coverage is described below.
 
 ## Quorum-confirmed reads
 
@@ -67,3 +68,39 @@ bounds the core's pending read contexts even during a partition. Read tokens are
 not persistent and must not be reused across peer instances. Confirmations do
 not append entries or WAL records; writes and elections still do, and snapshot
 compaction remains necessary for a long-running write workload.
+
+## Application checkpoints and lagging voters
+
+After processing all Ready work, call `checkpoint` on the exclusive application
+worker with a binary snapshot of the exact applied state. The runtime records its
+applied index, term and immutable voter set; it retains any persisted uncommitted
+suffix without applying it. A synced replacement WAL is published by atomic rename
+and its directory is synced. The stable `.runtime.lock` sidecar remains locked
+across inode replacement. Do not remove the WAL or lock sidecar; missing or empty
+history beside an existing lock is refused. An incomplete first WAL record is
+refused without truncation. A later torn final append retains the older prefix.
+
+Use `process_ready_with_snapshot` for every subsequent Ready pass and on reopen.
+Its restore callback installs the checkpoint before committed suffix entries are
+applied. A lagging voter receives the saved snapshot through the normal peer
+packet transport and publishes its new WAL before restoring application state or
+acknowledging Raft progress. Failure to persist or restore stops that peer. The
+older `process_ready` method refuses a checkpoint that needs restoration.
+
+`MAX_CHECKPOINT_BYTES` is currently 4 MiB so one complete snapshot fits within the
+existing 8 MiB packet and WAL-record bounds. Larger state is refused before any
+history changes; multi-frame snapshot streaming remains necessary for larger
+applications. Upgrade every voter to a runtime that supports snapshot packets
+before enabling checkpoints; older runtimes refuse snapshot packets and version-2 WAL records.
+Storage nodes must adopt the restore callback and choose a checkpoint policy
+before this API reclaims their history automatically. This library change alone
+does not enable automatic compaction in those applications. An outstanding snapshot
+is retried after ten local ticks if no successful append acknowledgment arrives;
+duplicate delivery does not restore an already-applied snapshot twice.
+
+Tests cover lagging-voter transfer, replay after total restart, preserved undecided
+suffixes, repeated history reclamation, replacement locking, failed publication,
+restore failure, every truncated checkpoint prefix, and byte corruption. Child
+processes exit immediately before and after the atomic replacement to verify that
+reopening sees complete old or new history. These are process-crash tests, not
+power-loss or filesystem fault-injection claims.
