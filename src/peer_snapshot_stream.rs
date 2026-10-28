@@ -162,19 +162,72 @@ struct Sending {
 }
 struct Receiving {
     identity: Fragment,
-    bytes: Vec<u8>,
+    file: File,
+    length: u64,
     idle: u8,
 }
-/// One outgoing and one incoming transfer per local peer bound retained memory.
+impl Receiving {
+    fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.file.seek(SeekFrom::Start(self.length))?;
+        self.file.write_all(bytes)?;
+        self.length += bytes.len() as u64;
+        Ok(())
+    }
+    fn matches(&mut self, offset: u64, bytes: &[u8]) -> std::io::Result<bool> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut saved = vec![0; bytes.len()];
+        self.file.read_exact(&mut saved)?;
+        Ok(saved == bytes)
+    }
+    fn finish(mut self) -> Result<Vec<u8>, RaftError> {
+        if self.length != self.identity.total
+            || self.file.metadata().map_err(storage_error)?.len() != self.length
+        {
+            return Err(storage_error("checkpoint staging file length mismatch"));
+        }
+        self.file.seek(SeekFrom::Start(0)).map_err(storage_error)?;
+        // The current protobuf decoder still needs one complete buffer. Retain
+        // no growing payload buffer while fragments are arriving.
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(self.length as usize)
+            .map_err(storage_error)?;
+        (&mut self.file)
+            .take(self.length + 1)
+            .read_to_end(&mut bytes)
+            .map_err(storage_error)?;
+        if bytes.len() as u64 != self.length {
+            return Err(storage_error("checkpoint staging file changed during read"));
+        }
+        Ok(bytes)
+    }
+}
+/// One outgoing and one incoming transfer per local peer bound retained state.
+/// Incoming bytes are staged beside the WAL in an automatically removed file.
 /// Other lagging voters remain in Raft's retry path until the outgoing slot frees.
-#[derive(Default)]
 pub(super) struct Stream {
+    spool_directory: PathBuf,
     sending: Option<Sending>,
     receiving: Option<Receiving>,
     completed: Option<Fragment>,
     ack: Option<Fragment>,
 }
+#[cfg(test)]
+impl Default for Stream {
+    fn default() -> Self {
+        Self::new(std::env::temp_dir())
+    }
+}
 impl Stream {
+    pub(super) fn new(spool_directory: PathBuf) -> Self {
+        Self {
+            spool_directory,
+            sending: None,
+            receiving: None,
+            completed: None,
+            ack: None,
+        }
+    }
     pub(super) fn sending_to(&self, to: u64) -> bool {
         self.sending.as_ref().is_some_and(|s| s.identity.to == to)
     }
@@ -291,33 +344,47 @@ impl Stream {
                 self.ack = Some(part.acknowledgment(0));
                 return Ok(None);
             }
+            // A partial file is expendable transport state, never a checkpoint
+            // commit. Its lifetime ends on completion, expiry, error or drop.
+            self.ack = None;
+            self.receiving = None;
+            let file = tempfile::tempfile_in(&self.spool_directory).map_err(storage_error)?;
             self.receiving = Some(Receiving {
                 identity: part.identity(),
-                bytes: Vec::new(),
+                file,
+                length: 0,
                 idle: 0,
             });
         }
+        self.ack = None;
         let receiving = self.receiving.as_mut().unwrap();
         receiving.idle = 0;
-        let offset = part.offset as usize;
-        if offset == receiving.bytes.len() {
-            receiving.bytes.extend_from_slice(&part.data);
-        } else if offset < receiving.bytes.len()
-            && receiving.bytes.get(offset..offset + part.data.len()) != Some(part.data.as_slice())
-        {
-            return Err(invalid("conflicting duplicate checkpoint fragment"));
+        let io_result = if part.offset == receiving.length {
+            receiving.append(&part.data).map(|()| true)
+        } else if part.offset < receiving.length {
+            receiving.matches(part.offset, &part.data)
+        } else {
+            Ok(true)
+        };
+        match io_result {
+            Ok(true) => {}
+            Ok(false) => return Err(invalid("conflicting duplicate checkpoint fragment")),
+            Err(error) => {
+                self.receiving = None;
+                return Err(storage_error(error));
+            }
         }
-        let accepted = receiving.bytes.len() as u64;
+        let accepted = self.receiving.as_ref().unwrap().length;
         if accepted != part.total {
             self.ack = Some(part.acknowledgment(accepted));
             return Ok(None);
         }
-        let receiving = self.receiving.take().unwrap();
-        if digest(&receiving.bytes) != part.checksum {
+        let bytes = self.receiving.take().unwrap().finish()?;
+        if digest(&bytes) != part.checksum {
             return Err(invalid("checkpoint transfer checksum mismatch"));
         }
-        let message = Message::decode(receiving.bytes.as_slice()).map_err(invalid)?;
-        if message.encode_to_vec() != receiving.bytes
+        let message = Message::decode(bytes.as_slice()).map_err(invalid)?;
+        if message.encode_to_vec() != bytes
             || message.get_msg_type() != MessageType::MsgSnapshot
             || message.from != part.from
             || message.to != part.to
@@ -439,8 +506,8 @@ mod tests {
         later.offset = 2 * SNAPSHOT_FRAGMENT_BYTES as u64;
         assert!(receiver.receive(later, &[1, 2, 3]).unwrap().is_none());
         assert_eq!(
-            receiver.receiving.as_ref().unwrap().bytes.len(),
-            SNAPSHOT_FRAGMENT_BYTES
+            receiver.receiving.as_ref().unwrap().length,
+            SNAPSHOT_FRAGMENT_BYTES as u64
         );
         let mut corrupt = first.clone();
         corrupt.data[0] ^= 1;
@@ -534,5 +601,120 @@ mod tests {
             }
             assert!(assembly.accept(next, 100).is_err(), "case {kind}");
         }
+    }
+    #[test]
+    fn incoming_checkpoint_spools_only_received_bytes_and_expiry_removes_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut receiver = Stream::new(directory.path().to_path_buf());
+        let mut part = Fragment {
+            from: 1,
+            to: 2,
+            term: 4,
+            index: 9,
+            total: 64 * SNAPSHOT_FRAGMENT_BYTES as u64,
+            checksum: 42,
+            offset: 0,
+            data: vec![13; SNAPSHOT_FRAGMENT_BYTES],
+            ack: false,
+        };
+        for number in 0..16 {
+            part.offset = number * SNAPSHOT_FRAGMENT_BYTES as u64;
+            assert!(receiver
+                .receive(part.clone(), &[1, 2, 3])
+                .unwrap()
+                .is_none());
+            let receiving = receiver.receiving.as_ref().unwrap();
+            let received = (number + 1) * SNAPSHOT_FRAGMENT_BYTES as u64;
+            assert_eq!(receiving.length, received);
+            assert_eq!(receiving.file.metadata().unwrap().len(), received);
+            assert!(receiving.identity.data.is_empty());
+            assert_eq!(fragment(&mut receiver).offset, received);
+        }
+        for _ in 0..100 {
+            receiver.tick(4, false);
+        }
+        assert!(receiver.receiving.is_none());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        // An expired receiver asks the sender to restart from zero; it cannot
+        // advertise the discarded partial bytes as a completed checkpoint.
+        assert!(receiver.receive(part, &[1, 2, 3]).unwrap().is_none());
+        assert_eq!(fragment(&mut receiver).offset, 0);
+        assert!(receiver.receiving.is_none());
+    }
+
+    #[test]
+    fn staging_io_errors_discard_partial_state_without_acknowledging_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut sender = Stream::default();
+        sender.start(message()).unwrap();
+        let first = fragment(&mut sender);
+        let mut unavailable = Stream::new(directory.path().join("missing"));
+        assert!(unavailable.receive(first.clone(), &[1, 2, 3]).is_err());
+        assert!(unavailable.packets(1).is_empty());
+        assert!(unavailable.receiving.is_none());
+
+        let mut receiver = Stream::new(directory.path().to_path_buf());
+        receiver.receive(first.clone(), &[1, 2, 3]).unwrap();
+        receiver
+            .receiving
+            .as_mut()
+            .unwrap()
+            .file
+            .set_len(0)
+            .unwrap();
+        // A duplicate must be checked against the actual staged bytes. Failure
+        // to read them also clears the acknowledgment queued by the first part.
+        assert!(receiver.receive(first.clone(), &[1, 2, 3]).is_err());
+        assert!(receiver.receiving.is_none());
+        assert!(receiver.completed.is_none());
+        assert!(receiver.packets(1).is_empty());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        let mut receiver = Stream::new(directory.path().to_path_buf());
+        receiver.receive(first.clone(), &[1, 2, 3]).unwrap();
+        let mut read_only = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        read_only.as_file_mut().write_all(&first.data).unwrap();
+        receiver.receiving.as_mut().unwrap().file = File::open(read_only.path()).unwrap();
+        let mut next = first;
+        next.offset = SNAPSHOT_FRAGMENT_BYTES as u64;
+        assert!(receiver.receive(next, &[1, 2, 3]).is_err());
+        assert!(receiver.receiving.is_none());
+        assert!(receiver.completed.is_none());
+        assert!(receiver.packets(1).is_empty());
+        drop(read_only);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn damaged_staging_file_never_becomes_a_completed_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut sender = Stream::default();
+        sender.start(message()).unwrap();
+        let first = fragment(&mut sender);
+        let mut receiver = Stream::new(directory.path().to_path_buf());
+        receiver.receive(first.clone(), &[1, 2, 3]).unwrap();
+        let file = &mut receiver.receiving.as_mut().unwrap().file;
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        let sending = sender.sending.as_ref().unwrap();
+        let mut offset = SNAPSHOT_FRAGMENT_BYTES;
+        while offset < sending.bytes.len() {
+            let end = (offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
+            let part = Fragment {
+                offset: offset as u64,
+                data: sending.bytes[offset..end].to_vec(),
+                ..first.identity()
+            };
+            let result = receiver.receive(part, &[1, 2, 3]);
+            if end == sending.bytes.len() {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().is_none());
+            }
+            offset = end;
+        }
+        assert!(receiver.receiving.is_none());
+        assert!(receiver.completed.is_none());
+        assert!(receiver.packets(1).is_empty());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 }

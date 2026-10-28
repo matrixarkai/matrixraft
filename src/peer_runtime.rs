@@ -529,6 +529,14 @@ impl DurablePeer {
         };
         let logger = slog::Logger::root(slog::Discard, slog::o!());
         let raw = RawNode::new(&config, store.clone(), &logger).map_err(invalid)?;
+        let stream = snapshot_stream::Stream::new(
+            options
+                .wal_path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+                .to_path_buf(),
+        );
         Ok(Self {
             options,
             raw,
@@ -539,7 +547,7 @@ impl DurablePeer {
             pending_read: None,
             restore_on_open,
             snapshot_flights: BTreeMap::new(),
-            stream: snapshot_stream::Stream::default(),
+            stream,
         })
     }
     fn healthy(&self) -> Result<(), RaftError> {
