@@ -131,3 +131,19 @@ receiver restart, and multiple lagging voters. They verify a subsequent write an
 total restart. Decoder tests cover conflicting senders, reordered extents, stale
 terms, and corrupt streams. These tests do not establish deployment-scale memory
 or throughput limits.
+
+### Incoming checkpoint staging
+
+An incomplete incoming checkpoint is held in an automatically removed temporary
+file in the WAL directory. Only received fragments consume file space; the
+advertised total does not preallocate it. Duplicate fragments are compared with
+the staged bytes. Creation, read or write errors discard partial state without
+acknowledging it, and expiry or peer shutdown releases the file. A retry after
+partial state is discarded starts at offset zero.
+
+Staging is expendable transport state. Completion still requires checksum and
+canonical-message validation, followed by durable WAL publication and application
+restore before completion packets can escape. The final decoder, outgoing
+snapshot and installed application checkpoint still use complete in-memory
+buffers, and the 256 MiB application bound remains. File staging alone does not
+provide larger checkpoints or a fully streaming restore API.
