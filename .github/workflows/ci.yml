@@ -68,7 +68,7 @@ jobs:
       - name: Peer quorum and recovery tests
         run: |
           cargo test --locked --features peer-runtime --test durable_peer_runtime
-          cargo test --locked --features peer-runtime --lib peer_runtime::tests
+          cargo test --locked --features peer-runtime --lib peer_runtime::
       - name: Build and document the peer API
         run: |
           cargo check --locked --all-features --all-targets
