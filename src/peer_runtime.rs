@@ -11,7 +11,7 @@ use prost::Message as ProstMessage;
 use raft_core::{
     eraftpb::{Entry, EntryType, HardState, Message, MessageType},
     storage::MemStorage,
-    Config, RawNode, StateRole, Storage,
+    Config, RawNode, ReadOnlyOption, StateRole, Storage,
 };
 use std::{
     collections::BTreeSet,
@@ -248,6 +248,16 @@ impl Journal {
         Ok(())
     }
 }
+struct PendingRead {
+    token: u64,
+    term: u64,
+    index: Option<u64>,
+}
+impl PendingRead {
+    fn context(&self) -> Vec<u8> {
+        [self.term.to_be_bytes(), self.token.to_be_bytes()].concat()
+    }
+}
 /// One actual Raft peer. Remote votes and append acknowledgments enter only via `step`.
 pub struct DurablePeer {
     options: PeerOptions,
@@ -255,6 +265,8 @@ pub struct DurablePeer {
     store: MemStorage,
     journal: Journal,
     failed: bool,
+    read_sequence: u64,
+    pending_read: Option<PendingRead>,
 }
 impl DurablePeer {
     pub fn open(mut options: PeerOptions) -> Result<Self, RaftError> {
@@ -275,6 +287,7 @@ impl DurablePeer {
             election_tick: 10,
             heartbeat_tick: 2,
             check_quorum: true,
+            read_only_option: ReadOnlyOption::Safe,
             pre_vote: true,
             max_size_per_msg: 1024 * 1024,
             max_inflight_msgs: 64,
@@ -289,6 +302,8 @@ impl DurablePeer {
             store,
             journal,
             failed: false,
+            read_sequence: 0,
+            pending_read: None,
         })
     }
     fn healthy(&self) -> Result<(), RaftError> {
@@ -346,6 +361,62 @@ impl DurablePeer {
             term: self.raw.raft.term,
             index,
         })
+    }
+    /// Start a quorum-confirmed read without appending an application entry.
+    /// Only one read may be outstanding. Keep polling after a caller timeout:
+    /// forgetting an unresolved read would allow unbounded consensus contexts.
+    /// The token is local to this open peer and is not a durable identifier.
+    pub fn begin_read(&mut self) -> Result<u64, RaftError> {
+        self.healthy()?;
+        if !self.is_leader() {
+            return Err(RaftError::NotLeader(self.options.node_id));
+        }
+        if self
+            .pending_read
+            .as_ref()
+            .is_some_and(|r| r.term != self.term())
+        {
+            self.pending_read = None;
+        }
+        if self.pending_read.is_some() {
+            return Err(invalid("a peer read is already pending"));
+        }
+        self.read_sequence = self
+            .read_sequence
+            .checked_add(1)
+            .ok_or_else(|| invalid("peer read sequence exhausted"))?;
+        let read = PendingRead {
+            token: self.read_sequence,
+            term: self.term(),
+            index: None,
+        };
+        self.raw.read_index(read.context());
+        self.pending_read = Some(read);
+        Ok(self.read_sequence)
+    }
+    /// True consumes a quorum confirmation whose index has applied locally.
+    /// Process and deliver Ready packets between polls. A lost leadership term
+    /// invalidates the token; a local clock or an old confirmation cannot serve it.
+    pub fn poll_read(&mut self, token: u64) -> Result<bool, RaftError> {
+        self.healthy()?;
+        let read = self
+            .pending_read
+            .as_ref()
+            .filter(|r| r.token == token)
+            .ok_or_else(|| invalid("unknown peer read token"))?;
+        if !self.is_leader() || read.term != self.term() {
+            self.pending_read = None;
+            return Err(RaftError::NotLeader(self.options.node_id));
+        }
+        if read
+            .index
+            .is_some_and(|index| index <= self.applied_index())
+        {
+            self.pending_read = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
     pub fn step(&mut self, bytes: &[u8]) -> Result<(), RaftError> {
         self.healthy()?;
@@ -462,6 +533,13 @@ impl DurablePeer {
         let mut output = Vec::new();
         while self.raw.has_ready() {
             let mut ready = self.raw.ready();
+            for confirmation in ready.take_read_states() {
+                if let Some(read) = &mut self.pending_read {
+                    if confirmation.request_ctx == read.context() {
+                        read.index = Some(confirmation.index);
+                    }
+                }
+            }
             if !ready.snapshot().is_empty() {
                 return Err(invalid("peer snapshot installation is not supported"));
             }

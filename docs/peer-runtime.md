@@ -20,7 +20,7 @@ and recover before serving. Keep the WAL file intact for the life of the group.
 
 The initial voter set, group, and node identity are recorded and checked during
 recovery. Membership is fixed. Snapshot installation, log compaction, transport
-threads, authentication, linearizable read APIs, and graceful worker lifecycle
+threads, authentication, and graceful worker lifecycle
 integration remain required before production use. The WAL is bounded to 512 MiB,
 individual frames to 8 MiB, and proposals to 4 MiB. Reaching the WAL bound stops
 writes; it does not discard history.
@@ -50,3 +50,20 @@ can replace an isolated leader's uncommitted tail, and restart replays committed
 data. Additional tests exercise storage failure, application failure, durable
 identity, exclusive locking, every truncated final append, and record corruption.
 They are not socket, multi-process, scale, or power-loss tests.
+
+## Quorum-confirmed reads
+
+A leader calls `begin_read` to obtain a local token, continues processing and
+transporting Ready packets, then calls `poll_read`. A true result consumes the
+token only after the core confirms a current-term quorum and the corresponding
+commit index has applied locally. Serve the read immediately on that same
+application worker. Leadership loss, unknown tokens, and failed peers are errors.
+This uses the safe quorum mode, not a clock-based lease.
+
+Only one confirmation may be outstanding. Concurrent application reads may share
+a confirmation if all were admitted before it began. Do not forget an unresolved
+token on client timeout: keep polling until completion or leadership loss. This
+bounds the core's pending read contexts even during a partition. Read tokens are
+not persistent and must not be reused across peer instances. Confirmations do
+not append entries or WAL records; writes and elections still do, and snapshot
+compaction remains necessary for a long-running write workload.
