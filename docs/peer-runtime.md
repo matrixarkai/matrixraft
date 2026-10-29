@@ -191,3 +191,14 @@ new WAL and packet versions; no automatic fallback sends an empty snapshot.
 Existing `checkpoint(Vec<u8>)` callers keep their original formats and 256 MiB
 bound. This API removes full-payload buffering in the peer runtime; applications
 must separately adopt streaming serialization and restoration to benefit.
+
+### Accumulated append packets
+
+Several bounded network packets can accumulate into a Ready larger than the
+8 MiB record ceiling. The journal splits those entries into bounded records,
+persists a new term and vote before them, and writes the advanced commit index
+after them. It syncs the complete append before returning any acknowledgment.
+Every complete record prefix can reopen; an incomplete physical record still
+fails closed. Record and total WAL bounds are checked before writing the first
+part. This uses the existing version-1 records and does not raise the 512 MiB
+WAL ceiling or change checkpoint formats.
