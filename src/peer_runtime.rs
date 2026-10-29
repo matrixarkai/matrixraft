@@ -496,6 +496,87 @@ impl Journal {
         .map_err(storage_error)?;
         Ok(())
     }
+    // A Ready can accumulate many independently bounded append packets. Its
+    // entries need not fit one WAL record. Persist the new term/vote first,
+    // entries in order, and the commit watermark last, then sync once before
+    // the runtime exposes any acknowledgment. Every complete prefix reopens.
+    fn append_ready(&mut self, record: &WalBatch, previous: &HardState) -> Result<(), RaftError> {
+        if record.encoded_len() <= LIMIT {
+            return self.append(record);
+        }
+        if record.version != 1 || !record.snapshot.is_empty() || !record.payload_manifest.is_empty()
+        {
+            return Err(storage_error(
+                "oversized peer record is not an append batch",
+            ));
+        }
+        let mut envelope = WalBatch {
+            version: 1,
+            group: record.group,
+            node: record.node,
+            voters: record.voters.clone(),
+            ..Default::default()
+        };
+        let overhead = envelope.encoded_len();
+        let mut spans = Vec::new();
+        let mut start = 0;
+        let mut size = overhead;
+        for (index, entry) in record.entries.iter().enumerate() {
+            let field = 1 + prost::encoding::encoded_len_varint(entry.len() as u64) + entry.len();
+            if overhead.saturating_add(field) > LIMIT {
+                return Err(storage_error("peer WAL entry exceeds record bound"));
+            }
+            if size + field > LIMIT {
+                spans.push((start, index, size));
+                start = index;
+                size = overhead;
+            }
+            size += field;
+        }
+        if start < record.entries.len() {
+            spans.push((start, record.entries.len(), size));
+        }
+        let mut prefix = envelope.clone();
+        if !record.hard_state.is_empty() {
+            let mut floor =
+                HardState::decode(record.hard_state.as_slice()).map_err(storage_error)?;
+            floor.commit = previous.commit;
+            prefix.hard_state = floor.encode_to_vec();
+        }
+        let mut final_state = envelope.clone();
+        if record.hard_state != prefix.hard_state {
+            final_state.hard_state = record.hard_state.clone();
+        }
+        let mut bytes = spans
+            .iter()
+            .map(|(_, _, size)| 24 + *size as u64)
+            .sum::<u64>();
+        for state in [&prefix, &final_state] {
+            if !state.hard_state.is_empty() {
+                if state.encoded_len() > LIMIT {
+                    return Err(storage_error("peer WAL hard state exceeds record bound"));
+                }
+                bytes = bytes.saturating_add(24 + state.encoded_len() as u64);
+            }
+        }
+        // Refuse a bound violation before writing even a valid prefix.
+        if self.length.saturating_add(bytes) > WAL_LIMIT {
+            return Err(storage_error(
+                "peer WAL capacity reached; checkpoint support is required",
+            ));
+        }
+        if !prefix.hard_state.is_empty() {
+            self.write_record(&prefix)?;
+        }
+        for (start, end, _) in spans {
+            envelope.entries = record.entries[start..end].to_vec();
+            self.write_record(&envelope)?;
+        }
+        if !final_state.hard_state.is_empty() {
+            self.write_record(&final_state)?;
+        }
+        self.file.sync_all().map_err(storage_error)
+    }
     fn append(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
         self.write_record(batch)?;
         self.file.sync_all().map_err(storage_error)
@@ -503,7 +584,10 @@ impl Journal {
     // Only rewrite may defer durability until the entire replacement is written.
     fn write_record(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
         let size = batch.encoded_len();
-        if size > LIMIT || self.length.saturating_add(24 + size as u64) > WAL_LIMIT {
+        if size > LIMIT {
+            return Err(storage_error("peer WAL record exceeds size bound"));
+        }
+        if self.length.saturating_add(24 + size as u64) > WAL_LIMIT {
             return Err(storage_error(
                 "peer WAL capacity reached; checkpoint support is required",
             ));
@@ -1185,7 +1269,12 @@ impl DurablePeer {
                 self.incoming_payload = None;
             } else if ready.hs().is_some() || !ready.entries().is_empty() {
                 let record = batch(&self.options, ready.hs(), ready.entries());
-                self.journal.append(&record)?;
+                let previous = self
+                    .store
+                    .initial_state()
+                    .map_err(storage_error)?
+                    .hard_state;
+                self.journal.append_ready(&record, &previous)?;
                 install(&self.store, &record)?;
             }
             output.extend(self.packets(ready.take_messages())?);
@@ -1253,6 +1342,130 @@ mod tests {
             wal_path: path,
         }
     }
+    #[test]
+    fn oversized_ready_limits_refuse_before_writing_any_prefix() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let root = path("append-bound-preflight");
+        std::fs::create_dir(&root).unwrap();
+        let config = options(root.join("peer.wal"));
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        let before = std::fs::read(&config.wal_path).unwrap();
+        let hard = HardState {
+            term: 2,
+            vote: 1,
+            commit: 9,
+        };
+        let entries: Vec<_> = (1..=9)
+            .map(|index| Entry {
+                term: 2,
+                index,
+                data: vec![7; 1024 * 1024],
+                ..Default::default()
+            })
+            .collect();
+        let record = batch(&config, Some(&hard), &entries);
+        let saved_length = peer.journal.length;
+        peer.journal.length = WAL_LIMIT - 1024;
+        assert!(peer
+            .journal
+            .append_ready(&record, &HardState::default())
+            .is_err());
+        assert_eq!(std::fs::read(&config.wal_path).unwrap(), before);
+        peer.journal.length = saved_length;
+        let mut too_large = record;
+        too_large.entries.push(vec![0; LIMIT]);
+        assert!(peer
+            .journal
+            .append_ready(&too_large, &HardState::default())
+            .is_err());
+        assert_eq!(std::fs::read(&config.wal_path).unwrap(), before);
+        drop(peer);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accumulated_append_packets_persist_beyond_one_record() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let root = path("many-append-records");
+        std::fs::create_dir(&root).unwrap();
+        let config = PeerOptions {
+            group_id: 1,
+            node_id: 2,
+            voters: vec![1, 2, 3],
+            wal_path: root.join("peer.wal"),
+        };
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        for index in 1..=9 {
+            let packet = Packet {
+                version: 1,
+                group: 1,
+                message: Message {
+                    from: 1,
+                    to: 2,
+                    term: 2,
+                    msg_type: MessageType::MsgAppend as i32,
+                    index: index - 1,
+                    log_term: if index == 1 { 0 } else { 2 },
+                    commit: index,
+                    entries: vec![Entry {
+                        term: 2,
+                        index,
+                        data: vec![index as u8; 1024 * 1024],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            }
+            .encode_to_vec();
+            peer.step(&packet).unwrap();
+        }
+        let mut applied = Vec::new();
+        peer.process_ready(|id, bytes| {
+            assert_eq!(bytes, vec![id.index as u8; 1024 * 1024]);
+            applied.push(id.index);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(applied, (1..=9).collect::<Vec<_>>());
+        drop(peer);
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        let mut replayed = Vec::new();
+        peer.process_ready(|id, bytes| {
+            assert_eq!(bytes, vec![id.index as u8; 1024 * 1024]);
+            replayed.push(id.index);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(replayed, applied);
+        drop(peer);
+        let bytes = std::fs::read(&config.wal_path).unwrap();
+        let mut offset = 0;
+        let mut records = 0;
+        while offset < bytes.len() {
+            let length =
+                u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            assert!(length <= LIMIT);
+            offset += 24 + length;
+            records += 1;
+            std::fs::write(&config.wal_path, &bytes[..offset]).unwrap();
+            let mut peer = DurablePeer::open(config.clone()).unwrap();
+            let mut count = 0;
+            peer.process_ready(|_, _| {
+                count += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert!(
+                count == 0 || count == 9,
+                "commit watermark precedes durable entries"
+            );
+            drop(peer);
+        }
+        assert!(records >= 5);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn incoming_snapshot_restore_failure_is_durable_and_returns_no_acknowledgment() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();
