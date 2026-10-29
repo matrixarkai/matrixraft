@@ -180,6 +180,14 @@ fn validate_snapshot(snapshot: &Snapshot, voters: &[u64]) -> Result<(), RaftErro
     Ok(())
 }
 fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
+    install_local(store, batch, None)
+}
+fn install_local(
+    store: &PeerStorage,
+    batch: &WalBatch,
+    captured: Option<Arc<checkpoint_file::Blob>>,
+) -> Result<(), RaftError> {
+    let local_capture = captured.is_some();
     let entries = batch
         .entries
         .iter()
@@ -197,16 +205,37 @@ fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
         Some(HardState::decode(batch.hard_state.as_slice()).map_err(storage_error)?)
     };
     let previous = store.initial_state().map_err(storage_error)?.hard_state;
+    // Local compaction may retain committed entries after the captured index.
+    // Compare them before replacing the in-memory snapshot, which clears the log.
+    if local_capture {
+        for entry in entries.iter().filter(|e| e.index <= previous.commit) {
+            let saved = store
+                .entries(
+                    entry.index,
+                    entry.index + 1,
+                    None,
+                    raft_core::GetEntriesContext::empty(false),
+                )
+                .map_err(storage_error)?;
+            if saved.as_slice() != std::slice::from_ref(entry) {
+                return Err(storage_error("local checkpoint changes a committed entry"));
+            }
+        }
+    }
     if !batch.snapshot.is_empty() {
         let snapshot = Snapshot::decode(batch.snapshot.as_slice()).map_err(storage_error)?;
         let payload = if batch.version == 4 {
             if !snapshot.data.is_empty() {
                 return Err(storage_error("file checkpoint contains inline data"));
             }
-            Some(checkpoint_file::Blob::open(
-                &store.payload_directory,
-                &batch.payload_manifest,
-            )?)
+            Some(if let Some(payload) = captured {
+                if payload.manifest.encode_to_vec() != batch.payload_manifest {
+                    return Err(storage_error("captured checkpoint manifest mismatch"));
+                }
+                payload
+            } else {
+                checkpoint_file::Blob::open(&store.payload_directory, &batch.payload_manifest)?
+            })
         } else {
             None
         };
@@ -216,7 +245,7 @@ fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
             .as_ref()
             .ok_or_else(|| storage_error("snapshot needs hard state"))?;
         if snapshot.encode_to_vec() != batch.snapshot
-            || meta.index < previous.commit
+            || (!local_capture && meta.index < previous.commit)
             || meta.index > next.commit
             || meta.term > next.term
             || next.term < previous.term
@@ -251,7 +280,10 @@ fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
     {
         return Err(storage_error("peer WAL log positions are invalid"));
     }
-    for entry in entries.iter().filter(|e| e.index <= previous.commit) {
+    for entry in entries
+        .iter()
+        .filter(|e| !local_capture && e.index <= previous.commit)
+    {
         let saved = store
             .entries(
                 entry.index,
@@ -625,6 +657,42 @@ impl PendingRead {
         [self.term.to_be_bytes(), self.token.to_be_bytes()].concat()
     }
 }
+/// A capture position bound to this open peer. Move this ticket to a worker with
+/// an immutable application snapshot taken at `position()`. Holding it prevents
+/// another runtime from opening and cleaning up the same storage directory.
+pub struct CheckpointCapture {
+    position: LogId,
+    directory: PathBuf,
+    lock: Arc<File>,
+}
+impl CheckpointCapture {
+    pub fn position(&self) -> LogId {
+        self.position.clone()
+    }
+    /// Serialize and sync the payload without borrowing or blocking the peer.
+    pub fn capture(
+        self,
+        reader: &mut dyn Read,
+        length: u64,
+    ) -> Result<PreparedCheckpoint, RaftError> {
+        let payload = checkpoint_file::Blob::capture(&self.directory, reader, length)?;
+        Ok(PreparedCheckpoint {
+            ticket: self,
+            payload,
+        })
+    }
+}
+/// A synced checkpoint awaiting publication. Dropping an unpublished result
+/// deletes its payload. The originating runtime must install it.
+pub struct PreparedCheckpoint {
+    ticket: CheckpointCapture,
+    payload: Arc<checkpoint_file::Blob>,
+}
+impl PreparedCheckpoint {
+    pub fn position(&self) -> LogId {
+        self.ticket.position.clone()
+    }
+}
 /// One actual Raft peer. Remote votes and append acknowledgments enter only via `step`.
 pub struct DurablePeer {
     options: PeerOptions,
@@ -792,6 +860,50 @@ impl DurablePeer {
         }
         self.checkpoint_payload(data, None)
     }
+    /// Reserve the current settled application position for background capture.
+    /// Snapshot application state before allowing further application mutations.
+    pub fn prepare_checkpoint(&self) -> Result<CheckpointCapture, RaftError> {
+        self.healthy()?;
+        if self.raw.has_ready()
+            || self.pending_read.is_some()
+            || self.restore_on_open.is_some()
+            || self.applied_index() == 0
+        {
+            return Err(invalid("checkpoint capture requires settled applied state"));
+        }
+        let index = self.applied_index();
+        Ok(CheckpointCapture {
+            position: LogId {
+                index,
+                term: self.store.term(index).map_err(storage_error)?,
+            },
+            directory: self.store.payload_directory.clone(),
+            lock: Arc::clone(&self.journal._lock),
+        })
+    }
+    /// Publish a worker result while preserving every entry after its position.
+    /// Returns false if a newer checkpoint already superseded it. A busy peer
+    /// returns an error; retain the result and retry after draining ready work.
+    /// WAL replacement and sync still run on the caller; payload I/O does not.
+    pub fn install_checkpoint(&mut self, prepared: &PreparedCheckpoint) -> Result<bool, RaftError> {
+        self.healthy()?;
+        if !Arc::ptr_eq(&prepared.ticket.lock, &self.journal._lock) {
+            return Err(invalid("checkpoint belongs to another open peer"));
+        }
+        let id = prepared.position();
+        if id.index < self.store.first_index().map_err(storage_error)? {
+            return Ok(false);
+        }
+        if id.index > self.applied_index()
+            || self.store.term(id.index).map_err(storage_error)? != id.term
+        {
+            return Err(invalid(
+                "checkpoint position no longer matches applied history",
+            ));
+        }
+        self.checkpoint_payload_at(Vec::new(), Some(Arc::clone(&prepared.payload)), id.index)?;
+        Ok(true)
+    }
     /// Capture a complete payload through a bounded buffer. The reader must end at length.
     /// Upgrade all peers and use the streaming restore callback before enabling this format.
     pub fn checkpoint_from_reader(
@@ -809,6 +921,14 @@ impl DurablePeer {
         data: Vec<u8>,
         payload: Option<Arc<checkpoint_file::Blob>>,
     ) -> Result<(), RaftError> {
+        self.checkpoint_payload_at(data, payload, self.applied_index())
+    }
+    fn checkpoint_payload_at(
+        &mut self,
+        data: Vec<u8>,
+        payload: Option<Arc<checkpoint_file::Blob>>,
+        index: u64,
+    ) -> Result<(), RaftError> {
         self.healthy()?;
         if data.len() > MAX_CHECKPOINT_BYTES
             || self.raw.has_ready()
@@ -820,7 +940,6 @@ impl DurablePeer {
                 "checkpoint requires a settled applied state within the snapshot bound",
             ));
         }
-        let index = self.applied_index();
         let snapshot = Snapshot {
             data,
             metadata: Some(SnapshotMetadata {
@@ -863,7 +982,7 @@ impl DurablePeer {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
                 }
-                install(&self.store, &record)
+                install_local(&self.store, &record, payload.clone())
             });
         if result.is_err() {
             self.failed = true;

@@ -202,3 +202,30 @@ Every complete record prefix can reopen; an incomplete physical record still
 fails closed. Record and total WAL bounds are checked before writing the first
 part. This uses the existing version-1 records and does not raise the 512 MiB
 WAL ceiling or change checkpoint formats.
+
+### Background checkpoint capture
+
+Call `prepare_checkpoint` at a settled applied position and take an immutable
+application snapshot at the returned position before processing more mutations.
+Move the ticket and snapshot to a worker. `CheckpointCapture::capture` serializes,
+checksums and syncs the payload without borrowing the peer. The caller can continue
+processing peer traffic and applying writes while the worker runs.
+
+Return the `PreparedCheckpoint` to the originating peer and call
+`install_checkpoint` after draining ready work and pending reads. Installation
+preserves all log entries after the captured position, including newer committed
+writes. A busy peer returns an error without consuming the prepared result; retry
+once settled. A result superseded by a newer checkpoint returns `false` and should
+be dropped. A result from another open peer is rejected.
+
+Tickets and prepared results hold the runtime storage lock until released. Dropping
+an unpublished result removes its payload. Applications should bound concurrent
+captures (normally one), arrange worker cancellation or completion at shutdown,
+and never claim a worker snapshot includes writes applied after its captured
+position. The application owns snapshot consistency; the runtime cannot verify
+its contents. This API retains the existing file and packet formats.
+
+Final WAL replacement and sync remain synchronous and their cost grows with the
+retained log. Snapshot export, serialization, validation and restore may also block
+unless the application explicitly schedules them off its consensus loop. The API
+alone does not change an application's threading or latency guarantees.

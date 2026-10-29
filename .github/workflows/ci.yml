@@ -67,6 +67,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler autoconf automake libtool
       - name: Peer quorum and recovery tests
         run: |
+          cargo test --locked --features peer-runtime --test staged_peer_checkpoints
           cargo test --locked --features peer-runtime --test durable_peer_runtime
           cargo test --locked --features peer-runtime --test file_peer_checkpoints
           set -o pipefail
