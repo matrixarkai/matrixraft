@@ -68,6 +68,10 @@ jobs:
       - name: Peer quorum and recovery tests
         run: |
           cargo test --locked --features peer-runtime --test durable_peer_runtime
+          cargo test --locked --features peer-runtime --test file_peer_checkpoints
+          set -o pipefail
+          cargo test --locked --features peer-runtime --test file_peer_checkpoints file_checkpoints_above_the_inline_limit_restore_without_full_payload_buffers -- --exact --ignored --nocapture | tee /tmp/file-checkpoint-large.log
+          grep -q 'test result: ok. 1 passed' /tmp/file-checkpoint-large.log
           cargo test --locked --features peer-runtime --lib peer_runtime::
       - name: Build and document the peer API
         run: |
