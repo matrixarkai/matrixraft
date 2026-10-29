@@ -23,12 +23,16 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "peer_checkpoint_file.rs"]
+mod checkpoint_file;
 #[path = "peer_snapshot_stream.rs"]
 mod snapshot_stream;
 
 const LIMIT: usize = 8 * 1024 * 1024;
 /// Maximum application checkpoint size. Transfers and WAL records are segmented.
 pub const MAX_CHECKPOINT_BYTES: usize = 256 * 1024 * 1024;
+/// Bound for the streaming file checkpoint API, independent of the inline API.
+pub const MAX_FILE_CHECKPOINT_BYTES: u64 = checkpoint_file::MAX_FILE_BYTES;
 const INLINE_CHECKPOINT_BYTES: usize = 4 * 1024 * 1024;
 const SNAPSHOT_ENCODED_LIMIT: usize = MAX_CHECKPOINT_BYTES + 64 * 1024;
 const SNAPSHOT_FRAGMENT_BYTES: usize = 1024 * 1024;
@@ -81,6 +85,8 @@ struct WalBatch {
     snapshot_total: u64,
     #[prost(uint64, tag = "10")]
     snapshot_digest: u64,
+    #[prost(bytes = "vec", tag = "11")]
+    payload_manifest: Vec<u8>,
 }
 fn invalid(s: impl ToString) -> RaftError {
     RaftError::InvalidRequest(s.to_string())
@@ -105,12 +111,15 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         snapshot_offset: 0,
         snapshot_total: 0,
         snapshot_digest: 0,
+        payload_manifest: Vec::new(),
     }
 }
 #[derive(Clone)]
 struct PeerStorage {
     memory: MemStorage,
     checkpoint: Arc<Mutex<Option<Snapshot>>>,
+    payload_directory: PathBuf,
+    payload: Arc<Mutex<Option<Arc<checkpoint_file::Blob>>>>,
 }
 impl std::ops::Deref for PeerStorage {
     type Target = MemStorage;
@@ -190,6 +199,17 @@ fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
     let previous = store.initial_state().map_err(storage_error)?.hard_state;
     if !batch.snapshot.is_empty() {
         let snapshot = Snapshot::decode(batch.snapshot.as_slice()).map_err(storage_error)?;
+        let payload = if batch.version == 4 {
+            if !snapshot.data.is_empty() {
+                return Err(storage_error("file checkpoint contains inline data"));
+            }
+            Some(checkpoint_file::Blob::open(
+                &store.payload_directory,
+                &batch.payload_manifest,
+            )?)
+        } else {
+            None
+        };
         validate_snapshot(&snapshot, &batch.voters)?;
         let meta = snapshot.get_metadata();
         let next = hs
@@ -209,6 +229,16 @@ fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
             .apply_snapshot(snapshot.clone())
             .map_err(storage_error)?;
         *store.checkpoint.lock().unwrap() = Some(snapshot);
+        let mut current = store.payload.lock().unwrap();
+        if let Some(old) = current.as_ref() {
+            if payload
+                .as_ref()
+                .is_none_or(|new| new.manifest.name != old.manifest.name)
+            {
+                old.retire();
+            }
+        }
+        *current = payload;
     }
 
     let last = store.last_index().map_err(storage_error)?;
@@ -330,8 +360,9 @@ impl Journal {
             let record = WalBatch::decode(bytes.as_slice()).map_err(storage_error)?;
             if !matches!(
                 (record.version, record.snapshot.is_empty()),
-                (1, true) | (2, false) | (3, false)
-            ) || record.group != options.group_id
+                (1, true) | (2, false) | (3, false) | (4, false)
+            ) || (record.version == 4) == record.payload_manifest.is_empty()
+                || record.group != options.group_id
                 || record.node != options.node_id
                 || record.voters != options.voters
                 || record.encode_to_vec() != bytes
@@ -344,6 +375,15 @@ impl Journal {
             offset += 24 + size as u64;
         }
         assembly.finish()?;
+        checkpoint_file::cleanup(
+            &store.payload_directory,
+            store
+                .payload
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|b| b.manifest.name.as_str()),
+        )?;
         if offset != length {
             file.set_len(offset).map_err(storage_error)?;
         }
@@ -373,6 +413,7 @@ impl Journal {
         snapshot: &Snapshot,
         hs: &HardState,
         entries: &[Entry],
+        payload: Option<&checkpoint_file::Blob>,
     ) -> Result<(), RaftError> {
         let temporary = options.wal_path.with_extension("checkpoint.tmp");
         let file = OpenOptions::new()
@@ -394,7 +435,19 @@ impl Journal {
         let mut first = batch(options, Some(&floor_state), &[]);
         first.version = 2;
         first.snapshot = snapshot.encode_to_vec();
-        if snapshot.data.len() <= INLINE_CHECKPOINT_BYTES {
+        if let Some(payload) = payload {
+            if !snapshot.data.is_empty() {
+                return Err(invalid("file checkpoint must not contain inline data"));
+            }
+            // Retain before publication: an error after rename must never delete a live payload.
+            // Orphans before publication are removed while holding the runtime lock on reopen.
+            payload.retain();
+            #[cfg(test)]
+            checkpoint_crash_point("after_payload_sync");
+            first.version = 4;
+            first.payload_manifest = payload.manifest.encode_to_vec();
+            replacement.write_record(&first)?;
+        } else if snapshot.data.len() <= INLINE_CHECKPOINT_BYTES {
             replacement.write_record(&first)?;
         } else {
             let encoded = std::mem::take(&mut first.snapshot);
@@ -500,6 +553,7 @@ pub struct DurablePeer {
     restore_on_open: Option<Snapshot>,
     snapshot_flights: BTreeMap<u64, (u64, u64, u8)>,
     stream: snapshot_stream::Stream,
+    incoming_payload: Option<(LogId, Arc<checkpoint_file::Blob>)>,
 }
 impl DurablePeer {
     pub fn open(mut options: PeerOptions) -> Result<Self, RaftError> {
@@ -516,6 +570,8 @@ impl DurablePeer {
         let store = PeerStorage {
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             checkpoint: Arc::new(Mutex::new(None)),
+            payload_directory: checkpoint_file::directory(&options.wal_path),
+            payload: Arc::new(Mutex::new(None)),
         };
         let journal = Journal::open(&options, &store)?;
         let restore_on_open = store.checkpoint.lock().unwrap().clone();
@@ -536,7 +592,7 @@ impl DurablePeer {
         };
         let logger = slog::Logger::root(slog::Discard, slog::o!());
         let raw = RawNode::new(&config, store.clone(), &logger).map_err(invalid)?;
-        let stream = snapshot_stream::Stream::new(
+        let mut stream = snapshot_stream::Stream::new(
             options
                 .wal_path
                 .parent()
@@ -544,6 +600,7 @@ impl DurablePeer {
                 .unwrap_or(Path::new("."))
                 .to_path_buf(),
         );
+        stream.payload_directory = store.payload_directory.clone();
         Ok(Self {
             options,
             raw,
@@ -555,6 +612,7 @@ impl DurablePeer {
             restore_on_open,
             snapshot_flights: BTreeMap::new(),
             stream,
+            incoming_payload: None,
         })
     }
     fn healthy(&self) -> Result<(), RaftError> {
@@ -645,6 +703,28 @@ impl DurablePeer {
     /// on its exclusive application worker. Uncommitted suffix entries survive.
     /// Use process_ready_with_snapshot after checkpointing, including on reopen.
     pub fn checkpoint(&mut self, data: Vec<u8>) -> Result<(), RaftError> {
+        if data.len() > MAX_CHECKPOINT_BYTES {
+            return Err(invalid("inline checkpoint exceeds size bound"));
+        }
+        self.checkpoint_payload(data, None)
+    }
+    /// Capture a complete payload through a bounded buffer. The reader must end at length.
+    /// Upgrade all peers and use the streaming restore callback before enabling this format.
+    pub fn checkpoint_from_reader(
+        &mut self,
+        reader: &mut dyn Read,
+        length: u64,
+    ) -> Result<(), RaftError> {
+        self.healthy()?;
+        let payload =
+            checkpoint_file::Blob::capture(&self.store.payload_directory, reader, length)?;
+        self.checkpoint_payload(Vec::new(), Some(payload))
+    }
+    fn checkpoint_payload(
+        &mut self,
+        data: Vec<u8>,
+        payload: Option<Arc<checkpoint_file::Blob>>,
+    ) -> Result<(), RaftError> {
         self.healthy()?;
         if data.len() > MAX_CHECKPOINT_BYTES
             || self.raw.has_ready()
@@ -690,11 +770,15 @@ impl DurablePeer {
             .hard_state;
         let result = self
             .journal
-            .rewrite(&self.options, &snapshot, &hs, &suffix)
+            .rewrite(&self.options, &snapshot, &hs, &suffix, payload.as_deref())
             .and_then(|()| {
                 let mut record = batch(&self.options, Some(&hs), &suffix);
                 record.version = 2;
                 record.snapshot = snapshot.encode_to_vec();
+                if let Some(payload) = &payload {
+                    record.version = 4;
+                    record.payload_manifest = payload.manifest.encode_to_vec();
+                }
                 install(&self.store, &record)
             });
         if result.is_err() {
@@ -764,15 +848,18 @@ impl DurablePeer {
             return Err(invalid("peer packet exceeds size limit"));
         }
         let packet = Packet::decode(bytes).map_err(invalid)?;
-        if !matches!(packet.version, 1 | 2)
+        if !matches!(packet.version, 1..=3)
             || packet.group != self.options.group_id
             || packet.encode_to_vec() != bytes
         {
             return Err(invalid("peer packet identity or encoding mismatch"));
         }
-        if packet.version == 2 {
+        if packet.version == 2 || packet.version == 3 {
             let part =
                 snapshot_stream::Fragment::decode(packet.message.as_slice()).map_err(invalid)?;
+            if part.file_backed != (packet.version == 3) {
+                return Err(invalid("checkpoint transfer format mismatch"));
+            }
             part.validate(&self.options, self.term())?;
             if part.encode_to_vec() != packet.message {
                 return Err(invalid("noncanonical checkpoint fragment"));
@@ -789,6 +876,18 @@ impl DurablePeer {
             let from = part.from;
             let term = part.term;
             if let Some(message) = self.stream.receive(part, &self.options.voters)? {
+                if let Some(payload) = self.stream.received_payload.take() {
+                    let meta = message.get_snapshot().get_metadata();
+                    if meta.index > self.raw.raft.raft_log.committed {
+                        self.incoming_payload = Some((
+                            LogId {
+                                index: meta.index,
+                                term: meta.term,
+                            },
+                            payload,
+                        ));
+                    }
+                }
                 self.step_message(message)?;
             } else {
                 // Keep the recognized sender's term and election timer current
@@ -897,6 +996,27 @@ impl DurablePeer {
                     to,
                     (message.term, message.get_snapshot().get_metadata().index, 0),
                 );
+                let payload = self.store.payload.lock().unwrap().clone();
+                if let Some(payload) = payload {
+                    let current = self
+                        .store
+                        .checkpoint
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .ok_or_else(|| storage_error("missing file checkpoint metadata"))?;
+                    if current.get_metadata() != message.get_snapshot().get_metadata() {
+                        return Err(storage_error(
+                            "file checkpoint metadata changed during send",
+                        ));
+                    }
+                    if !self.stream.start_file(message, payload)? {
+                        self.raw
+                            .report_snapshot(to, raft_core::SnapshotStatus::Failure);
+                        self.snapshot_flights.remove(&to);
+                    }
+                    continue;
+                }
                 if message.get_snapshot().data.len() > INLINE_CHECKPOINT_BYTES {
                     if !self.stream.start(message)? {
                         self.raw
@@ -940,23 +1060,48 @@ impl DurablePeer {
     /// callbacks must rebuild the same application; failure stops the peer.
     pub fn process_ready_with_snapshot(
         &mut self,
-        mut apply: impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
+        apply: impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
         mut restore: impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
+    ) -> Result<Vec<PeerPacket>, RaftError> {
+        self.process_ready_with_snapshot_reader(apply, |id, reader, length| {
+            if length > MAX_CHECKPOINT_BYTES as u64 {
+                return Err(storage_error(
+                    "file checkpoint requires streaming restore callback",
+                ));
+            }
+            let mut bytes = Vec::new();
+            reader
+                .take(length)
+                .read_to_end(&mut bytes)
+                .map_err(storage_error)?;
+            if bytes.len() as u64 != length {
+                return Err(storage_error("checkpoint payload truncated during restore"));
+            }
+            restore(id, &bytes)
+        })
+    }
+    /// Restore file or legacy checkpoints through a reader before applying the suffix.
+    /// The callback must consume exactly length bytes; a failure stops this peer.
+    pub fn process_ready_with_snapshot_reader(
+        &mut self,
+        mut apply: impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
+        mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         self.healthy()?;
         let result = (|| {
             if let Some(snapshot) = self.restore_on_open.take() {
-                let meta = snapshot.get_metadata();
-                restore(
-                    LogId {
-                        index: meta.index,
-                        term: meta.term,
-                    },
-                    &snapshot.data,
-                )?;
+                self.restore_payload(&snapshot, &mut restore)?;
             }
             let mut output = self.process_inner(&mut apply, &mut restore)?;
-            output.extend(self.stream.packets(self.options.group_id));
+            // Raft may advance through matching entries without installing the received image.
+            if self
+                .incoming_payload
+                .as_ref()
+                .is_some_and(|(id, _)| id.index <= self.applied_index())
+            {
+                self.incoming_payload = None;
+            }
+            output.extend(self.stream.packets(self.options.group_id)?);
             Ok(output)
         })();
         if result.is_err() {
@@ -964,10 +1109,36 @@ impl DurablePeer {
         }
         result
     }
+    fn restore_payload(
+        &self,
+        snapshot: &Snapshot,
+        restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
+    ) -> Result<(), RaftError> {
+        let id = LogId {
+            index: snapshot.get_metadata().index,
+            term: snapshot.get_metadata().term,
+        };
+        let payload = self.store.payload.lock().unwrap().clone();
+        let mut reader: Box<dyn Read> = match &payload {
+            Some(payload) => Box::new(payload.reader()?),
+            None => Box::new(std::io::Cursor::new(snapshot.data.as_slice())),
+        };
+        let length = payload
+            .as_ref()
+            .map_or(snapshot.data.len() as u64, |p| p.manifest.length);
+        let mut limited = reader.by_ref().take(length);
+        restore(id, &mut limited, length)?;
+        if limited.limit() != 0 {
+            return Err(storage_error(
+                "checkpoint restore did not consume the payload",
+            ));
+        }
+        Ok(())
+    }
     fn process_inner(
         &mut self,
         apply: &mut impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
-        restore: &mut impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
+        restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         let mut output = Vec::new();
         while self.raw.has_ready() {
@@ -986,20 +1157,32 @@ impl DurablePeer {
                     .hs()
                     .cloned()
                     .ok_or_else(|| storage_error("snapshot ready needs hard state"))?;
-                self.journal
-                    .rewrite(&self.options, &snapshot, &hs, ready.entries())?;
+                let position = LogId {
+                    index: snapshot.get_metadata().index,
+                    term: snapshot.get_metadata().term,
+                };
+                let payload = self
+                    .incoming_payload
+                    .as_ref()
+                    .filter(|(id, _)| *id == position)
+                    .map(|(_, p)| Arc::clone(p));
+                self.journal.rewrite(
+                    &self.options,
+                    &snapshot,
+                    &hs,
+                    ready.entries(),
+                    payload.as_deref(),
+                )?;
                 let mut record = batch(&self.options, Some(&hs), ready.entries());
                 record.version = 2;
                 record.snapshot = snapshot.encode_to_vec();
+                if let Some(payload) = payload {
+                    record.version = 4;
+                    record.payload_manifest = payload.manifest.encode_to_vec();
+                }
                 install(&self.store, &record)?;
-                let meta = snapshot.get_metadata();
-                restore(
-                    LogId {
-                        term: meta.term,
-                        index: meta.index,
-                    },
-                    &snapshot.data,
-                )?;
+                self.restore_payload(&snapshot, restore)?;
+                self.incoming_payload = None;
             } else if ready.hs().is_some() || !ready.entries().is_empty() {
                 let record = batch(&self.options, ready.hs(), ready.entries());
                 self.journal.append(&record)?;
@@ -1163,7 +1346,12 @@ mod tests {
         } else {
             vec![7; size]
         };
-        peer.checkpoint(bytes).unwrap();
+        if std::env::var_os("MATRIXRAFT_CHECKPOINT_TEST_FILE").is_some() {
+            peer.checkpoint_from_reader(&mut bytes.as_slice(), bytes.len() as u64)
+                .unwrap();
+        } else {
+            peer.checkpoint(bytes).unwrap();
+        }
         panic!("checkpoint crash hook did not run");
     }
     #[test]
@@ -1182,17 +1370,27 @@ mod tests {
         }
         drop(peer);
         let original = std::fs::read(&wal).unwrap();
-        for (phase, size) in [
-            ("before_sync", 0),
-            ("before_publish", 0),
-            ("after_publish", 0),
-            ("during_write", 9 * 1024 * 1024),
-            ("before_sync", 9 * 1024 * 1024),
-            ("before_publish", 9 * 1024 * 1024),
-            ("after_publish", 9 * 1024 * 1024),
+        for (phase, size, file) in [
+            ("before_sync", 0, false),
+            ("before_publish", 0, false),
+            ("after_publish", 0, false),
+            ("during_write", 9 * 1024 * 1024, false),
+            ("before_sync", 9 * 1024 * 1024, false),
+            ("before_publish", 9 * 1024 * 1024, false),
+            ("after_publish", 9 * 1024 * 1024, false),
+            ("after_payload_sync", 9 * 1024 * 1024, true),
+            ("before_sync", 9 * 1024 * 1024, true),
+            ("before_publish", 9 * 1024 * 1024, true),
+            ("after_publish", 9 * 1024 * 1024, true),
         ] {
             std::fs::write(&wal, &original).unwrap();
-            let child = std::process::Command::new(std::env::current_exe().unwrap())
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            if file {
+                command.env("MATRIXRAFT_CHECKPOINT_TEST_FILE", "1");
+            } else {
+                command.env_remove("MATRIXRAFT_CHECKPOINT_TEST_FILE");
+            }
+            let child = command
                 .args([
                     "--exact",
                     "peer_runtime::tests::checkpoint_crash_child",
@@ -1275,7 +1473,7 @@ mod tests {
         let mut peer = DurablePeer::open(config.clone()).unwrap();
         let mut failed = false;
         for _ in 0..20 {
-            let packets = sender.packets(1);
+            let packets = sender.packets(1).unwrap();
             assert_eq!(packets.len(), 1);
             peer.step(&packets[0].bytes).unwrap();
             match peer.process_ready_with_snapshot(

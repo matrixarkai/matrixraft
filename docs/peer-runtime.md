@@ -156,3 +156,38 @@ file do not each require a sync: recovery continues to use the previous WAL unti
 the rename. Live WAL appends still sync before returning. Publication retains the
 stable runtime lock and the parent-directory sync. A write or sync failure stops
 checkpoint publication and leaves the peer failed until restart.
+
+## File-backed checkpoints
+
+`checkpoint_from_reader(reader, length)` captures an application checkpoint with
+64 KiB copying buffers. It accepts up to 16 GiB on a 64-bit host and requires the
+reader to end at the declared length. Call it on the exclusive application worker
+at a settled applied position, just like `checkpoint`. Capture and checksum scans
+are synchronous; a very large capture can delay that worker.
+
+Use `process_ready_with_snapshot_reader` to restore through a bounded reader,
+consuming exactly the supplied length before returning success. The retained log
+suffix applies afterwards. The Raft core retains snapshot metadata only; payloads
+live in a directory named `<wal filename>.payloads` beside the WAL. Treat this
+directory and the WAL as one durability unit for backups and recovery. Missing or
+corrupt committed payloads refuse startup. The legacy byte-slice API still reads
+old checkpoints, but refuses file payloads above its 256 MiB allocation bound.
+
+The payload is synced before an atomic WAL replacement publishes a version-4
+binary protobuf manifest. That manifest names a bounded local filename, length,
+and checksum; it does not contain the application bytes. Previous payload files
+remain available to active transfers and are removed after their last user drops.
+Orphan capture files are removed on reopen under the exclusive runtime lock.
+
+File transfers use packet version 3 and canonical protobuf fragment metadata.
+The stream consists of a bounded length/checksum header, a canonical protobuf
+Raft message containing snapshot metadata, and the payload bytes. Each fragment
+is at most 1 MiB. The receiver stages bytes on disk, validates the envelope and
+payload checksums, then publishes its own local payload and WAL manifest before
+restoring application state. Transport acknowledgments do not commit entries.
+
+Upgrade every voter before using the new capture API. Older readers reject the
+new WAL and packet versions; no automatic fallback sends an empty snapshot.
+Existing `checkpoint(Vec<u8>)` callers keep their original formats and 256 MiB
+bound. This API removes full-payload buffering in the peer runtime; applications
+must separately adopt streaming serialization and restoration to benefit.

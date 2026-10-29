@@ -96,6 +96,8 @@ pub(super) struct Fragment {
     data: Vec<u8>,
     #[prost(bool, tag = "9")]
     pub ack: bool,
+    #[prost(bool, tag = "10")]
+    pub file_backed: bool,
 }
 impl Fragment {
     pub(super) fn validate(&self, options: &PeerOptions, term: u64) -> Result<(), RaftError> {
@@ -108,7 +110,12 @@ impl Fragment {
             || self.index == 0
             || self.index == u64::MAX
             || self.total == 0
-            || self.total > SNAPSHOT_ENCODED_LIMIT as u64
+            || self.total
+                > if self.file_backed {
+                    checkpoint_file::MAX_FILE_BYTES + 8192
+                } else {
+                    SNAPSHOT_ENCODED_LIMIT as u64
+                }
             || self.offset > self.total
         {
             return Err(invalid("invalid checkpoint fragment identity or bounds"));
@@ -133,6 +140,7 @@ impl Fragment {
             && self.index == other.index
             && self.total == other.total
             && self.checksum == other.checksum
+            && self.file_backed == other.file_backed
     }
     fn acknowledgment(&self, offset: u64) -> Self {
         Self {
@@ -152,9 +160,48 @@ impl Fragment {
         }
     }
 }
+enum Source {
+    Memory(Vec<u8>),
+    File {
+        prefix: Vec<u8>,
+        payload: Arc<checkpoint_file::Blob>,
+    },
+}
+impl Source {
+    fn len(&self) -> usize {
+        match self {
+            Self::Memory(bytes) => bytes.len(),
+            Self::File { prefix, payload } => prefix.len() + payload.manifest.length as usize,
+        }
+    }
+    fn fragment(&self, offset: usize, size: usize) -> Result<Vec<u8>, RaftError> {
+        match self {
+            Self::Memory(bytes) => Ok(bytes[offset..offset + size].to_vec()),
+            Self::File { prefix, payload } => {
+                let mut output = vec![0; size];
+                let head = if offset < prefix.len() {
+                    (prefix.len() - offset).min(size)
+                } else {
+                    0
+                };
+                if head > 0 {
+                    output[..head].copy_from_slice(&prefix[offset..offset + head]);
+                }
+                if head < size {
+                    let mut file = payload.reader()?;
+                    file.seek(SeekFrom::Start((offset + head - prefix.len()) as u64))
+                        .map_err(storage_error)?;
+                    file.read_exact(&mut output[head..])
+                        .map_err(storage_error)?;
+                }
+                Ok(output)
+            }
+        }
+    }
+}
 struct Sending {
     identity: Fragment,
-    bytes: Vec<u8>,
+    bytes: Source,
     offset: usize,
     ticks: u8,
     idle: u8,
@@ -178,6 +225,41 @@ impl Receiving {
         let mut saved = vec![0; bytes.len()];
         self.file.read_exact(&mut saved)?;
         Ok(saved == bytes)
+    }
+    fn finish_file(
+        mut self,
+        directory: &Path,
+    ) -> Result<(Message, Arc<checkpoint_file::Blob>), RaftError> {
+        if self.length != self.identity.total
+            || self.file.metadata().map_err(storage_error)?.len() != self.length
+        {
+            return Err(storage_error("file transfer length mismatch"));
+        }
+        self.file.seek(SeekFrom::Start(0)).map_err(storage_error)?;
+        let mut header = [0; 12];
+        self.file.read_exact(&mut header).map_err(storage_error)?;
+        let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+        if len == 0 || len > 4096 || len as u64 + 12 > self.length {
+            return Err(invalid("invalid file checkpoint envelope"));
+        }
+        let mut bytes = vec![0; len];
+        self.file.read_exact(&mut bytes).map_err(storage_error)?;
+        if digest(&bytes) != u64::from_be_bytes(header[4..].try_into().unwrap()) {
+            return Err(invalid("file checkpoint envelope checksum mismatch"));
+        }
+        let message = Message::decode(bytes.as_slice()).map_err(invalid)?;
+        if message.encode_to_vec() != bytes || !message.get_snapshot().data.is_empty() {
+            return Err(invalid("invalid file checkpoint metadata encoding"));
+        }
+        let payload = checkpoint_file::Blob::capture(
+            directory,
+            &mut self.file,
+            self.length - len as u64 - 12,
+        )?;
+        if payload.manifest.checksum != self.identity.checksum {
+            return Err(invalid("file checkpoint payload checksum mismatch"));
+        }
+        Ok((message, payload))
     }
     fn finish(mut self) -> Result<Vec<u8>, RaftError> {
         if self.length != self.identity.total
@@ -207,6 +289,8 @@ impl Receiving {
 /// Other lagging voters remain in Raft's retry path until the outgoing slot frees.
 pub(super) struct Stream {
     spool_directory: PathBuf,
+    pub(super) payload_directory: PathBuf,
+    pub(super) received_payload: Option<Arc<checkpoint_file::Blob>>,
     sending: Option<Sending>,
     receiving: Option<Receiving>,
     completed: Option<Fragment>,
@@ -221,6 +305,8 @@ impl Default for Stream {
 impl Stream {
     pub(super) fn new(spool_directory: PathBuf) -> Self {
         Self {
+            payload_directory: spool_directory.join("file-payloads"),
+            received_payload: None,
             spool_directory,
             sending: None,
             receiving: None,
@@ -257,8 +343,55 @@ impl Stream {
                 offset: 0,
                 data: Vec::new(),
                 ack: false,
+                file_backed: false,
             },
-            bytes,
+            bytes: Source::Memory(bytes),
+            offset: 0,
+            ticks: 0,
+            idle: 0,
+            ready: true,
+        });
+        Ok(true)
+    }
+    pub(super) fn start_file(
+        &mut self,
+        message: Message,
+        payload: Arc<checkpoint_file::Blob>,
+    ) -> Result<bool, RaftError> {
+        if let Some(sending) = &self.sending {
+            return Ok(sending.identity.to == message.to
+                && sending.identity.term == message.term
+                && sending.identity.index == message.get_snapshot().get_metadata().index
+                && sending.identity.file_backed);
+        }
+        if !message.get_snapshot().data.is_empty() {
+            return Err(invalid("file transfer includes inline payload"));
+        }
+        let bytes = message.encode_to_vec();
+        if bytes.len() > 4096 {
+            return Err(invalid("file transfer metadata exceeds bound"));
+        }
+        let mut prefix = (bytes.len() as u32).to_be_bytes().to_vec();
+        prefix.extend_from_slice(&digest(&bytes).to_be_bytes());
+        prefix.extend(bytes);
+        let source = Source::File {
+            prefix,
+            payload: Arc::clone(&payload),
+        };
+        self.sending = Some(Sending {
+            identity: Fragment {
+                from: message.from,
+                to: message.to,
+                term: message.term,
+                index: message.get_snapshot().get_metadata().index,
+                total: source.len() as u64,
+                checksum: payload.manifest.checksum,
+                offset: 0,
+                data: Vec::new(),
+                ack: false,
+                file_backed: true,
+            },
+            bytes: source,
             offset: 0,
             ticks: 0,
             idle: 0,
@@ -379,13 +512,22 @@ impl Stream {
             self.ack = Some(part.acknowledgment(accepted));
             return Ok(None);
         }
-        let bytes = self.receiving.take().unwrap().finish()?;
-        if digest(&bytes) != part.checksum {
-            return Err(invalid("checkpoint transfer checksum mismatch"));
-        }
-        let message = Message::decode(bytes.as_slice()).map_err(invalid)?;
-        if message.encode_to_vec() != bytes
-            || message.get_msg_type() != MessageType::MsgSnapshot
+        let receiving = self.receiving.take().unwrap();
+        let (message, payload) = if part.file_backed {
+            let (message, payload) = receiving.finish_file(&self.payload_directory)?;
+            (message, Some(payload))
+        } else {
+            let bytes = receiving.finish()?;
+            if digest(&bytes) != part.checksum {
+                return Err(invalid("checkpoint transfer checksum mismatch"));
+            }
+            let message = Message::decode(bytes.as_slice()).map_err(invalid)?;
+            if message.encode_to_vec() != bytes {
+                return Err(invalid("noncanonical checkpoint message"));
+            }
+            (message, None)
+        };
+        if message.get_msg_type() != MessageType::MsgSnapshot
             || message.from != part.from
             || message.to != part.to
             || message.term != part.term
@@ -396,11 +538,12 @@ impl Stream {
             return Err(invalid("checkpoint transfer message mismatch"));
         }
         validate_snapshot(message.get_snapshot(), voters)?;
+        self.received_payload = payload;
         self.completed = Some(part.identity());
         self.ack = Some(part.acknowledgment(part.total));
         Ok(Some(message))
     }
-    pub(super) fn packets(&mut self, group: u64) -> Vec<PeerPacket> {
+    pub(super) fn packets(&mut self, group: u64) -> Result<Vec<PeerPacket>, RaftError> {
         let mut parts = Vec::new();
         if let Some(ack) = self.ack.take() {
             parts.push(ack);
@@ -410,24 +553,26 @@ impl Stream {
                 let end = (sending.offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
                 parts.push(Fragment {
                     offset: sending.offset as u64,
-                    data: sending.bytes[sending.offset..end].to_vec(),
+                    data: sending
+                        .bytes
+                        .fragment(sending.offset, end - sending.offset)?,
                     ..sending.identity.clone()
                 });
                 sending.ready = false;
             }
         }
-        parts
+        Ok(parts
             .into_iter()
             .map(|part| PeerPacket {
                 to: part.to,
                 bytes: Packet {
-                    version: 2,
+                    version: if part.file_backed { 3 } else { 2 },
                     group,
                     message: part.encode_to_vec(),
                 }
                 .encode_to_vec(),
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -455,7 +600,7 @@ mod tests {
         }
     }
     fn fragment(stream: &mut Stream) -> Fragment {
-        let packets = stream.packets(1);
+        let packets = stream.packets(1).unwrap();
         assert_eq!(packets.len(), 1);
         let packet = Packet::decode(packets[0].bytes.as_slice()).unwrap();
         assert_eq!(packet.version, 2);
@@ -521,7 +666,7 @@ mod tests {
             let end = (offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
             let mut part = Fragment {
                 offset: offset as u64,
-                data: sending.bytes[offset..end].to_vec(),
+                data: sending.bytes.fragment(offset, end - offset).unwrap(),
                 ..first.identity()
             };
             let last = end == sending.bytes.len();
@@ -562,7 +707,7 @@ mod tests {
         assert!(stream.receiving.is_some());
         stream.tick(5, false);
         assert!(stream.receiving.is_none());
-        assert!(stream.packets(1).is_empty());
+        assert!(stream.packets(1).unwrap().is_empty());
     }
     #[test]
     fn wal_stream_rejects_reordered_repeated_or_mixed_records() {
@@ -616,6 +761,7 @@ mod tests {
             offset: 0,
             data: vec![13; SNAPSHOT_FRAGMENT_BYTES],
             ack: false,
+            file_backed: false,
         };
         for number in 0..16 {
             part.offset = number * SNAPSHOT_FRAGMENT_BYTES as u64;
@@ -650,7 +796,7 @@ mod tests {
         let first = fragment(&mut sender);
         let mut unavailable = Stream::new(directory.path().join("missing"));
         assert!(unavailable.receive(first.clone(), &[1, 2, 3]).is_err());
-        assert!(unavailable.packets(1).is_empty());
+        assert!(unavailable.packets(1).unwrap().is_empty());
         assert!(unavailable.receiving.is_none());
 
         let mut receiver = Stream::new(directory.path().to_path_buf());
@@ -667,7 +813,7 @@ mod tests {
         assert!(receiver.receive(first.clone(), &[1, 2, 3]).is_err());
         assert!(receiver.receiving.is_none());
         assert!(receiver.completed.is_none());
-        assert!(receiver.packets(1).is_empty());
+        assert!(receiver.packets(1).unwrap().is_empty());
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
         let mut receiver = Stream::new(directory.path().to_path_buf());
         receiver.receive(first.clone(), &[1, 2, 3]).unwrap();
@@ -679,7 +825,7 @@ mod tests {
         assert!(receiver.receive(next, &[1, 2, 3]).is_err());
         assert!(receiver.receiving.is_none());
         assert!(receiver.completed.is_none());
-        assert!(receiver.packets(1).is_empty());
+        assert!(receiver.packets(1).unwrap().is_empty());
         drop(read_only);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
@@ -701,7 +847,7 @@ mod tests {
             let end = (offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
             let part = Fragment {
                 offset: offset as u64,
-                data: sending.bytes[offset..end].to_vec(),
+                data: sending.bytes.fragment(offset, end - offset).unwrap(),
                 ..first.identity()
             };
             let result = receiver.receive(part, &[1, 2, 3]);
@@ -714,7 +860,79 @@ mod tests {
         }
         assert!(receiver.receiving.is_none());
         assert!(receiver.completed.is_none());
-        assert!(receiver.packets(1).is_empty());
+        assert!(receiver.packets(1).unwrap().is_empty());
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+    #[test]
+    fn file_transfer_checks_payload_corruption_and_retains_active_send_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = std::io::repeat(17).take(5 * 1024 * 1024);
+        let blob =
+            checkpoint_file::Blob::capture(dir.path(), &mut source, 5 * 1024 * 1024).unwrap();
+        let name = blob.manifest.name.clone();
+        let message = Message {
+            from: 1,
+            to: 2,
+            term: 4,
+            msg_type: MessageType::MsgSnapshot as i32,
+            snapshot: Some(Snapshot {
+                data: Vec::new(),
+                metadata: Some(SnapshotMetadata {
+                    index: 9,
+                    term: 3,
+                    conf_state: Some(ConfState {
+                        voters: vec![1, 2, 3],
+                        ..Default::default()
+                    }),
+                }),
+            }),
+            ..Default::default()
+        };
+        let mut sender = Stream::new(dir.path().to_path_buf());
+        sender.start_file(message, Arc::clone(&blob)).unwrap();
+        blob.retire();
+        drop(blob);
+        assert!(dir.path().join(&name).exists());
+        let mut receiver = Stream::new(dir.path().to_path_buf());
+        let mut rejected = false;
+        for _ in 0..20 {
+            let packets = sender.packets(1).unwrap();
+            assert_eq!(packets.len(), 1);
+            let packet = Packet::decode(packets[0].bytes.as_slice()).unwrap();
+            assert_eq!(packet.version, 3);
+            let mut part = Fragment::decode(packet.message.as_slice()).unwrap();
+            if part.offset > 0 {
+                part.data[0] ^= 1;
+            }
+            match receiver.receive(part, &[1, 2, 3]) {
+                Err(_) => {
+                    rejected = true;
+                    break;
+                }
+                Ok(None) => {}
+                Ok(Some(_)) => panic!("corrupt file checkpoint accepted"),
+            }
+            for ack in receiver.packets(1).unwrap() {
+                let packet = Packet::decode(ack.bytes.as_slice()).unwrap();
+                let ack = Fragment::decode(packet.message.as_slice()).unwrap();
+                sender.acknowledge(&ack);
+            }
+        }
+        assert!(rejected);
+        assert!(receiver.received_payload.is_none());
+        assert!(receiver.packets(1).unwrap().is_empty());
+        drop(sender);
+        assert!(!dir.path().join(name).exists());
+        assert_eq!(
+            std::fs::read_dir(receiver.payload_directory)
+                .unwrap()
+                .count(),
+            0
+        );
     }
 }
