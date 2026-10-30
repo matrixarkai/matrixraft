@@ -33,6 +33,24 @@ no positions. The consensus core's uncommitted-byte budget still applies; a full
 budget rejects the batch. Admission is not commitment, and applications must
 still wait for the matching successful committed-entry callbacks.
 
+Live Ready installation borrows the core's decoded entries after WAL sync,
+instead of decoding the just-encoded journal payload again. Recovery still
+decodes the journal, and both paths share the same state and membership checks.
+`cargo run --features peer-runtime --example durable_ready_allocations` measures
+allocated bytes around single-voter `process_ready`, excluding payload creation
+and proposal admission, and verifies exact application values after reopening.
+Local debug-build measurements with the old decode call and the borrowed call:
+
+| Entries | Bytes per value | Decode call | Borrowed call |
+| ---: | ---: | ---: | ---: |
+| 1 | 4096 | 29273 | 20793 |
+| 1 | 65536 | 459356 | 327996 |
+| 32 | 4096 | 930248 | 663784 |
+| 32 | 65536 | 14692904 | 10494280 |
+
+These are allocation volumes (about 29% lower here), not peak memory or
+throughput. WAL bytes and persistence ordering are unchanged.
+
 The application callback receives election no-ops as empty payloads. On reopen,
 the WAL restores term, vote, log, and commit state, and committed entries replay
 from the beginning, or from the latest application checkpoint and its suffix.

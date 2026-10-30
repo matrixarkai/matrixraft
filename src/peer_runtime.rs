@@ -254,6 +254,28 @@ fn install_from(
     batch: &WalBatch,
     source: SnapshotSource,
 ) -> Result<(), RaftError> {
+    let entries = batch
+        .entries
+        .iter()
+        .map(|b| Entry::decode(b.as_slice()).map_err(storage_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    let hs = if batch.hard_state.is_empty() {
+        None
+    } else {
+        Some(HardState::decode(batch.hard_state.as_slice()).map_err(storage_error)?)
+    };
+    install_decoded(store, batch, source, &entries, hs)
+}
+
+// Live Ready entries already have their decoded form. Journal recovery decodes
+// first; both paths use the same state and membership validation below.
+fn install_decoded(
+    store: &PeerStorage,
+    batch: &WalBatch,
+    source: SnapshotSource,
+    entries: &[Entry],
+    hs: Option<HardState>,
+) -> Result<(), RaftError> {
     // A validated incoming payload does not authorize local compaction rules.
     // It still must not replace state below the durable commit position.
     let local_capture = matches!(&source, SnapshotSource::LocalCapture(_));
@@ -261,22 +283,12 @@ fn install_from(
         SnapshotSource::Journal => None,
         SnapshotSource::LocalCapture(payload) | SnapshotSource::Received(payload) => Some(payload),
     };
-    let entries = batch
-        .entries
-        .iter()
-        .map(|b| Entry::decode(b.as_slice()).map_err(storage_error))
-        .collect::<Result<Vec<_>, _>>()?;
     for entry in entries
         .iter()
         .filter(|e| e.entry_type != EntryType::EntryNormal as i32)
     {
         membership::decode_change(entry, &store.permitted).map_err(storage_error)?;
     }
-    let hs = if batch.hard_state.is_empty() {
-        None
-    } else {
-        Some(HardState::decode(batch.hard_state.as_slice()).map_err(storage_error)?)
-    };
     let previous = store.initial_state().map_err(storage_error)?.hard_state;
     // Local compaction may retain committed entries after the captured index.
     // Compare them before replacing the in-memory snapshot, which clears the log.
@@ -387,7 +399,7 @@ fn install_from(
         return Err(storage_error("peer WAL hard state is invalid"));
     }
     let mut core = store.wl();
-    core.append(&entries).map_err(storage_error)?;
+    core.append(entries).map_err(storage_error)?;
     if let Some(hs) = hs {
         core.set_hardstate(hs);
     }
@@ -1653,7 +1665,13 @@ impl DurablePeer {
                     .map_err(storage_error)?
                     .hard_state;
                 self.journal.append_ready(&mut record, &previous)?;
-                install(&self.store, &record)?;
+                install_decoded(
+                    &self.store,
+                    &record,
+                    SnapshotSource::Journal,
+                    ready.entries(),
+                    ready.hs().cloned(),
+                )?;
             }
             output.extend(self.packets(ready.take_messages())?);
             output.extend(self.packets(ready.take_persisted_messages())?);
@@ -1884,6 +1902,66 @@ mod tests {
             &record.payload_manifest
         )
         .is_err());
+    }
+
+    #[test]
+    fn decoded_installation_enforces_the_journal_state_checks() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for case in 0..6 {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("live.wal"));
+            let live = DurablePeer::open(config.clone()).unwrap();
+            let replay = DurablePeer::open(options(directory.path().join("replay.wal"))).unwrap();
+            let mut entries = vec![Entry {
+                term: 1,
+                index: 1,
+                data: vec![7; 64 * 1024],
+                ..Default::default()
+            }];
+            let mut hard = HardState {
+                term: 1,
+                vote: 1,
+                commit: 1,
+            };
+            match case {
+                1 => entries[0].index = 2,
+                2 => entries[0].term = 0,
+                3 => hard.commit = 2,
+                4 => hard.vote = 99,
+                5 => {
+                    entries[0].entry_type = EntryType::EntryConfChangeV2 as i32;
+                    entries[0].data = vec![0xff];
+                }
+                _ => {}
+            }
+            let record = batch(&config, Some(&hard), &entries);
+            let decoded = install_decoded(
+                &live.store,
+                &record,
+                SnapshotSource::Journal,
+                &entries,
+                Some(hard),
+            );
+            let encoded = install(&replay.store, &record);
+            assert_eq!(decoded.is_ok(), case == 0, "case {case}");
+            assert_eq!(decoded.is_ok(), encoded.is_ok(), "case {case}");
+            assert_eq!(
+                live.store.initial_state().unwrap().hard_state,
+                replay.store.initial_state().unwrap().hard_state,
+            );
+            assert_eq!(
+                live.store.last_index().unwrap(),
+                replay.store.last_index().unwrap(),
+            );
+            if case == 0 {
+                assert_eq!(
+                    live.store
+                        .entries(1, 2, None, raft_core::GetEntriesContext::empty(false))
+                        .unwrap(),
+                    entries,
+                );
+            }
+        }
     }
 
     #[test]
