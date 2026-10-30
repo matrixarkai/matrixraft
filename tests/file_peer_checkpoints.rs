@@ -140,7 +140,7 @@ fn drive(
             if version == 3 && packet.bytes.len() >= 1024 * 1024 {
                 // Include decoder growth, but reject a separate payload-sized
                 // allocation for duplicate comparison.
-                assert!(allocated < 4 * packet.bytes.len() + 8192,
+                assert!(allocated < 3 * packet.bytes.len() + 8192,
                     "duplicate packet of {} bytes allocated {allocated}", packet.bytes.len());
             }
         }

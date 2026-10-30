@@ -64,15 +64,15 @@ struct Packet {
     version: u32,
     #[prost(uint64, tag = "2")]
     group: u64,
-    #[prost(bytes = "vec", tag = "3")]
-    message: Vec<u8>,
+    #[prost(bytes = "bytes", tag = "3")]
+    message: prost::bytes::Bytes,
 }
 
 fn canonical_packet(packet: &Packet, bytes: &[u8]) -> bool {
     let header = Packet {
         version: packet.version,
         group: packet.group,
-        message: Vec::new(),
+        message: Default::default(),
     };
     // Two scalar fields and the payload key/length fit in 28 bytes even with
     // maximum-width varints. Compare the payload without encoding another copy.
@@ -103,7 +103,7 @@ fn encode_envelope(
     let header = Packet {
         version,
         group,
-        message: Vec::new(),
+        message: Default::default(),
     };
     let message_len = message.encoded_len();
     let size = header.encoded_len()
@@ -1345,7 +1345,7 @@ impl DurablePeer {
         if bytes.len() > LIMIT {
             return Err(invalid("peer packet exceeds size limit"));
         }
-        let mut packet = Packet::decode(bytes).map_err(invalid)?;
+        let packet = Packet::decode(bytes).map_err(invalid)?;
         if !matches!(packet.version, 1..=3)
             || packet.group != self.options.group_id
             || !canonical_packet(&packet, bytes)
@@ -1355,6 +1355,7 @@ impl DurablePeer {
         // Canonical envelopes put the message last. Keep the original bytes while
         // reusing the decoded message allocation for canonical validation below.
         let original_message = &bytes[bytes.len() - packet.message.len()..];
+        let mut validation: Vec<u8> = packet.message.into();
         if packet.version == 2 || packet.version == 3 {
             let part = snapshot_stream::Fragment::decode(original_message).map_err(invalid)?;
             if part.file_backed != (packet.version == 3) {
@@ -1365,9 +1366,9 @@ impl DurablePeer {
                 routing.voters = self.store.permitted.clone();
             }
             part.validate(&routing, self.term())?;
-            packet.message.clear();
-            part.encode(&mut packet.message).map_err(invalid)?;
-            if packet.message != original_message {
+            validation.clear();
+            part.encode(&mut validation).map_err(invalid)?;
+            if validation != original_message {
                 return Err(invalid("noncanonical checkpoint fragment"));
             }
             if part.ack {
@@ -1383,7 +1384,7 @@ impl DurablePeer {
             let term = part.term;
             // Validation is complete; reuse its buffer for duplicate-file reads.
             if let Some(message) = self.stream.receive_with_scratch(
-                part, &self.options.voters, &mut packet.message,
+                part, &self.options.voters, &mut validation,
             )? {
                 self.accept_received_checkpoint(message)?;
             } else {
@@ -1402,9 +1403,9 @@ impl DurablePeer {
             return Ok(());
         }
         let message = Message::decode(original_message).map_err(invalid)?;
-        packet.message.clear();
-        message.encode(&mut packet.message).map_err(invalid)?;
-        if packet.message != original_message {
+        validation.clear();
+        message.encode(&mut validation).map_err(invalid)?;
+        if validation != original_message {
             return Err(invalid("noncanonical peer message"));
         }
         self.step_message(message)
@@ -1772,6 +1773,27 @@ impl DurablePeer {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn decoded_packet_buffer_moves_into_validation_without_copying() {
+        use super::*;
+        for length in [1, 127, 128, 16384, SNAPSHOT_FRAGMENT_BYTES] {
+            let bytes = Packet {
+                version: 3,
+                group: 17,
+                message: vec![37; length].into(),
+            }.encode_to_vec();
+            let packet = Packet::decode(bytes.as_slice()).unwrap();
+            assert!(canonical_packet(&packet, &bytes));
+            let pointer = packet.message.as_ptr();
+            let mut validation: Vec<u8> = packet.message.into();
+            assert_eq!(validation.as_ptr(), pointer);
+            assert_eq!(validation, vec![37; length]);
+            validation.clear();
+            validation.extend_from_slice(&vec![19; length]);
+            assert_eq!(validation.as_ptr(), pointer);
+        }
+    }
+
+    #[test]
     fn bounded_packet_check_matches_full_protobuf_encoding() {
         use super::*;
         let check = |bytes: &[u8]| {
@@ -1788,7 +1810,7 @@ mod tests {
                     let packet = Packet {
                         version,
                         group,
-                        message: vec![42; length],
+                        message: vec![42; length].into(),
                     };
                     let bytes = packet.encode_to_vec();
                     assert!(canonical_packet(&packet, &bytes));
@@ -1846,7 +1868,7 @@ mod tests {
         let malformed = Packet {
             version: 1,
             group: 17,
-            message: inner,
+            message: inner.into(),
         }
         .encode_to_vec();
         assert!(peer.step(&malformed).is_err());
@@ -1882,7 +1904,7 @@ mod tests {
                 Packet {
                     version: 1,
                     group: 17,
-                    message: black_box(&message).encode_to_vec(),
+                    message: black_box(&message).encode_to_vec().into(),
                 }
                 .encode_to_vec()
             };
@@ -1922,7 +1944,7 @@ mod tests {
                 let expected = Packet {
                     version: 1,
                     group,
-                    message: message.encode_to_vec(),
+                    message: message.encode_to_vec().into(),
                 }
                 .encode_to_vec();
                 assert_eq!(encode_packet(group, &message).unwrap(), expected);
@@ -2343,7 +2365,7 @@ mod tests {
             Packet {
                 version: 1,
                 group: 1,
-                message: message.encode_to_vec(),
+                message: message.encode_to_vec().into(),
             }
             .encode_to_vec()
         };
@@ -2442,7 +2464,7 @@ mod tests {
                     }],
                     ..Default::default()
                 }
-                .encode_to_vec(),
+                .encode_to_vec().into(),
             }
             .encode_to_vec();
             peer.step(&packet).unwrap();
@@ -2529,7 +2551,7 @@ mod tests {
                     snapshot: Some(snapshot),
                     ..Default::default()
                 }
-                .encode_to_vec(),
+                .encode_to_vec().into(),
             }
             .encode_to_vec()
         };
@@ -2729,7 +2751,7 @@ mod tests {
                         let envelope = Packet::decode(packet.bytes.as_slice()).unwrap();
                         if envelope.version == 2 {
                             let part =
-                                snapshot_stream::Fragment::decode(envelope.message.as_slice())
+                                snapshot_stream::Fragment::decode(envelope.message.as_ref())
                                     .unwrap();
                             assert!(part.ack);
                             assert!(
@@ -2931,7 +2953,7 @@ mod tests {
             let bytes = Packet {
                 version: 1,
                 group: 1,
-                message: message.encode_to_vec(),
+                message: message.encode_to_vec().into(),
             }
             .encode_to_vec();
             assert!(peer.step(&bytes).is_err());
@@ -2952,7 +2974,7 @@ mod tests {
             let bytes = Packet {
                 version: 1,
                 group: 1,
-                message: message.encode_to_vec(),
+                message: message.encode_to_vec().into(),
             }
             .encode_to_vec();
             assert!(peer.step(&bytes).is_err());

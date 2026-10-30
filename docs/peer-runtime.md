@@ -198,6 +198,13 @@ cloning fragment data. Outgoing fragments encode directly into their packet
 buffer, avoiding an intermediate full-fragment protobuf buffer. Both memory and
 file transfers retain identical wire bytes and the same frame-size checks.
 
+Packet envelopes decode their message field into an owned byte buffer, then move
+that allocation into the mutable validation buffer. This avoids the intermediate
+payload copy made when decoding directly into a vector. It applies to ordinary
+peer messages and both checkpoint formats; canonical encoding checks and public
+packet types are unchanged. Tests verify allocation identity through the move and
+bound duplicate-fragment allocation volume in the full receive path.
+
 Each peer retains at most one outgoing and one incoming large transfer. Other
 lagging voters remain on the consensus retry path until the outgoing slot is free.
 A sender advances one fragment per acknowledgment and retries after ten local

@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(packets.len(), 1);
         let packet = Packet::decode(packets[0].bytes.as_slice()).unwrap();
         assert_eq!(packet.version, 2);
-        Fragment::decode(packet.message.as_slice()).unwrap()
+        Fragment::decode(packet.message.as_ref()).unwrap()
     }
     #[test]
     fn fragment_metadata_and_direct_envelopes_preserve_wire_bytes() {
@@ -735,7 +735,7 @@ mod tests {
                         let expected = Packet {
                             version,
                             group,
-                            message: payload.encode_to_vec(),
+                            message: payload.encode_to_vec().into(),
                         }.encode_to_vec();
                         assert_eq!(encode_envelope(version, group, &payload).unwrap(), expected);
                     }
@@ -1111,7 +1111,7 @@ mod file_tests {
                 peer.step(&final_packet).unwrap();
                 for packet in peer.stream.packets(1).unwrap() {
                     let packet = Packet::decode(packet.bytes.as_slice()).unwrap();
-                    let ack = Fragment::decode(packet.message.as_slice()).unwrap();
+                    let ack = Fragment::decode(packet.message.as_ref()).unwrap();
                     assert!(ack.offset < ack.total);
                     sender.acknowledge(&ack);
                 }
@@ -1131,7 +1131,7 @@ mod file_tests {
                     &Packet {
                         version: 1,
                         group: 1,
-                        message: heartbeat.encode_to_vec(),
+                        message: heartbeat.encode_to_vec().into(),
                     }
                     .encode_to_vec(),
                 )
@@ -1148,7 +1148,7 @@ mod file_tests {
                 assert!(output.iter().any(|packet| {
                     let packet = Packet::decode(packet.bytes.as_slice()).unwrap();
                     packet.version == 1
-                        && Message::decode(packet.message.as_slice())
+                        && Message::decode(packet.message.as_ref())
                             .unwrap()
                             .get_msg_type()
                             == MessageType::MsgHeartbeatResponse
@@ -1196,7 +1196,7 @@ mod file_tests {
                 {
                     let packet = Packet::decode(packet.bytes.as_slice()).unwrap();
                     if packet.version == 3 {
-                        let ack = Fragment::decode(packet.message.as_slice()).unwrap();
+                        let ack = Fragment::decode(packet.message.as_ref()).unwrap();
                         completed |= ack.ack && ack.offset == ack.total;
                     }
                 }
@@ -1303,7 +1303,7 @@ mod file_tests {
             assert_eq!(packets.len(), 1);
             let packet = Packet::decode(packets[0].bytes.as_slice()).unwrap();
             assert_eq!(packet.version, 3);
-            let mut part = Fragment::decode(packet.message.as_slice()).unwrap();
+            let mut part = Fragment::decode(packet.message.as_ref()).unwrap();
             if part.offset > 0 {
                 part.data[0] ^= 1;
             }
@@ -1326,7 +1326,7 @@ mod file_tests {
             }
             for ack in receiver.packets(1).unwrap() {
                 let packet = Packet::decode(ack.bytes.as_slice()).unwrap();
-                let ack = Fragment::decode(packet.message.as_slice()).unwrap();
+                let ack = Fragment::decode(packet.message.as_ref()).unwrap();
                 sender.acknowledge(&ack);
             }
         }
