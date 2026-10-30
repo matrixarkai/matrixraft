@@ -68,6 +68,29 @@ struct Packet {
     message: Vec<u8>,
 }
 
+fn canonical_packet(packet: &Packet, bytes: &[u8]) -> bool {
+    let header = Packet {
+        version: packet.version,
+        group: packet.group,
+        message: Vec::new(),
+    };
+    // Two scalar fields and the payload key/length fit in 28 bytes even with
+    // maximum-width varints. Compare the payload without encoding another copy.
+    let mut storage = [0u8; 32];
+    let mut output = storage.as_mut_slice();
+    if header.encode(&mut output).is_err() {
+        return false;
+    }
+    if !packet.message.is_empty() {
+        prost::encoding::encode_key(3, prost::encoding::WireType::LengthDelimited, &mut output);
+        prost::encoding::encode_varint(packet.message.len() as u64, &mut output);
+    }
+    let length = 32 - output.len();
+    bytes.len() == length + packet.message.len()
+        && bytes[..length] == storage[..length]
+        && bytes[length..] == packet.message
+}
+
 fn encode_packet(group: u64, message: &Message) -> Result<Vec<u8>, RaftError> {
     let header = Packet {
         version: 1,
@@ -1282,7 +1305,7 @@ impl DurablePeer {
         let mut packet = Packet::decode(bytes).map_err(invalid)?;
         if !matches!(packet.version, 1..=3)
             || packet.group != self.options.group_id
-            || packet.encode_to_vec() != bytes
+            || !canonical_packet(&packet, bytes)
         {
             return Err(invalid("peer packet identity or encoding mismatch"));
         }
@@ -1702,6 +1725,57 @@ impl DurablePeer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bounded_packet_check_matches_full_protobuf_encoding() {
+        use super::*;
+        let check = |bytes: &[u8]| {
+            if let Ok(packet) = Packet::decode(bytes) {
+                assert_eq!(
+                    canonical_packet(&packet, bytes),
+                    packet.encode_to_vec() == bytes,
+                );
+            }
+        };
+        for version in [0, 1, 2, 3, u32::MAX] {
+            for group in [0, 17, 127, 128, u64::MAX] {
+                for length in [0, 1, 127, 128, 16383, 16384] {
+                    let packet = Packet {
+                        version,
+                        group,
+                        message: vec![42; length],
+                    };
+                    let bytes = packet.encode_to_vec();
+                    assert!(canonical_packet(&packet, &bytes));
+                    check(&bytes);
+                    for suffix in [&[0x08, 1][..], &[0x20, 1], &[0x1a, 0], &[0x10, 0]] {
+                        let mut malformed = bytes.clone();
+                        malformed.extend_from_slice(suffix);
+                        check(&malformed);
+                    }
+                    // Mutations cover keys, scalar values, lengths, and payload.
+                    for index in 0..bytes.len().min(32) {
+                        for value in [0, 0x80, 0xff] {
+                            let mut altered = bytes.clone();
+                            altered[index] = value;
+                            check(&altered);
+                        }
+                        check(&bytes[..index]);
+                    }
+                }
+            }
+        }
+        // Same decoded values, but field reordering or non-minimal varints.
+        for bytes in [
+            &[0x10, 17, 0x08, 1][..],
+            &[0x08, 0x81, 0, 0x10, 17],
+            &[0x08, 1, 0x10, 17, 0x1a, 0x81, 0, 42],
+        ] {
+            let packet = Packet::decode(bytes).unwrap();
+            assert!(!canonical_packet(&packet, bytes));
+            check(bytes);
+        }
+    }
+
     #[test]
     fn receive_buffer_reuse_still_rejects_noncanonical_packets() {
         use super::*;

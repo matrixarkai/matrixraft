@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
-//! Allocation volume for durable single-voter Ready processing.
+//! Allocation volume for durable Ready processing and three-voter packet admission.
 //! Run with `cargo run --features peer-runtime --example durable_ready_allocations`.
 //! Payload construction and proposal admission are outside the measured region.
 //! These are allocated bytes, not peak memory, disk traffic, or throughput.
 
 #[cfg(feature = "peer-runtime")]
 mod probe {
-    use matrixraft::peer_runtime::{DurablePeer, PeerOptions};
+    use matrixraft::{
+        peer_runtime::{DurablePeer, PeerOptions},
+        LogId,
+    };
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -24,6 +27,79 @@ mod probe {
     }
     #[global_allocator]
     static ALLOCATOR: Counting = Counting;
+
+    type Applied = Vec<Vec<(LogId, Vec<u8>)>>;
+
+    fn exchange(peers: &mut [DurablePeer], applied: &mut Applied) -> (usize, usize, usize) {
+        let mut received = 0;
+        let mut wire_bytes = 0;
+        let mut allocated = 0;
+        for _ in 0..100 {
+            let mut packets = Vec::new();
+            for (index, peer) in peers.iter_mut().enumerate() {
+                packets.extend(
+                    peer.process_ready(|id, bytes| {
+                        if !bytes.is_empty() {
+                            applied[index].push((id, bytes.to_vec()));
+                        }
+                        Ok(())
+                    })
+                    .unwrap(),
+                );
+            }
+            if packets.is_empty() {
+                return (received, wire_bytes, allocated);
+            }
+            for packet in packets {
+                let peer = &mut peers[packet.to as usize - 1];
+                let before = BYTES.load(Ordering::Relaxed);
+                peer.step(&packet.bytes).unwrap();
+                allocated += BYTES.load(Ordering::Relaxed) - before;
+                received += 1;
+                wire_bytes += packet.bytes.len();
+            }
+        }
+        panic!("packet exchange did not settle");
+    }
+
+    fn receive_cost() {
+        println!("voters,payload_bytes,packets,packet_bytes,step_allocated_bytes");
+        for width in [64, 4096, 1024 * 1024] {
+            let dir = tempfile::tempdir().unwrap();
+            let options: Vec<_> = (1..=3)
+                .map(|node_id| PeerOptions {
+                    group_id: 17,
+                    node_id,
+                    voters: vec![1, 2, 3],
+                    wal_path: dir.path().join(format!("peer-{node_id}.wal")),
+                })
+                .collect();
+            let open = || {
+                options
+                    .iter()
+                    .map(|o| DurablePeer::open(o.clone()).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            let mut peers = open();
+            let mut applied = vec![Vec::new(); 3];
+            peers[0].campaign().unwrap();
+            exchange(&mut peers, &mut applied);
+            assert!(peers[0].is_leader());
+            assert!(applied.iter().all(Vec::is_empty));
+            let data = vec![42; width];
+            let id = peers[0].propose(data.clone()).unwrap();
+            let (packets, bytes, allocated) = exchange(&mut peers, &mut applied);
+            let expected = vec![(id, data)];
+            assert!(packets >= 4);
+            assert!(applied.iter().all(|values| *values == expected));
+            drop(peers);
+            let mut peers = open();
+            let mut replay = vec![Vec::new(); 3];
+            exchange(&mut peers, &mut replay);
+            assert_eq!(replay, applied);
+            println!("3,{width},{packets},{bytes},{allocated}");
+        }
+    }
 
     pub fn run() {
         println!("entries,payload_bytes,ready_allocated_bytes");
@@ -77,6 +153,7 @@ mod probe {
                 println!("{count},{width},{allocated}");
             }
         }
+        receive_cost();
     }
 }
 

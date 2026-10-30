@@ -51,6 +51,23 @@ Local debug-build measurements with the old decode call and the borrowed call:
 These are allocation volumes (about 29% lower here), not peak memory or
 throughput. WAL bytes and persistence ordering are unchanged.
 
+The same probe also routes a proposal through three durable voters, measures
+allocations only inside `step`, and checks exact committed values and WAL replay
+on every voter. Packet envelope validation compares a stack-encoded header and
+the decoded payload against the received bytes, avoiding a second packet-sized
+encoding buffer. Full protobuf decoding and inner-message validation remain.
+The old full-envelope check and the stack-header check measured:
+
+| Value bytes | Received packets | Received bytes | Old allocated bytes | New allocated bytes |
+| ---: | ---: | ---: | ---: | ---: |
+| 64 | 8 | 296 | 7512 | 7216 |
+| 4096 | 8 | 8366 | 55910 | 47544 |
+| 1048576 | 8 | 2097332 | 12589684 | 10492352 |
+
+The removed allocation volume equals the received packet bytes in each case.
+This local debug-build probe excludes Ready processing from the receive counter;
+it is not a multi-host or end-to-end throughput measurement.
+
 The application callback receives election no-ops as empty payloads. On reopen,
 the WAL restores term, vote, log, and commit state, and committed entries replay
 from the beginning, or from the latest application checkpoint and its suffix.
