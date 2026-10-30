@@ -289,6 +289,13 @@ is at most 1 MiB. The receiver stages bytes on disk, validates the envelope and
 payload checksums, then publishes its own local payload and WAL manifest before
 restoring application state. Transport acknowledgments do not commit entries.
 
+An outgoing file transfer opens its payload once and retains that handle through
+fragment reads and retries. The single outgoing transfer slot bounds this to one
+additional file handle per peer; completion, expiry, or loss of leadership closes
+it. Reads still seek to the requested offset, so retransmissions do not depend on
+the previous read position. This avoids reopening the payload for every 1 MiB
+fragment without changing the wire format or checksum validation.
+
 The final file fragment starts one owned background worker to copy, checksum and
 sync the staged payload. `step` returns without waiting for that work. Call
 `process_ready_with_snapshot_reader` on a bounded timer, including when no network

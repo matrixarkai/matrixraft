@@ -170,6 +170,7 @@ enum Source {
     Memory(Vec<u8>),
     File {
         prefix: Vec<u8>,
+        reader: File,
         payload: Arc<checkpoint_file::Blob>,
     },
 }
@@ -177,13 +178,13 @@ impl Source {
     fn len(&self) -> usize {
         match self {
             Self::Memory(bytes) => bytes.len(),
-            Self::File { prefix, payload } => prefix.len() + payload.manifest.length as usize,
+            Self::File { prefix, payload, .. } => prefix.len() + payload.manifest.length as usize,
         }
     }
     fn fragment(&self, offset: usize, size: usize) -> Result<Vec<u8>, RaftError> {
         match self {
             Self::Memory(bytes) => Ok(bytes[offset..offset + size].to_vec()),
-            Self::File { prefix, payload } => {
+            Self::File { prefix, reader, .. } => {
                 let mut output = vec![0; size];
                 let head = if offset < prefix.len() {
                     (prefix.len() - offset).min(size)
@@ -194,7 +195,7 @@ impl Source {
                     output[..head].copy_from_slice(&prefix[offset..offset + head]);
                 }
                 if head < size {
-                    let mut file = payload.reader()?;
+                    let mut file = reader;
                     file.seek(SeekFrom::Start((offset + head - prefix.len()) as u64))
                         .map_err(storage_error)?;
                     file.read_exact(&mut output[head..])
@@ -405,6 +406,7 @@ impl Stream {
         prefix.extend(bytes);
         let source = Source::File {
             prefix,
+            reader: payload.reader()?,
             payload: Arc::clone(&payload),
         };
         self.sending = Some(Sending {
@@ -1164,6 +1166,52 @@ mod file_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn file_fragments_reuse_the_open_handle_across_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..2 * SNAPSHOT_FRAGMENT_BYTES + 17)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let blob = checkpoint_file::Blob::capture(
+            dir.path(), &mut data.as_slice(), data.len() as u64,
+        ).unwrap();
+        let original = dir.path().join(&blob.manifest.name);
+        let moved = dir.path().join("moved-payload");
+        let metadata = Message {
+            from: 1,
+            to: 2,
+            term: 4,
+            msg_type: MessageType::MsgSnapshot as i32,
+            snapshot: Some(Snapshot {
+                metadata: Some(SnapshotMetadata {
+                    index: 9,
+                    term: 3,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut sender = Stream::new(dir.path().to_path_buf());
+        sender.start_file(metadata, Arc::clone(&blob)).unwrap();
+        drop(blob);
+        // Removing the pathname proves subsequent reads use the retained handle.
+        std::fs::rename(&original, &moved).unwrap();
+        let source = &sender.sending.as_ref().unwrap().bytes;
+        let Source::File { prefix, .. } = source else { panic!("expected file source") };
+        let mut expected = prefix.clone();
+        expected.extend_from_slice(&data);
+        for offset in [0, SNAPSHOT_FRAGMENT_BYTES, 0, 2 * SNAPSHOT_FRAGMENT_BYTES,
+            SNAPSHOT_FRAGMENT_BYTES, prefix.len() - 1, prefix.len()] {
+            let size = SNAPSHOT_FRAGMENT_BYTES.min(expected.len() - offset);
+            assert_eq!(source.fragment(offset, size).unwrap(), expected[offset..offset + size]);
+        }
+        std::fs::rename(&moved, &original).unwrap();
+        sender.completed_send(2);
+        assert!(!original.exists());
     }
 
     #[test]
