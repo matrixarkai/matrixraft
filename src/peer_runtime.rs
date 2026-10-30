@@ -1381,7 +1381,10 @@ impl DurablePeer {
             }
             let from = part.from;
             let term = part.term;
-            if let Some(message) = self.stream.receive(part, &self.options.voters)? {
+            // Validation is complete; reuse its buffer for duplicate-file reads.
+            if let Some(message) = self.stream.receive_with_scratch(
+                part, &self.options.voters, &mut packet.message,
+            )? {
                 self.accept_received_checkpoint(message)?;
             } else {
                 // Keep the recognized sender's term and election timer current

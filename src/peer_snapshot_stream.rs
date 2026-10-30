@@ -227,11 +227,11 @@ impl Receiving {
         self.length += bytes.len() as u64;
         Ok(())
     }
-    fn matches(&mut self, offset: u64, bytes: &[u8]) -> std::io::Result<bool> {
+    fn matches(&mut self, offset: u64, bytes: &[u8], scratch: &mut Vec<u8>) -> std::io::Result<bool> {
         self.file.seek(SeekFrom::Start(offset))?;
-        let mut saved = vec![0; bytes.len()];
-        self.file.read_exact(&mut saved)?;
-        Ok(saved == bytes)
+        scratch.resize(bytes.len(), 0);
+        self.file.read_exact(scratch)?;
+        Ok(scratch.as_slice() == bytes)
     }
     fn finish_file(
         mut self,
@@ -479,10 +479,19 @@ impl Stream {
         }
         false
     }
-    pub(super) fn receive(
+    #[cfg(test)]
+    fn receive(
         &mut self,
         part: Fragment,
         voters: &[u64],
+    ) -> Result<Option<Message>, RaftError> {
+        self.receive_with_scratch(part, voters, &mut Vec::new())
+    }
+    pub(super) fn receive_with_scratch(
+        &mut self,
+        part: Fragment,
+        voters: &[u64],
+        scratch: &mut Vec<u8>,
     ) -> Result<Option<Message>, RaftError> {
         // Keep one finalization worker, even when another sender or term arrives.
         // No completion acknowledgment is sent until validation and sync finish.
@@ -531,7 +540,7 @@ impl Stream {
         let io_result = if part.offset == receiving.length {
             receiving.append(&part.data).map(|()| true)
         } else if part.offset < receiving.length {
-            receiving.matches(part.offset, &part.data)
+            receiving.matches(part.offset, &part.data, scratch)
         } else {
             Ok(true)
         };
@@ -915,6 +924,49 @@ mod tests {
         assert!(receiver.receive(part, &[1, 2, 3]).unwrap().is_none());
         assert_eq!(fragment(&mut receiver).offset, 0);
         assert!(receiver.receiving.is_none());
+    }
+
+    #[test]
+    fn duplicate_comparison_reuses_validation_storage_and_checks_all_bytes() {
+        for file_backed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut sender = Stream::default();
+            sender.start(message()).unwrap();
+            let mut first = fragment(&mut sender);
+            first.file_backed = file_backed;
+            let mut second = first.clone();
+            second.offset = SNAPSHOT_FRAGMENT_BYTES as u64;
+            second.data.fill(29);
+            let mut receiver = Stream::new(directory.path().to_path_buf());
+            let mut scratch = second.encode_to_vec();
+            let allocation = scratch.as_ptr();
+            let capacity = scratch.capacity();
+            for part in [&first, &second] {
+                receiver.receive_with_scratch(part.clone(), &[1, 2, 3], &mut scratch).unwrap();
+            }
+            for _ in 0..16 {
+                for part in [&first, &second] {
+                    scratch.clear();
+                    part.encode(&mut scratch).unwrap();
+                    assert!(receiver.receive_with_scratch(
+                        part.clone(), &[1, 2, 3], &mut scratch,
+                    ).unwrap().is_none());
+                    assert_eq!(scratch, part.data);
+                    assert_eq!(scratch.as_ptr(), allocation);
+                    assert_eq!(scratch.capacity(), capacity);
+                    assert_eq!(receiver.ack.as_ref().unwrap().offset, 2 * SNAPSHOT_FRAGMENT_BYTES as u64);
+                }
+            }
+            let mut conflicting = second.clone();
+            *conflicting.data.last_mut().unwrap() ^= 1;
+            assert!(receiver.receive_with_scratch(conflicting, &[1, 2, 3], &mut scratch).is_err());
+            assert!(receiver.ack.is_none());
+            assert_eq!(receiver.receiving.as_ref().unwrap().length, 2 * SNAPSHOT_FRAGMENT_BYTES as u64);
+            receiver.receiving.as_mut().unwrap().file.set_len(SNAPSHOT_FRAGMENT_BYTES as u64).unwrap();
+            assert!(receiver.receive_with_scratch(second, &[1, 2, 3], &mut scratch).is_err());
+            assert!(receiver.receiving.is_none());
+            assert!(receiver.ack.is_none());
+        }
     }
 
     #[test]

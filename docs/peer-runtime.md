@@ -244,6 +244,12 @@ the staged bytes. Creation, read or write errors discard partial state without
 acknowledging it, and expiry or peer shutdown releases the file. A retry after
 partial state is discarded starts at offset zero.
 
+After packet validation, duplicate comparison reuses the decoded packet's buffer
+for its staging-file read. This removes a separate fragment-sized allocation
+(up to 1 MiB per duplicate) without retaining a scratch buffer between packets or
+adding read calls. The comparison still checks every byte, and read errors still
+discard partial state without acknowledging it.
+
 Staging is expendable transport state. Completion still requires checksum and
 canonical-message validation, followed by durable WAL publication and application
 restore before completion packets can escape. The final decoder, outgoing

@@ -14,9 +14,12 @@ struct PacketVersion {
 }
 struct Measured;
 static LARGEST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ALLOCATED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static EXERCISE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 unsafe impl std::alloc::GlobalAlloc for Measured {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         LARGEST.fetch_max(layout.size(), std::sync::atomic::Ordering::Relaxed);
+        ALLOCATED.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
         std::alloc::System.alloc(layout)
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
@@ -24,6 +27,7 @@ unsafe impl std::alloc::GlobalAlloc for Measured {
     }
     unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
         LARGEST.fetch_max(size, std::sync::atomic::Ordering::Relaxed);
+        ALLOCATED.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
         std::alloc::System.realloc(pointer, layout, size)
     }
 }
@@ -126,16 +130,25 @@ fn drive(
                     .step(&packet.bytes)
                     .unwrap();
             }
+            let before = ALLOCATED.load(std::sync::atomic::Ordering::Relaxed);
             peers
                 .get_mut(&packet.to)
                 .unwrap()
                 .step(&packet.bytes)
                 .unwrap();
+            let allocated = ALLOCATED.load(std::sync::atomic::Ordering::Relaxed) - before;
+            if version == 3 && packet.bytes.len() >= 1024 * 1024 {
+                // Include decoder growth, but reject a separate payload-sized
+                // allocation for duplicate comparison.
+                assert!(allocated < 4 * packet.bytes.len() + 8192,
+                    "duplicate packet of {} bytes allocated {allocated}", packet.bytes.len());
+            }
         }
     }
     panic!("streamed checkpoint exchange did not settle");
 }
 fn exercise(length: u64) {
+    let _measurement = EXERCISE.lock().unwrap();
     LARGEST.store(0, std::sync::atomic::Ordering::Relaxed);
     DROP_FILE_PACKET.store(true, std::sync::atomic::Ordering::Relaxed);
     let dir = tempfile::tempdir().unwrap();
