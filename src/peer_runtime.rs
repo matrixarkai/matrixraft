@@ -991,6 +991,59 @@ impl DurablePeer {
             index,
         })
     }
+    /// Submit up to 1024 nonempty values, totaling at most 4 MiB, in one core proposal.
+    /// Returned positions are contiguous admissions, not commit acknowledgments.
+    pub fn propose_batch(&mut self, payloads: Vec<Vec<u8>>) -> Result<Vec<LogId>, RaftError> {
+        self.healthy()?;
+        if !self.is_leader() {
+            return Err(RaftError::NotLeader(self.options.node_id));
+        }
+        if payloads.is_empty() || payloads.len() > 1024 {
+            return Err(invalid("peer proposal batch must contain 1..1024 entries"));
+        }
+        let total = payloads.iter().try_fold(0usize, |size, payload| {
+            if payload.is_empty() {
+                None
+            } else {
+                size.checked_add(payload.len())
+            }
+        });
+        if !matches!(total, Some(size) if size <= 4 * 1024 * 1024) {
+            return Err(invalid(
+                "peer proposal batch must contain nonempty values totaling at most 4 MiB",
+            ));
+        }
+        let before = self.raw.raft.raft_log.last_index();
+        let last = before
+            .checked_add(payloads.len() as u64)
+            .ok_or_else(|| invalid("peer proposal index exceeds limit"))?;
+        let entries = payloads
+            .into_iter()
+            .map(|data| Entry {
+                data,
+                ..Default::default()
+            })
+            .collect();
+        self.raw
+            .raft
+            .step(Message {
+                from: self.options.node_id,
+                msg_type: MessageType::MsgPropose as i32,
+                entries,
+                ..Default::default()
+            })
+            .map_err(invalid)?;
+        if self.raw.raft.raft_log.last_index() != last {
+            return Err(invalid("peer proposal batch was not admitted"));
+        }
+        Ok((before + 1..=last)
+            .map(|index| LogId {
+                term: self.raw.raft.term,
+                index,
+            })
+            .collect())
+    }
+
     /// Atomically replace durable history through the applied index with an
     /// application checkpoint. The caller must capture these exact applied bytes
     /// on its exclusive application worker. Uncommitted suffix entries survive.

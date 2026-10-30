@@ -18,6 +18,7 @@ enum Request {
     Campaign,
     Propose(Vec<u8>),
     ProposeBatch(Vec<Vec<u8>>),
+    ProposeGroup(Vec<Vec<u8>>),
     Step(Vec<u8>),
     StepBatch(Vec<Vec<u8>>),
     Inspect,
@@ -98,6 +99,9 @@ fn peer_transport_child() {
                 }
             }
             Request::Step(bytes) => peer.step(&bytes).unwrap(),
+            Request::ProposeGroup(entries) => {
+                peer.propose_batch(entries).unwrap();
+            }
             Request::StepBatch(packets) => {
                 for bytes in packets {
                     peer.step(&bytes).unwrap();
@@ -226,6 +230,7 @@ fn run_durable_batch(
     payload_bytes: usize,
     batch_size: usize,
     receive_batch: bool,
+    multi_entry: bool,
 ) -> u64 {
     let root = tempfile::tempdir().unwrap();
     let start = || {
@@ -254,7 +259,9 @@ fn run_durable_batch(
     let before = wal_bytes();
     let expected: Vec<_> = (0..32u8).map(|value| vec![value; payload_bytes]).collect();
     for entries in expected.chunks(batch_size) {
-        let request = if batch_size == 1 {
+        let request = if multi_entry {
+            Request::ProposeGroup(entries.to_vec())
+        } else if batch_size == 1 {
             Request::Propose(entries[0].clone())
         } else {
             Request::ProposeBatch(entries.to_vec())
@@ -279,11 +286,12 @@ fn independent_tcp_voters_commit_and_recover_after_process_restart() {
     // Logical WAL growth only: the loopback router is not a throughput benchmark.
     for count in [3, 5, 9] {
         for payload_bytes in [64, 4096] {
-            let single = run_durable_batch(count, payload_bytes, 1, false);
-            let batched = run_durable_batch(count, payload_bytes, 16, false);
-            let receive_batched = run_durable_batch(count, payload_bytes, 16, true);
+            let single = run_durable_batch(count, payload_bytes, 1, false, false);
+            let batched = run_durable_batch(count, payload_bytes, 16, false, false);
+            let receive_batched = run_durable_batch(count, payload_bytes, 16, true, false);
+            let grouped = run_durable_batch(count, payload_bytes, 16, true, true);
             println!(
-                "voters={count} payload={payload_bytes} single_wal={single} leader_batched_wal={batched} all_batched_wal={receive_batched}"
+                "voters={count} payload={payload_bytes} single_wal={single} leader_batched_wal={batched} all_batched_wal={receive_batched} grouped_wal={grouped}"
             );
             assert!(
                 batched < single,
@@ -293,6 +301,7 @@ fn independent_tcp_voters_commit_and_recover_after_process_restart() {
                 receive_batched < batched,
                 "receive batching did not reduce aggregate WAL growth"
             );
+            assert!(grouped <= receive_batched);
         }
     }
 }

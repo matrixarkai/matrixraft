@@ -80,6 +80,117 @@ fn peers(dir: &Directory) -> BTreeMap<u64, DurablePeer> {
         .collect()
 }
 #[test]
+fn proposal_groups_are_bounded_contiguous_and_replayed() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    assert!(group
+        .get_mut(&2)
+        .unwrap()
+        .propose_batch(vec![vec![1]])
+        .is_err());
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let before = group[&1].commit_index();
+    let leader = group.get_mut(&1).unwrap();
+    for invalid in [
+        Vec::new(),
+        vec![vec![1], Vec::new()],
+        vec![vec![1]; 1025],
+        vec![vec![1; 4 * 1024 * 1024], vec![2]],
+    ] {
+        assert!(leader.propose_batch(invalid).is_err());
+    }
+    let payloads: Vec<_> = (0..16u8).map(|n| vec![n; 4096]).collect();
+    let ids = leader.propose_batch(payloads.clone()).unwrap();
+    assert_eq!(ids.len(), payloads.len());
+    for (offset, id) in ids.iter().enumerate() {
+        assert_eq!(id.index, before + offset as u64 + 1);
+        assert_eq!(id.term, leader.term());
+    }
+    assert_eq!(leader.commit_index(), before);
+    pump(&mut group, &mut applied, None);
+    let expected = applied[&1].clone();
+    for values in applied.values() {
+        assert_eq!(values, &expected);
+    }
+    drop(group);
+    let mut recovered = peers(&dir);
+    let mut replay = Applied::new();
+    pump(&mut recovered, &mut replay, None);
+    for values in replay.values() {
+        assert_eq!(values, &expected);
+    }
+}
+
+#[test]
+fn proposal_group_limits_and_uncommitted_backpressure_preserve_positions() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let leader = group.get_mut(&1).unwrap();
+    let before = leader.commit_index();
+    let ids = leader.propose_batch(vec![vec![7; 4096]; 1024]).unwrap();
+    assert_eq!(ids.len(), 1024);
+    assert_eq!(ids[0].index, before + 1);
+    assert_eq!(ids[1023].index, before + 1024);
+    assert!(leader.propose_batch(vec![vec![8]]).is_err());
+    assert_eq!(leader.commit_index(), before);
+    pump(&mut group, &mut applied, None);
+    for values in applied.values() {
+        assert_eq!(
+            values.iter().filter(|(_, value)| !value.is_empty()).count(),
+            1024
+        );
+        for (_, value) in values.iter().filter(|(_, value)| !value.is_empty()) {
+            assert_eq!(value.len(), 4096);
+            assert!(value.iter().all(|byte| *byte == 7));
+        }
+    }
+    let next = group
+        .get_mut(&1)
+        .unwrap()
+        .propose_batch(vec![vec![9]])
+        .unwrap();
+    assert_eq!(next[0].index, before + 1025);
+    pump(&mut group, &mut applied, None);
+    assert!(applied
+        .values()
+        .all(|values| values.last().unwrap().1 == vec![9]));
+}
+
+#[test]
+fn grouped_proposals_reduce_append_packet_overhead() {
+    let mut costs = Vec::new();
+    for grouped in [false, true] {
+        let dir = Directory::new();
+        let mut group = peers(&dir);
+        let mut applied = Applied::new();
+        group.get_mut(&1).unwrap().campaign().unwrap();
+        pump(&mut group, &mut applied, None);
+        let leader = group.get_mut(&1).unwrap();
+        let values = (0..16u8).map(|n| vec![n; 64]).collect::<Vec<_>>();
+        if grouped {
+            leader.propose_batch(values).unwrap();
+        } else {
+            for value in values {
+                leader.propose(value).unwrap();
+            }
+        }
+        let packets = leader.process_ready(|_, _| Ok(())).unwrap();
+        costs.push((
+            packets.len(),
+            packets.iter().map(|p| p.bytes.len()).sum::<usize>(),
+        ));
+    }
+    println!("individual={:?} grouped={:?}", costs[0], costs[1]);
+    assert!(costs[1].0 < costs[0].0);
+    assert!(costs[1].1 < costs[0].1);
+}
+
+#[test]
 fn isolated_peer_cannot_elect_or_commit_without_received_votes() {
     let dir = Directory::new();
     let mut peer = DurablePeer::open(dir.options(1, vec![1, 2, 3])).unwrap();

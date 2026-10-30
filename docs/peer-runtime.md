@@ -25,6 +25,14 @@ The loopback process test compares unbatched inputs, batches of 16 proposals,
 and batches of 16 proposals plus up to 16 queued packets per receiving peer.
 This is a host scheduling choice, not a relaxation of the persistence barrier.
 
+For an application batch already available on the leader, `propose_batch` submits
+all values in one core proposal instead of broadcasting after each individual
+`propose` call. It accepts 1..1024 nonempty values with at most 4 MiB of combined
+payload and returns contiguous admitted log positions. Invalid batches allocate
+no positions. The consensus core's uncommitted-byte budget still applies; a full
+budget rejects the batch. Admission is not commitment, and applications must
+still wait for the matching successful committed-entry callbacks.
+
 The application callback receives election no-ops as empty payloads. On reopen,
 the WAL restores term, vote, log, and commit state, and committed entries replay
 from the beginning, or from the latest application checkpoint and its suffix.
@@ -68,7 +76,7 @@ or power-loss safety. Checkpoint process-crash coverage is described below.
 
 `tests/peer_process_transport.rs` separately runs 3, 5, and 9 independent voter
 processes over loopback TCP. For each group size it commits 32 values of 64 or
-4096 bytes under each of the three batching policies, checks every voter, kills
+4096 bytes under each of four batching policies (including `propose_batch`), checks every voter, kills
 all voter processes, and checks exact replay after reopening every WAL. It also
 compares aggregate WAL growth after election settles. The parent routes messages;
 this is not a production peer server, a multi-host throughput test, or a
