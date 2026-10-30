@@ -295,6 +295,7 @@ struct Finishing {
 /// One outgoing and one incoming transfer per local peer bound retained state.
 /// File completion runs on one owned worker while Raft continues processing.
 pub(super) struct Stream {
+    pub(super) permitted: Vec<u64>,
     spool_directory: PathBuf,
     pub(super) payload_directory: PathBuf,
     pub(super) received_payload: Option<Arc<checkpoint_file::Blob>>,
@@ -315,6 +316,7 @@ impl Default for Stream {
 impl Stream {
     pub(super) fn new(spool_directory: PathBuf) -> Self {
         Self {
+            permitted: Vec::new(),
             payload_directory: spool_directory.join("file-payloads"),
             received_payload: None,
             spool_directory,
@@ -612,7 +614,7 @@ impl Stream {
         {
             return Err(invalid("checkpoint transfer message mismatch"));
         }
-        validate_snapshot(message.get_snapshot(), voters)?;
+        validate_snapshot_for(message.get_snapshot(), voters, &self.permitted)?;
         self.received_payload = payload;
         self.completed = Some(part.identity());
         self.ack = Some(part.acknowledgment(part.total));

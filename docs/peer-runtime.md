@@ -19,7 +19,8 @@ Supply a fresh application, or an explicitly idempotent applier. An application 
 and recover before serving. Keep the WAL file intact for the life of the group.
 
 The initial voter set, group, and node identity are recorded and checked during
-recovery. Membership is fixed. Transport threads, authentication, and graceful
+recovery. `open` keeps membership fixed; the opt-in API below supports changes.
+Transport threads, authentication, and graceful
 worker lifecycle integration remain required before
 production use. The WAL is bounded to 512 MiB,
 individual frames to 8 MiB, and proposals to 4 MiB. Reaching the WAL bound stops
@@ -73,7 +74,7 @@ compaction remains necessary for a long-running write workload.
 
 After processing all Ready work, call `checkpoint` on the exclusive application
 worker with a binary snapshot of the exact applied state. The runtime records its
-applied index, term and immutable voter set; it retains any persisted uncommitted
+applied index, term and committed configuration; it retains any persisted uncommitted
 suffix without applying it. A synced replacement WAL is published by atomic rename
 and its directory is synced. The stable `.runtime.lock` sidecar remains locked
 across inode replacement. Do not remove the WAL or lock sidecar; missing or empty
@@ -263,3 +264,59 @@ Keep the old process fenced and preserve its remaining files. The fixed-membersh
 runtime does not provide a new-identity replacement or membership-change workflow.
 Rejecting an inconsistent heartbeat prevents a core panic; it does not reconstruct
 lost votes or make identity reuse safe.
+
+
+## Opt-in durable membership
+
+New groups may use `DurablePeer::open_with_membership(options, permitted)`.
+Supply the same sorted inventory of at most 64 nonzero unique IDs to every peer,
+including all bootstrap voters and future learners. Bootstrap groups have one to
+seven voters. The inventory, bootstrap voters, group and local ID are bound into
+every binary protobuf WAL record. Keep these options unchanged on every reopen.
+This API does not migrate an existing fixed-membership WAL. Fixed-mode readers,
+older runtimes and a changed inventory refuse membership-enabled history.
+
+Before ticking, campaigning or delivering packets to any newly opened instance,
+call the appropriate `process_ready` variant successfully. This restores its
+checkpoint and replays committed configuration entries before it can vote.
+`membership()` reports the last applied configuration; inspect it only after this
+initial recovery. Configuration entries are applied internally and do not reach
+the application's normal-entry callback.
+
+Applications must authenticate and route packets for the whole permitted
+inventory. An inventory entry is permission to join, not a vote. A fresh identity
+outside the bootstrap voter set cannot campaign until promoted. Serialize all
+operations on the application worker and use this replacement sequence:
+
+1. Fence the failed process and preserve its durable files. Start the replacement
+   with a distinct permitted ID and new storage, then drain its initial recovery.
+2. The leader proposes `MembershipChange::AddLearner(id)`. Wait for the returned
+   position to apply; proposal acceptance alone does not acknowledge commitment.
+3. If `membership_checkpoint_needed()` is true, publish a fresh application
+   checkpoint at the current applied position. A compacted image predating the
+   learner cannot seed that learner. A staged capture retains its capture-time
+   configuration and can therefore still require a newer checkpoint.
+4. Transport packets until the learner catches up. `Promote(id)` refuses a
+   learner whose matched position is below the leader's commit. Promotion enters
+   explicit joint consensus; both old and new majorities must acknowledge writes.
+5. After the joint entry applies, propose `LeaveJoint` and wait for it to apply.
+   Remove the old voter with `Remove(old_id)`, wait for that joint entry to apply,
+   then commit another `LeaveJoint`. Removing a learner needs no joint phase.
+
+Only one configuration proposal may be pending. While joint, only `LeaveJoint`
+is admitted. The last voter cannot be removed, and promotion beyond seven voters
+is refused. A leader removed from both voter sets steps down and refuses writes
+and campaigns. Every applied configuration invalidates outstanding read tokens;
+start a fresh quorum-confirmed read under the new membership.
+
+Checkpoint metadata preserves both voter sets and learners. Recovery applies
+retained configuration entries in order, including after an older staged capture.
+Tests exercise both-majority partitions, learner catch-up, leader removal,
+restart during joint consensus, every complete WAL record prefix, and checkpoint
+history across configuration changes. Run them in WSL with
+`cargo test --locked --features peer-runtime --test peer_membership`.
+
+This library API does not implement endpoint discovery, an administrative network
+API, application catalog changes or automatic replacement. Applications must wire
+those operations before offering membership changes to operators. Losing a
+voter's durable state never makes reuse of its old identity safe.
