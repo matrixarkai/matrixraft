@@ -689,8 +689,16 @@ impl Journal {
             self.write_record(&prefix)?;
         }
         for (start, end, _) in spans {
-            envelope.entries = record.entries[start..end].to_vec();
-            self.write_record(&envelope)?;
+            let entries = &mut record.entries[start..end];
+            envelope
+                .entries
+                .extend(entries.iter_mut().map(std::mem::take));
+            let result = self.write_record(&envelope);
+            // Installation still needs the complete batch, including on write failure.
+            for (entry, encoded) in entries.iter_mut().zip(envelope.entries.drain(..)) {
+                *entry = encoded;
+            }
+            result?;
         }
         if !final_state.hard_state.is_empty() {
             self.write_record(&final_state)?;
@@ -1864,6 +1872,61 @@ mod tests {
             })
             .unwrap();
         assert_eq!(applied, vec![entries[0].data.clone()]);
+    }
+
+    #[test]
+    fn split_writes_restore_entry_buffers_after_success_and_io_failure() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for fail_write in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let mut peer = DurablePeer::open(config.clone()).unwrap();
+            let entries: Vec<_> = (1..=9)
+                .map(|index| Entry {
+                    term: 1,
+                    index,
+                    data: vec![index as u8; 1024 * 1024],
+                    ..Default::default()
+                })
+                .collect();
+            // No hard-state prefix: a read-only file fails inside the entry chunk.
+            let mut record = batch(&config, None, &entries);
+            let pointers: Vec<_> = record.entries.iter().map(|e| e.as_ptr()).collect();
+            let expected = record.entries.clone();
+            let before = std::fs::read(&config.wal_path).unwrap();
+            if fail_write {
+                peer.journal.file = File::open(&config.wal_path).unwrap();
+            }
+            let result = peer.journal.append_ready(&mut record, &HardState::default());
+            assert_eq!(result.is_err(), fail_write);
+            assert_eq!(record.entries, expected);
+            assert_eq!(
+                record.entries.iter().map(|e| e.as_ptr()).collect::<Vec<_>>(),
+                pointers
+            );
+            let bytes = std::fs::read(&config.wal_path).unwrap();
+            if fail_write {
+                assert_eq!(bytes, before);
+            } else {
+                let mut offset = before.len();
+                let mut decoded_entries = Vec::new();
+                let mut chunks = 0;
+                while offset < bytes.len() {
+                    let size =
+                        u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+                    assert!(size <= LIMIT);
+                    let payload = &bytes[offset + 24..offset + 24 + size];
+                    let decoded = WalBatch::decode(payload).unwrap();
+                    assert_eq!(decoded.encode_to_vec(), payload);
+                    assert_eq!(decoded.permitted, peer.journal.permitted);
+                    decoded_entries.extend(decoded.entries);
+                    offset += 24 + size;
+                    chunks += 1;
+                }
+                assert!(chunks > 1);
+                assert_eq!(decoded_entries, expected);
+            }
+        }
     }
 
     #[test]
