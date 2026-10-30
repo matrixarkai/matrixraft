@@ -4,7 +4,8 @@
 //!
 //! This API does not simulate remote peers. Call `process_ready` after each input,
 //! deliver its packets to their destinations, and supply a fresh application on
-//! restart: committed entries replay from the beginning. Membership is fixed;
+//! restart: committed entries replay from the beginning or a checkpoint. Membership
+//! changes require the opt-in API and initial recovery before peer inputs;
 //! checkpoints require an application restore callback during recovery and transfer.
 use crate::{LogId, RaftError};
 use prost::Message as ProstMessage;
@@ -25,8 +26,11 @@ use std::{
 
 #[path = "peer_checkpoint_file.rs"]
 mod checkpoint_file;
+#[path = "peer_membership.rs"]
+mod membership;
 #[path = "peer_snapshot_stream.rs"]
 mod snapshot_stream;
+pub use membership::{MembershipChange, MembershipState};
 
 const LIMIT: usize = 8 * 1024 * 1024;
 /// Maximum application checkpoint size. Transfers and WAL records are segmented.
@@ -39,7 +43,7 @@ const SNAPSHOT_FRAGMENT_BYTES: usize = 1024 * 1024;
 const WAL_LIMIT: u64 = 512 * 1024 * 1024;
 const MAGIC: &[u8; 4] = b"MRPW";
 
-/// Static identity and voter set. The WAL refuses a different identity on reopen.
+/// Static identity and bootstrap voters. These options must match on every reopen.
 #[derive(Clone, Debug)]
 pub struct PeerOptions {
     pub group_id: u64,
@@ -87,6 +91,8 @@ struct WalBatch {
     snapshot_digest: u64,
     #[prost(bytes = "vec", tag = "11")]
     payload_manifest: Vec<u8>,
+    #[prost(uint64, repeated, packed = "true", tag = "12")]
+    permitted: Vec<u64>,
 }
 fn invalid(s: impl ToString) -> RaftError {
     RaftError::InvalidRequest(s.to_string())
@@ -112,10 +118,12 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         snapshot_total: 0,
         snapshot_digest: 0,
         payload_manifest: Vec::new(),
+        permitted: Vec::new(),
     }
 }
 #[derive(Clone)]
 struct PeerStorage {
+    permitted: Vec<u64>,
     memory: MemStorage,
     checkpoint: Arc<Mutex<Option<Snapshot>>>,
     payload_directory: PathBuf,
@@ -161,7 +169,11 @@ impl Storage for PeerStorage {
             ))
     }
 }
-fn validate_snapshot(snapshot: &Snapshot, voters: &[u64]) -> Result<(), RaftError> {
+fn validate_snapshot_for(
+    snapshot: &Snapshot,
+    voters: &[u64],
+    permitted: &[u64],
+) -> Result<(), RaftError> {
     let meta = snapshot.get_metadata();
     let expected = ConfState {
         voters: voters.to_vec(),
@@ -171,11 +183,14 @@ fn validate_snapshot(snapshot: &Snapshot, voters: &[u64]) -> Result<(), RaftErro
         || meta.index == u64::MAX
         || meta.term == 0
         || meta.term == u64::MAX
-        || meta.get_conf_state() != &expected
+        || (permitted.is_empty() && meta.get_conf_state() != &expected)
         || snapshot.data.len() > MAX_CHECKPOINT_BYTES
         || snapshot.encoded_len() > SNAPSHOT_ENCODED_LIMIT - 1024
     {
         return Err(invalid("invalid peer snapshot identity, position or size"));
+    }
+    if !permitted.is_empty() {
+        membership::validate_conf(meta.get_conf_state(), permitted)?;
     }
     Ok(())
 }
@@ -226,11 +241,11 @@ fn install_from(
         .iter()
         .map(|b| Entry::decode(b.as_slice()).map_err(storage_error))
         .collect::<Result<Vec<_>, _>>()?;
-    if entries
+    for entry in entries
         .iter()
-        .any(|e| e.entry_type != EntryType::EntryNormal as i32)
+        .filter(|e| e.entry_type != EntryType::EntryNormal as i32)
     {
-        return Err(storage_error("peer WAL contains a membership change"));
+        membership::decode_change(entry, &store.permitted).map_err(storage_error)?;
     }
     let hs = if batch.hard_state.is_empty() {
         None
@@ -272,7 +287,7 @@ fn install_from(
         } else {
             None
         };
-        validate_snapshot(&snapshot, &batch.voters)?;
+        validate_snapshot_for(&snapshot, &batch.voters, &store.permitted)?;
         let meta = snapshot.get_metadata();
         let next = hs
             .as_ref()
@@ -335,7 +350,13 @@ fn install_from(
         || next.commit < previous.commit
         || next.commit > next_last
         || (next.term == previous.term && previous.vote != 0 && next.vote != previous.vote)
-        || (next.vote != 0 && !batch.voters.contains(&next.vote))
+        || (next.vote != 0
+            && !if store.permitted.is_empty() {
+                &batch.voters
+            } else {
+                &store.permitted
+            }
+            .contains(&next.vote))
         || entries.iter().any(|e| e.term == 0 || e.term > next.term)
     {
         return Err(storage_error("peer WAL hard state is invalid"));
@@ -348,6 +369,7 @@ fn install_from(
     Ok(())
 }
 struct Journal {
+    permitted: Vec<u64>,
     file: File,
     _lock: Arc<File>,
     length: u64,
@@ -430,6 +452,7 @@ impl Journal {
                 || record.group != options.group_id
                 || record.node != options.node_id
                 || record.voters != options.voters
+                || record.permitted != store.permitted
                 || record.encode_to_vec() != bytes
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
@@ -463,6 +486,7 @@ impl Journal {
         .and_then(|f| f.sync_all())
         .map_err(storage_error)?;
         let mut journal = Self {
+            permitted: store.permitted.clone(),
             file,
             _lock: Arc::new(lock),
             length: offset,
@@ -491,6 +515,7 @@ impl Journal {
         fs2::FileExt::try_lock_exclusive(&file).map_err(storage_error)?;
         file.set_len(0).map_err(storage_error)?;
         let mut replacement = Journal {
+            permitted: self.permitted.clone(),
             file,
             length: 0,
             _lock: Arc::clone(&self._lock),
@@ -566,6 +591,14 @@ impl Journal {
     // entries in order, and the commit watermark last, then sync once before
     // the runtime exposes any acknowledgment. Every complete prefix reopens.
     fn append_ready(&mut self, record: &WalBatch, previous: &HardState) -> Result<(), RaftError> {
+        let normalized = if record.permitted == self.permitted {
+            std::borrow::Cow::Borrowed(record)
+        } else {
+            let mut value = record.clone();
+            value.permitted = self.permitted.clone();
+            std::borrow::Cow::Owned(value)
+        };
+        let record = normalized.as_ref();
         if record.encoded_len() <= LIMIT {
             return self.append(record);
         }
@@ -580,6 +613,7 @@ impl Journal {
             group: record.group,
             node: record.node,
             voters: record.voters.clone(),
+            permitted: self.permitted.clone(),
             ..Default::default()
         };
         let overhead = envelope.encoded_len();
@@ -648,6 +682,14 @@ impl Journal {
     }
     // Only rewrite may defer durability until the entire replacement is written.
     fn write_record(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
+        let normalized = if batch.permitted == self.permitted {
+            std::borrow::Cow::Borrowed(batch)
+        } else {
+            let mut value = batch.clone();
+            value.permitted = self.permitted.clone();
+            std::borrow::Cow::Owned(value)
+        };
+        let batch = normalized.as_ref();
         let size = batch.encoded_len();
         if size > LIMIT {
             return Err(storage_error("peer WAL record exceeds size bound"));
@@ -694,6 +736,7 @@ impl PendingRead {
 /// an immutable application snapshot taken at `position()`. Holding it prevents
 /// another runtime from opening and cleaning up the same storage directory.
 pub struct CheckpointCapture {
+    configuration: ConfState,
     position: LogId,
     directory: PathBuf,
     lock: Arc<File>,
@@ -728,6 +771,7 @@ impl PreparedCheckpoint {
 }
 /// One actual Raft peer. Remote votes and append acknowledgments enter only via `step`.
 pub struct DurablePeer {
+    recovering_membership: bool,
     options: PeerOptions,
     raw: RawNode<PeerStorage>,
     store: PeerStorage,
@@ -747,18 +791,24 @@ impl Drop for DurablePeer {
     }
 }
 impl DurablePeer {
-    pub fn open(mut options: PeerOptions) -> Result<Self, RaftError> {
+    pub fn open(options: PeerOptions) -> Result<Self, RaftError> {
+        Self::open_inner(options, Vec::new())
+    }
+    fn open_inner(mut options: PeerOptions, permitted: Vec<u64>) -> Result<Self, RaftError> {
         let unique: BTreeSet<_> = options.voters.iter().copied().collect();
         if options.group_id == 0
             || options.node_id == 0
             || unique.contains(&0)
             || unique.len() != options.voters.len()
-            || !unique.contains(&options.node_id)
+            || unique.is_empty()
+            || (!permitted.is_empty() && unique.len() > 7)
+            || (permitted.is_empty() && !unique.contains(&options.node_id))
         {
             return Err(invalid("invalid peer identity or voter set"));
         }
         options.voters = unique.into_iter().collect();
         let store = PeerStorage {
+            permitted,
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             checkpoint: Arc::new(Mutex::new(None)),
             payload_directory: checkpoint_file::directory(&options.wal_path),
@@ -792,7 +842,9 @@ impl DurablePeer {
                 .to_path_buf(),
         );
         stream.payload_directory = store.payload_directory.clone();
+        stream.permitted = store.permitted.clone();
         Ok(Self {
+            recovering_membership: !store.permitted.is_empty(),
             options,
             raw,
             store,
@@ -805,6 +857,14 @@ impl DurablePeer {
             stream,
             incoming_payload: None,
         })
+    }
+    fn membership_recovered(&self) -> Result<(), RaftError> {
+        if self.recovering_membership {
+            return Err(invalid(
+                "process ready must recover membership before peer input",
+            ));
+        }
+        Ok(())
     }
     fn healthy(&self) -> Result<(), RaftError> {
         if self.failed {
@@ -840,6 +900,7 @@ impl DurablePeer {
     }
     pub fn tick(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
+        self.membership_recovered()?;
         self.raw.tick();
         if !self.is_leader() {
             self.snapshot_flights.clear();
@@ -872,6 +933,10 @@ impl DurablePeer {
     }
     pub fn campaign(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
+        self.membership_recovered()?;
+        if !self.raw.raft.promotable() {
+            return Err(invalid("local peer is not a committed voter"));
+        }
         self.raw.campaign().map_err(invalid)
     }
     /// Acceptance allocates a log position; it does not mean the proposal committed.
@@ -917,6 +982,11 @@ impl DurablePeer {
         }
         let index = self.applied_index();
         Ok(CheckpointCapture {
+            configuration: self
+                .store
+                .initial_state()
+                .map_err(storage_error)?
+                .conf_state,
             position: LogId {
                 index,
                 term: self.store.term(index).map_err(storage_error)?,
@@ -945,7 +1015,12 @@ impl DurablePeer {
                 "checkpoint position no longer matches applied history",
             ));
         }
-        self.checkpoint_payload_at(Vec::new(), Some(Arc::clone(&prepared.payload)), id.index)?;
+        self.checkpoint_payload_at(
+            Vec::new(),
+            Some(Arc::clone(&prepared.payload)),
+            id.index,
+            Some(prepared.ticket.configuration.clone()),
+        )?;
         Ok(true)
     }
     /// Capture a complete payload through a bounded buffer. The reader must end at length.
@@ -965,13 +1040,14 @@ impl DurablePeer {
         data: Vec<u8>,
         payload: Option<Arc<checkpoint_file::Blob>>,
     ) -> Result<(), RaftError> {
-        self.checkpoint_payload_at(data, payload, self.applied_index())
+        self.checkpoint_payload_at(data, payload, self.applied_index(), None)
     }
     fn checkpoint_payload_at(
         &mut self,
         data: Vec<u8>,
         payload: Option<Arc<checkpoint_file::Blob>>,
         index: u64,
+        configuration: Option<ConfState>,
     ) -> Result<(), RaftError> {
         self.healthy()?;
         if data.len() > MAX_CHECKPOINT_BYTES
@@ -989,13 +1065,17 @@ impl DurablePeer {
             metadata: Some(SnapshotMetadata {
                 index,
                 term: self.store.term(index).map_err(storage_error)?,
-                conf_state: Some(ConfState {
-                    voters: self.options.voters.clone(),
-                    ..Default::default()
-                }),
+                conf_state: Some(
+                    configuration.unwrap_or(
+                        self.store
+                            .initial_state()
+                            .map_err(storage_error)?
+                            .conf_state,
+                    ),
+                ),
             }),
         };
-        validate_snapshot(&snapshot, &self.options.voters)?;
+        validate_snapshot_for(&snapshot, &self.options.voters, &self.store.permitted)?;
         let first = self.store.first_index().map_err(storage_error)?;
         if index < first {
             return Err(invalid("applied state is already checkpointed"));
@@ -1015,6 +1095,11 @@ impl DurablePeer {
             .initial_state()
             .map_err(storage_error)?
             .hard_state;
+        let current_configuration = self
+            .store
+            .initial_state()
+            .map_err(storage_error)?
+            .conf_state;
         let result = self
             .journal
             .rewrite(&self.options, &snapshot, &hs, &suffix, payload.as_deref())
@@ -1026,7 +1111,9 @@ impl DurablePeer {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
                 }
-                install_local(&self.store, &record, payload.clone())
+                install_local(&self.store, &record, payload.clone())?;
+                self.store.wl().set_conf_state(current_configuration);
+                Ok(())
             });
         if result.is_err() {
             self.failed = true;
@@ -1091,6 +1178,7 @@ impl DurablePeer {
     }
     pub fn step(&mut self, bytes: &[u8]) -> Result<(), RaftError> {
         self.healthy()?;
+        self.membership_recovered()?;
         if bytes.len() > LIMIT {
             return Err(invalid("peer packet exceeds size limit"));
         }
@@ -1107,7 +1195,11 @@ impl DurablePeer {
             if part.file_backed != (packet.version == 3) {
                 return Err(invalid("checkpoint transfer format mismatch"));
             }
-            part.validate(&self.options, self.term())?;
+            let mut routing = self.options.clone();
+            if !self.store.permitted.is_empty() {
+                routing.voters = self.store.permitted.clone();
+            }
+            part.validate(&routing, self.term())?;
             if part.encode_to_vec() != packet.message {
                 return Err(invalid("noncanonical checkpoint fragment"));
             }
@@ -1179,20 +1271,19 @@ impl DurablePeer {
         }
         if message.to != self.options.node_id
             || message.from == self.options.node_id
-            || !self.options.voters.contains(&message.from)
+            || !if self.store.permitted.is_empty() {
+                &self.options.voters
+            } else {
+                &self.store.permitted
+            }
+            .contains(&message.from)
             || raft_core::raw_node::is_local_msg(kind)
             || matches!(
                 kind,
                 MessageType::MsgPropose | MessageType::MsgTransferLeader
             )
-            || message
-                .entries
-                .iter()
-                .any(|e| e.entry_type != EntryType::EntryNormal as i32)
         {
-            return Err(invalid(
-                "peer packet is not valid for this fixed-membership runtime",
-            ));
+            return Err(invalid("peer packet is not valid for this runtime"));
         }
         if (message.snapshot.is_some() && kind != MessageType::MsgSnapshot)
             || (kind != MessageType::MsgAppend && !message.entries.is_empty())
@@ -1204,7 +1295,7 @@ impl DurablePeer {
                 .snapshot
                 .as_ref()
                 .ok_or_else(|| invalid("missing peer snapshot"))?;
-            validate_snapshot(snapshot, &self.options.voters)?;
+            validate_snapshot_for(snapshot, &self.options.voters, &self.store.permitted)?;
             if snapshot.get_metadata().term > message.term {
                 return Err(invalid("snapshot term exceeds sender term"));
             }
@@ -1215,6 +1306,26 @@ impl DurablePeer {
         if kind == MessageType::MsgHeartbeat && message.commit > self.raw.raft.raft_log.last_index()
         {
             return Err(invalid("heartbeat commit exceeds local log"));
+        }
+        for entry in message
+            .entries
+            .iter()
+            .filter(|e| e.entry_type != EntryType::EntryNormal as i32)
+        {
+            membership::decode_change(entry, &self.store.permitted)?;
+        }
+        if !self.store.permitted.is_empty()
+            && matches!(
+                kind,
+                MessageType::MsgRequestVote | MessageType::MsgRequestPreVote
+            )
+        {
+            let state = self.membership();
+            if !state.voters.contains(&message.from)
+                && !state.outgoing_voters.contains(&message.from)
+            {
+                return Err(invalid("vote request sender is not a committed voter"));
+            }
         }
         let mut index = message.index;
         let mut term = message.log_term;
@@ -1370,6 +1481,8 @@ impl DurablePeer {
         })();
         if result.is_err() {
             self.failed = true;
+        } else {
+            self.recovering_membership = false;
         }
         result
     }
@@ -1416,7 +1529,7 @@ impl DurablePeer {
             }
             if !ready.snapshot().is_empty() {
                 let snapshot = ready.snapshot().clone();
-                validate_snapshot(&snapshot, &self.options.voters)?;
+                validate_snapshot_for(&snapshot, &self.options.voters, &self.store.permitted)?;
                 let hs = ready
                     .hs()
                     .cloned()
@@ -1462,13 +1575,7 @@ impl DurablePeer {
             output.extend(self.packets(ready.take_messages())?);
             output.extend(self.packets(ready.take_persisted_messages())?);
             for entry in ready.take_committed_entries() {
-                apply(
-                    LogId {
-                        term: entry.term,
-                        index: entry.index,
-                    },
-                    &entry.data,
-                )?;
+                self.apply_committed(entry, apply)?;
             }
             let mut light = self.raw.advance(ready);
             if let Some(commit) = light.commit_index() {
@@ -1484,13 +1591,7 @@ impl DurablePeer {
             }
             output.extend(self.packets(light.take_messages())?);
             for entry in light.take_committed_entries() {
-                apply(
-                    LogId {
-                        term: entry.term,
-                        index: entry.index,
-                    },
-                    &entry.data,
-                )?;
+                self.apply_committed(entry, apply)?;
             }
             self.raw.advance_apply();
         }
