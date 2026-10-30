@@ -138,9 +138,9 @@ fn drive(
                 .unwrap();
             let allocated = ALLOCATED.load(std::sync::atomic::Ordering::Relaxed) - before;
             if version == 3 && packet.bytes.len() >= 1024 * 1024 {
-                // Include decoder growth, but reject a separate payload-sized
-                // allocation for duplicate comparison.
-                assert!(allocated < 3 * packet.bytes.len() + 8192,
+                // Envelope and fragment each own one decoded buffer. Reject
+                // extra payload copies or a separate duplicate-read allocation.
+                assert!(allocated < 2 * packet.bytes.len() + 8192,
                     "duplicate packet of {} bytes allocated {allocated}", packet.bytes.len());
             }
         }

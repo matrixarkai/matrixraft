@@ -92,14 +92,21 @@ pub(super) struct Fragment {
     checksum: u64,
     #[prost(uint64, tag = "7")]
     offset: u64,
-    #[prost(bytes = "vec", tag = "8")]
-    data: Vec<u8>,
+    #[prost(bytes = "bytes", tag = "8")]
+    data: prost::bytes::Bytes,
     #[prost(bool, tag = "9")]
     pub ack: bool,
     #[prost(bool, tag = "10")]
     pub file_backed: bool,
 }
 impl Fragment {
+    #[cfg(test)]
+    fn corrupt_byte(&mut self, index: usize) {
+        let mut data = self.data.to_vec();
+        data[index] ^= 1;
+        self.data = data.into();
+    }
+
     pub(super) fn validate(&self, options: &PeerOptions, term: u64) -> Result<(), RaftError> {
         if self.to != options.node_id
             || self.from == self.to
@@ -161,7 +168,7 @@ impl Fragment {
             checksum: self.checksum,
             ack: self.ack,
             file_backed: self.file_backed,
-            data: Vec::new(),
+            data: Default::default(),
             offset: 0,
         }
     }
@@ -371,7 +378,7 @@ impl Stream {
                 total: bytes.len() as u64,
                 checksum: digest(&bytes),
                 offset: 0,
-                data: Vec::new(),
+                data: Default::default(),
                 ack: false,
                 file_backed: false,
             },
@@ -418,7 +425,7 @@ impl Stream {
                 total: source.len() as u64,
                 checksum: payload.manifest.checksum,
                 offset: 0,
-                data: Vec::new(),
+                data: Default::default(),
                 ack: false,
                 file_backed: true,
             },
@@ -649,7 +656,7 @@ impl Stream {
                     offset: sending.offset as u64,
                     data: sending
                         .bytes
-                        .fragment(sending.offset, end - sending.offset)?,
+                        .fragment(sending.offset, end - sending.offset)?.into(),
                     ..sending.identity.clone()
                 });
                 sending.ready = false;
@@ -716,7 +723,7 @@ mod tests {
                         total: 2 * SNAPSHOT_FRAGMENT_BYTES as u64,
                         checksum: u64::MAX,
                         offset: SNAPSHOT_FRAGMENT_BYTES as u64,
-                        data: vec![13; length],
+                        data: vec![13; length].into(),
                         ack: false,
                         file_backed,
                     };
@@ -766,7 +773,7 @@ mod tests {
                 4 => bad.total = SNAPSHOT_ENCODED_LIMIT as u64 + 1,
                 5 => bad.offset = 1,
                 6 => {
-                    bad.data.pop();
+                    bad.data.truncate(bad.data.len() - 1);
                 }
                 7 => bad.index = 0,
                 8 => bad.ack = true,
@@ -793,7 +800,7 @@ mod tests {
             SNAPSHOT_FRAGMENT_BYTES as u64
         );
         let mut corrupt = first.clone();
-        corrupt.data[0] ^= 1;
+        corrupt.corrupt_byte(0);
         assert!(receiver.receive(corrupt, &[1, 2, 3]).is_err());
         let mut conflicting = first.clone();
         conflicting.from = 3;
@@ -804,12 +811,12 @@ mod tests {
             let end = (offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
             let mut part = Fragment {
                 offset: offset as u64,
-                data: sending.bytes.fragment(offset, end - offset).unwrap(),
+                data: sending.bytes.fragment(offset, end - offset).unwrap().into(),
                 ..first.identity()
             };
             let last = end == sending.bytes.len();
             if last {
-                part.data[0] ^= 1;
+                part.corrupt_byte(0);
             }
             let result = receiver.receive(part, &[1, 2, 3]);
             if last {
@@ -897,7 +904,7 @@ mod tests {
             total: 64 * SNAPSHOT_FRAGMENT_BYTES as u64,
             checksum: 42,
             offset: 0,
-            data: vec![13; SNAPSHOT_FRAGMENT_BYTES],
+            data: vec![13; SNAPSHOT_FRAGMENT_BYTES].into(),
             ack: false,
             file_backed: false,
         };
@@ -936,7 +943,7 @@ mod tests {
             first.file_backed = file_backed;
             let mut second = first.clone();
             second.offset = SNAPSHOT_FRAGMENT_BYTES as u64;
-            second.data.fill(29);
+            second.data = vec![29; second.data.len()].into();
             let mut receiver = Stream::new(directory.path().to_path_buf());
             let mut scratch = second.encode_to_vec();
             let allocation = scratch.as_ptr();
@@ -958,7 +965,7 @@ mod tests {
                 }
             }
             let mut conflicting = second.clone();
-            *conflicting.data.last_mut().unwrap() ^= 1;
+            conflicting.corrupt_byte(conflicting.data.len() - 1);
             assert!(receiver.receive_with_scratch(conflicting, &[1, 2, 3], &mut scratch).is_err());
             assert!(receiver.ack.is_none());
             assert_eq!(receiver.receiving.as_ref().unwrap().length, 2 * SNAPSHOT_FRAGMENT_BYTES as u64);
@@ -1028,7 +1035,7 @@ mod tests {
             let end = (offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
             let part = Fragment {
                 offset: offset as u64,
-                data: sending.bytes.fragment(offset, end - offset).unwrap(),
+                data: sending.bytes.fragment(offset, end - offset).unwrap().into(),
                 ..first.identity()
             };
             let result = receiver.receive(part, &[1, 2, 3]);
@@ -1305,7 +1312,7 @@ mod file_tests {
             assert_eq!(packet.version, 3);
             let mut part = Fragment::decode(packet.message.as_ref()).unwrap();
             if part.offset > 0 {
-                part.data[0] ^= 1;
+                part.corrupt_byte(0);
             }
             let mut result = receiver.receive(part, &[1, 2, 3]);
             if receiver.finishing.is_some() {

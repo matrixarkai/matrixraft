@@ -205,6 +205,12 @@ peer messages and both checkpoint formats; canonical encoding checks and public
 packet types are unchanged. Tests verify allocation identity through the move and
 bound duplicate-fragment allocation volume in the full receive path.
 
+Checkpoint fragment payloads also decode into owned byte buffers, avoiding a
+second copy inside the fragment decoder. Together with envelope-buffer reuse,
+the duplicate receive path is bounded by two payload-sized allocations plus
+bookkeeping. The file-transfer tests enforce this bound for 1 MiB fragments while
+exercising packet loss, duplicates, suffix recovery, and full restart.
+
 Each peer retains at most one outgoing and one incoming large transfer. Other
 lagging voters remain on the consensus retry path until the outgoing slot is free.
 A sender advances one fragment per acknowledgment and retries after ten local
