@@ -249,3 +249,17 @@ Final WAL replacement and sync remain synchronous and their cost grows with the
 retained log. Snapshot export, serialization, validation and restore may also block
 unless the application explicitly schedules them off its consensus loop. The API
 alone does not change an application's threading or latency guarantees.
+
+## Heartbeat commit bounds
+
+Heartbeat packets cannot advance commit beyond the receiving peer's local log.
+The boundary includes entries already received and awaiting persistence. A packet
+with a larger commit position is rejected before entering the consensus core,
+changing term, or writing durable state. A later valid packet can still proceed.
+
+Raft requires durable term, vote and log state for each voter identity. Losing a
+voter's storage does not authorize starting an empty voter under the same ID.
+Keep the old process fenced and preserve its remaining files. The fixed-membership
+runtime does not provide a new-identity replacement or membership-change workflow.
+Rejecting an inconsistent heartbeat prevents a core panic; it does not reconstruct
+lost votes or make identity reuse safe.

@@ -1209,6 +1209,14 @@ impl DurablePeer {
                 return Err(invalid("snapshot term exceeds sender term"));
             }
         }
+        // Heartbeats carry no entries. A valid leader caps their commit at this
+        // voter's acknowledged log position. The core assumes that invariant.
+        // Include unstable entries received before process_ready persists them.
+        if kind == MessageType::MsgHeartbeat
+            && message.commit > self.raw.raft.raft_log.last_index()
+        {
+            return Err(invalid("heartbeat commit exceeds local log"));
+        }
         let mut index = message.index;
         let mut term = message.log_term;
         for entry in &message.entries {
@@ -1621,6 +1629,58 @@ mod tests {
         assert_eq!(std::fs::read(&config.wal_path).unwrap(), before);
         drop(peer);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn heartbeat_commit_cannot_exceed_the_local_log() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let config = PeerOptions {
+            group_id: 1, node_id: 2, voters: vec![1, 2, 3],
+            wal_path: root.path().join("peer.wal"),
+        };
+        let packet = |message: Message| Packet {
+            version: 1, group: 1, message: message.encode_to_vec(),
+        }.encode_to_vec();
+        let heartbeat = |term, commit| packet(Message {
+            from: 1, to: 2, term, commit,
+            msg_type: MessageType::MsgHeartbeat as i32,
+            ..Default::default()
+        });
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        let before = std::fs::read(&config.wal_path).unwrap();
+        assert!(peer.step(&heartbeat(2, 1)).is_err());
+        assert_eq!(peer.term(), 0);
+        assert_eq!(peer.commit_index(), 0);
+        assert_eq!(std::fs::read(&config.wal_path).unwrap(), before);
+
+        peer.step(&packet(Message {
+            from: 1, to: 2, term: 2,
+            msg_type: MessageType::MsgAppend as i32,
+            entries: vec![Entry { term: 2, index: 1, data: vec![17], ..Default::default() }],
+            ..Default::default()
+        })).unwrap();
+        // The appended entry is still unstable; a matching heartbeat is valid.
+        peer.step(&heartbeat(2, 1)).unwrap();
+        let mut applied = Vec::new();
+        peer.process_ready(|id, bytes| { applied.push((id.index, bytes.to_vec())); Ok(()) }).unwrap();
+        assert_eq!(applied, vec![(1, vec![17])]);
+        let before = std::fs::read(&config.wal_path).unwrap();
+        for commit in [2, u64::MAX] {
+            assert!(peer.step(&heartbeat(3, commit)).is_err());
+            assert_eq!(peer.term(), 2);
+            assert_eq!(peer.commit_index(), 1);
+            assert_eq!(std::fs::read(&config.wal_path).unwrap(), before);
+        }
+        peer.tick().unwrap();
+        drop(peer);
+        let mut peer = DurablePeer::open(config).unwrap();
+        let mut replayed = Vec::new();
+        peer.process_ready(|id, bytes| { replayed.push((id.index, bytes.to_vec())); Ok(()) }).unwrap();
+        assert_eq!(replayed, applied);
+        assert!(peer.step(&heartbeat(3, 2)).is_err());
+        peer.step(&heartbeat(2, 1)).unwrap();
+        peer.process_ready(|_, _| panic!("heartbeat replayed an applied entry")).unwrap();
     }
 
     #[test]
