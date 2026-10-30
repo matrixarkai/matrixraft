@@ -1210,16 +1210,18 @@ impl DurablePeer {
         if bytes.len() > LIMIT {
             return Err(invalid("peer packet exceeds size limit"));
         }
-        let packet = Packet::decode(bytes).map_err(invalid)?;
+        let mut packet = Packet::decode(bytes).map_err(invalid)?;
         if !matches!(packet.version, 1..=3)
             || packet.group != self.options.group_id
             || packet.encode_to_vec() != bytes
         {
             return Err(invalid("peer packet identity or encoding mismatch"));
         }
+        // Canonical envelopes put the message last. Keep the original bytes while
+        // reusing the decoded message allocation for canonical validation below.
+        let original_message = &bytes[bytes.len() - packet.message.len()..];
         if packet.version == 2 || packet.version == 3 {
-            let part =
-                snapshot_stream::Fragment::decode(packet.message.as_slice()).map_err(invalid)?;
+            let part = snapshot_stream::Fragment::decode(original_message).map_err(invalid)?;
             if part.file_backed != (packet.version == 3) {
                 return Err(invalid("checkpoint transfer format mismatch"));
             }
@@ -1228,7 +1230,9 @@ impl DurablePeer {
                 routing.voters = self.store.permitted.clone();
             }
             part.validate(&routing, self.term())?;
-            if part.encode_to_vec() != packet.message {
+            packet.message.clear();
+            part.encode(&mut packet.message).map_err(invalid)?;
+            if packet.message != original_message {
                 return Err(invalid("noncanonical checkpoint fragment"));
             }
             if part.ack {
@@ -1259,8 +1263,10 @@ impl DurablePeer {
             }
             return Ok(());
         }
-        let message = Message::decode(packet.message.as_slice()).map_err(invalid)?;
-        if message.encode_to_vec() != packet.message {
+        let message = Message::decode(original_message).map_err(invalid)?;
+        packet.message.clear();
+        message.encode(&mut packet.message).map_err(invalid)?;
+        if packet.message != original_message {
             return Err(invalid("noncanonical peer message"));
         }
         self.step_message(message)
@@ -1621,6 +1627,43 @@ impl DurablePeer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn receive_buffer_reuse_still_rejects_noncanonical_packets() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let mut peer = DurablePeer::open(PeerOptions {
+            group_id: 17,
+            node_id: 2,
+            voters: vec![1, 2, 3],
+            wal_path: dir.path().join("peer.wal"),
+        })
+        .unwrap();
+        let message = Message {
+            from: 1,
+            to: 2,
+            term: 1,
+            msg_type: MessageType::MsgHeartbeat as i32,
+            ..Default::default()
+        };
+        let valid = encode_packet(17, &message).unwrap();
+        let mut inner = message.encode_to_vec();
+        inner.extend_from_slice(&[0xf8, 0x07, 1]); // Unknown field 127.
+        let malformed = Packet {
+            version: 1,
+            group: 17,
+            message: inner,
+        }
+        .encode_to_vec();
+        assert!(peer.step(&malformed).is_err());
+        assert_eq!(peer.term(), 0);
+        let mut duplicate = valid.clone();
+        duplicate.extend_from_slice(&[0x08, 1]); // Repeated envelope version.
+        assert!(peer.step(&duplicate).is_err());
+        assert_eq!(peer.term(), 0);
+        peer.step(&valid).unwrap();
+        assert_eq!(peer.term(), 1);
+    }
+
     #[test]
     #[ignore = "encoding microbenchmark; run explicitly in release mode"]
     fn packet_encoding_cost() {
