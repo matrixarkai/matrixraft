@@ -67,6 +67,31 @@ struct Packet {
     #[prost(bytes = "vec", tag = "3")]
     message: Vec<u8>,
 }
+
+fn encode_packet(group: u64, message: &Message) -> Result<Vec<u8>, RaftError> {
+    let header = Packet {
+        version: 1,
+        group,
+        message: Vec::new(),
+    };
+    let message_len = message.encoded_len();
+    let size = header.encoded_len()
+        + if message_len == 0 {
+            0
+        } else {
+            1 + prost::encoding::encoded_len_varint(message_len as u64) + message_len
+        };
+    if size > LIMIT {
+        return Err(invalid("outgoing peer packet exceeds size limit"));
+    }
+    let mut bytes = Vec::with_capacity(size);
+    header.encode(&mut bytes).map_err(invalid)?;
+    if message_len != 0 {
+        // Embedded messages and byte fields share the length-delimited wire format.
+        prost::encoding::message::encode(3, message, &mut bytes);
+    }
+    Ok(bytes)
+}
 #[derive(Clone, PartialEq, prost::Message)]
 struct WalBatch {
     #[prost(uint32, tag = "1")]
@@ -1397,17 +1422,9 @@ impl DurablePeer {
                     continue;
                 }
             }
-            let packet = Packet {
-                version: 1,
-                group: self.options.group_id,
-                message: message.encode_to_vec(),
-            };
-            if packet.encoded_len() > LIMIT {
-                return Err(invalid("outgoing peer packet exceeds size limit"));
-            }
             output.push(PeerPacket {
                 to,
-                bytes: packet.encode_to_vec(),
+                bytes: encode_packet(self.options.group_id, &message)?,
             });
         }
         Ok(output)
@@ -1604,6 +1621,31 @@ impl DurablePeer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn packet_encoding_preserves_wire_bytes_and_bounds() {
+        use super::*;
+        for group in [0, 17, u64::MAX] {
+            for length in [0, 1, 127, 128, 16384] {
+                let message = Message {
+                    context: vec![42; length],
+                    ..Default::default()
+                };
+                let expected = Packet {
+                    version: 1,
+                    group,
+                    message: message.encode_to_vec(),
+                }
+                .encode_to_vec();
+                assert_eq!(encode_packet(group, &message).unwrap(), expected);
+            }
+        }
+        let oversized = Message {
+            context: vec![0; LIMIT],
+            ..Default::default()
+        };
+        assert!(encode_packet(17, &oversized).is_err());
+    }
+
     use super::*;
     // A spawned child can briefly retain another thread's file locks before
     // exec closes inherited descriptors. Keep process creation exclusive with
