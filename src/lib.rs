@@ -327,4 +327,4 @@ include!("facade/transport_runtime.rs");
 include!("facade/status_admin_runtime.rs");
 
 // crate-level regression tests.
-include!("facade/tests.rs");
+include!("facade/raft_regression_tests.rs");
