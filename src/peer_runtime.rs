@@ -92,8 +92,16 @@ fn canonical_packet(packet: &Packet, bytes: &[u8]) -> bool {
 }
 
 fn encode_packet(group: u64, message: &Message) -> Result<Vec<u8>, RaftError> {
+    encode_envelope(1, group, message)
+}
+
+fn encode_envelope(
+    version: u32,
+    group: u64,
+    message: &impl ProstMessage,
+) -> Result<Vec<u8>, RaftError> {
     let header = Packet {
-        version: 1,
+        version,
         group,
         message: Vec::new(),
     };

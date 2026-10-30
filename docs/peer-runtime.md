@@ -171,6 +171,11 @@ The segmented WAL prefix is accepted only when contiguous, complete, and checksu
 verified; an interrupted prefix is refused without truncating the file. The old
 WAL remains authoritative until the complete replacement is synced and renamed.
 
+Fragment identities and acknowledgments contain no payload and are built without
+cloning fragment data. Outgoing fragments encode directly into their packet
+buffer, avoiding an intermediate full-fragment protobuf buffer. Both memory and
+file transfers retain identical wire bytes and the same frame-size checks.
+
 Each peer retains at most one outgoing and one incoming large transfer. Other
 lagging voters remain on the consensus retry path until the outgoing slot is free.
 A sender advances one fragment per acknowledgment and retries after ten local

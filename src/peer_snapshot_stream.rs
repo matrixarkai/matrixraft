@@ -148,15 +148,21 @@ impl Fragment {
             to: self.from,
             offset,
             ack: true,
-            data: Vec::new(),
-            ..self.clone()
+            ..self.identity()
         }
     }
     fn identity(&self) -> Self {
         Self {
+            from: self.from,
+            to: self.to,
+            term: self.term,
+            index: self.index,
+            total: self.total,
+            checksum: self.checksum,
+            ack: self.ack,
+            file_backed: self.file_backed,
             data: Vec::new(),
             offset: 0,
-            ..self.clone()
         }
     }
 }
@@ -638,18 +644,15 @@ impl Stream {
                 sending.ready = false;
             }
         }
-        Ok(parts
+        parts
             .into_iter()
-            .map(|part| PeerPacket {
-                to: part.to,
-                bytes: Packet {
-                    version: if part.file_backed { 3 } else { 2 },
-                    group,
-                    message: part.encode_to_vec(),
-                }
-                .encode_to_vec(),
+            .map(|part| {
+                Ok(PeerPacket {
+                    to: part.to,
+                    bytes: encode_envelope(if part.file_backed { 3 } else { 2 }, group, &part)?,
+                })
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -689,6 +692,47 @@ mod tests {
         assert_eq!(packet.version, 2);
         Fragment::decode(packet.message.as_slice()).unwrap()
     }
+    #[test]
+    fn fragment_metadata_and_direct_envelopes_preserve_wire_bytes() {
+        for file_backed in [false, true] {
+            for group in [0, 17, u64::MAX] {
+                for length in [0, 1, 127, 128, SNAPSHOT_FRAGMENT_BYTES] {
+                    let part = Fragment {
+                        from: 1,
+                        to: 2,
+                        term: 4,
+                        index: 9,
+                        total: 2 * SNAPSHOT_FRAGMENT_BYTES as u64,
+                        checksum: u64::MAX,
+                        offset: SNAPSHOT_FRAGMENT_BYTES as u64,
+                        data: vec![13; length],
+                        ack: false,
+                        file_backed,
+                    };
+                    let mut expected_identity = part.clone();
+                    expected_identity.data.clear();
+                    expected_identity.offset = 0;
+                    assert_eq!(part.identity(), expected_identity);
+                    let mut expected_ack = expected_identity;
+                    expected_ack.from = part.to;
+                    expected_ack.to = part.from;
+                    expected_ack.offset = part.total;
+                    expected_ack.ack = true;
+                    assert_eq!(part.acknowledgment(part.total), expected_ack);
+                    for payload in [part, expected_ack] {
+                        let version = if file_backed { 3 } else { 2 };
+                        let expected = Packet {
+                            version,
+                            group,
+                            message: payload.encode_to_vec(),
+                        }.encode_to_vec();
+                        assert_eq!(encode_envelope(version, group, &payload).unwrap(), expected);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn fragment_validation_rejects_invalid_routes_extents_and_stale_terms() {
         let mut sender = Stream::default();
