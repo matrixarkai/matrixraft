@@ -699,12 +699,15 @@ impl Journal {
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
-        let bytes = batch.encode_to_vec();
-        let mut record = MAGIC.to_vec();
+        let mut record = Vec::with_capacity(24 + size);
+        record.extend_from_slice(MAGIC);
         record.extend_from_slice(&(size as u32).to_be_bytes());
         record.extend_from_slice(&digest(&record).to_be_bytes());
-        record.extend_from_slice(&digest(&bytes).to_be_bytes());
-        record.extend_from_slice(&bytes);
+        // Encode directly after the frame header to avoid a second payload buffer.
+        record.extend_from_slice(&[0; 8]);
+        batch.encode(&mut record).map_err(storage_error)?;
+        let checksum = digest(&record[24..]).to_be_bytes();
+        record[16..24].copy_from_slice(&checksum);
         self.file.write_all(&record).map_err(storage_error)?;
         self.length += record.len() as u64;
         Ok(())
