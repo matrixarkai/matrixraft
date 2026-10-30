@@ -957,6 +957,14 @@ impl DurablePeer {
     pub fn applied_index(&self) -> u64 {
         self.raw.raft.raft_log.applied
     }
+    /// Current persisted WAL file length, excluding checkpoint payload files.
+    /// Updated by successful Ready persistence and checkpoint replacement;
+    /// admitted proposals alone do not change it. No filesystem query is made.
+    /// A failed peer refuses the value because its final write may be partial.
+    pub fn persisted_wal_bytes(&self) -> Result<u64, RaftError> {
+        self.healthy()?;
+        Ok(self.journal.length)
+    }
     pub fn is_leader(&self) -> bool {
         !self.failed && self.raw.raft.state == StateRole::Leader
     }
@@ -2610,6 +2618,41 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn persisted_wal_length_tracks_append_checkpoint_and_recovery() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let check = |peer: &DurablePeer| {
+            let length = peer.persisted_wal_bytes().unwrap();
+            assert_eq!(length, std::fs::metadata(&config.wal_path).unwrap().len());
+            length
+        };
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        check(&peer);
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let empty = check(&peer);
+        peer.propose(vec![7; 65536]).unwrap();
+        assert_eq!(check(&peer), empty);
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let appended = check(&peer);
+        assert!(appended > empty);
+        peer.checkpoint(vec![7; 8]).unwrap();
+        let compacted = check(&peer);
+        assert!(compacted < appended);
+        drop(peer);
+        // Recovery discards an incomplete trailing frame before reporting size.
+        OpenOptions::new()
+            .append(true)
+            .open(&config.wal_path)
+            .unwrap()
+            .write_all(&MAGIC[..2])
+            .unwrap();
+        let peer = DurablePeer::open(config.clone()).unwrap();
+        assert_eq!(check(&peer), compacted);
+    }
+
+    #[test]
     fn wal_failure_returns_no_packets_or_application_and_stops_peer() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();
         let path = path("failure");
@@ -2628,6 +2671,7 @@ mod tests {
             })
             .is_err());
         assert_eq!(applied, 0);
+        assert!(peer.persisted_wal_bytes().is_err());
         assert!(peer.tick().is_err());
         assert!(!peer.is_leader());
         drop(peer);

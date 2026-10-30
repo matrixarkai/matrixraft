@@ -74,6 +74,13 @@ from the beginning, or from the latest application checkpoint and its suffix.
 Supply a fresh application, or an explicitly idempotent applier. An application or persistence failure stops that peer instance; restart
 and recover before serving. Keep the WAL file intact for the life of the group.
 
+Hosts can use `persisted_wal_bytes()` for byte-based checkpoint scheduling
+without querying filesystem metadata on each applied batch. It reports the
+current WAL file length, not cumulative writes or separate checkpoint payload
+files. Unpersisted proposals do not increase it; checkpoint replacement may
+decrease it. Failed peers refuse the value. The runtime exclusively owns the WAL;
+this is not a detector for external deletion or modification of live files.
+
 The initial voter set, group, and node identity are recorded and checked during
 recovery. `open` keeps membership fixed; the opt-in API below supports changes.
 Transport threads, authentication, and graceful
