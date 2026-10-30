@@ -181,7 +181,7 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
 struct PeerStorage {
     permitted: Vec<u64>,
     memory: MemStorage,
-    checkpoint: Arc<Mutex<Option<Snapshot>>>,
+    checkpoint: Arc<Mutex<Option<Arc<Snapshot>>>>,
     payload_directory: PathBuf,
     payload: Arc<Mutex<Option<Arc<checkpoint_file::Blob>>>>,
 }
@@ -219,7 +219,7 @@ impl Storage for PeerStorage {
             .unwrap()
             .as_ref()
             .filter(|snapshot| snapshot.get_metadata().index >= request_index)
-            .cloned()
+            .map(|snapshot| snapshot.as_ref().clone())
             .ok_or(raft_core::Error::Store(
                 raft_core::StorageError::SnapshotTemporarilyUnavailable,
             ))
@@ -369,11 +369,16 @@ fn install_decoded(
         {
             return Err(storage_error("peer snapshot conflicts with durable state"));
         }
+        // The core storage keeps only metadata; the application payload stays
+        // in the retained checkpoint used by restoration and snapshot serving.
         store
             .wl()
-            .apply_snapshot(snapshot.clone())
+            .apply_snapshot(Snapshot {
+                metadata: snapshot.metadata.clone(),
+                ..Default::default()
+            })
             .map_err(storage_error)?;
-        *store.checkpoint.lock().unwrap() = Some(snapshot);
+        *store.checkpoint.lock().unwrap() = Some(Arc::new(snapshot));
         let mut current = store.payload.lock().unwrap();
         if let Some(old) = current.as_ref() {
             if payload
@@ -876,7 +881,7 @@ pub struct DurablePeer {
     failed: bool,
     read_sequence: u64,
     pending_read: Option<PendingRead>,
-    restore_on_open: Option<Snapshot>,
+    restore_on_open: Option<Arc<Snapshot>>,
     snapshot_flights: BTreeMap<u64, (u64, u64, u8)>,
     stream: snapshot_stream::Stream,
     incoming_payload: Option<(LogId, Arc<checkpoint_file::Blob>)>,
@@ -2755,6 +2760,50 @@ mod tests {
         drop(peer);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn pending_restore_shares_the_retained_checkpoint_payload() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for length in [1024 * 1024, 5 * 1024 * 1024] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let mut peer = DurablePeer::open(config.clone()).unwrap();
+            peer.campaign().unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            let position = peer.applied_index();
+            peer.checkpoint(vec![37; length]).unwrap();
+            drop(peer);
+            let mut restored = DurablePeer::open(config).unwrap();
+            let retained = restored.store.checkpoint.lock().unwrap().clone().unwrap();
+            assert!(Arc::ptr_eq(&retained, restored.restore_on_open.as_ref().unwrap()));
+            assert_eq!(retained.data.len(), length);
+            assert_eq!(restored.store.first_index().unwrap(), position + 1);
+            let mut seen = false;
+            restored.process_ready_with_snapshot_reader(
+                |_, _| panic!("unexpected suffix entry"),
+                |id, reader, size| {
+                    assert_eq!(id.index, position);
+                    assert_eq!(size, length as u64);
+                    let mut buffer = [0; 8192];
+                    let mut total = 0;
+                    loop {
+                        let count = reader.read(&mut buffer).unwrap();
+                        if count == 0 {
+                            break;
+                        }
+                        assert!(buffer[..count].iter().all(|b| *b == 37));
+                        total += count;
+                    }
+                    assert_eq!(total, length);
+                    seen = true;
+                    Ok(())
+                },
+            ).unwrap();
+            assert!(seen);
+            assert!(restored.restore_on_open.is_none());
+            assert_eq!(retained.data.len(), length);
+        }
+    }
+
     #[test]
     fn persisted_wal_length_tracks_append_checkpoint_and_recovery() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();

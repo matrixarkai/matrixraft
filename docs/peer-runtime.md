@@ -68,6 +68,20 @@ The removed allocation volume equals the received packet bytes in each case.
 This local debug-build probe excludes Ready processing from the receive counter;
 it is not a multi-host or end-to-end throughput measurement.
 
+Retained checkpoints are shared with pending restoration on reopen. Installing
+the checkpoint into the consensus core passes only its metadata, because the
+core storage does not retain application data. The allocation probe also creates
+and reopens 1 MiB and 5 MiB checkpoints, then verifies every restored byte outside
+the measured open call:
+
+| Checkpoint bytes | Old reopen allocated bytes | Shared reopen allocated bytes |
+| ---: | ---: | ---: |
+| 1048576 | 9439915 | 7342779 |
+| 5242880 | 61869246 | 51383502 |
+
+These local debug-build results remove approximately two payload-sized copies.
+They measure allocation volume, not peak resident memory or restart latency.
+
 The application callback receives election no-ops as empty payloads. On reopen,
 the WAL restores term, vote, log, and commit state, and committed entries replay
 from the beginning, or from the latest application checkpoint and its suffix.

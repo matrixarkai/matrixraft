@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
-//! Allocation volume for durable Ready processing and three-voter packet admission.
+//! Allocation volume for durable Ready processing, packet admission, and checkpoint reopen.
 //! Run with `cargo run --features peer-runtime --example durable_ready_allocations`.
 //! Payload construction and proposal admission are outside the measured region.
 //! These are allocated bytes, not peak memory, disk traffic, or throughput.
@@ -154,6 +154,53 @@ mod probe {
             }
         }
         receive_cost();
+        reopen_cost();
+    }
+
+    fn reopen_cost() {
+        println!("checkpoint_bytes,reopen_allocated_bytes");
+        for width in [1024 * 1024, 5 * 1024 * 1024] {
+            let dir = tempfile::tempdir().unwrap();
+            let options = PeerOptions {
+                group_id: 17,
+                node_id: 1,
+                voters: vec![1],
+                wal_path: dir.path().join("peer.wal"),
+            };
+            let mut peer = DurablePeer::open(options.clone()).unwrap();
+            peer.campaign().unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            let position = peer.applied_index();
+            peer.checkpoint(vec![42; width]).unwrap();
+            drop(peer);
+            let before = BYTES.load(Ordering::Relaxed);
+            let mut peer = DurablePeer::open(options).unwrap();
+            let allocated = BYTES.load(Ordering::Relaxed) - before;
+            let mut seen = false;
+            peer.process_ready_with_snapshot_reader(
+                |_, _| panic!("unexpected suffix"),
+                |id, reader, length| {
+                    assert_eq!(id.index, position);
+                    assert_eq!(length, width as u64);
+                    let mut buffer = [0; 8192];
+                    let mut total = 0;
+                    loop {
+                        let count = reader.read(&mut buffer).unwrap();
+                        if count == 0 {
+                            break;
+                        }
+                        assert!(buffer[..count].iter().all(|b| *b == 42));
+                        total += count;
+                    }
+                    assert_eq!(total, width);
+                    seen = true;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(seen);
+            println!("{width},{allocated}");
+        }
     }
 }
 
