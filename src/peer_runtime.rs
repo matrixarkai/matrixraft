@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 //! Independent durable peers backed by the raft-rs consensus core.
 //!
-//! This API does not simulate remote peers. Call `process_ready` after each input,
+//! This API does not simulate remote peers. Call `process_ready` after each bounded input batch,
 //! deliver its packets to their destinations, and supply a fresh application on
 //! restart: committed entries replay from the beginning or a checkpoint. Membership
 //! changes require the opt-in API and initial recovery before peer inputs;

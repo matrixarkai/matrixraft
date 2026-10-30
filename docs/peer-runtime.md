@@ -12,6 +12,19 @@ Deliver packets only to their `to` peer. A successful `propose` allocates a log
 position; it does not acknowledge commitment. A serving application acknowledges
 only its matching committed log position after successful application.
 
+Hosts may submit several proposals or already-queued incoming packets on the same
+exclusive peer worker before calling `process_ready`. Bound each batch by count,
+bytes, and elapsed time; do not wait for a batch to fill or starve ticks and Ready
+processing. A successful input call is still not a durable acknowledgment. Send
+only the packets returned by successful Ready processing and acknowledge client
+writes only after their committed-entry callbacks succeed.
+
+Batching proposals alone does not batch follower persistence. A receiver that
+processes Ready after every packet can still produce many small WAL records.
+The loopback process test compares unbatched inputs, batches of 16 proposals,
+and batches of 16 proposals plus up to 16 queued packets per receiving peer.
+This is a host scheduling choice, not a relaxation of the persistence barrier.
+
 The application callback receives election no-ops as empty payloads. On reopen,
 the WAL restores term, vote, log, and commit state, and committed entries replay
 from the beginning, or from the latest application checkpoint and its suffix.
@@ -52,6 +65,18 @@ data. Additional tests exercise storage failure, application failure, durable
 identity, exclusive locking, every truncated final append, and record corruption.
 These packet-exchange tests do not establish socket transport, multi-host scale,
 or power-loss safety. Checkpoint process-crash coverage is described below.
+
+`tests/peer_process_transport.rs` separately runs 3, 5, and 9 independent voter
+processes over loopback TCP. For each group size it commits 32 values of 64 or
+4096 bytes under each of the three batching policies, checks every voter, kills
+all voter processes, and checks exact replay after reopening every WAL. It also
+compares aggregate WAL growth after election settles. The parent routes messages;
+this is not a production peer server, a multi-host throughput test, or a
+power-loss durability test. Run it with:
+
+```text
+cargo test --release --features peer-runtime --test peer_process_transport -- --test-threads=1 --nocapture
+```
 
 ## Quorum-confirmed reads
 

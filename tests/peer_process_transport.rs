@@ -5,7 +5,7 @@
 use matrixraft::peer_runtime::{DurablePeer, PeerOptions};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
@@ -17,7 +17,9 @@ use std::{
 enum Request {
     Campaign,
     Propose(Vec<u8>),
+    ProposeBatch(Vec<Vec<u8>>),
     Step(Vec<u8>),
+    StepBatch(Vec<Vec<u8>>),
     Inspect,
 }
 #[derive(Serialize, Deserialize)]
@@ -83,12 +85,24 @@ fn peer_transport_child() {
     for connection in listener.incoming() {
         let mut stream = connection.unwrap();
         timeouts(&stream);
-        match receive(&mut stream) {
+        let request: Request = receive(&mut stream);
+        let inspect = matches!(&request, Request::Inspect);
+        match request {
             Request::Campaign => peer.campaign().unwrap(),
             Request::Propose(bytes) => {
                 peer.propose(bytes).unwrap();
             }
+            Request::ProposeBatch(entries) => {
+                for bytes in entries {
+                    peer.propose(bytes).unwrap();
+                }
+            }
             Request::Step(bytes) => peer.step(&bytes).unwrap(),
+            Request::StepBatch(packets) => {
+                for bytes in packets {
+                    peer.step(&bytes).unwrap();
+                }
+            }
             Request::Inspect => {}
         }
         let packets = peer
@@ -106,7 +120,7 @@ fn peer_transport_child() {
             &mut stream,
             &Reply {
                 packets,
-                applied: applied.clone(),
+                applied: if inspect { applied.clone() } else { Vec::new() },
             },
         );
     }
@@ -185,32 +199,100 @@ fn deliver(voters: &[Voter], packets: Vec<(u64, Vec<u8>)>) {
     panic!("packet exchange did not settle");
 }
 
+fn deliver_batched(voters: &[Voter], mut packets: Vec<(u64, Vec<u8>)>) {
+    let mut delivered = 0;
+    while !packets.is_empty() {
+        let mut destinations = BTreeMap::<u64, Vec<Vec<u8>>>::new();
+        for (to, bytes) in std::mem::take(&mut packets) {
+            assert!((1..=voters.len() as u64).contains(&to));
+            destinations.entry(to).or_default().push(bytes);
+        }
+        for (to, pending) in destinations {
+            for batch in pending.chunks(16) {
+                delivered += batch.len();
+                assert!(delivered <= 10_000, "packet exchange did not settle");
+                packets.extend(
+                    voters[to as usize - 1]
+                        .request(Request::StepBatch(batch.to_vec()))
+                        .packets,
+                );
+            }
+        }
+    }
+}
+
+fn run_durable_batch(
+    count: u64,
+    payload_bytes: usize,
+    batch_size: usize,
+    receive_batch: bool,
+) -> u64 {
+    let root = tempfile::tempdir().unwrap();
+    let start = || {
+        (1..=count)
+            .map(|id| Voter::start(root.path(), id, count))
+            .collect::<Vec<_>>()
+    };
+    let voters = start();
+    let exchange = |voters: &[Voter], packets| {
+        if receive_batch {
+            deliver_batched(voters, packets)
+        } else {
+            deliver(voters, packets)
+        }
+    };
+    exchange(&voters, voters[0].request(Request::Campaign).packets);
+    let wal_bytes = || {
+        (1..=count)
+            .map(|id| {
+                std::fs::metadata(root.path().join(format!("{id}.wal")))
+                    .unwrap()
+                    .len()
+            })
+            .sum::<u64>()
+    };
+    let before = wal_bytes();
+    let expected: Vec<_> = (0..32u8).map(|value| vec![value; payload_bytes]).collect();
+    for entries in expected.chunks(batch_size) {
+        let request = if batch_size == 1 {
+            Request::Propose(entries[0].clone())
+        } else {
+            Request::ProposeBatch(entries.to_vec())
+        };
+        exchange(&voters, voters[0].request(request).packets);
+    }
+    for voter in &voters {
+        assert_eq!(voter.request(Request::Inspect).applied, expected);
+    }
+    let growth = wal_bytes() - before;
+    // Kill every process without a graceful flush; acknowledged WAL writes must survive.
+    drop(voters);
+    let recovered = start();
+    for voter in &recovered {
+        assert_eq!(voter.request(Request::Inspect).applied, expected);
+    }
+    growth
+}
+
 #[test]
 fn independent_tcp_voters_commit_and_recover_after_process_restart() {
-    for count in [3, 5] {
-        let root = tempfile::tempdir().unwrap();
-        let start = || {
-            (1..=count)
-                .map(|id| Voter::start(root.path(), id, count))
-                .collect::<Vec<_>>()
-        };
-        let voters = start();
-        deliver(&voters, voters[0].request(Request::Campaign).packets);
-        let expected: Vec<_> = (0..32u8).map(|value| vec![value; 4096]).collect();
-        for bytes in &expected {
-            deliver(
-                &voters,
-                voters[0].request(Request::Propose(bytes.clone())).packets,
+    // Logical WAL growth only: the loopback router is not a throughput benchmark.
+    for count in [3, 5, 9] {
+        for payload_bytes in [64, 4096] {
+            let single = run_durable_batch(count, payload_bytes, 1, false);
+            let batched = run_durable_batch(count, payload_bytes, 16, false);
+            let receive_batched = run_durable_batch(count, payload_bytes, 16, true);
+            println!(
+                "voters={count} payload={payload_bytes} single_wal={single} leader_batched_wal={batched} all_batched_wal={receive_batched}"
             );
-        }
-        for voter in &voters {
-            assert_eq!(voter.request(Request::Inspect).applied, expected);
-        }
-        // Kill every process without a graceful flush; acknowledged WAL writes must survive.
-        drop(voters);
-        let recovered = start();
-        for voter in &recovered {
-            assert_eq!(voter.request(Request::Inspect).applied, expected);
+            assert!(
+                batched < single,
+                "batching did not reduce aggregate WAL growth"
+            );
+            assert!(
+                receive_batched < batched,
+                "receive batching did not reduce aggregate WAL growth"
+            );
         }
     }
 }
