@@ -179,15 +179,48 @@ fn validate_snapshot(snapshot: &Snapshot, voters: &[u64]) -> Result<(), RaftErro
     }
     Ok(())
 }
+enum SnapshotSource {
+    Journal,
+    LocalCapture(Arc<checkpoint_file::Blob>),
+    Received(Arc<checkpoint_file::Blob>),
+}
 fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
-    install_local(store, batch, None)
+    install_from(store, batch, SnapshotSource::Journal)
 }
 fn install_local(
     store: &PeerStorage,
     batch: &WalBatch,
     captured: Option<Arc<checkpoint_file::Blob>>,
 ) -> Result<(), RaftError> {
-    let local_capture = captured.is_some();
+    install_from(
+        store,
+        batch,
+        captured.map_or(SnapshotSource::Journal, SnapshotSource::LocalCapture),
+    )
+}
+fn install_received(
+    store: &PeerStorage,
+    batch: &WalBatch,
+    payload: Option<Arc<checkpoint_file::Blob>>,
+) -> Result<(), RaftError> {
+    install_from(
+        store,
+        batch,
+        payload.map_or(SnapshotSource::Journal, SnapshotSource::Received),
+    )
+}
+fn install_from(
+    store: &PeerStorage,
+    batch: &WalBatch,
+    source: SnapshotSource,
+) -> Result<(), RaftError> {
+    // A validated incoming payload does not authorize local compaction rules.
+    // It still must not replace state below the durable commit position.
+    let local_capture = matches!(&source, SnapshotSource::LocalCapture(_));
+    let captured = match source {
+        SnapshotSource::Journal => None,
+        SnapshotSource::LocalCapture(payload) | SnapshotSource::Received(payload) => Some(payload),
+    };
     let entries = batch
         .entries
         .iter()
@@ -1400,11 +1433,13 @@ impl DurablePeer {
                 let mut record = batch(&self.options, Some(&hs), ready.entries());
                 record.version = 2;
                 record.snapshot = snapshot.encode_to_vec();
-                if let Some(payload) = payload {
+                if let Some(payload) = &payload {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
                 }
-                install(&self.store, &record)?;
+                // Receive finalization already validated and synced this owned
+                // payload. Reuse it without scanning it again on the Raft loop.
+                install_received(&self.store, &record, payload)?;
                 self.restore_payload(&snapshot, restore)?;
                 self.incoming_payload = None;
             } else if ready.hs().is_some() || !ready.entries().is_empty() {
@@ -1482,6 +1517,71 @@ mod tests {
             wal_path: path,
         }
     }
+    #[test]
+    fn received_payload_reuse_keeps_commit_floor_and_manifest_checks() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        peer.propose(vec![7]).unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let hard = peer.store.initial_state().unwrap().hard_state;
+        assert!(hard.commit > 1);
+        let mut reader = std::io::repeat(19).take(1024 * 1024);
+        let payload =
+            checkpoint_file::Blob::capture(&peer.store.payload_directory, &mut reader, 1024 * 1024)
+                .unwrap();
+        let mut snapshot = Snapshot {
+            metadata: Some(SnapshotMetadata {
+                index: hard.commit - 1,
+                term: hard.term,
+                conf_state: Some(ConfState {
+                    voters: vec![1],
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        let mut record = batch(&config, Some(&hard), &[]);
+        record.version = 4;
+        record.snapshot = snapshot.encode_to_vec();
+        record.payload_manifest = payload.manifest.encode_to_vec();
+        let before = peer.store.first_index().unwrap();
+        assert!(install_received(&peer.store, &record, Some(Arc::clone(&payload))).is_err());
+        assert_eq!(peer.store.first_index().unwrap(), before);
+        assert!(peer.store.checkpoint.lock().unwrap().is_none());
+
+        snapshot.metadata.as_mut().unwrap().index = hard.commit;
+        record.snapshot = snapshot.encode_to_vec();
+        record.payload_manifest.push(0);
+        assert!(install_received(&peer.store, &record, Some(Arc::clone(&payload))).is_err());
+        assert_eq!(peer.store.first_index().unwrap(), before);
+        assert!(peer.store.checkpoint.lock().unwrap().is_none());
+
+        record.payload_manifest = payload.manifest.encode_to_vec();
+        install_received(&peer.store, &record, Some(Arc::clone(&payload))).unwrap();
+        let installed = peer.store.payload.lock().unwrap().clone().unwrap();
+        assert!(
+            Arc::ptr_eq(&installed, &payload),
+            "validated payload must be reused"
+        );
+        assert_eq!(peer.store.first_index().unwrap(), hard.commit + 1);
+
+        // Reopening from a durable manifest must still validate the whole file.
+        let mut damaged = std::fs::OpenOptions::new()
+            .write(true)
+            .open(peer.store.payload_directory.join(&payload.manifest.name))
+            .unwrap();
+        damaged.write_all(&[0]).unwrap();
+        assert!(checkpoint_file::Blob::open(
+            &peer.store.payload_directory,
+            &record.payload_manifest
+        )
+        .is_err());
+    }
+
     #[test]
     fn oversized_ready_limits_refuse_before_writing_any_prefix() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();

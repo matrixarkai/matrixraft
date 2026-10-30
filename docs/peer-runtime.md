@@ -196,6 +196,12 @@ payloads are rejected without stopping the voter. One worker per peer bounds
 concurrency even if other transfers arrive. Shutdown joins the owned worker and
 removes unpublished payloads.
 
+Installation reuses the payload validated and synced by the receive worker,
+avoiding another full checksum scan on the Raft loop. Received images still
+obey the incoming commit-position floor and exact manifest checks; they do not
+inherit local-capture compaction rules. Reopening from the WAL continues to scan
+and validate the entire payload before recovery.
+
 This moves file finalization off packet processing. Fragment staging, final WAL
 publication and application restoration remain synchronous. It does not remove
 disk latency from those operations or establish a maximum recovery latency.
