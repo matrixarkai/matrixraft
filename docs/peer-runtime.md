@@ -33,6 +33,26 @@ no positions. The consensus core's uncommitted-byte budget still applies; a full
 budget rejects the batch. Admission is not commitment, and applications must
 still wait for the matching successful committed-entry callbacks.
 
+`cargo run --release --features peer-runtime --example durable_peer_write_cost`
+compares immediate individual proposals, deferred Ready processing after 16
+individual proposals, and grouped admission of 16 values. It reports aggregate
+WAL growth, packet count, packet bytes, and maximum Ready-call duration, excluding
+election and restart from the measured interval. Every case checks all applied
+values and exact replay on every voter after reopening. For 64 values of 64 bytes
+with nine voters, the local probe produced:
+
+| Admission | Batch size | WAL growth bytes | Packets | Packet bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Individual | 1 | 93312 | 2048 | 75776 |
+| Individual | 16 | 44712 | 2048 | 75776 |
+| Grouped | 16 | 44712 | 128 | 39328 |
+
+Deferring Ready alone reduces persistence overhead but does not undo broadcasts
+already emitted by individual proposals. Grouped admission reduces those packets.
+Ready timing includes local persistence and application capture; it is sensitive
+to host load. These in-process packet exchanges do not measure network throughput
+or establish a bound on production tail latency.
+
 Live Ready installation borrows the core's decoded entries after WAL sync,
 instead of decoding the just-encoded journal payload again. Recovery still
 decodes the journal, and both paths share the same state and membership checks.
