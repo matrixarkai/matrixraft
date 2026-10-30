@@ -615,15 +615,11 @@ impl Journal {
     // entries need not fit one WAL record. Persist the new term/vote first,
     // entries in order, and the commit watermark last, then sync once before
     // the runtime exposes any acknowledgment. Every complete prefix reopens.
-    fn append_ready(&mut self, record: &WalBatch, previous: &HardState) -> Result<(), RaftError> {
-        let normalized = if record.permitted == self.permitted {
-            std::borrow::Cow::Borrowed(record)
-        } else {
-            let mut value = record.clone();
-            value.permitted = self.permitted.clone();
-            std::borrow::Cow::Owned(value)
-        };
-        let record = normalized.as_ref();
+    fn append_ready(&mut self, record: &mut WalBatch, previous: &HardState) -> Result<(), RaftError> {
+        // Updating routing metadata must not duplicate the encoded entry payloads.
+        if record.permitted != self.permitted {
+            record.permitted.clone_from(&self.permitted);
+        }
         if record.encoded_len() <= LIMIT {
             return self.append(record);
         }
@@ -1589,13 +1585,13 @@ impl DurablePeer {
                 self.restore_payload(&snapshot, restore)?;
                 self.incoming_payload = None;
             } else if ready.hs().is_some() || !ready.entries().is_empty() {
-                let record = batch(&self.options, ready.hs(), ready.entries());
+                let mut record = batch(&self.options, ready.hs(), ready.entries());
                 let previous = self
                     .store
                     .initial_state()
                     .map_err(storage_error)?
                     .hard_state;
-                self.journal.append_ready(&record, &previous)?;
+                self.journal.append_ready(&mut record, &previous)?;
                 install(&self.store, &record)?;
             }
             output.extend(self.packets(ready.take_messages())?);
@@ -1830,6 +1826,47 @@ mod tests {
     }
 
     #[test]
+    fn ready_metadata_update_preserves_payload_buffers_and_wal_bytes() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        let entries = vec![Entry {
+            term: 1,
+            index: 1,
+            data: vec![7; 1024 * 1024],
+            ..Default::default()
+        }];
+        let hard = HardState {
+            term: 1,
+            vote: 1,
+            commit: 1,
+        };
+        let mut record = batch(&config, Some(&hard), &entries);
+        let payload = record.entries[0].as_ptr();
+        let mut expected = record.clone();
+        expected.permitted = peer.journal.permitted.clone();
+        let offset = peer.journal.length as usize;
+        peer.journal
+            .append_ready(&mut record, &HardState::default())
+            .unwrap();
+        assert_eq!(record.entries[0].as_ptr(), payload);
+        assert_eq!(record, expected);
+        let bytes = std::fs::read(&config.wal_path).unwrap();
+        assert_eq!(&bytes[offset + 24..], expected.encode_to_vec());
+        drop(peer);
+        let mut recovered = DurablePeer::open(config).unwrap();
+        let mut applied = Vec::new();
+        recovered
+            .process_ready(|_, data| {
+                applied.push(data.to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(applied, vec![entries[0].data.clone()]);
+    }
+
+    #[test]
     fn oversized_ready_limits_refuse_before_writing_any_prefix() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();
         let root = path("append-bound-preflight");
@@ -1850,12 +1887,12 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let record = batch(&config, Some(&hard), &entries);
+        let mut record = batch(&config, Some(&hard), &entries);
         let saved_length = peer.journal.length;
         peer.journal.length = WAL_LIMIT - 1024;
         assert!(peer
             .journal
-            .append_ready(&record, &HardState::default())
+            .append_ready(&mut record, &HardState::default())
             .is_err());
         assert_eq!(std::fs::read(&config.wal_path).unwrap(), before);
         peer.journal.length = saved_length;
@@ -1863,7 +1900,7 @@ mod tests {
         too_large.entries.push(vec![0; LIMIT]);
         assert!(peer
             .journal
-            .append_ready(&too_large, &HardState::default())
+            .append_ready(&mut too_large, &HardState::default())
             .is_err());
         assert_eq!(std::fs::read(&config.wal_path).unwrap(), before);
         drop(peer);
