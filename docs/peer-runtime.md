@@ -210,6 +210,12 @@ cloning fragment data. Outgoing fragments encode directly into their packet
 buffer, avoiding an intermediate full-fragment protobuf buffer. Both memory and
 file transfers retain identical wire bytes and the same frame-size checks.
 
+Inline transfer fragments share slices of the retained encoded checkpoint, including
+retries, instead of copying a payload-sized buffer before packet encoding. The
+wire packet still owns its encoded bytes. Tests verify shared addresses at initial,
+repeated, and final offsets, exact payload contents, and slice lifetime after the
+sender releases its transfer. File-backed fragments still allocate their read buffer.
+
 Packet envelopes decode their message field into an owned byte buffer, then move
 that allocation into the mutable validation buffer. This avoids the intermediate
 payload copy made when decoding directly into a vector. It applies to ordinary

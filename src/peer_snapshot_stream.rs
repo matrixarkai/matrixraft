@@ -174,7 +174,7 @@ impl Fragment {
     }
 }
 enum Source {
-    Memory(Vec<u8>),
+    Memory(prost::bytes::Bytes),
     File {
         prefix: Vec<u8>,
         reader: File,
@@ -188,9 +188,9 @@ impl Source {
             Self::File { prefix, payload, .. } => prefix.len() + payload.manifest.length as usize,
         }
     }
-    fn fragment(&self, offset: usize, size: usize) -> Result<Vec<u8>, RaftError> {
+    fn fragment(&self, offset: usize, size: usize) -> Result<prost::bytes::Bytes, RaftError> {
         match self {
-            Self::Memory(bytes) => Ok(bytes[offset..offset + size].to_vec()),
+            Self::Memory(bytes) => Ok(bytes.slice(offset..offset + size)),
             Self::File { prefix, reader, .. } => {
                 let mut output = vec![0; size];
                 let head = if offset < prefix.len() {
@@ -208,7 +208,7 @@ impl Source {
                     file.read_exact(&mut output[head..])
                         .map_err(storage_error)?;
                 }
-                Ok(output)
+                Ok(output.into())
             }
         }
     }
@@ -382,7 +382,7 @@ impl Stream {
                 ack: false,
                 file_backed: false,
             },
-            bytes: Source::Memory(bytes),
+            bytes: Source::Memory(bytes.into()),
             offset: 0,
             ticks: 0,
             idle: 0,
@@ -656,7 +656,7 @@ impl Stream {
                     offset: sending.offset as u64,
                     data: sending
                         .bytes
-                        .fragment(sending.offset, end - sending.offset)?.into(),
+                        .fragment(sending.offset, end - sending.offset)?,
                     ..sending.identity.clone()
                 });
                 sending.ready = false;
@@ -1225,6 +1225,38 @@ mod file_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn memory_fragments_share_retained_bytes_across_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let message = Message {
+            from: 1,
+            to: 2,
+            term: 4,
+            msg_type: MessageType::MsgSnapshot as i32,
+            snapshot: Some(Snapshot {
+                data: (0..2 * SNAPSHOT_FRAGMENT_BYTES + 17)
+                    .map(|index| (index % 251) as u8).collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let expected = message.encode_to_vec();
+        let mut sender = Stream::new(dir.path().to_path_buf());
+        sender.start(message).unwrap();
+        let source = &sender.sending.as_ref().unwrap().bytes;
+        let Source::Memory(bytes) = source else { panic!("expected memory source") };
+        for offset in [0, SNAPSHOT_FRAGMENT_BYTES, 0, expected.len() - 17,
+            SNAPSHOT_FRAGMENT_BYTES] {
+            let size = SNAPSHOT_FRAGMENT_BYTES.min(expected.len() - offset);
+            let part = source.fragment(offset, size).unwrap();
+            assert_eq!(part.as_ptr(), bytes[offset..].as_ptr());
+            assert_eq!(&part[..], &expected[offset..offset + size]);
+        }
+        let retained = source.fragment(expected.len() - 17, 17).unwrap();
+        sender.completed_send(2);
+        assert_eq!(&retained[..], &expected[expected.len() - 17..]);
     }
 
     #[test]
