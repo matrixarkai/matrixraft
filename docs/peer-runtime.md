@@ -186,6 +186,20 @@ is at most 1 MiB. The receiver stages bytes on disk, validates the envelope and
 payload checksums, then publishes its own local payload and WAL manifest before
 restoring application state. Transport acknowledgments do not commit entries.
 
+The final file fragment starts one owned background worker to copy, checksum and
+sync the staged payload. `step` returns without waiting for that work. Call
+`process_ready_with_snapshot_reader` on a bounded timer, including when no network
+packet arrives, to collect completion; `checkpoint_receive_pending` reports this
+outstanding work. No completion acknowledgment or application restoration occurs
+before successful validation. An older-term result is discarded, and malformed
+payloads are rejected without stopping the voter. One worker per peer bounds
+concurrency even if other transfers arrive. Shutdown joins the owned worker and
+removes unpublished payloads.
+
+This moves file finalization off packet processing. Fragment staging, final WAL
+publication and application restoration remain synchronous. It does not remove
+disk latency from those operations or establish a maximum recovery latency.
+
 Upgrade every voter before using the new capture API. Older readers reject the
 new WAL and packet versions; no automatic fallback sends an empty snapshot.
 Existing `checkpoint(Vec<u8>)` callers keep their original formats and 256 MiB

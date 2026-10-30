@@ -707,6 +707,12 @@ pub struct DurablePeer {
     stream: snapshot_stream::Stream,
     incoming_payload: Option<(LogId, Arc<checkpoint_file::Blob>)>,
 }
+impl Drop for DurablePeer {
+    fn drop(&mut self) {
+        // Retain the journal's exclusive storage lock until all receive I/O ends.
+        self.stream.finish_shutdown();
+    }
+}
 impl DurablePeer {
     pub fn open(mut options: PeerOptions) -> Result<Self, RaftError> {
         let unique: BTreeSet<_> = options.voters.iter().copied().collect();
@@ -793,6 +799,11 @@ impl DurablePeer {
     }
     pub fn is_leader(&self) -> bool {
         !self.failed && self.raw.raft.state == StateRole::Leader
+    }
+    /// True while an incoming file checkpoint is being finalized or awaits polling.
+    /// Continue processing Ready on a bounded timer even if no packets arrive.
+    pub fn checkpoint_receive_pending(&self) -> bool {
+        self.stream.finalizing()
     }
     pub fn tick(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
@@ -1079,19 +1090,7 @@ impl DurablePeer {
             let from = part.from;
             let term = part.term;
             if let Some(message) = self.stream.receive(part, &self.options.voters)? {
-                if let Some(payload) = self.stream.received_payload.take() {
-                    let meta = message.get_snapshot().get_metadata();
-                    if meta.index > self.raw.raft.raft_log.committed {
-                        self.incoming_payload = Some((
-                            LogId {
-                                index: meta.index,
-                                term: meta.term,
-                            },
-                            payload,
-                        ));
-                    }
-                }
-                self.step_message(message)?;
+                self.accept_received_checkpoint(message)?;
             } else {
                 // Keep the recognized sender's term and election timer current
                 // while its checkpoint travels through bounded transport frames.
@@ -1110,6 +1109,21 @@ impl DurablePeer {
         let message = Message::decode(packet.message.as_slice()).map_err(invalid)?;
         if message.encode_to_vec() != packet.message {
             return Err(invalid("noncanonical peer message"));
+        }
+        self.step_message(message)
+    }
+    fn accept_received_checkpoint(&mut self, message: Message) -> Result<(), RaftError> {
+        if let Some(payload) = self.stream.received_payload.take() {
+            let meta = message.get_snapshot().get_metadata();
+            if meta.index > self.raw.raft.raft_log.committed {
+                self.incoming_payload = Some((
+                    LogId {
+                        index: meta.index,
+                        term: meta.term,
+                    },
+                    payload,
+                ));
+            }
         }
         self.step_message(message)
     }
@@ -1292,6 +1306,13 @@ impl DurablePeer {
     ) -> Result<Vec<PeerPacket>, RaftError> {
         self.healthy()?;
         let result = (|| {
+            // Invalid incoming transfer bytes are rejected just like step errors.
+            // They must not poison an otherwise healthy voter. A failed worker
+            // drops its payload and sends no completion acknowledgment.
+            if let Ok(Some(message)) = self.stream.poll_finished(self.term(), &self.options.voters)
+            {
+                self.accept_received_checkpoint(message)?;
+            }
             if let Some(snapshot) = self.restore_on_open.take() {
                 self.restore_payload(&snapshot, &mut restore)?;
             }

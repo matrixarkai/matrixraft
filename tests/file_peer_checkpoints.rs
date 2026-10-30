@@ -53,7 +53,13 @@ fn drive(
     states: &mut BTreeMap<u64, State>,
     isolate: Option<u64>,
 ) {
-    for _ in 0..2000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut exchanges = 0;
+    while exchanges < 2000 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "checkpoint exchange timed out"
+        );
         let mut packets = Vec::new();
         for (id, peer) in peers.iter_mut() {
             let state = std::cell::Cell::new(states.get(id).copied().unwrap_or_default());
@@ -98,8 +104,13 @@ fn drive(
             );
         }
         if packets.is_empty() {
+            if peers.values().any(DurablePeer::checkpoint_receive_pending) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
             return;
         }
+        exchanges += 1;
         for packet in packets {
             assert!(packet.bytes.len() < 2 * 1024 * 1024);
             let version = <PacketVersion as prost::Message>::decode(packet.bytes.as_slice())
