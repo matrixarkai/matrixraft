@@ -287,12 +287,22 @@ impl Receiving {
 /// One outgoing and one incoming transfer per local peer bound retained state.
 /// Incoming bytes are staged beside the WAL in an automatically removed file.
 /// Other lagging voters remain in Raft's retry path until the outgoing slot frees.
+struct Finishing {
+    identity: Fragment,
+    worker: std::thread::JoinHandle<Result<(Message, Arc<checkpoint_file::Blob>), RaftError>>,
+}
+
+/// One outgoing and one incoming transfer per local peer bound retained state.
+/// File completion runs on one owned worker while Raft continues processing.
 pub(super) struct Stream {
     spool_directory: PathBuf,
     pub(super) payload_directory: PathBuf,
     pub(super) received_payload: Option<Arc<checkpoint_file::Blob>>,
     sending: Option<Sending>,
     receiving: Option<Receiving>,
+    finishing: Option<Finishing>,
+    #[cfg(test)]
+    finalization_gate: Option<std::sync::mpsc::Receiver<()>>,
     completed: Option<Fragment>,
     ack: Option<Fragment>,
 }
@@ -310,9 +320,20 @@ impl Stream {
             spool_directory,
             sending: None,
             receiving: None,
+            finishing: None,
+            #[cfg(test)]
+            finalization_gate: None,
             completed: None,
             ack: None,
         }
+    }
+    pub(super) fn finish_shutdown(&mut self) {
+        if let Some(finishing) = self.finishing.take() {
+            let _ = finishing.worker.join();
+        }
+    }
+    pub(super) fn finalizing(&self) -> bool {
+        self.finishing.is_some()
     }
     pub(super) fn sending_to(&self, to: u64) -> bool {
         self.sending.as_ref().is_some_and(|s| s.identity.to == to)
@@ -453,6 +474,11 @@ impl Stream {
         part: Fragment,
         voters: &[u64],
     ) -> Result<Option<Message>, RaftError> {
+        // Keep one finalization worker, even when another sender or term arrives.
+        // No completion acknowledgment is sent until validation and sync finish.
+        if self.finishing.is_some() {
+            return Ok(None);
+        }
         if self
             .completed
             .as_ref()
@@ -514,8 +540,24 @@ impl Stream {
         }
         let receiving = self.receiving.take().unwrap();
         let (message, payload) = if part.file_backed {
-            let (message, payload) = receiving.finish_file(&self.payload_directory)?;
-            (message, Some(payload))
+            let directory = self.payload_directory.clone();
+            #[cfg(test)]
+            let gate = self.finalization_gate.take();
+            let worker = std::thread::Builder::new()
+                .name("raft-checkpoint-receive".into())
+                .spawn(move || {
+                    #[cfg(test)]
+                    if let Some(gate) = gate {
+                        gate.recv().map_err(storage_error)?;
+                    }
+                    receiving.finish_file(&directory)
+                })
+                .map_err(storage_error)?;
+            self.finishing = Some(Finishing {
+                identity: part.identity(),
+                worker,
+            });
+            return Ok(None);
         } else {
             let bytes = receiving.finish()?;
             if digest(&bytes) != part.checksum {
@@ -527,6 +569,39 @@ impl Stream {
             }
             (message, None)
         };
+        self.complete(part, message, payload, voters)
+    }
+    pub(super) fn poll_finished(
+        &mut self,
+        term: u64,
+        voters: &[u64],
+    ) -> Result<Option<Message>, RaftError> {
+        if !self
+            .finishing
+            .as_ref()
+            .is_some_and(|f| f.worker.is_finished())
+        {
+            return Ok(None);
+        }
+        let finishing = self.finishing.take().unwrap();
+        let result = finishing
+            .worker
+            .join()
+            .map_err(|_| storage_error("checkpoint receive worker panicked"))?;
+        if finishing.identity.term < term {
+            // Dropping a superseded result also removes its uncommitted payload.
+            return Ok(None);
+        }
+        let (message, payload) = result?;
+        self.complete(finishing.identity, message, Some(payload), voters)
+    }
+    fn complete(
+        &mut self,
+        part: Fragment,
+        message: Message,
+        payload: Option<Arc<checkpoint_file::Blob>>,
+        voters: &[u64],
+    ) -> Result<Option<Message>, RaftError> {
         if message.get_msg_type() != MessageType::MsgSnapshot
             || message.from != part.from
             || message.to != part.to
@@ -573,6 +648,12 @@ impl Stream {
                 .encode_to_vec(),
             })
             .collect())
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        self.finish_shutdown();
     }
 }
 
@@ -869,6 +950,177 @@ mod tests {
 mod file_tests {
     use super::*;
     #[test]
+    fn stalled_file_finalization_keeps_raft_responsive_and_discards_old_terms() {
+        for (superseded, corrupt, shutdown) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let options = PeerOptions {
+                group_id: 1,
+                node_id: 2,
+                voters: vec![1, 2, 3],
+                wal_path: directory.path().join("peer.wal"),
+            };
+            let mut peer = DurablePeer::open(options.clone()).unwrap();
+            let mut source = std::io::repeat(17).take(2 * 1024 * 1024);
+            let blob =
+                checkpoint_file::Blob::capture(directory.path(), &mut source, 2 * 1024 * 1024)
+                    .unwrap();
+            if corrupt {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(directory.path().join(&blob.manifest.name))
+                    .unwrap()
+                    .write_all(&[99])
+                    .unwrap();
+            }
+            let mut sender = Stream::new(directory.path().to_path_buf());
+            sender
+                .start_file(
+                    Message {
+                        from: 1,
+                        to: 2,
+                        term: 4,
+                        msg_type: MessageType::MsgSnapshot as i32,
+                        snapshot: Some(Snapshot {
+                            metadata: Some(SnapshotMetadata {
+                                index: 9,
+                                term: 3,
+                                conf_state: Some(ConfState {
+                                    voters: vec![1, 2, 3],
+                                    ..Default::default()
+                                }),
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    blob,
+                )
+                .unwrap();
+            let (release, gate) = std::sync::mpsc::channel();
+            peer.stream.finalization_gate = Some(gate);
+            let mut final_packet = Vec::new();
+            while peer.stream.finishing.is_none() {
+                let packets = sender.packets(1).unwrap();
+                assert_eq!(packets.len(), 1);
+                final_packet = packets[0].bytes.clone();
+                peer.step(&final_packet).unwrap();
+                for packet in peer.stream.packets(1).unwrap() {
+                    let packet = Packet::decode(packet.bytes.as_slice()).unwrap();
+                    let ack = Fragment::decode(packet.message.as_slice()).unwrap();
+                    assert!(ack.offset < ack.total);
+                    sender.acknowledge(&ack);
+                }
+            }
+            // The worker cannot complete until release is sent. Raft must still
+            // answer heartbeats, without restoring or acknowledging the image.
+            for _ in 0..30 {
+                peer.tick().unwrap();
+                let heartbeat = Message {
+                    from: 1,
+                    to: 2,
+                    term: if superseded { 5 } else { 4 },
+                    msg_type: MessageType::MsgHeartbeat as i32,
+                    ..Default::default()
+                };
+                peer.step(
+                    &Packet {
+                        version: 1,
+                        group: 1,
+                        message: heartbeat.encode_to_vec(),
+                    }
+                    .encode_to_vec(),
+                )
+                .unwrap();
+                if !superseded {
+                    peer.step(&final_packet).unwrap();
+                }
+                let output = peer
+                    .process_ready_with_snapshot_reader(
+                        |_, _| Ok(()),
+                        |_, _, _| panic!("unfinished image restored"),
+                    )
+                    .unwrap();
+                assert!(output.iter().any(|packet| {
+                    let packet = Packet::decode(packet.bytes.as_slice()).unwrap();
+                    packet.version == 1
+                        && Message::decode(packet.message.as_slice())
+                            .unwrap()
+                            .get_msg_type()
+                            == MessageType::MsgHeartbeatResponse
+                }));
+                assert!(output
+                    .iter()
+                    .all(|packet| Packet::decode(packet.bytes.as_slice()).unwrap().version == 1));
+                assert_eq!(peer.applied_index(), 0);
+                assert!(!peer.is_leader());
+            }
+            if shutdown {
+                let (started, dropping) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    started.send(()).unwrap();
+                    drop(peer);
+                });
+                dropping.recv().unwrap();
+                assert!(DurablePeer::open(options.clone()).is_err());
+                release.send(()).unwrap();
+                worker.join().unwrap();
+                assert!(DurablePeer::open(options).is_ok());
+                continue;
+            }
+            release.send(()).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut restored = false;
+            let mut completed = false;
+            while peer.stream.finishing.is_some() {
+                assert!(std::time::Instant::now() < deadline);
+                for packet in peer
+                    .process_ready_with_snapshot_reader(
+                        |_, _| Ok(()),
+                        |id, reader, length| {
+                            assert!(!superseded && !corrupt);
+                            assert_eq!(id.index, 9);
+                            assert_eq!(length, 2 * 1024 * 1024);
+                            let mut bytes = Vec::new();
+                            reader.read_to_end(&mut bytes).unwrap();
+                            assert!(bytes.iter().all(|&byte| byte == 17));
+                            restored = true;
+                            Ok(())
+                        },
+                    )
+                    .unwrap()
+                {
+                    let packet = Packet::decode(packet.bytes.as_slice()).unwrap();
+                    if packet.version == 3 {
+                        let ack = Fragment::decode(packet.message.as_slice()).unwrap();
+                        completed |= ack.ack && ack.offset == ack.total;
+                    }
+                }
+                std::thread::yield_now();
+            }
+            assert_eq!(restored, !superseded && !corrupt);
+            assert_eq!(completed, !superseded && !corrupt);
+            assert_eq!(
+                peer.applied_index(),
+                if superseded || corrupt { 0 } else { 9 }
+            );
+            assert!(peer.healthy().is_ok());
+            if superseded || corrupt {
+                assert_eq!(
+                    std::fs::read_dir(&peer.stream.payload_directory)
+                        .unwrap()
+                        .count(),
+                    0
+                );
+            }
+        }
+    }
+
+    #[test]
     fn file_transfer_checks_payload_corruption_and_retains_active_send_files() {
         let dir = tempfile::tempdir().unwrap();
         let mut source = std::io::repeat(17).take(5 * 1024 * 1024);
@@ -909,7 +1161,16 @@ mod file_tests {
             if part.offset > 0 {
                 part.data[0] ^= 1;
             }
-            match receiver.receive(part, &[1, 2, 3]) {
+            let mut result = receiver.receive(part, &[1, 2, 3]);
+            if receiver.finishing.is_some() {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while receiver.finishing.is_some() {
+                    assert!(std::time::Instant::now() < deadline);
+                    result = receiver.poll_finished(4, &[1, 2, 3]);
+                    std::thread::yield_now();
+                }
+            }
+            match result {
                 Err(_) => {
                     rejected = true;
                     break;
@@ -929,7 +1190,7 @@ mod file_tests {
         drop(sender);
         assert!(!dir.path().join(name).exists());
         assert_eq!(
-            std::fs::read_dir(receiver.payload_directory)
+            std::fs::read_dir(&receiver.payload_directory)
                 .unwrap()
                 .count(),
             0
