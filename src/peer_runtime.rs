@@ -1622,6 +1622,57 @@ impl DurablePeer {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[ignore = "encoding microbenchmark; run explicitly in release mode"]
+    fn packet_encoding_cost() {
+        use super::*;
+        use std::{hint::black_box, time::Instant};
+        println!("payload_bytes,iterations,two_buffer_ns,direct_ns");
+        for length in [64, 4096, 1024 * 1024] {
+            let message = Message {
+                from: 1,
+                to: 2,
+                term: 1,
+                entries: vec![Entry {
+                    index: 1,
+                    term: 1,
+                    data: vec![42; length],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let two_buffer = || {
+                Packet {
+                    version: 1,
+                    group: 17,
+                    message: black_box(&message).encode_to_vec(),
+                }
+                .encode_to_vec()
+            };
+            let direct = || encode_packet(17, black_box(&message)).unwrap();
+            assert_eq!(two_buffer(), direct());
+            let iterations = if length < 8192 { 20_000 } else { 256 };
+            let mut samples = [Vec::new(), Vec::new()];
+            for pass in 0..7 {
+                for offset in 0..2 {
+                    let mode = (pass + offset) % 2;
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        black_box(if mode == 0 { two_buffer() } else { direct() });
+                    }
+                    samples[mode].push(start.elapsed().as_nanos() as f64 / iterations as f64);
+                }
+            }
+            for sample in &mut samples {
+                sample.sort_by(f64::total_cmp);
+            }
+            println!(
+                "{length},{iterations},{:.1},{:.1}",
+                samples[0][3], samples[1][3]
+            );
+        }
+    }
+
+    #[test]
     fn packet_encoding_preserves_wire_bytes_and_bounds() {
         use super::*;
         for group in [0, 17, u64::MAX] {
