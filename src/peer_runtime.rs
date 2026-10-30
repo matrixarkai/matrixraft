@@ -623,8 +623,30 @@ impl Journal {
                 checkpoint_crash_point("during_write");
             }
         }
+        // Bound rewrite staging while amortizing frame headers and write calls.
+        // A single larger entry keeps the existing per-record size limit.
+        let mut suffix = batch(options, None, &[]);
+        suffix.permitted.clone_from(&self.permitted);
+        let overhead = suffix.encoded_len();
+        let mut size = overhead;
         for entry in entries {
-            replacement.write_record(&batch(options, None, std::slice::from_ref(entry)))?;
+            let length = entry.encoded_len();
+            let field = 1 + prost::encoding::encoded_len_varint(length as u64) + length;
+            if overhead.saturating_add(field) > LIMIT {
+                return Err(storage_error("peer WAL entry exceeds record bound"));
+            }
+            if !suffix.entries.is_empty()
+                && (suffix.entries.len() == 1024 || size.saturating_add(field) > 1024 * 1024)
+            {
+                replacement.write_record(&suffix)?;
+                suffix.entries.clear();
+                size = overhead;
+            }
+            suffix.entries.push(entry.encode_to_vec());
+            size += field;
+        }
+        if !suffix.entries.is_empty() {
+            replacement.write_record(&suffix)?;
         }
         if hs != &floor_state {
             replacement.write_record(&batch(options, Some(hs), &[]))?;
@@ -1929,6 +1951,114 @@ mod tests {
             wal_path: path,
         }
     }
+    #[test]
+    fn checkpoint_rewrite_bounds_suffix_batches_and_replays_committed_entries() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for (count, width, expected_records) in [
+            (0, 64, 0),
+            (2048, 64, 2),
+            (64, 32768, 3),
+            (3, 2 * 1024 * 1024, 3),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let mut peer = DurablePeer::open(config.clone()).unwrap();
+            let snapshot = Snapshot {
+                data: b"base".to_vec(),
+                metadata: Some(SnapshotMetadata {
+                    index: 1,
+                    term: 1,
+                    conf_state: Some(ConfState {
+                        voters: vec![1],
+                        ..Default::default()
+                    }),
+                }),
+            };
+            let entries: Vec<_> = (0..count)
+                .map(|i| Entry {
+                    index: i as u64 + 2,
+                    term: 1,
+                    data: vec![i as u8; width],
+                    ..Default::default()
+                })
+                .collect();
+            let committed = if count == 2048 { count / 2 } else { count };
+            let hard = HardState {
+                term: 1,
+                vote: 1,
+                commit: committed as u64 + 1,
+            };
+            let individual_bytes: usize = entries.iter().map(|entry| {
+                let mut record = batch(&config, None, std::slice::from_ref(entry));
+                record.permitted.clone_from(&peer.journal.permitted);
+                24 + record.encoded_len()
+            }).sum();
+            peer.journal
+                .rewrite(&config, &snapshot, &hard, &entries, None)
+                .unwrap();
+            let bytes = std::fs::read(&config.wal_path).unwrap();
+            let mut offset = 0;
+            let mut records = 0;
+            let mut suffix_bytes = 0;
+            let mut decoded = Vec::new();
+            while offset < bytes.len() {
+                let length = u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+                assert!(length <= LIMIT);
+                let record = WalBatch::decode(&bytes[offset + 24..offset + 24 + length]).unwrap();
+                if !record.entries.is_empty() {
+                    assert!(record.entries.len() <= 1024);
+                    assert!(length <= 1024 * 1024 || record.entries.len() == 1);
+                    records += 1;
+                    suffix_bytes += 24 + length;
+                    decoded.extend(record.entries.iter().map(|entry| Entry::decode(entry.as_slice()).unwrap()));
+                }
+                offset += 24 + length;
+            }
+            assert_eq!(records, expected_records);
+            assert_eq!(decoded, entries);
+            assert!(suffix_bytes <= individual_bytes);
+            if count > expected_records {
+                assert!(suffix_bytes < individual_bytes);
+            }
+            println!("suffix_entries={count} value_bytes={width} individual_bytes={individual_bytes} batched_bytes={suffix_bytes} records={records}");
+            if count == 0 {
+                let oversized = Entry {
+                    index: 2,
+                    term: 1,
+                    data: vec![0; LIMIT],
+                    ..Default::default()
+                };
+                assert!(peer.journal.rewrite(&config, &snapshot, &hard, &[oversized], None).is_err());
+                assert_eq!(std::fs::read(&config.wal_path).unwrap(), bytes);
+                assert_eq!(peer.persisted_wal_bytes().unwrap(), bytes.len() as u64);
+            }
+            drop(peer);
+            let mut restored = DurablePeer::open(config).unwrap();
+            let mut applied = 0;
+            let mut snapshot_seen = false;
+            restored.process_ready_with_snapshot_reader(
+                |id, data| {
+                    assert_eq!(id.index, entries[applied].index);
+                    assert_eq!(data, entries[applied].data);
+                    applied += 1;
+                    Ok(())
+                },
+                |id, reader, length| {
+                    assert_eq!(id.index, 1);
+                    assert_eq!(length, 4);
+                    let mut data = Vec::new();
+                    reader.read_to_end(&mut data).unwrap();
+                    assert_eq!(data, b"base");
+                    snapshot_seen = true;
+                    Ok(())
+                },
+            ).unwrap();
+            assert!(snapshot_seen);
+            assert_eq!(applied, committed);
+            assert_eq!(restored.commit_index(), committed as u64 + 1);
+        }
+    }
+
     #[test]
     fn received_payload_reuse_keeps_commit_floor_and_manifest_checks() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();

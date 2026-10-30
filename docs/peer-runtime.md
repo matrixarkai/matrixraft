@@ -81,6 +81,14 @@ files. Unpersisted proposals do not increase it; checkpoint replacement may
 decrease it. Failed peers refuse the value. The runtime exclusively owns the WAL;
 this is not a detector for external deletion or modification of live files.
 
+Checkpoint WAL rewriting groups retained entries into records targeting at most
+1 MiB and 1024 entries. A larger individual entry keeps the existing 8 MiB record
+bound. The replacement is still fully synced before publication, and its final
+hard state still follows all retained entries. For 2048 retained 64-byte values,
+the deterministic frame-size check drops suffix bytes from 216962 to 149444 and
+suffix records from 2048 to 2. This excludes the checkpoint itself and is not a
+throughput measurement; larger values save proportionally less header space.
+
 The initial voter set, group, and node identity are recorded and checked during
 recovery. `open` keeps membership fixed; the opt-in API below supports changes.
 Transport threads, authentication, and graceful
