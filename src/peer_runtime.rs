@@ -135,8 +135,8 @@ struct WalBatch {
     voters: Vec<u64>,
     #[prost(bytes = "vec", tag = "5")]
     hard_state: Vec<u8>,
-    #[prost(bytes = "vec", repeated, tag = "6")]
-    entries: Vec<Vec<u8>>,
+    #[prost(bytes = "bytes", repeated, tag = "6")]
+    entries: Vec<prost::bytes::Bytes>,
     #[prost(bytes = "vec", tag = "7")]
     snapshot: Vec<u8>,
     #[prost(uint64, tag = "8")]
@@ -168,7 +168,7 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         node: options.node_id,
         voters: options.voters.clone(),
         hard_state: hs.map(ProstMessage::encode_to_vec).unwrap_or_default(),
-        entries: entries.iter().map(ProstMessage::encode_to_vec).collect(),
+        entries: entries.iter().map(|entry| entry.encode_to_vec().into()).collect(),
         snapshot: Vec::new(),
         snapshot_offset: 0,
         snapshot_total: 0,
@@ -288,7 +288,7 @@ fn install_from(
     let entries = batch
         .entries
         .iter()
-        .map(|b| Entry::decode(b.as_slice()).map_err(storage_error))
+        .map(|b| Entry::decode(b.clone()).map_err(storage_error))
         .collect::<Result<Vec<_>, _>>()?;
     let hs = if batch.hard_state.is_empty() {
         None
@@ -647,7 +647,7 @@ impl Journal {
                 suffix.entries.clear();
                 size = overhead;
             }
-            suffix.entries.push(entry.encode_to_vec());
+            suffix.entries.push(entry.encode_to_vec().into());
             size += field;
         }
         if !suffix.entries.is_empty() {
@@ -1773,6 +1773,40 @@ impl DurablePeer {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn encoded_entry_buffers_share_storage_and_preserve_decoding() {
+        use super::*;
+        let options = PeerOptions {
+            group_id: 17,
+            node_id: 1,
+            voters: vec![1, 2, 3],
+            wal_path: PathBuf::new(),
+        };
+        let entries: Vec<_> = [0, 4096, 65536].into_iter().enumerate()
+            .map(|(index, width)| Entry {
+                term: 3,
+                index: index as u64 + 1,
+                data: vec![index as u8; width],
+                context: vec![9; 8],
+                ..Default::default()
+            }).collect();
+        let original = batch(&options, None, &entries);
+        let shared = original.clone();
+        for (left, right) in original.entries.iter().zip(&shared.entries) {
+            assert_eq!(left.as_ptr(), right.as_ptr());
+        }
+        let wire = original.encode_to_vec();
+        let recovered = WalBatch::decode(wire.as_slice()).unwrap();
+        assert_eq!(recovered.encode_to_vec(), wire);
+        for (encoded, expected) in recovered.entries.iter().zip(&entries) {
+            assert_eq!(Entry::decode(encoded.clone()).unwrap(), *expected);
+        }
+        drop(original);
+        for (encoded, expected) in shared.entries.iter().zip(&entries) {
+            assert_eq!(Entry::decode(encoded.clone()).unwrap(), *expected);
+        }
+    }
+
+    #[test]
     fn decoded_packet_buffer_moves_into_validation_without_copying() {
         use super::*;
         for length in [1, 127, 128, 16384, SNAPSHOT_FRAGMENT_BYTES] {
@@ -2040,7 +2074,7 @@ mod tests {
                     assert!(length <= 1024 * 1024 || record.entries.len() == 1);
                     records += 1;
                     suffix_bytes += 24 + length;
-                    decoded.extend(record.entries.iter().map(|entry| Entry::decode(entry.as_slice()).unwrap()));
+                    decoded.extend(record.entries.iter().map(|entry| Entry::decode(entry.clone()).unwrap()));
                 }
                 offset += 24 + length;
             }
@@ -2341,7 +2375,7 @@ mod tests {
         assert_eq!(std::fs::read(&config.wal_path).unwrap(), before);
         peer.journal.length = saved_length;
         let mut too_large = record;
-        too_large.entries.push(vec![0; LIMIT]);
+        too_large.entries.push(vec![0; LIMIT].into());
         assert!(peer
             .journal
             .append_ready(&mut too_large, &HardState::default())

@@ -130,6 +130,18 @@ the hasher. This dependency maintenance risk remains part of production review.
 
 ## Validation scope
 
+Encoded WAL entries use owned byte buffers during replay. Batch decoding avoids
+an intermediate payload copy, and entry decoding reads from the shared buffer
+without another temporary copy. The persisted protobuf fields are unchanged.
+
+`cargo run --features peer-runtime --example durable_ready_allocations` measures
+both Ready processing and reopening committed entry batches. In a local debug
+run with 32 entries of 64 KiB, reopen allocation volume fell from 14,692,910 to
+10,499,646 bytes. Ready allocation volume increased from 10,494,280 to 10,495,304
+bytes due to buffer metadata. These are allocated-byte totals, not peak resident
+memory, disk traffic, or recovery latency. Exact entry positions and payloads are
+verified after reopen, outside the allocation measurement.
+
 Tests exchange encoded packets between independent cores. They prove that an
 isolated peer cannot elect itself, a missing quorum cannot commit, a new majority
 can replace an isolated leader's uncommitted tail, and restart replays committed

@@ -102,7 +102,7 @@ mod probe {
     }
 
     pub fn run() {
-        println!("entries,payload_bytes,ready_allocated_bytes");
+        println!("entries,payload_bytes,ready_allocated_bytes,replay_open_allocated_bytes");
         for count in [1, 32] {
             for width in [4096, 65536] {
                 let dir = tempfile::tempdir().unwrap();
@@ -134,7 +134,10 @@ mod probe {
                 assert!(packets.is_empty());
                 assert_eq!(applied, count);
                 drop(peer);
+                let before = BYTES.load(Ordering::Relaxed);
                 let mut replay = DurablePeer::open(options).unwrap();
+                let reopen_allocated = BYTES.load(Ordering::Relaxed) - before;
+                assert!(reopen_allocated < 6 * count * width + 16384 + 1024 * count);
                 let mut restored = 0;
                 replay
                     .process_ready(|id, bytes| {
@@ -150,7 +153,7 @@ mod probe {
                     })
                     .unwrap();
                 assert_eq!(restored, count);
-                println!("{count},{width},{allocated}");
+                println!("{count},{width},{allocated},{reopen_allocated}");
             }
         }
         receive_cost();
