@@ -1056,6 +1056,17 @@ impl From<&LogEntry> for MatrixRaftEntry {
 }
 
 impl MatrixRaftEntry {
+    /// Read a config change back out of an entry payload written by [`Self::to_log_entry`].
+    ///
+    /// `LogEntry` carries `{term, index, payload, is_command}` and so cannot hold the three-way
+    /// entry type: a `ConfigChange` converted to a `LogEntry` and back arrives as `Meta`, because
+    /// `is_command` is false for both. That loss is in `LogEntry`'s own shape -- widening it is a
+    /// durable WAL format change, since `is_command` is stored there -- so this at least keeps the
+    /// CONTENTS recoverable instead of leaving a rendering behind.
+    pub fn config_change_from_payload(payload: &[u8]) -> Option<MatrixRaftConfigChange> {
+        serde_json::from_slice(payload).ok()
+    }
+
     pub fn to_log_entry(&self) -> LogEntry {
         LogEntry {
             log_id: LogId {
@@ -1067,9 +1078,16 @@ impl MatrixRaftEntry {
                 .as_ref()
                 .map(|propose| propose.data.clone())
                 .or_else(|| {
+                    // A config change carries the member id, both addresses, the old member set,
+                    // the target conf state and the auto-promote flag. Rendering it with `{:?}`
+                    // put a Rust Debug STRING in the payload: nothing can parse it, its shape
+                    // follows whatever the struct's derive prints, and it changes under a field
+                    // rename that no reader would notice. An entry payload is a format, so it
+                    // gets a format -- the same one every other structured payload in this crate
+                    // uses -- and `config_change_from_payload` reads it back.
                     self.config_change
                         .as_ref()
-                        .map(|change| format!("{change:?}").into_bytes())
+                        .and_then(|change| serde_json::to_vec(change).ok())
                 })
                 .unwrap_or_default(),
             is_command: matches!(self.entry_type, MatrixRaftEntryType::Normal),
