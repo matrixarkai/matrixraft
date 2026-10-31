@@ -168,7 +168,10 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         node: options.node_id,
         voters: options.voters.clone(),
         hard_state: hs.map(ProstMessage::encode_to_vec).unwrap_or_default(),
-        entries: entries.iter().map(|entry| entry.encode_to_vec().into()).collect(),
+        entries: entries
+            .iter()
+            .map(|entry| entry.encode_to_vec().into())
+            .collect(),
         snapshot: Vec::new(),
         snapshot_offset: 0,
         snapshot_total: 0,
@@ -685,7 +688,11 @@ impl Journal {
     // entries need not fit one WAL record. Persist the new term/vote first,
     // entries in order, and the commit watermark last, then sync once before
     // the runtime exposes any acknowledgment. Every complete prefix reopens.
-    fn append_ready(&mut self, record: &mut WalBatch, previous: &HardState) -> Result<(), RaftError> {
+    fn append_ready(
+        &mut self,
+        record: &mut WalBatch,
+        previous: &HardState,
+    ) -> Result<(), RaftError> {
         // Updating routing metadata must not duplicate the encoded entry payloads.
         if record.permitted != self.permitted {
             record.permitted.clone_from(&self.permitted);
@@ -1383,9 +1390,10 @@ impl DurablePeer {
             let from = part.from;
             let term = part.term;
             // Validation is complete; reuse its buffer for duplicate-file reads.
-            if let Some(message) = self.stream.receive_with_scratch(
-                part, &self.options.voters, &mut validation,
-            )? {
+            if let Some(message) =
+                self.stream
+                    .receive_with_scratch(part, &self.options.voters, &mut validation)?
+            {
                 self.accept_received_checkpoint(message)?;
             } else {
                 // Keep the recognized sender's term and election timer current
@@ -1781,14 +1789,17 @@ mod tests {
             voters: vec![1, 2, 3],
             wal_path: PathBuf::new(),
         };
-        let entries: Vec<_> = [0, 4096, 65536].into_iter().enumerate()
+        let entries: Vec<_> = [0, 4096, 65536]
+            .into_iter()
+            .enumerate()
             .map(|(index, width)| Entry {
                 term: 3,
                 index: index as u64 + 1,
                 data: vec![index as u8; width],
                 context: vec![9; 8],
                 ..Default::default()
-            }).collect();
+            })
+            .collect();
         let original = batch(&options, None, &entries);
         let shared = original.clone();
         for (left, right) in original.entries.iter().zip(&shared.entries) {
@@ -1814,7 +1825,8 @@ mod tests {
                 version: 3,
                 group: 17,
                 message: vec![37; length].into(),
-            }.encode_to_vec();
+            }
+            .encode_to_vec();
             let packet = Packet::decode(bytes.as_slice()).unwrap();
             assert!(canonical_packet(&packet, &bytes));
             let pointer = packet.message.as_ptr();
@@ -2052,11 +2064,14 @@ mod tests {
                 vote: 1,
                 commit: committed as u64 + 1,
             };
-            let individual_bytes: usize = entries.iter().map(|entry| {
-                let mut record = batch(&config, None, std::slice::from_ref(entry));
-                record.permitted.clone_from(&peer.journal.permitted);
-                24 + record.encoded_len()
-            }).sum();
+            let individual_bytes: usize = entries
+                .iter()
+                .map(|entry| {
+                    let mut record = batch(&config, None, std::slice::from_ref(entry));
+                    record.permitted.clone_from(&peer.journal.permitted);
+                    24 + record.encoded_len()
+                })
+                .sum();
             peer.journal
                 .rewrite(&config, &snapshot, &hard, &entries, None)
                 .unwrap();
@@ -2066,7 +2081,8 @@ mod tests {
             let mut suffix_bytes = 0;
             let mut decoded = Vec::new();
             while offset < bytes.len() {
-                let length = u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+                let length =
+                    u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
                 assert!(length <= LIMIT);
                 let record = WalBatch::decode(&bytes[offset + 24..offset + 24 + length]).unwrap();
                 if !record.entries.is_empty() {
@@ -2074,7 +2090,12 @@ mod tests {
                     assert!(length <= 1024 * 1024 || record.entries.len() == 1);
                     records += 1;
                     suffix_bytes += 24 + length;
-                    decoded.extend(record.entries.iter().map(|entry| Entry::decode(entry.clone()).unwrap()));
+                    decoded.extend(
+                        record
+                            .entries
+                            .iter()
+                            .map(|entry| Entry::decode(entry.clone()).unwrap()),
+                    );
                 }
                 offset += 24 + length;
             }
@@ -2092,7 +2113,10 @@ mod tests {
                     data: vec![0; LIMIT],
                     ..Default::default()
                 };
-                assert!(peer.journal.rewrite(&config, &snapshot, &hard, &[oversized], None).is_err());
+                assert!(peer
+                    .journal
+                    .rewrite(&config, &snapshot, &hard, &[oversized], None)
+                    .is_err());
                 assert_eq!(std::fs::read(&config.wal_path).unwrap(), bytes);
                 assert_eq!(peer.persisted_wal_bytes().unwrap(), bytes.len() as u64);
             }
@@ -2100,23 +2124,25 @@ mod tests {
             let mut restored = DurablePeer::open(config).unwrap();
             let mut applied = 0;
             let mut snapshot_seen = false;
-            restored.process_ready_with_snapshot_reader(
-                |id, data| {
-                    assert_eq!(id.index, entries[applied].index);
-                    assert_eq!(data, entries[applied].data);
-                    applied += 1;
-                    Ok(())
-                },
-                |id, reader, length| {
-                    assert_eq!(id.index, 1);
-                    assert_eq!(length, 4);
-                    let mut data = Vec::new();
-                    reader.read_to_end(&mut data).unwrap();
-                    assert_eq!(data, b"base");
-                    snapshot_seen = true;
-                    Ok(())
-                },
-            ).unwrap();
+            restored
+                .process_ready_with_snapshot_reader(
+                    |id, data| {
+                        assert_eq!(id.index, entries[applied].index);
+                        assert_eq!(data, entries[applied].data);
+                        applied += 1;
+                        Ok(())
+                    },
+                    |id, reader, length| {
+                        assert_eq!(id.index, 1);
+                        assert_eq!(length, 4);
+                        let mut data = Vec::new();
+                        reader.read_to_end(&mut data).unwrap();
+                        assert_eq!(data, b"base");
+                        snapshot_seen = true;
+                        Ok(())
+                    },
+                )
+                .unwrap();
             assert!(snapshot_seen);
             assert_eq!(applied, committed);
             assert_eq!(restored.commit_index(), committed as u64 + 1);
@@ -2312,11 +2338,17 @@ mod tests {
             if fail_write {
                 peer.journal.file = File::open(&config.wal_path).unwrap();
             }
-            let result = peer.journal.append_ready(&mut record, &HardState::default());
+            let result = peer
+                .journal
+                .append_ready(&mut record, &HardState::default());
             assert_eq!(result.is_err(), fail_write);
             assert_eq!(record.entries, expected);
             assert_eq!(
-                record.entries.iter().map(|e| e.as_ptr()).collect::<Vec<_>>(),
+                record
+                    .entries
+                    .iter()
+                    .map(|e| e.as_ptr())
+                    .collect::<Vec<_>>(),
                 pointers
             );
             let bytes = std::fs::read(&config.wal_path).unwrap();
@@ -2327,8 +2359,8 @@ mod tests {
                 let mut decoded_entries = Vec::new();
                 let mut chunks = 0;
                 while offset < bytes.len() {
-                    let size =
-                        u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+                    let size = u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().unwrap())
+                        as usize;
                     assert!(size <= LIMIT);
                     let payload = &bytes[offset + 24..offset + 24 + size];
                     let decoded = WalBatch::decode(payload).unwrap();
@@ -2498,7 +2530,8 @@ mod tests {
                     }],
                     ..Default::default()
                 }
-                .encode_to_vec().into(),
+                .encode_to_vec()
+                .into(),
             }
             .encode_to_vec();
             peer.step(&packet).unwrap();
@@ -2585,7 +2618,8 @@ mod tests {
                     snapshot: Some(snapshot),
                     ..Default::default()
                 }
-                .encode_to_vec().into(),
+                .encode_to_vec()
+                .into(),
             }
             .encode_to_vec()
         };
@@ -2784,9 +2818,8 @@ mod tests {
                     for packet in packets {
                         let envelope = Packet::decode(packet.bytes.as_slice()).unwrap();
                         if envelope.version == 2 {
-                            let part =
-                                snapshot_stream::Fragment::decode(envelope.message.as_ref())
-                                    .unwrap();
+                            let part = snapshot_stream::Fragment::decode(envelope.message.as_ref())
+                                .unwrap();
                             assert!(part.ack);
                             assert!(
                                 !sender.acknowledge(&part),
@@ -2833,30 +2866,35 @@ mod tests {
             drop(peer);
             let mut restored = DurablePeer::open(config).unwrap();
             let retained = restored.store.checkpoint.lock().unwrap().clone().unwrap();
-            assert!(Arc::ptr_eq(&retained, restored.restore_on_open.as_ref().unwrap()));
+            assert!(Arc::ptr_eq(
+                &retained,
+                restored.restore_on_open.as_ref().unwrap()
+            ));
             assert_eq!(retained.data.len(), length);
             assert_eq!(restored.store.first_index().unwrap(), position + 1);
             let mut seen = false;
-            restored.process_ready_with_snapshot_reader(
-                |_, _| panic!("unexpected suffix entry"),
-                |id, reader, size| {
-                    assert_eq!(id.index, position);
-                    assert_eq!(size, length as u64);
-                    let mut buffer = [0; 8192];
-                    let mut total = 0;
-                    loop {
-                        let count = reader.read(&mut buffer).unwrap();
-                        if count == 0 {
-                            break;
+            restored
+                .process_ready_with_snapshot_reader(
+                    |_, _| panic!("unexpected suffix entry"),
+                    |id, reader, size| {
+                        assert_eq!(id.index, position);
+                        assert_eq!(size, length as u64);
+                        let mut buffer = [0; 8192];
+                        let mut total = 0;
+                        loop {
+                            let count = reader.read(&mut buffer).unwrap();
+                            if count == 0 {
+                                break;
+                            }
+                            assert!(buffer[..count].iter().all(|b| *b == 37));
+                            total += count;
                         }
-                        assert!(buffer[..count].iter().all(|b| *b == 37));
-                        total += count;
-                    }
-                    assert_eq!(total, length);
-                    seen = true;
-                    Ok(())
-                },
-            ).unwrap();
+                        assert_eq!(total, length);
+                        seen = true;
+                        Ok(())
+                    },
+                )
+                .unwrap();
             assert!(seen);
             assert!(restored.restore_on_open.is_none());
             assert_eq!(retained.data.len(), length);

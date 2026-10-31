@@ -185,7 +185,9 @@ impl Source {
     fn len(&self) -> usize {
         match self {
             Self::Memory(bytes) => bytes.len(),
-            Self::File { prefix, payload, .. } => prefix.len() + payload.manifest.length as usize,
+            Self::File {
+                prefix, payload, ..
+            } => prefix.len() + payload.manifest.length as usize,
         }
     }
     fn fragment(&self, offset: usize, size: usize) -> Result<prost::bytes::Bytes, RaftError> {
@@ -234,7 +236,12 @@ impl Receiving {
         self.length += bytes.len() as u64;
         Ok(())
     }
-    fn matches(&mut self, offset: u64, bytes: &[u8], scratch: &mut Vec<u8>) -> std::io::Result<bool> {
+    fn matches(
+        &mut self,
+        offset: u64,
+        bytes: &[u8],
+        scratch: &mut Vec<u8>,
+    ) -> std::io::Result<bool> {
         self.file.seek(SeekFrom::Start(offset))?;
         scratch.resize(bytes.len(), 0);
         self.file.read_exact(scratch)?;
@@ -487,11 +494,7 @@ impl Stream {
         false
     }
     #[cfg(test)]
-    fn receive(
-        &mut self,
-        part: Fragment,
-        voters: &[u64],
-    ) -> Result<Option<Message>, RaftError> {
+    fn receive(&mut self, part: Fragment, voters: &[u64]) -> Result<Option<Message>, RaftError> {
         self.receive_with_scratch(part, voters, &mut Vec::new())
     }
     pub(super) fn receive_with_scratch(
@@ -743,7 +746,8 @@ mod tests {
                             version,
                             group,
                             message: payload.encode_to_vec().into(),
-                        }.encode_to_vec();
+                        }
+                        .encode_to_vec();
                         assert_eq!(encode_envelope(version, group, &payload).unwrap(), expected);
                     }
                 }
@@ -949,28 +953,47 @@ mod tests {
             let allocation = scratch.as_ptr();
             let capacity = scratch.capacity();
             for part in [&first, &second] {
-                receiver.receive_with_scratch(part.clone(), &[1, 2, 3], &mut scratch).unwrap();
+                receiver
+                    .receive_with_scratch(part.clone(), &[1, 2, 3], &mut scratch)
+                    .unwrap();
             }
             for _ in 0..16 {
                 for part in [&first, &second] {
                     scratch.clear();
                     part.encode(&mut scratch).unwrap();
-                    assert!(receiver.receive_with_scratch(
-                        part.clone(), &[1, 2, 3], &mut scratch,
-                    ).unwrap().is_none());
+                    assert!(receiver
+                        .receive_with_scratch(part.clone(), &[1, 2, 3], &mut scratch,)
+                        .unwrap()
+                        .is_none());
                     assert_eq!(scratch, part.data);
                     assert_eq!(scratch.as_ptr(), allocation);
                     assert_eq!(scratch.capacity(), capacity);
-                    assert_eq!(receiver.ack.as_ref().unwrap().offset, 2 * SNAPSHOT_FRAGMENT_BYTES as u64);
+                    assert_eq!(
+                        receiver.ack.as_ref().unwrap().offset,
+                        2 * SNAPSHOT_FRAGMENT_BYTES as u64
+                    );
                 }
             }
             let mut conflicting = second.clone();
             conflicting.corrupt_byte(conflicting.data.len() - 1);
-            assert!(receiver.receive_with_scratch(conflicting, &[1, 2, 3], &mut scratch).is_err());
+            assert!(receiver
+                .receive_with_scratch(conflicting, &[1, 2, 3], &mut scratch)
+                .is_err());
             assert!(receiver.ack.is_none());
-            assert_eq!(receiver.receiving.as_ref().unwrap().length, 2 * SNAPSHOT_FRAGMENT_BYTES as u64);
-            receiver.receiving.as_mut().unwrap().file.set_len(SNAPSHOT_FRAGMENT_BYTES as u64).unwrap();
-            assert!(receiver.receive_with_scratch(second, &[1, 2, 3], &mut scratch).is_err());
+            assert_eq!(
+                receiver.receiving.as_ref().unwrap().length,
+                2 * SNAPSHOT_FRAGMENT_BYTES as u64
+            );
+            receiver
+                .receiving
+                .as_mut()
+                .unwrap()
+                .file
+                .set_len(SNAPSHOT_FRAGMENT_BYTES as u64)
+                .unwrap();
+            assert!(receiver
+                .receive_with_scratch(second, &[1, 2, 3], &mut scratch)
+                .is_err());
             assert!(receiver.receiving.is_none());
             assert!(receiver.ack.is_none());
         }
@@ -1237,7 +1260,8 @@ mod file_tests {
             msg_type: MessageType::MsgSnapshot as i32,
             snapshot: Some(Snapshot {
                 data: (0..2 * SNAPSHOT_FRAGMENT_BYTES + 17)
-                    .map(|index| (index % 251) as u8).collect(),
+                    .map(|index| (index % 251) as u8)
+                    .collect(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1246,9 +1270,16 @@ mod file_tests {
         let mut sender = Stream::new(dir.path().to_path_buf());
         sender.start(message).unwrap();
         let source = &sender.sending.as_ref().unwrap().bytes;
-        let Source::Memory(bytes) = source else { panic!("expected memory source") };
-        for offset in [0, SNAPSHOT_FRAGMENT_BYTES, 0, expected.len() - 17,
-            SNAPSHOT_FRAGMENT_BYTES] {
+        let Source::Memory(bytes) = source else {
+            panic!("expected memory source")
+        };
+        for offset in [
+            0,
+            SNAPSHOT_FRAGMENT_BYTES,
+            0,
+            expected.len() - 17,
+            SNAPSHOT_FRAGMENT_BYTES,
+        ] {
             let size = SNAPSHOT_FRAGMENT_BYTES.min(expected.len() - offset);
             let part = source.fragment(offset, size).unwrap();
             assert_eq!(part.as_ptr(), bytes[offset..].as_ptr());
@@ -1266,9 +1297,9 @@ mod file_tests {
         let data: Vec<u8> = (0..2 * SNAPSHOT_FRAGMENT_BYTES + 17)
             .map(|index| (index % 251) as u8)
             .collect();
-        let blob = checkpoint_file::Blob::capture(
-            dir.path(), &mut data.as_slice(), data.len() as u64,
-        ).unwrap();
+        let blob =
+            checkpoint_file::Blob::capture(dir.path(), &mut data.as_slice(), data.len() as u64)
+                .unwrap();
         let original = dir.path().join(&blob.manifest.name);
         let moved = dir.path().join("moved-payload");
         let metadata = Message {
@@ -1292,13 +1323,25 @@ mod file_tests {
         // Removing the pathname proves subsequent reads use the retained handle.
         std::fs::rename(&original, &moved).unwrap();
         let source = &sender.sending.as_ref().unwrap().bytes;
-        let Source::File { prefix, .. } = source else { panic!("expected file source") };
+        let Source::File { prefix, .. } = source else {
+            panic!("expected file source")
+        };
         let mut expected = prefix.clone();
         expected.extend_from_slice(&data);
-        for offset in [0, SNAPSHOT_FRAGMENT_BYTES, 0, 2 * SNAPSHOT_FRAGMENT_BYTES,
-            SNAPSHOT_FRAGMENT_BYTES, prefix.len() - 1, prefix.len()] {
+        for offset in [
+            0,
+            SNAPSHOT_FRAGMENT_BYTES,
+            0,
+            2 * SNAPSHOT_FRAGMENT_BYTES,
+            SNAPSHOT_FRAGMENT_BYTES,
+            prefix.len() - 1,
+            prefix.len(),
+        ] {
             let size = SNAPSHOT_FRAGMENT_BYTES.min(expected.len() - offset);
-            assert_eq!(source.fragment(offset, size).unwrap(), expected[offset..offset + size]);
+            assert_eq!(
+                source.fragment(offset, size).unwrap(),
+                expected[offset..offset + size]
+            );
         }
         std::fs::rename(&moved, &original).unwrap();
         sender.completed_send(2);
