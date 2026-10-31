@@ -445,6 +445,16 @@ fn install_decoded(
     Ok(())
 }
 struct Journal {
+    /// Durability barriers this journal has issued, and records it has written.
+    ///
+    /// A durable append costs about one block whatever the record holds, so what one append costs
+    /// is decided by how many entries share a barrier -- not by the size of the record. Batching
+    /// is therefore the first lever and the envelope only the second: `append_ready` writes a
+    /// prefix hard state, a record per span of entries and a final hard state, then issues ONE
+    /// barrier for all of them. These two counters are what let a test assert that, so a change
+    /// that quietly returns to a barrier per entry fails instead of merely getting slower.
+    barriers: u64,
+    records: u64,
     permitted: Vec<u64>,
     file: File,
     _lock: Arc<File>,
@@ -566,6 +576,8 @@ impl Journal {
             file,
             _lock: Arc::new(lock),
             length: offset,
+            barriers: 0,
+            records: 0,
         };
         if offset == 0 {
             journal.append(&batch(options, None, &[]))?;
@@ -595,6 +607,8 @@ impl Journal {
             file,
             length: 0,
             _lock: Arc::clone(&self._lock),
+            barriers: 0,
+            records: 0,
         };
         let mut floor_state = hs.clone();
         floor_state.commit = snapshot.get_metadata().index;
@@ -780,10 +794,12 @@ impl Journal {
         if !final_state.hard_state.is_empty() {
             self.write_record(&final_state)?;
         }
+        self.barriers = self.barriers.saturating_add(1);
         self.file.sync_all().map_err(storage_error)
     }
     fn append(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
         self.write_record(batch)?;
+        self.barriers = self.barriers.saturating_add(1);
         self.file.sync_all().map_err(storage_error)
     }
     // Only rewrite may defer durability until the entire replacement is written.
@@ -816,6 +832,7 @@ impl Journal {
         record[16..24].copy_from_slice(&checksum);
         self.file.write_all(&record).map_err(storage_error)?;
         self.length += record.len() as u64;
+        self.records = self.records.saturating_add(1);
         Ok(())
     }
 }
@@ -1780,6 +1797,149 @@ impl DurablePeer {
 
 #[cfg(test)]
 mod tests {
+    /// One durable append costs about one block whatever the record holds, so what an append costs
+    /// is decided by how many entries share a barrier -- not by the size of the record. Batching is
+    /// the first lever and the envelope only the second; shrinking a record buys nothing unbatched.
+    ///
+    /// `append_ready` is built for that. A Ready too big for one record is split into spans, each
+    /// span written as its own record, and then ONE barrier is issued for all of them. Nothing
+    /// asserted it, so a change to a barrier per record would have cost a barrier per 8 MiB of
+    /// Ready and stayed green.
+    ///
+    /// The arm deliberately crosses `LIMIT` so it sits on the span path: under it `append_ready`
+    /// delegates to `append`, which writes one record, and one record cannot tell a per-record
+    /// barrier from a per-Ready one.
+    #[test]
+    fn a_ready_split_into_several_records_still_costs_one_barrier() {
+        use super::*;
+        const ENTRY_BYTES: usize = 1024 * 1024;
+        const ENTRIES: u64 = 12;
+
+        let dir = tempfile::tempdir().unwrap();
+        let options = PeerOptions {
+            group_id: 17,
+            node_id: 1,
+            voters: vec![1, 2, 3],
+            wal_path: dir.path().join("peer.wal"),
+        };
+        let store = PeerStorage {
+            permitted: Vec::new(),
+            memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
+            checkpoint: Arc::new(Mutex::new(None)),
+            payload_directory: checkpoint_file::directory(&options.wal_path),
+            payload: Arc::new(Mutex::new(None)),
+        };
+        let mut journal = Journal::open(&options, &store).unwrap();
+        // `open` writes a bootstrap record under its own barrier, so measure deltas from here.
+        let barriers_before = journal.barriers;
+        let records_before = journal.records;
+        assert!(
+            barriers_before > 0,
+            "positive control: opening the journal must itself have issued a barrier, or the \
+             counter is not wired to the barrier at all and a delta of 1 below proves nothing"
+        );
+
+        let entries: Vec<Entry> = (1..=ENTRIES)
+            .map(|index| Entry {
+                term: 3,
+                index,
+                // Varied bytes: a run of one byte is not representative of a real payload.
+                data: (0..ENTRY_BYTES)
+                    .map(|i| (i as u8).wrapping_add(index as u8))
+                    .collect(),
+                context: vec![9; 8],
+                ..Default::default()
+            })
+            .collect();
+        let mut record = batch(&options, None, &entries);
+        assert!(
+            record.encoded_len() > LIMIT,
+            "positive control: the Ready must exceed LIMIT ({LIMIT}) so this runs on the \
+             span-splitting path; it encoded to {}",
+            record.encoded_len()
+        );
+
+        journal
+            .append_ready(&mut record, &HardState::default())
+            .unwrap();
+
+        let barriers = journal.barriers - barriers_before;
+        let records = journal.records - records_before;
+        assert!(
+            records >= 2,
+            "the Ready must have been split into several records for this arm to say anything \
+             about sharing a barrier; wrote {records}"
+        );
+        assert_eq!(
+            barriers, 1,
+            "{records} records from one Ready must cost exactly ONE barrier, not one apiece"
+        );
+    }
+    #[test]
+    fn a_ready_carrying_many_entries_costs_one_barrier() {
+        use super::*;
+        const ENTRIES: u64 = 8;
+        assert!(
+            ENTRIES >= 2,
+            "vacuity floor: a single entry cannot tell a per-entry barrier from a per-batch one"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let options = PeerOptions {
+            group_id: 17,
+            node_id: 1,
+            voters: vec![1, 2, 3],
+            wal_path: dir.path().join("peer.wal"),
+        };
+        let store = PeerStorage {
+            permitted: Vec::new(),
+            memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
+            checkpoint: Arc::new(Mutex::new(None)),
+            payload_directory: checkpoint_file::directory(&options.wal_path),
+            payload: Arc::new(Mutex::new(None)),
+        };
+        let mut journal = Journal::open(&options, &store).unwrap();
+        // `open` writes a bootstrap record under its own barrier, so measure the delta from here
+        // rather than the totals.
+        let barriers_before = journal.barriers;
+        let records_before = journal.records;
+        assert!(
+            barriers_before > 0,
+            "positive control: opening the journal must itself have issued a barrier, otherwise \
+             the counter is not wired to the barrier at all and a delta of 1 below would prove \
+             nothing"
+        );
+
+        let entries: Vec<Entry> = (1..=ENTRIES)
+            .map(|index| Entry {
+                term: 3,
+                index,
+                data: vec![7u8; 128],
+                context: vec![9; 8],
+                ..Default::default()
+            })
+            .collect();
+        let mut record = batch(&options, None, &entries);
+        journal
+            .append_ready(&mut record, &HardState::default())
+            .unwrap();
+
+        assert_eq!(
+            journal.barriers - barriers_before,
+            1,
+            "{ENTRIES} entries in one Ready must cost exactly ONE barrier, not one each"
+        );
+        let records = journal.records - records_before;
+        assert!(
+            records >= 1,
+            "the Ready must have written at least one record, or the arm measured an empty append"
+        );
+        assert!(
+            records < ENTRIES,
+            "{ENTRIES} contiguous entries must share records rather than taking one apiece; wrote \
+             {records}"
+        );
+    }
     #[test]
     fn encoded_entry_buffers_share_storage_and_preserve_decoding() {
         use super::*;
