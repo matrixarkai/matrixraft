@@ -2317,3 +2317,163 @@ mod fail_stop_after_failed_durable_write_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod the_truncation_is_floored_at_the_commit_point {
+    //! Committed entries are not a caller's to remove.
+    //!
+    //! The conflict index a follower answers a mismatching append with is already floored at the
+    //! commit point -- `conflict_next_index` walks `while index > self.commit_index` and falls
+    //! back to `commit_index + 1`, so the leader never backtracks below it. These arms put the
+    //! same floor at the two sites that would do the damage, so a producer that does not come
+    //! through that path -- a reordered replay, a peer with a stale next index, a direct caller --
+    //! cannot cut committed state either. Nothing here rewinds `commit_index`, `applied_index` or
+    //! `safety_applied_index`, so a cut below them would leave the node reporting as applied an
+    //! index whose entry it no longer holds.
+
+    use super::*;
+
+    fn entry(term: Term, index: LogIndex) -> LogEntry {
+        LogEntry {
+            log_id: LogId { term, index },
+            payload: vec![b'x'; 4],
+            is_command: false,
+        }
+    }
+
+    /// Five entries at term 1, with `commit_index` advanced to `commit`.
+    fn node_with_five_entries_committed_through(commit: LogIndex) -> Node {
+        let mut node = Node::new(1, ReplicaRole::Voter, false);
+        for index in 1..=5 {
+            node.append_entry(std::sync::Arc::new(entry(1, index)));
+        }
+        node.advance_commit(commit);
+        assert_eq!(
+            node.log.len(),
+            5,
+            "fixture must hold five entries before the conflict arrives"
+        );
+        assert_eq!(
+            node.commit_index, commit,
+            "fixture must have advanced the commit point to {commit}; `advance_commit` clamps to \
+             the match index, so a fixture that cannot reach it would test nothing"
+        );
+        node
+    }
+
+    #[test]
+    fn a_same_term_duplicate_append_does_not_drop_the_tail() {
+        let mut node = node_with_five_entries_committed_through(0);
+
+        // Same index, same term: it IS that entry. A duplicate or reordered append must be a
+        // no-op, not a reason to drop everything after it.
+        node.append_entry(std::sync::Arc::new(entry(1, 3)));
+
+        assert_eq!(
+            node.log.len(),
+            5,
+            "a same-term duplicate must not truncate; log is {:?}",
+            node.log
+                .iter()
+                .map(|e| (e.log_id.index, e.log_id.term))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            node.log_term_at(5),
+            Some(1),
+            "the tail must survive a duplicate append in the middle of the log"
+        );
+        assert_eq!(
+            node.retained_log_bytes(),
+            node.log.iter().map(|e| e.payload.len() as u64).sum::<u64>(),
+            "retained byte count drifted from the log"
+        );
+    }
+
+    #[test]
+    fn a_conflicting_append_at_the_commit_point_is_refused() {
+        let mut node = node_with_five_entries_committed_through(3);
+
+        // A DIFFERENT term at an index the group has committed. Raft forbids overwriting a
+        // committed entry, so this is refused rather than absorbed by truncating.
+        node.append_entry(std::sync::Arc::new(entry(2, 3)));
+
+        assert_eq!(
+            node.log.len(),
+            5,
+            "nothing may be cut at or below the commit point; log is {:?}",
+            node.log
+                .iter()
+                .map(|e| (e.log_id.index, e.log_id.term))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            node.log_term_at(3),
+            Some(1),
+            "the committed entry must still be the one that was committed"
+        );
+        assert!(
+            node.applied_index <= node.commit_index,
+            "the apply cursor must never exceed the commit point ({} > {})",
+            node.applied_index,
+            node.commit_index
+        );
+    }
+
+    #[test]
+    fn a_conflicting_append_above_the_commit_point_still_truncates() {
+        // The inverse arm: the floor must not disable the truncation Raft requires, or it would
+        // pass by refusing everything.
+        let mut node = node_with_five_entries_committed_through(2);
+
+        node.append_entry(std::sync::Arc::new(entry(2, 4)));
+
+        assert_eq!(
+            node.log.len(),
+            4,
+            "an uncommitted conflicting entry must replace the tail from its index on"
+        );
+        assert_eq!(
+            node.log_term_at(4),
+            Some(2),
+            "index 4 must now carry the replacing term"
+        );
+    }
+
+    #[test]
+    fn truncate_log_from_refuses_to_cut_at_or_below_the_commit_point() {
+        let mut node = node_with_five_entries_committed_through(3);
+
+        node.truncate_log_from(3);
+
+        assert_eq!(
+            node.log.len(),
+            5,
+            "an explicit truncation at the commit point must be refused"
+        );
+        assert_eq!(
+            node.log_term_at(3),
+            Some(1),
+            "the committed entry at the commit point must survive"
+        );
+    }
+
+    #[test]
+    fn truncate_log_from_still_cuts_above_the_commit_point() {
+        // The inverse arm for the explicit entry point.
+        let mut node = node_with_five_entries_committed_through(2);
+
+        node.truncate_log_from(4);
+
+        assert_eq!(
+            node.log.len(),
+            3,
+            "an explicit truncation above the commit point must still cut"
+        );
+        assert_eq!(
+            node.retained_log_bytes(),
+            node.log.iter().map(|e| e.payload.len() as u64).sum::<u64>(),
+            "retained byte count drifted from the log after a truncation"
+        );
+    }
+}

@@ -219,6 +219,21 @@ impl Node {
             .is_none_or(|last| last.log_id.index < entry.log_id.index);
         if !extends_tail {
             if let Some(position) = self.log_position(entry.log_id.index) {
+                // An entry already present with the SAME term IS that entry, so a duplicate or
+                // reordered append is a no-op. Truncating on the bare index collision would drop
+                // every entry after it, which for a committed suffix is data loss.
+                if self.log[position].log_id.term == entry.log_id.term {
+                    return;
+                }
+                // A DIFFERENT term at or below the commit point would overwrite an entry the
+                // group has committed, which Raft forbids. The conflict index a follower answers
+                // a mismatching append with is already floored at the commit point; this refuses
+                // the same thing at the site that would do the damage, so a producer that does
+                // not go through that path -- a reordered replay, a peer with a stale next index
+                // -- cannot reach past the floor either.
+                if entry.log_id.index <= self.commit_index {
+                    return;
+                }
                 self.truncate_log_at(position);
             }
         }
@@ -229,6 +244,14 @@ impl Node {
     }
 
     fn truncate_log_from(&mut self, log_index: LogIndex) {
+        // Never cut at or below the commit point. Committed entries are not the caller's to
+        // remove, and none of `commit_index`, `applied_index` or `safety_applied_index` is rewound
+        // here -- so a cut below them would leave this node reporting as applied an index whose
+        // entry it no longer holds. Wholesale replacement after a snapshot goes through `set_log`,
+        // which resets those cursors with the log.
+        if log_index <= self.commit_index {
+            return;
+        }
         if let Some(position) = self.log_position_at_or_after(log_index) {
             self.truncate_log_at(position);
         }
