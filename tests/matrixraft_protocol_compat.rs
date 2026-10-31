@@ -928,3 +928,80 @@ fn matrixraft_protocol_message_shapes_cover_entries_lease_snapshot_and_admin_pay
         MatrixRaftAdminCommandType::ReleaseMemory
     );
 }
+
+/// An entry payload is a format, so it has to have a reader.
+///
+/// A config change carries the member id, both addresses, the old member set, the target conf
+/// state and the auto-promote flag. Converting one to a `LogEntry` used to render it with `{:?}`
+/// and put that Rust Debug STRING in the payload: nothing could parse it, its shape followed
+/// whatever the struct's derive happened to print, and a field rename would have changed it with
+/// no reader to notice. The arm next door asserted only `!payload.is_empty()`, which a rendering
+/// satisfies -- so the encoding was never wrong, merely never checked.
+#[test]
+fn a_config_change_payload_is_a_format_not_a_rendering() {
+    let change = matrixraft::MatrixRaftConfigChange {
+        request_id: Some(123),
+        change_type: matrixraft::MatrixRaftConfigChangeType::AddNode,
+        member_id: 4,
+        raft_addr: "127.0.0.1:71004".to_string(),
+        snapshot_addr: "127.0.0.1:72004".to_string(),
+        old_members: Vec::new(),
+        conf_state: MatrixRaftConfState::Learner,
+        auto_promote: true,
+    };
+    let entry = MatrixRaftEntry {
+        entry_type: MatrixRaftEntryType::ConfigChange,
+        term: 6,
+        index: 12,
+        propose: None,
+        config_change: Some(change.clone()),
+        memberships: Vec::new(),
+        request_id: 123,
+        bytes_size: 0,
+    };
+
+    let log_entry = entry.to_log_entry();
+    assert!(
+        !log_entry.payload.is_empty(),
+        "vacuity floor: an empty payload would pass every assertion below for the wrong reason"
+    );
+
+    // It is a format: it reads back as the change that was written, field for field.
+    let recovered = MatrixRaftEntry::config_change_from_payload(&log_entry.payload)
+        .expect("a config change payload must decode back into a config change");
+    assert_eq!(
+        recovered, change,
+        "the payload must carry the change itself, not a description of it"
+    );
+
+    // And specifically NOT a rendering. This is the assertion the old encoding failed and the
+    // `is_empty` check could not.
+    let text = String::from_utf8_lossy(&log_entry.payload);
+    assert!(
+        !text.starts_with("MatrixRaftConfigChange"),
+        "the payload is a Debug rendering of the struct, not an encoding of it: {text}"
+    );
+
+    // What loss REMAINS is pinned here rather than left to be discovered. `LogEntry` carries
+    // `is_command`, a bool, so it cannot hold the three-way entry type that `MatrixRaftEntry` and
+    // the engine this protocol mirrors both have -- a `ConfigChange` comes back as `Meta`, since
+    // `is_command` is false for both. Widening `LogEntry` is a durable WAL format change, because
+    // `is_command` is stored there, so it is deliberately not done here.
+    let round_tripped = MatrixRaftEntry::from(&log_entry);
+    assert_eq!(
+        round_tripped.entry_type,
+        MatrixRaftEntryType::Meta,
+        "the entry-type loss through LogEntry must stay exactly this, so a change to it is seen"
+    );
+    assert_eq!(
+        MatrixRaftEntry::config_change_from_payload(
+            &round_tripped
+                .propose
+                .as_ref()
+                .expect("the round trip must keep a propose")
+                .data
+        ),
+        Some(change),
+        "even after the type is lost, the change itself must still be recoverable from the payload"
+    );
+}
