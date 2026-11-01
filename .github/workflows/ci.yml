@@ -128,6 +128,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      # `--all-targets` widens targets, not features, so the run above cannot see a line behind
+      # `#[cfg(feature = "peer-runtime")]`. Three findings sat in the durable peer sources because
+      # of that, invisible to every clippy run this workflow made. The crate has one feature; this
+      # covers it.
+      - name: Clippy with the durable peer feature
+        run: cargo clippy --all-targets --locked --features peer-runtime -- -D warnings
+
   prohibited-vocabulary:
     name: prohibited vocabulary
     runs-on: ubuntu-latest
