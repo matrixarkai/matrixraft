@@ -6,17 +6,56 @@ use matrixraft::{
     RaftError,
 };
 use prost::Message as _;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::BTreeMap, path::PathBuf};
+static DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// A directory name for one test, from the clock reading AND a process-local
+/// sequence number.
+///
+/// The clock alone is not enough. Twenty tests share this binary and the harness
+/// runs them on parallel threads, so two can take the same reading --
+/// `as_nanos()` reports whatever resolution the host clock has, not a promise of
+/// distinctness. Same pid plus same reading is the same path, and the
+/// `create_dir` below then fails `AlreadyExists`: that is how this surfaced, one
+/// CI job red on a tree whose own run had just passed.
+///
+/// The sequence number is distinct by construction within the process, and the
+/// pid keeps it distinct across processes. Taking the reading as an argument is
+/// what lets the test below reach the collision deliberately instead of waiting
+/// for a slow clock to produce one.
+fn directory_name(nanos: u128) -> String {
+    format!(
+        "matrixraft-peer-{}-{}-{}",
+        std::process::id(),
+        nanos,
+        DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+#[test]
+fn two_directories_differ_even_on_one_clock_reading() {
+    // The same reading twice is exactly the case the clock cannot rule out.
+    // `create_dir` is kept rather than `create_dir_all` on purpose: if a path
+    // ever does collide, two peers writing one WAL should fail loudly instead of
+    // quietly sharing a directory.
+    let first = directory_name(1_700_000_000_000_000_000);
+    let second = directory_name(1_700_000_000_000_000_000);
+    assert_ne!(
+        first, second,
+        "two directories built from one clock reading must still differ, or parallel \
+         tests in this binary can be handed the same path"
+    );
+}
+
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "matrixraft-peer-{}-{}",
-            std::process::id(),
+        let path = std::env::temp_dir().join(directory_name(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
         ));
         std::fs::create_dir(&path).unwrap();
         Self(path)
