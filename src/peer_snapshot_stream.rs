@@ -815,7 +815,7 @@ mod tests {
             let end = (offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
             let mut part = Fragment {
                 offset: offset as u64,
-                data: sending.bytes.fragment(offset, end - offset).unwrap().into(),
+                data: sending.bytes.fragment(offset, end - offset).unwrap(),
                 ..first.identity()
             };
             let last = end == sending.bytes.len();
@@ -1058,7 +1058,7 @@ mod tests {
             let end = (offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
             let part = Fragment {
                 offset: offset as u64,
-                data: sending.bytes.fragment(offset, end - offset).unwrap().into(),
+                data: sending.bytes.fragment(offset, end - offset).unwrap(),
                 ..first.identity()
             };
             let result = receiver.receive(part, &[1, 2, 3]);

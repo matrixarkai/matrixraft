@@ -1879,7 +1879,11 @@ mod tests {
     fn a_ready_carrying_many_entries_costs_one_barrier() {
         use super::*;
         const ENTRIES: u64 = 8;
-        assert!(
+        // Checked at compile time, not at run time: the value is a constant, so a runtime
+        // assertion can only ever report what the compiler already knows. As a `const` item it
+        // FAILS THE BUILD if anyone lowers ENTRIES below 2, which is strictly stronger than the
+        // runtime form and is why the floor is kept rather than removed to satisfy the lint.
+        const _: () = assert!(
             ENTRIES >= 2,
             "vacuity floor: a single entry cannot tell a per-entry barrier from a per-batch one"
         );
