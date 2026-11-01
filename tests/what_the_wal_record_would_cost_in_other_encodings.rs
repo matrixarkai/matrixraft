@@ -4,15 +4,24 @@
 //! What the WAL record would cost in other encodings.
 //!
 //! A sibling suite pins what an append costs today: 43 bytes per segment file,
-//! 441 bytes per record, plus 4/3 of the payload, so a 9-byte command costs
-//! about fifty times its own size. 77.4% of a record is its own field names.
+//! 412 bytes per record, plus 4/3 of the payload, so a 9-byte command costs
+//! about forty-six times its own size. Roughly three quarters of a record is
+//! its own field names.
+//!
+//! The JSON column moved from 437 to 408 when the record stopped writing an
+//! empty `learners` and `witnesses` on every append, and the three computed
+//! columns did NOT move -- correctly, and that is worth saying out loud. A
+//! binary encoding writes a zero-length prefix for an empty list, one byte as a
+//! varint and four fixed-width, so it never paid the 29 bytes JSON was spending
+//! on `"learners":[],"witnesses":[],`. The saving closes a little of the
+//! distance to binary rather than changing what binary costs.
 //! The obvious reaction is to shorten the names. **Measured, that is the worst
 //! of the three alternatives**, and this file exists so that conclusion is a
 //! number rather than an opinion.
 //!
 //! | encoding | envelope | 9-byte command | large payloads |
 //! |---|---|---|---|
-//! | JSON, as written today | 437 B | 49.9x | 1.333x |
+//! | JSON, as written today | 408 B | 46.7x | 1.333x |
 //! | JSON with one-character keys | 183 B | 21.7x | 1.333x |
 //! | binary, every integer eight bytes | 169 B | 19.8x | 1.000x |
 //! | binary, varint integers | **35 B** | **4.9x** | 1.000x |
@@ -27,7 +36,7 @@
 //! **The envelope is small integers written as text under long names.** This
 //! record's integers are a term of 3, an index of 1, a node of 1, an epoch of
 //! 3: each costs one byte as a varint and up to twenty-six characters as
-//! `"installed_snapshot_index":0`. Collapsing both at once is what takes 437
+//! `"installed_snapshot_index":0`. Collapsing both at once is what takes 408
 //! bytes to 35 -- an envelope **12.5x smaller than short keys achieve** -- and
 //! it is also what moves the payload slope from 4/3 to 1, because a binary
 //! record has no reason to base64 anything.
@@ -107,11 +116,11 @@ fn record(payload_len: usize) -> WalRecord {
 }
 
 #[test]
-fn the_envelope_is_437_bytes_today_and_35_as_varints() {
+fn the_envelope_is_408_bytes_today_and_35_as_varints() {
     let empty = record(0);
     assert_eq!(
         serde_json::to_string(&empty).expect("encode").len(),
-        437,
+        408,
         "the JSON envelope moved, so every figure in this file needs re-pricing"
     );
     assert_eq!(short_key_json_len(&empty), 183, "short-key envelope moved");
@@ -145,7 +154,7 @@ fn a_binary_record_also_removes_the_payloads_four_thirds() {
     let big = record(3_000);
     let json = serde_json::to_string(&big).expect("encode").len();
     let varint = varint_bytes(&big);
-    assert_eq!(json, 4_437);
+    assert_eq!(json, 4_408);
     assert_eq!(varint, 3_036);
     assert!(
         varint < 3_000 + 50,

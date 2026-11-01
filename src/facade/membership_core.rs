@@ -178,9 +178,19 @@ fn matrixraft_quorum_size(voters: usize, witnesses: usize, ignore_witness: bool)
 pub struct Membership {
     pub group_id: GroupId,
     pub voters: Vec<NodeId>,
-    #[serde(default)]
+    /// Written only when non-empty, like `witnesses` below.
+    ///
+    /// `"learners":[],"witnesses":[],` is 29 bytes of every WAL record of a
+    /// group that has neither, which is the ordinary case. Both already read as
+    /// `#[serde(default)]`, so an absent list is empty to a reader of any age,
+    /// and the WAL checksum mixes each list's LENGTH before its members -- an
+    /// absent list comes back empty, so the length is still zero and the hash
+    /// does not move. `epoch` is deliberately left written: it is non-zero for
+    /// any group that has ever reconfigured, so skipping it at zero would buy
+    /// almost nothing while adding a predicate to read past.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub learners: Vec<NodeId>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub witnesses: Vec<NodeId>,
     #[serde(default)]
     pub epoch: u64,

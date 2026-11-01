@@ -890,11 +890,21 @@ pub(crate) mod wal_entry_payloads {
         Ok(out)
     }
 
-    /// One entry as written: `payload` is base64 rather than a number array.
+    /// One entry as written: `payload` is base64 rather than a number array,
+    /// and `is_command` is written only when it is set.
+    ///
+    /// `"is_command":false` is 19 bytes of every entry that is not a command,
+    /// and `EntryIn` below already takes it as `#[serde(default)]`, so omitting
+    /// it is invisible to a reader of either age -- the same argument the record
+    /// makes for `entries_are_delta` and `installed_snapshot`. Kept here in the
+    /// WAL's own projection rather than on `GenericLogEntry`, which is also
+    /// serialized for RPC and for the debug surfaces where nothing is paying for
+    /// it by the megabyte.
     #[derive(serde::Serialize)]
     struct EntryOut<'a> {
         log_id: &'a LogId,
         payload: String,
+        #[serde(skip_serializing_if = "super::is_false")]
         is_command: bool,
     }
 

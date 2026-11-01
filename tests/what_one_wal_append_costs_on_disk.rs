@@ -6,18 +6,18 @@
 //! Three assertions in this suite already cared about this cost, and all three
 //! were one-sided bounds: a per-record cost "under 1000 bytes", a 4 KiB record
 //! "under 6500 bytes", and a legacy record "over 16000". A bound that loose
-//! cannot catch a regression -- the per-record figure is **441 bytes**, so the
+//! cannot catch a regression -- the per-record figure is **412 bytes**, so the
 //! existing bound would admit a 2.2x envelope growth without going red.
 //!
 //! Measured, the cost is a line, and it resolves into integers exactly:
 //!
 //! ```text
-//! 100 records, payload    0 B  ->  44,143 B on disk  =  100 *   441 + 43
-//! 100 records, payload  300 B  ->  84,143 B on disk  =  100 *   841 + 43
-//! 100 records, payload 3000 B  -> 444,143 B on disk  =  100 *  4,441 + 43
+//! 100 records, payload    0 B  ->  41,243 B on disk  =  100 *   412 + 43
+//! 100 records, payload  300 B  ->  81,243 B on disk  =  100 *   812 + 43
+//! 100 records, payload 3000 B  -> 441,243 B on disk  =  100 *  4,412 + 43
 //! ```
 //!
-//! so **43 bytes per segment file, plus 441 bytes per record, plus 4/3 of the
+//! so **43 bytes per segment file, plus 412 bytes per record, plus 4/3 of the
 //! payload.** The 4/3 is base64, which is what the payload encoding costs after
 //! the move off `serde_json`'s number array; it is the floor this format can
 //! reach and nothing here is going to beat it.
@@ -32,12 +32,12 @@
 //!
 //! | payload | bytes per append | amplification |
 //! |---|---|---|
-//! | 9 B | 453.4 B | **50.4x** |
-//! | 300 B | 841.4 B | 2.80x |
-//! | 3000 B | 4441.4 B | 1.48x |
+//! | 9 B | 424.4 B | **47.2x** |
+//! | 300 B | 812.4 B | 2.71x |
+//! | 3000 B | 4412.4 B | 1.47x |
 //!
-//! A raft log carrying small commands pays about **fifty times** its payload.
-//! That is not the payload encoding's fault -- it is the 441-byte envelope, and
+//! A raft log carrying small commands pays about **forty-seven times** its payload.
+//! That is not the payload encoding's fault -- it is the 412-byte envelope, and
 //! **77.4% of a record is its own field names**: 328 bytes of `"name":` in a
 //! 424-byte record carrying 9 bytes. The widest single field is
 //! `apply_snapshot_fence` at 118 bytes, of which 73 are the four names
@@ -87,13 +87,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const RECORDS: u64 = 100;
 const SEGMENT_OVERHEAD: u64 = 43;
-const PER_RECORD: u64 = 441;
+const PER_RECORD: u64 = 412;
 
 /// Measured, exact: the same appends always produce the same bytes.
-const DISK_AT_0: u64 = 44_143;
-const DISK_AT_9: u64 = 45_343;
-const DISK_AT_300: u64 = 84_143;
-const DISK_AT_3000: u64 = 444_143;
+const DISK_AT_0: u64 = 41_243;
+const DISK_AT_9: u64 = 42_443;
+const DISK_AT_300: u64 = 81_243;
+const DISK_AT_3000: u64 = 441_243;
 
 fn temp_wal_dir(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -178,7 +178,7 @@ fn disk_bytes(records: u64, payload_len: usize) -> u64 {
 }
 
 #[test]
-fn one_append_costs_a_fixed_envelope_and_the_envelope_is_441_bytes() {
+fn one_append_costs_a_fixed_envelope_and_the_envelope_is_412_bytes() {
     assert_eq!(
         disk_bytes(RECORDS, 0),
         DISK_AT_0,
@@ -213,17 +213,17 @@ fn a_payload_byte_costs_four_thirds_of_a_byte_and_nothing_else() {
 }
 
 #[test]
-fn a_small_command_pays_about_fifty_times_its_own_size() {
+fn a_small_command_pays_about_forty_seven_times_its_own_size() {
     let bytes = disk_bytes(RECORDS, 9);
     assert_eq!(bytes, DISK_AT_9, "the 9-byte point moved");
 
-    // The number this whole file exists to make visible. 441 bytes of envelope
+    // The number this whole file exists to make visible. 412 bytes of envelope
     // around 9 bytes of command.
     let payload_total = 9 * RECORDS;
     assert_eq!(
         bytes * 100 / payload_total,
-        5_038,
-        "a 9-byte command should cost 50.38x on disk, got {:.2}x",
+        4_715,
+        "a 9-byte command should cost 47.15x on disk, got {:.2}x",
         bytes as f64 / payload_total as f64
     );
 }
