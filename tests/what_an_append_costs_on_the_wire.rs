@@ -52,6 +52,16 @@
 //! do: so the figure is a number rather than an impression when somebody comes
 //! to decide, and so nothing quietly makes it worse first.
 //!
+//! ## Every figure here is for `is_command: true`
+//!
+//! The WAL's entry projection carries
+//! `#[serde(skip_serializing_if = "is_false")]` on `is_command`, so an entry
+//! that is not a command omits the field entirely and costs less. The fixture
+//! sets it, which is the common case for a replicated command and the more
+//! expensive one -- but it means these are not "the" per-entry figures, they
+//! are the per-command ones. The same field once made a WAL measurement read
+//! 29 bytes where another read 48, for exactly this reason.
+//!
 //! ## What is not measured here
 //!
 //! - The durable peer path. `peer_runtime` is prost throughout -- 40 encode
@@ -158,7 +168,12 @@ fn an_append_costs_a_fixed_envelope_and_four_thirds_of_its_payload() {
 /// after it is the per-entry cost.
 #[test]
 fn an_entry_costs_sixty_four_bytes_of_envelope_before_its_payload() {
-    let entries_only = WIRE_AT_100_EMPTY - WIRE_AT_NO_ENTRIES;
+    // MEASURED, not the difference between two of this file's own constants.
+    // That is what this arm did first, and a plant found it: lengthening an
+    // entry's wire name moved every measured point and left this one green,
+    // because two constants subtract at compile time and assert nothing about
+    // the code.
+    let entries_only = wire_bytes(ENTRIES, 0) - wire_bytes(0, 0);
     assert_eq!(
         entries_only, 6_393,
         "100 empty entries cost {entries_only} bytes of envelope, not 6,393"
