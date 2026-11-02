@@ -155,8 +155,20 @@ pub(crate) struct WalRecordProto {
     pub installed_snapshot: Option<SnapshotMetadataProto>,
     #[prost(message, optional, tag = "8")]
     pub apply_snapshot_fence: Option<ApplySnapshotFenceProto>,
+    /// Only for a checksum that is not sixteen lowercase hex characters: a
+    /// record written by hand, or one being carried across from a JSON
+    /// segment. Everything this crate writes goes in `checksum_digest`.
     #[prost(string, tag = "9")]
     pub checksum: String,
+    /// The `u64` the checksum spells, 9 bytes on the wire against the 18 the
+    /// hex text costs.
+    ///
+    /// `optional` rather than bare, because an absent digest must not be
+    /// confusable with a digest of zero -- a record carrying no checksum would
+    /// otherwise read back as sixteen zeros, which is a valid-looking checksum
+    /// that nothing computed.
+    #[prost(fixed64, optional, tag = "10")]
+    pub checksum_digest: Option<u64>,
 }
 
 fn role_to_wire(role: ReplicaRole) -> i32 {
@@ -208,6 +220,7 @@ impl From<&LogIdProto> for LogId {
 
 impl From<&WalRecord> for WalRecordProto {
     fn from(record: &WalRecord) -> Self {
+        let (text, digest) = checksum_to_wire(&record.checksum);
         Self {
             group_id: record.group_id,
             node_id: record.node_id,
@@ -258,7 +271,8 @@ impl From<&WalRecord> for WalRecordProto {
                 installed_snapshot_index: record.apply_snapshot_fence.installed_snapshot_index,
                 first_retained_log_index: record.apply_snapshot_fence.first_retained_log_index,
             }),
-            checksum: record.checksum.clone(),
+            checksum: text,
+            checksum_digest: digest,
         }
     }
 }
@@ -333,9 +347,50 @@ impl TryFrom<WalRecordProto> for WalRecord {
                 installed_snapshot_index: fence.installed_snapshot_index,
                 first_retained_log_index: fence.first_retained_log_index,
             },
-            checksum: proto.checksum,
+            checksum: checksum_from_wire(proto.checksum, proto.checksum_digest),
         })
     }
+}
+
+/// Splits a record's checksum into the two fields the wire carries.
+///
+/// A checksum this crate computed is always sixteen lowercase hex characters,
+/// so it travels as a `fixed64` and costs 9 bytes instead of 18. Anything else
+/// -- a value written by hand, or one carried across from a JSON segment --
+/// travels as text, because the point of storing it is to hand back exactly
+/// what was stored.
+fn checksum_to_wire(checksum: &str) -> (String, Option<u64>) {
+    match checksum_as_u64(checksum) {
+        Some(value) => (String::new(), Some(value)),
+        None => (checksum.to_string(), None),
+    }
+}
+
+/// The inverse. The digest wins when it is present, since nothing sets both.
+fn checksum_from_wire(text: String, digest: Option<u64>) -> String {
+    match digest {
+        Some(value) => format!("{value:016x}"),
+        None => text,
+    }
+}
+
+/// The `u64` that a sixteen-character lowercase hex string spells.
+///
+/// Lowercase only, deliberately. `u64::from_str_radix` would take `AB` as
+/// happily as `ab`, and re-encoding would hand back the lowercase spelling --
+/// so accepting uppercase here would make the round trip change the bytes it
+/// was asked to preserve.
+fn checksum_as_u64(checksum: &str) -> Option<u64> {
+    if checksum.len() != 16 {
+        return None;
+    }
+    if !checksum
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    u64::from_str_radix(checksum, 16).ok()
 }
 
 /// FNV-1a over the record bytes, as the frame's integrity check.
@@ -546,12 +601,19 @@ mod tests {
         );
     }
     #[test]
-    fn the_envelope_is_about_seventy_five_bytes_and_the_payload_slope_is_one() {
-        // Measured: 73 B at an empty payload, 75 at nine bytes, 77 at three
+    fn the_envelope_is_tens_of_bytes_not_hundreds_and_the_payload_slope_is_one() {
+        // Measured: 64 B at an empty payload, 66 at nine bytes, 68 at three
         // hundred and at three thousand. Bounded rather than pinned exactly,
         // because prost's own field framing is its business and not a contract
         // this suite should freeze -- but the ORDER of magnitude is the point,
         // against 412 B as JSON.
+        //
+        // The window is wide on purpose, and was widened once: it used to be
+        // 60..=90 around a 73-byte envelope, which left four bytes of headroom
+        // below, so narrowing the checksum nearly reddened a bound that exists
+        // to catch a return to JSON rather than to pin a figure. The exact
+        // bytes are pinned by `what_one_wal_append_costs_on_disk`, and that is
+        // the file to change when they move.
         let mut envelopes = Vec::new();
         for payload in [0usize, 9, 300, 3_000] {
             let framed = encode_framed(&record(payload, true)).expect("encodes");
@@ -563,8 +625,8 @@ mod tests {
         }
         for (index, envelope) in envelopes.iter().enumerate() {
             assert!(
-                (60..=90).contains(envelope),
-                "envelope {index} should sit near 75 bytes, got {envelope}"
+                (24..=120).contains(envelope),
+                "envelope {index} should be tens of bytes, not hundreds like the 412 JSON cost, and not so few that it cannot be carrying a frame, a digest and the record's integers: got {envelope}"
             );
         }
 
@@ -578,5 +640,123 @@ mod tests {
             2_700,
             "2700 more payload bytes must cost exactly 2700 more on the wire"
         );
+    }
+    /// The `fixed64` path is actually taken, which the byte count depends on.
+    ///
+    /// A positive control. Every test below checks that some checksum survives
+    /// the round trip, and all of them would pass with every checksum going
+    /// through the text field and the nine-byte saving being imaginary -- so
+    /// this one asserts the hex characters are NOT on the wire.
+    #[test]
+    fn a_real_checksum_travels_as_eight_bytes_and_not_as_its_hex_text() {
+        let value = record(0, true);
+        assert_eq!(
+            value.checksum.len(),
+            16,
+            "the fixture's checksum is not the sixteen hex characters this test is about"
+        );
+        let framed = encode_framed(&value).expect("encodes");
+        let hex = value.checksum.as_bytes();
+        assert!(
+            !framed.windows(hex.len()).any(|window| window == hex),
+            "the checksum's hex text is still on the wire, so it is being carried as a string and the nine-byte figure is wrong"
+        );
+
+        let proto = WalRecordProto::from(&value);
+        assert!(
+            proto.checksum.is_empty(),
+            "the text field is populated as well, so the checksum is being written twice"
+        );
+        assert!(
+            proto.checksum_digest.is_some(),
+            "the digest field is empty, so nothing is carrying the checksum"
+        );
+    }
+
+    /// An empty checksum comes back empty, not as sixteen zeros.
+    ///
+    /// This is what `optional` on the digest buys. A bare `fixed64` cannot tell
+    /// "no checksum" from "a checksum of zero", so a record carrying none would
+    /// read back carrying `0000000000000000` -- a well-formed checksum that
+    /// nothing ever computed, which `matrixraft_wal_checksum_valid` would then
+    /// reject for a reason that has nothing to do with the stored bytes.
+    #[test]
+    fn a_record_with_no_checksum_does_not_acquire_one_in_transit() {
+        let mut value = record(0, true);
+        value.checksum = String::new();
+        let framed = encode_framed(&value).expect("encodes");
+        let (back, _) = decode_framed(&framed).expect("decodes").expect("whole");
+        assert_eq!(
+            back.checksum, "",
+            "an absent checksum came back as {:?}, so the wire cannot tell absent from zero",
+            back.checksum
+        );
+    }
+
+    /// A checksum of zero is a real value and survives as one.
+    ///
+    /// The other side of the case above: sixteen zeros is what a `u64` of zero
+    /// spells, and it has to round trip as itself rather than being read as
+    /// "no checksum".
+    #[test]
+    fn a_checksum_of_zero_is_a_value_and_not_an_absence() {
+        let mut value = record(0, true);
+        value.checksum = "0000000000000000".to_string();
+        let framed = encode_framed(&value).expect("encodes");
+        let (back, _) = decode_framed(&framed).expect("decodes").expect("whole");
+        assert_eq!(back.checksum, "0000000000000000");
+        assert_eq!(
+            WalRecordProto::from(&value).checksum_digest,
+            Some(0),
+            "a checksum of zero should travel as a digest of zero, not as text"
+        );
+    }
+
+    /// Anything that is not sixteen lowercase hex characters travels verbatim.
+    ///
+    /// Two callers depend on this. A test that damages a checksum to see
+    /// recovery refuse the record writes a value like the one below, and it has
+    /// to survive encoding so that what fails is the checksum CHECK and not the
+    /// parse. And a record carried across from a JSON segment can hold whatever
+    /// that file held.
+    #[test]
+    fn a_checksum_that_is_not_sixteen_hex_characters_survives_verbatim() {
+        for odd in [
+            "not-the-right-checksum",
+            "",
+            "0",
+            "d01ebf93ae8ef00",
+            "d01ebf93ae8ef0066",
+            "D01EBF93AE8EF006",
+            "zzzzzzzzzzzzzzzz",
+            "d01ebf93ae8ef00 ",
+        ] {
+            let mut value = record(0, true);
+            value.checksum = odd.to_string();
+            let framed = encode_framed(&value).expect("encodes");
+            let (back, _) = decode_framed(&framed).expect("decodes").expect("whole");
+            assert_eq!(
+                back.checksum, odd,
+                "the checksum {odd:?} did not survive the round trip"
+            );
+        }
+    }
+
+    /// Uppercase hex is deliberately not accepted into the digest.
+    ///
+    /// `u64::from_str_radix` takes `AB` as happily as `ab`, so accepting it
+    /// would make the round trip hand back the lowercase spelling of a value
+    /// the caller wrote in uppercase -- a silent rewrite of a field whose whole
+    /// job is to be compared for equality.
+    #[test]
+    fn uppercase_hex_is_not_rewritten_into_lowercase() {
+        let mut value = record(0, true);
+        value.checksum = "D01EBF93AE8EF006".to_string();
+        let proto = WalRecordProto::from(&value);
+        assert!(
+            proto.checksum_digest.is_none(),
+            "uppercase hex went into the digest, so decoding would rewrite it as lowercase"
+        );
+        assert_eq!(proto.checksum, "D01EBF93AE8EF006");
     }
 }
