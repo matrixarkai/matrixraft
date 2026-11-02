@@ -180,6 +180,65 @@ pub(crate) struct WalRecordProto {
     pub checksum_digest: Option<u64>,
 }
 
+impl From<&Peer> for PeerProto {
+    fn from(peer: &Peer) -> Self {
+        Self {
+            node_id: peer.node_id,
+            raft_addr: peer.raft_addr.clone(),
+            snapshot_addr: peer.snapshot_addr.clone(),
+            role: role_to_wire(peer.role),
+            auto_promote: peer.auto_promote,
+        }
+    }
+}
+
+impl TryFrom<PeerProto> for Peer {
+    type Error = RaftError;
+
+    fn try_from(proto: PeerProto) -> Result<Self, Self::Error> {
+        Ok(Self {
+            node_id: proto.node_id,
+            raft_addr: proto.raft_addr,
+            snapshot_addr: proto.snapshot_addr,
+            role: role_from_wire(proto.role)?,
+            auto_promote: proto.auto_promote,
+        })
+    }
+}
+
+impl From<&SnapshotMetadata> for SnapshotMetadataProto {
+    fn from(meta: &SnapshotMetadata) -> Self {
+        Self {
+            snapshot_id: meta.snapshot_id.clone(),
+            last_log_id: Some(LogIdProto::from(&meta.last_log_id)),
+            membership: meta.membership.clone(),
+            members: meta.members.iter().map(PeerProto::from).collect(),
+            payload_bytes: meta.payload_bytes,
+        }
+    }
+}
+
+impl TryFrom<SnapshotMetadataProto> for SnapshotMetadata {
+    type Error = RaftError;
+
+    fn try_from(proto: SnapshotMetadataProto) -> Result<Self, Self::Error> {
+        let last_log_id = proto
+            .last_log_id
+            .ok_or_else(|| missing("the snapshot's last log id"))?;
+        let mut members = Vec::with_capacity(proto.members.len());
+        for peer in proto.members {
+            members.push(Peer::try_from(peer)?);
+        }
+        Ok(Self {
+            snapshot_id: proto.snapshot_id,
+            last_log_id: LogId::from(&last_log_id),
+            membership: proto.membership,
+            members,
+            payload_bytes: proto.payload_bytes,
+        })
+    }
+}
+
 fn role_to_wire(role: ReplicaRole) -> i32 {
     match role {
         ReplicaRole::Voter => 0,
@@ -255,25 +314,10 @@ impl From<&WalRecord> for WalRecordProto {
                 })
                 .collect(),
             entries_are_delta: record.entries_are_delta,
-            installed_snapshot: record.installed_snapshot.as_ref().map(|snapshot| {
-                SnapshotMetadataProto {
-                    snapshot_id: snapshot.snapshot_id.clone(),
-                    last_log_id: Some(LogIdProto::from(&snapshot.last_log_id)),
-                    membership: snapshot.membership.clone(),
-                    members: snapshot
-                        .members
-                        .iter()
-                        .map(|peer| PeerProto {
-                            node_id: peer.node_id,
-                            raft_addr: peer.raft_addr.clone(),
-                            snapshot_addr: peer.snapshot_addr.clone(),
-                            role: role_to_wire(peer.role),
-                            auto_promote: peer.auto_promote,
-                        })
-                        .collect(),
-                    payload_bytes: snapshot.payload_bytes,
-                }
-            }),
+            installed_snapshot: record
+                .installed_snapshot
+                .as_ref()
+                .map(SnapshotMetadataProto::from),
             apply_snapshot_fence: Some(ApplySnapshotFenceProto {
                 applied_index: record.apply_snapshot_fence.applied_index,
                 commit_index: record.apply_snapshot_fence.commit_index,
@@ -306,31 +350,10 @@ impl TryFrom<WalRecordProto> for WalRecord {
             });
         }
 
-        let installed_snapshot = match proto.installed_snapshot {
-            None => None,
-            Some(snapshot) => {
-                let last_log_id = snapshot
-                    .last_log_id
-                    .ok_or_else(|| missing("the installed snapshot's last log id"))?;
-                let mut members = Vec::with_capacity(snapshot.members.len());
-                for peer in snapshot.members {
-                    members.push(Peer {
-                        node_id: peer.node_id,
-                        raft_addr: peer.raft_addr,
-                        snapshot_addr: peer.snapshot_addr,
-                        role: role_from_wire(peer.role)?,
-                        auto_promote: peer.auto_promote,
-                    });
-                }
-                Some(SnapshotMetadata {
-                    snapshot_id: snapshot.snapshot_id,
-                    last_log_id: LogId::from(&last_log_id),
-                    membership: snapshot.membership,
-                    members,
-                    payload_bytes: snapshot.payload_bytes,
-                })
-            }
-        };
+        let installed_snapshot = proto
+            .installed_snapshot
+            .map(SnapshotMetadata::try_from)
+            .transpose()?;
 
         Ok(WalRecord {
             group_id: proto.group_id,
@@ -359,6 +382,120 @@ impl TryFrom<WalRecordProto> for WalRecord {
             checksum: checksum_from_wire(proto.checksum, proto.checksum_digest),
         })
     }
+}
+
+/// What a snapshot checkpoint file holds.
+#[derive(Clone, PartialEq, prost::Message)]
+pub(crate) struct CheckpointProto {
+    #[prost(uint64, tag = "1")]
+    pub group_id: u64,
+    #[prost(message, optional, tag = "2")]
+    pub meta: Option<SnapshotMetadataProto>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub payload: Vec<u8>,
+}
+
+/// The four bytes that open a framed checkpoint.
+///
+/// Distinct from the WAL segment's magic on purpose: the two files live in
+/// different directories and hold different messages, and a magic that
+/// identified only "some framed thing" would let a decoder try a WAL record
+/// against a checkpoint and report a torn file rather than the wrong file.
+pub(crate) const CHECKPOINT_MAGIC: &[u8; 4] = b"MRCP";
+
+/// One checkpoint, framed exactly as a WAL record is.
+///
+/// The payload is a protobuf `bytes` field, so it costs a tag, a length varint
+/// and the bytes -- 1.000 per payload byte against the 1.333 base64 costs and
+/// the 4.000 a JSON number array cost before that.
+///
+/// Known cost, not hidden: the payload is cloned into the message. The JSON
+/// path it replaces also built a complete copy, and a four-times-larger one,
+/// so this is strictly better -- but for a large snapshot it is still a full
+/// copy, and avoiding it means appending the payload's own tag and length to an
+/// otherwise-encoded message by hand. That is a change worth making on its own
+/// rather than inside a format change.
+pub(crate) fn encode_checkpoint(snapshot: &crate::RaftSnapshot) -> Result<Vec<u8>, RaftError> {
+    let proto = CheckpointProto {
+        group_id: snapshot.group_id,
+        meta: Some(SnapshotMetadataProto::from(&snapshot.meta)),
+        payload: snapshot.payload.clone(),
+    };
+    let body = prost::Message::encode_to_vec(&proto);
+    let length = u32::try_from(body.len()).map_err(|_| {
+        RaftError::Storage("snapshot checkpoint exceeds a frame length".to_string())
+    })?;
+    let mut out = Vec::with_capacity(CHECKPOINT_MAGIC.len() + FRAME_BYTES + body.len());
+    out.extend_from_slice(CHECKPOINT_MAGIC);
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(&FrameDigest::Crc32c.of(&body).to_le_bytes());
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Whether these bytes are a framed checkpoint rather than the JSON an earlier
+/// build wrote.
+pub(crate) fn is_framed_checkpoint(bytes: &[u8]) -> bool {
+    bytes.starts_with(CHECKPOINT_MAGIC)
+}
+
+/// The checkpoint a framed file holds.
+///
+/// Every refusal begins "failed to decode snapshot", because callers match on
+/// that phrase -- `snapshot_staging` asserts a checkpoint torn from outside the
+/// store is refused by looking for it. The specific reason follows it.
+///
+/// Errors rather than reporting absence, which is the opposite of what
+/// [`decode_framed`] does for a WAL record, and deliberately. A WAL's last
+/// record can be half-written because a crash between a write and its barrier
+/// is ordinary, so a bad digest there means "cut the tail". A checkpoint is
+/// written to a staging name and renamed into place, and a rename is atomic --
+/// so a reader sees a whole file or no file, and a bad digest means the bytes
+/// are damaged. Treating that as absence would turn a corrupt checkpoint into a
+/// missing one and lose the only signal that something is wrong.
+pub(crate) fn decode_checkpoint(bytes: &[u8]) -> Result<crate::RaftSnapshot, RaftError> {
+    if !is_framed_checkpoint(bytes) {
+        return Err(RaftError::Storage(
+            "failed to decode snapshot: the checkpoint does not open with its magic".to_string(),
+        ));
+    }
+    let framed = &bytes[CHECKPOINT_MAGIC.len()..];
+    if framed.len() < FRAME_BYTES {
+        return Err(RaftError::Storage(
+            "failed to decode snapshot: the checkpoint is shorter than its frame".to_string(),
+        ));
+    }
+    let length = u32::from_le_bytes([framed[0], framed[1], framed[2], framed[3]]) as usize;
+    let digest = u32::from_le_bytes([framed[4], framed[5], framed[6], framed[7]]);
+    let end = FRAME_BYTES.checked_add(length).ok_or_else(|| {
+        RaftError::Storage(
+            "failed to decode snapshot: the checkpoint's length overflows".to_string(),
+        )
+    })?;
+    if framed.len() < end {
+        return Err(RaftError::Storage(format!(
+            "failed to decode snapshot: the checkpoint declares {length} bytes and carries {}",
+            framed.len() - FRAME_BYTES
+        )));
+    }
+    let body = &framed[FRAME_BYTES..end];
+    if FrameDigest::Crc32c.of(body) != digest {
+        return Err(RaftError::Storage(
+            "failed to decode snapshot: the checkpoint fails its frame digest".to_string(),
+        ));
+    }
+    let proto = <CheckpointProto as prost::Message>::decode(body)
+        .map_err(|err| RaftError::Storage(format!("failed to decode snapshot: {err}")))?;
+    let meta = SnapshotMetadata::try_from(
+        proto
+            .meta
+            .ok_or_else(|| missing("the checkpoint's metadata"))?,
+    )?;
+    Ok(crate::GenericSnapshot {
+        group_id: proto.group_id,
+        meta,
+        payload: proto.payload,
+    })
 }
 
 /// Splits a record's checksum into the two fields the wire carries.
