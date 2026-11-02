@@ -99,6 +99,7 @@ pub mod pipeline;
 pub mod rate_limit;
 pub mod read_safety;
 pub mod readiness;
+mod rpc_binary;
 pub mod scheduler;
 pub mod snapshot;
 pub mod snapshot_pools;
@@ -107,6 +108,10 @@ pub mod storage;
 pub mod transport;
 pub mod unique_id;
 pub mod wal;
+pub use rpc_binary::{
+    matrixraft_decode_rpc_envelope, matrixraft_decode_rpc_response, matrixraft_encode_rpc_envelope,
+    matrixraft_encode_rpc_response,
+};
 mod wal_binary;
 // The log codec only: the proto mirrors beside it are an implementation detail
 // and stay private, so the crate's surface gains two functions rather than a
