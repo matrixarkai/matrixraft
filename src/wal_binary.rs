@@ -44,7 +44,16 @@ use crate::{
 
 /// Marks a segment file as binary. Deliberately not starting with `{`, so the
 /// first byte alone separates this format from the JSON one.
-pub(crate) const SEGMENT_MAGIC: &[u8; 4] = b"MRWB";
+pub(crate) const SEGMENT_MAGIC: &[u8; 4] = b"MRWC";
+
+/// The first framed shape, still read.
+///
+/// `MRWB` segments carry an FNV-1a-32 frame digest; `MRWC` carry a CRC-32C one.
+/// The magic is what tells them apart, so no reader has to guess which function
+/// a frame was written with. A segment never holds both shapes: the active one
+/// is converted before the first append, exactly as a JSON segment is, and a
+/// sealed one is rewritten the next time compaction touches it.
+pub(crate) const SEGMENT_MAGIC_FNV: &[u8; 4] = b"MRWB";
 
 /// Bytes of frame around each record: a little-endian length and a CRC32.
 pub(crate) const FRAME_BYTES: usize = 8;
@@ -393,15 +402,93 @@ fn checksum_as_u64(checksum: &str) -> Option<u64> {
     u64::from_str_radix(checksum, 16).ok()
 }
 
-/// FNV-1a over the record bytes, as the frame's integrity check.
+/// Which function checks a frame's digest, decided by the segment's magic.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FrameDigest {
+    /// `MRWB`, the first framed shape.
+    Fnv1a32,
+    /// `MRWC`. What this build writes.
+    Crc32c,
+}
+
+impl FrameDigest {
+    /// The variant a segment's leading bytes call for.
+    ///
+    /// `None` means the bytes are not a framed segment's magic at all, which is
+    /// a JSON segment and the caller's legacy arm. Returning an Option rather
+    /// than defaulting is the point: a framed segment read with the wrong
+    /// digest looks exactly like a shredded one, so every record in it would be
+    /// discarded as a torn tail.
+    pub(crate) fn from_segment(bytes: &[u8]) -> Option<Self> {
+        if bytes.starts_with(SEGMENT_MAGIC) {
+            Some(Self::Crc32c)
+        } else if bytes.starts_with(SEGMENT_MAGIC_FNV) {
+            Some(Self::Fnv1a32)
+        } else {
+            None
+        }
+    }
+
+    fn of(self, bytes: &[u8]) -> u32 {
+        match self {
+            Self::Fnv1a32 => fnv1a32(bytes),
+            Self::Crc32c => crc32c(bytes),
+        }
+    }
+}
+
+/// CRC-32C (Castagnoli) over a record's bytes, as the frame's integrity check.
 ///
-/// Not CRC32 despite the field's name in the design being followed: this crate
-/// adds no dependency to get one, and the WAL's own record checksum is already
-/// FNV-1a. The frame check answers a different question from that one -- it
-/// catches a torn or shredded frame before the bytes are handed to a decoder,
-/// where the record checksum catches a record whose CONTENT disagrees with
-/// itself.
-pub(crate) fn frame_digest(bytes: &[u8]) -> u32 {
+/// The shape around it already matched the authority: `byteraft`'s
+/// `RecordAppender::EmitPhysicalRecord` writes a little-endian `u32` length,
+/// then a little-endian `u32` digest over the serialized protobuf, then the
+/// body -- the same field order, endianness and coverage this frame has. What
+/// did not match was the function, and `base/checksum.h` declares `kCRC32`
+/// beside `kMurmurhash32` and includes `butil/crc32c.h`.
+///
+/// So this matches the FAMILY it uses, and not a verified byte-for-byte match:
+/// its record frame calls `byte::CRCUtil::ComputeCRC32`, whose header lives in
+/// a submodule that is empty in this checkout, so the polynomial it compiles
+/// against cannot be read here. Claiming the bytes agree would be claiming more
+/// than was checked.
+///
+/// Worth doing on its own merit regardless. A frame digest exists to catch a
+/// torn or rotted record before its bytes reach a decoder, and a CRC is an
+/// error-DETECTING code built for that, with a guarantee -- every burst error
+/// up to 32 bits -- where FNV-1a is a hash function with none.
+///
+/// Hand-rolled for the same reason the base64 in `wal.rs` is: this crate adds
+/// no dependency, and a gating licence-and-advisory check makes taking one for
+/// thirty lines a poor trade. Bit-at-a-time rather than table-driven, because
+/// the table is the part that is easy to get silently wrong and a WAL record is
+/// tens to thousands of bytes. Pinned against the PUBLISHED check value rather
+/// than against its own output, since a hand-rolled CRC that is wrong still
+/// looks like a hash.
+pub(crate) fn crc32c(bytes: &[u8]) -> u32 {
+    /// 0x1EDC_6F41 bit-reversed, which is the form a right-shifting
+    /// implementation needs.
+    const POLYNOMIAL: u32 = 0x82F6_3B78;
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ POLYNOMIAL
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// FNV-1a-32, which `MRWB` segments carry.
+///
+/// Kept only to read them. The frame check answers a different question from
+/// the record's own checksum -- it catches a torn or shredded frame before the
+/// bytes are handed to a decoder, where the record checksum catches a record
+/// whose CONTENT disagrees with itself.
+pub(crate) fn fnv1a32(bytes: &[u8]) -> u32 {
     let mut hash = 2_166_136_261_u32;
     for byte in bytes {
         hash ^= *byte as u32;
@@ -418,7 +505,7 @@ pub(crate) fn encode_framed(record: &WalRecord) -> Result<Vec<u8>, RaftError> {
         .map_err(|_| RaftError::Storage("WAL record exceeds a frame length".to_string()))?;
     let mut out = Vec::with_capacity(FRAME_BYTES + body.len());
     out.extend_from_slice(&length.to_le_bytes());
-    out.extend_from_slice(&frame_digest(&body).to_le_bytes());
+    out.extend_from_slice(&FrameDigest::Crc32c.of(&body).to_le_bytes());
     out.extend_from_slice(&body);
     Ok(out)
 }
@@ -430,6 +517,17 @@ pub(crate) fn encode_framed(record: &WalRecord) -> Result<Vec<u8>, RaftError> {
 /// answer the JSON reader gave for a half-written line, and it must stay the
 /// same answer: a crash between a write and its barrier is ordinary.
 pub(crate) fn decode_framed(bytes: &[u8]) -> Result<Option<(WalRecord, usize)>, RaftError> {
+    decode_framed_with(bytes, FrameDigest::Crc32c)
+}
+
+/// The same, checking the frame against the digest a given segment uses.
+///
+/// Separate from [`decode_framed`] so that the only callers who have to think
+/// about the variant are the two that read a segment file and know its magic.
+pub(crate) fn decode_framed_with(
+    bytes: &[u8],
+    digest_kind: FrameDigest,
+) -> Result<Option<(WalRecord, usize)>, RaftError> {
     if bytes.len() < FRAME_BYTES {
         return Ok(None);
     }
@@ -442,7 +540,7 @@ pub(crate) fn decode_framed(bytes: &[u8]) -> Result<Option<(WalRecord, usize)>, 
         return Ok(None);
     }
     let body = &bytes[FRAME_BYTES..end];
-    if frame_digest(body) != digest {
+    if digest_kind.of(body) != digest {
         return Ok(None);
     }
     let Ok(proto) = <WalRecordProto as prost::Message>::decode(body) else {
@@ -758,5 +856,246 @@ mod tests {
             "uppercase hex went into the digest, so decoding would rewrite it as lowercase"
         );
         assert_eq!(proto.checksum, "D01EBF93AE8EF006");
+    }
+    /// The CRC matches its published check value, not its own output.
+    ///
+    /// The whole risk with a hand-rolled CRC is that it computes *a* function
+    /// of the bytes -- stable, plausible, and not the one it claims. Pinning it
+    /// against a value this code did not produce is the only check that
+    /// catches that, so these two came from published test vectors rather than
+    /// from running the function and writing down the answer.
+    ///
+    /// Note what is NOT asserted here: 0xCBF43926 is the check value for
+    /// CRC-32/ISO-HDLC, a different CRC, and test suites have been seen using
+    /// it for Castagnoli by mistake. If this arm is ever "fixed" by swapping in
+    /// that constant, the fix is the bug.
+    ///
+    /// Measured, not assumed: planting the UNREFLECTED polynomial
+    /// (`0x1EDC_6F41` where a right-shifting implementation needs
+    /// `0x82F6_3B78`) reddens **this arm and no other** -- 15 of the 16 in this
+    /// module still pass. A wrong CRC round trips perfectly, because the
+    /// encoder and the decoder agree with each other; only a value this code
+    /// did not produce can tell them both apart from the format they claim to
+    /// be. That is the entire argument for a published check value over a
+    /// self-consistency test.
+    #[test]
+    fn the_crc_matches_its_published_check_value() {
+        assert_eq!(
+            crc32c(b"123456789"),
+            0xE306_9283,
+            "CRC-32C of the standard check string is wrong, so this is some other function of the bytes"
+        );
+        assert_eq!(
+            crc32c(b""),
+            0,
+            "CRC-32C of nothing should be zero, which also pins the init and the final inversion against each other"
+        );
+        assert_ne!(
+            crc32c(b"123456789"),
+            0xCBF4_3926,
+            "that is CRC-32/ISO-HDLC's check value: this is computing the wrong CRC"
+        );
+    }
+
+    /// A one-bit change moves the digest, which is the property it exists for.
+    ///
+    /// Weak as a test of a CRC and strong as a test of the wiring: a digest
+    /// function that ignored its input, or hashed a length rather than bytes,
+    /// would pass the check values above only by coincidence but cannot pass
+    /// this.
+    #[test]
+    fn flipping_one_bit_of_a_record_moves_its_frame_digest() {
+        let framed = encode_framed(&record(64, true)).expect("encodes");
+        let body = &framed[FRAME_BYTES..];
+        let clean = crc32c(body);
+        for bit in [0usize, 1, 7, 8, 63] {
+            let mut damaged = body.to_vec();
+            damaged[bit / 8] ^= 1 << (bit % 8);
+            assert_ne!(
+                crc32c(&damaged),
+                clean,
+                "flipping bit {bit} left the digest unchanged"
+            );
+        }
+    }
+
+    /// The magic says which digest a segment's frames carry, and reading one
+    /// with the other discards every record in it.
+    ///
+    /// This is why `FrameDigest::from_segment` returns an Option instead of
+    /// defaulting to the current shape. A frame checked against the wrong
+    /// function fails its digest, which the reader cannot tell from a shredded
+    /// frame -- so it is treated as a torn tail and the file is truncated. A
+    /// default would therefore not be a lenient fallback; it would be silent
+    /// data loss on every segment written by an earlier build.
+    #[test]
+    fn a_frame_read_with_the_wrong_digest_looks_torn_rather_than_valid() {
+        let framed = encode_framed(&record(9, true)).expect("encodes");
+
+        let (whole, used) = decode_framed_with(&framed, FrameDigest::Crc32c)
+            .expect("no hard error")
+            .expect("the right digest reads it whole");
+        assert_eq!(used, framed.len());
+        assert_eq!(whole.entries.len(), 1);
+
+        assert!(
+            decode_framed_with(&framed, FrameDigest::Fnv1a32)
+                .expect("no hard error")
+                .is_none(),
+            "a CRC-32C frame read as FNV-1a passed its digest check, so the two functions agree on this body and the magic would not need a version"
+        );
+    }
+
+    /// The two magics are distinct, four bytes, and neither can be mistaken for
+    /// the JSON a reader might still meet.
+    #[test]
+    fn the_two_segment_magics_are_distinct_and_are_not_json() {
+        assert_ne!(SEGMENT_MAGIC, SEGMENT_MAGIC_FNV);
+        assert_eq!(SEGMENT_MAGIC.len(), 4);
+        assert_eq!(SEGMENT_MAGIC_FNV.len(), 4);
+        for magic in [SEGMENT_MAGIC, SEGMENT_MAGIC_FNV] {
+            assert_ne!(magic[0], b'{', "a segment could be mistaken for JSON");
+            assert_eq!(
+                FrameDigest::from_segment(magic).is_some(),
+                true,
+                "a magic this crate writes is not recognised by the reader that dispatches on it"
+            );
+        }
+        assert!(
+            FrameDigest::from_segment(b"{\"hard_state\":").is_none(),
+            "a JSON segment was taken for a framed one"
+        );
+        assert!(
+            FrameDigest::from_segment(b"").is_none(),
+            "an empty file was taken for a framed segment"
+        );
+    }
+    /// A segment written by the previous build is read, and then converted.
+    ///
+    /// The one test in this file that is about data rather than about bytes. A
+    /// frame checked against the wrong digest fails, and a failed digest is
+    /// indistinguishable from a shredded frame -- so getting this wrong does
+    /// not raise an error, it silently truncates every segment an earlier build
+    /// wrote and reports a WAL that recovered cleanly to nothing.
+    ///
+    /// The fixture is built by hand rather than by an older binary, which is
+    /// the honest limit of it: it asserts this build reads what it believes the
+    /// older shape to be. What makes that more than circular is that the shape
+    /// is pinned independently -- `SEGMENT_MAGIC_FNV`, an 8-byte frame, and
+    /// FNV-1a-32 over the body -- and those three were the format, not a
+    /// description of it.
+    #[test]
+    fn a_segment_written_with_the_older_digest_is_read_and_then_converted() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "rustraft-crc-migrate-{}-{nonce}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the wal dir");
+        let path = dir.join(format!("{:020}.wal", 0));
+
+        // Two records in the shape the writer produces: the first whole,
+        // because it opens the segment, and the second a delta extending it.
+        let mut first = record(0, true);
+        first.entries_are_delta = false;
+        first.checksum = matrixraft_wal_checksum(&first);
+
+        let mut second = record(0, true);
+        second.entries[0].log_id.index = 2;
+        second.hard_state.committed = Some(LogId { term: 3, index: 2 });
+        second.apply_snapshot_fence.applied_index = 2;
+        second.apply_snapshot_fence.commit_index = 2;
+        second.checksum = matrixraft_wal_checksum(&second);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(SEGMENT_MAGIC_FNV);
+        for value in [&first, &second] {
+            let body = prost::Message::encode_to_vec(&WalRecordProto::from(value));
+            let length = u32::try_from(body.len()).expect("fits");
+            bytes.extend_from_slice(&length.to_le_bytes());
+            // The older digest, which is the whole point of the fixture.
+            bytes.extend_from_slice(&fnv1a32(&body).to_le_bytes());
+            bytes.extend_from_slice(&body);
+        }
+        std::fs::write(&path, &bytes).expect("write the older segment");
+
+        // The reader recognises the shape rather than defaulting to the current
+        // one, and an inspector does not touch the file.
+        assert_eq!(
+            FrameDigest::from_segment(&bytes),
+            Some(FrameDigest::Fnv1a32),
+            "the older magic was not recognised"
+        );
+        let seen = crate::matrixraft_read_wal_segment_file(&path).expect("reads the older shape");
+        assert_eq!(
+            seen,
+            vec![first.clone(), second.clone()],
+            "the records did not come back from the older shape"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("re-read"),
+            bytes,
+            "reading the segment modified it, which an inspector must never do"
+        );
+
+        // Opening the WAL converts it, and the records survive the conversion.
+        let options = crate::PersistentRaftWalOptions {
+            dir: dir.clone(),
+            max_records_per_segment: 1_000_000,
+            max_segment_bytes: u64::MAX,
+            min_keep_segments: 1,
+            fsync_on_append: false,
+        };
+        let mut wal = crate::PersistentRaftWal::open(options).expect("the WAL opens");
+        let report = wal.recover().expect("it recovers");
+        assert_eq!(
+            report
+                .recovered
+                .as_ref()
+                .and_then(|value| value.entries.last())
+                .map(|entry| entry.log_id.index),
+            Some(2),
+            "recovery lost the entries the older segment held"
+        );
+
+        // One append is what triggers the conversion, since only the active
+        // segment is ever appended to.
+        let mut third = record(0, true);
+        third.entries[0].log_id.index = 3;
+        third.hard_state.committed = Some(LogId { term: 3, index: 3 });
+        third.apply_snapshot_fence.applied_index = 3;
+        third.apply_snapshot_fence.commit_index = 3;
+        third.checksum = matrixraft_wal_checksum(&third);
+        wal.append(third).expect("appends after the conversion");
+        drop(wal);
+
+        let after = std::fs::read(&path).expect("read the converted segment");
+        assert_eq!(
+            &after[..4],
+            SEGMENT_MAGIC,
+            "the segment was appended to without being converted, so it now holds two shapes and nothing can read it whole"
+        );
+        let converted =
+            crate::matrixraft_read_wal_segment_file(&path).expect("reads the converted shape");
+        assert_eq!(
+            converted.len(),
+            3,
+            "the conversion did not keep every record it read"
+        );
+        assert_eq!(
+            converted
+                .last()
+                .and_then(|value| value.entries.last())
+                .map(|entry| entry.log_id.index),
+            Some(3)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

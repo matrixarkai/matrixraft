@@ -1244,7 +1244,7 @@ fn encode_wal_record(record: &WalRecord) -> Result<Vec<u8>, RaftError> {
 pub fn matrixraft_read_wal_segment_file(path: &Path) -> Result<Vec<WalRecord>, RaftError> {
     let bytes = fs::read(path).map_err(|err| wal_file_error("failed to read WAL segment", &err))?;
     let mut records = Vec::new();
-    if !bytes.starts_with(crate::wal_binary::SEGMENT_MAGIC) {
+    let Some(digest_kind) = crate::wal_binary::FrameDigest::from_segment(&bytes) else {
         for line in bytes.split(|byte| *byte == b'\n') {
             if line.is_empty() {
                 continue;
@@ -1255,10 +1255,10 @@ pub fn matrixraft_read_wal_segment_file(path: &Path) -> Result<Vec<WalRecord>, R
             records.push(record);
         }
         return Ok(records);
-    }
+    };
     let mut offset = crate::wal_binary::SEGMENT_MAGIC.len();
     while offset < bytes.len() {
-        match crate::wal_binary::decode_framed(&bytes[offset..])? {
+        match crate::wal_binary::decode_framed_with(&bytes[offset..], digest_kind)? {
             Some((record, used)) => {
                 offset += used;
                 records.push(record);
@@ -1487,13 +1487,19 @@ fn open_segment_for_append(dir: &Path, segment_id: u64) -> Result<File, RaftErro
     let path = wal_segment_path(dir, segment_id);
     let existing = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
     if existing > 0 {
-        let head = fs::read(&path)
+        let current = fs::read(&path)
             .map(|bytes| bytes.starts_with(crate::wal_binary::SEGMENT_MAGIC))
             .unwrap_or(false);
-        if !head {
-            let bytes =
-                fs::read(&path).map_err(|err| wal_file_error("failed to read WAL segment", &err))?;
-            let (records, _) = read_legacy_json_segment(&path, &bytes)?;
+        if !current {
+            // Whatever shape it is in -- JSON from before the frame, or a frame
+            // with the older digest -- read it with the reader that recognises
+            // all of them and write it back in the current one.
+            //
+            // Reading it as JSON unconditionally, which is what this did while
+            // there was only one framed shape, would parse a framed segment as
+            // zero records and rewrite the file empty. That is silent data
+            // loss, and it is the whole reason the magic carries a version.
+            let records = matrixraft_read_wal_segment_file(&path)?;
             let converted = WalSegment {
                 segment_id,
                 first_index: records.first().map(wal_record_index).unwrap_or_default(),
@@ -1598,17 +1604,21 @@ fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<WalSegment>, bool), Raf
 /// active segment is converted before the first append reaches it.
 fn read_wal_segment_file(path: &Path) -> Result<(Vec<WalRecord>, bool, bool), RaftError> {
     let bytes = fs::read(path).map_err(|err| wal_file_error("failed to open WAL segment", &err))?;
-    if !bytes.starts_with(crate::wal_binary::SEGMENT_MAGIC) {
+    let Some(digest_kind) = crate::wal_binary::FrameDigest::from_segment(&bytes) else {
         let (records, truncated) = read_legacy_json_segment(path, &bytes)?;
         return Ok((records, truncated, true));
-    }
+    };
+    // A framed segment in the older shape is reported as legacy for the same
+    // reason a JSON one is: it reads correctly, and it has to be rewritten
+    // before anything is appended, so that no file ever holds two shapes.
+    let outdated = digest_kind != crate::wal_binary::FrameDigest::Crc32c;
 
     let mut records = Vec::new();
     let mut offset = crate::wal_binary::SEGMENT_MAGIC.len();
     let mut valid_end_offset = offset as u64;
     let mut truncated = false;
     while offset < bytes.len() {
-        match crate::wal_binary::decode_framed(&bytes[offset..])? {
+        match crate::wal_binary::decode_framed_with(&bytes[offset..], digest_kind)? {
             Some((record, used)) => {
                 if !matrixraft_wal_checksum_valid(&record) {
                     truncated = true;
@@ -1630,5 +1640,5 @@ fn read_wal_segment_file(path: &Path) -> Result<(Vec<WalRecord>, bool, bool), Ra
     if truncated {
         truncate_wal_segment(path, valid_end_offset)?;
     }
-    Ok((records, truncated, false))
+    Ok((records, truncated, outdated))
 }
