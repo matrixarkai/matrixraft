@@ -588,7 +588,7 @@ impl PersistentRaftWal {
         if segment.record_count == 0 || !segment.records.is_empty() {
             return Ok(segment.records.clone());
         }
-        let (records, _) =
+        let (records, _, _) =
             read_wal_segment_file(&wal_segment_path(&self.options.dir, segment.segment_id))?;
         Ok(records)
     }
@@ -799,7 +799,9 @@ impl PersistentRaftWal {
             }
         }
         let encoded = encode_wal_record(&record)?;
-        let record_bytes = encoded.len() as u64 + 1;
+        // The frame carries its own length, so there is no delimiter to add.
+        // The JSON form needed a newline and counted it here.
+        let record_bytes = encoded.len() as u64;
 
         let mut segment_rolled = false;
         // `active_records > 0` is what decides where a record larger than
@@ -817,8 +819,7 @@ impl PersistentRaftWal {
         }
 
         self.active_segment
-            .write_all(encoded.as_bytes())
-            .and_then(|_| self.active_segment.write_all(b"\n"))
+            .write_all(&encoded)
             .map_err(|err| RaftError::Storage(format!("failed to append WAL record: {err}")))?;
         // After a roll `active_len` describes the PREVIOUS segment, so the
         // expectation is only computable when this append stayed put. A roll
@@ -1173,10 +1174,19 @@ impl PersistentRaftWal {
         matrixraft_fold_wal_latest_record(&stored)
     }
 
+    /// Appends a frame header that promises more bytes than follow it.
+    ///
+    /// The JSON form of this wrote half an object. The framed equivalent is a
+    /// length that overruns the file, which is what a crash between a write and
+    /// its barrier actually leaves behind.
     pub fn corrupt_tail_for_test(&mut self) -> Result<(), RaftError> {
+        let mut torn = Vec::new();
+        torn.extend_from_slice(&4096u32.to_le_bytes());
+        torn.extend_from_slice(&0u32.to_le_bytes());
+        torn.extend_from_slice(b"not a whole frame");
         self.active_segment
             .seek(SeekFrom::End(0))
-            .and_then(|_| self.active_segment.write_all(b"{\"corrupt_tail\":true\n"))
+            .and_then(|_| self.active_segment.write_all(&torn))
             .and_then(|_| self.active_segment.flush())
             .map_err(|err| RaftError::Storage(format!("failed to corrupt WAL tail: {err}")))?;
         Ok(())
@@ -1218,9 +1228,67 @@ fn whole_record(record: &WalRecord) -> WalRecord {
     whole
 }
 
-fn encode_wal_record(record: &WalRecord) -> Result<String, RaftError> {
-    serde_json::to_string(record)
-        .map_err(|err| RaftError::Storage(format!("failed to encode WAL record: {err}")))
+fn encode_wal_record(record: &WalRecord) -> Result<Vec<u8>, RaftError> {
+    crate::wal_binary::encode_framed(record)
+}
+
+/// Every whole record a segment file holds, without repairing it.
+///
+/// Deliberately not the recovery reader. That one truncates a torn tail as it
+/// goes, because a WAL being opened has to end in a state it can keep appending
+/// to -- an inspector has to leave the file exactly as it found it. This stops
+/// at the first frame that is not whole and reports what came before it.
+///
+/// Reads either shape: a framed segment, or a newline-delimited one written
+/// before the frame existed.
+pub fn matrixraft_read_wal_segment_file(path: &Path) -> Result<Vec<WalRecord>, RaftError> {
+    let bytes = fs::read(path).map_err(|err| wal_file_error("failed to read WAL segment", &err))?;
+    let mut records = Vec::new();
+    if !bytes.starts_with(crate::wal_binary::SEGMENT_MAGIC) {
+        for line in bytes.split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(record) = serde_json::from_slice::<WalRecord>(line) else {
+                break;
+            };
+            records.push(record);
+        }
+        return Ok(records);
+    }
+    let mut offset = crate::wal_binary::SEGMENT_MAGIC.len();
+    while offset < bytes.len() {
+        match crate::wal_binary::decode_framed(&bytes[offset..])? {
+            Some((record, used)) => {
+                offset += used;
+                records.push(record);
+            }
+            None => break,
+        }
+    }
+    Ok(records)
+}
+
+/// Replaces a segment file with these records, framed.
+///
+/// The counterpart of [`matrixraft_read_wal_segment_file`], for a caller that
+/// has read a segment, changed something, and wants it back on disk in the
+/// shape the WAL reads.
+pub fn matrixraft_write_wal_segment_file(
+    path: &Path,
+    records: &[WalRecord],
+) -> Result<(), RaftError> {
+    let mut file =
+        File::create(path).map_err(|err| wal_file_error("failed to create WAL segment", &err))?;
+    file.write_all(crate::wal_binary::SEGMENT_MAGIC)
+        .map_err(|err| wal_file_error("failed to write WAL segment", &err))?;
+    for record in records {
+        let encoded = crate::wal_binary::encode_framed(record)?;
+        file.write_all(&encoded)
+            .map_err(|err| wal_file_error("failed to write WAL segment", &err))?;
+    }
+    file.sync_data()
+        .map_err(|err| wal_file_error("failed to fsync WAL segment", &err))
 }
 
 fn wal_segment_path(dir: &Path, segment_id: u64) -> PathBuf {
@@ -1365,23 +1433,103 @@ mod wal_file_error_tests {
     }
 }
 
+/// The newline-delimited reader, kept for segments written before the frame.
+fn read_legacy_json_segment(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(Vec<WalRecord>, bool), RaftError> {
+    let mut records = Vec::new();
+    let mut valid_end_offset = 0u64;
+    let mut current_offset = 0u64;
+    let mut truncated = false;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        current_offset += line.len() as u64 + 1;
+        if line.is_empty() {
+            valid_end_offset = current_offset;
+            continue;
+        }
+        let Ok(record) = serde_json::from_slice::<WalRecord>(line) else {
+            truncated = true;
+            break;
+        };
+        if !matrixraft_wal_checksum_valid(&record) {
+            truncated = true;
+            break;
+        }
+        valid_end_offset = current_offset;
+        records.push(record);
+    }
+    if truncated {
+        truncate_wal_segment(path, valid_end_offset)?;
+    }
+    Ok((records, truncated))
+}
+
+fn truncate_wal_segment(path: &Path, valid_end_offset: u64) -> Result<(), RaftError> {
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|err| wal_file_error("failed to reopen WAL segment", &err))?;
+    file.set_len(valid_end_offset)
+        .map_err(|err| RaftError::Storage(format!("failed to truncate WAL segment: {err}")))?;
+    file.sync_data()
+        .map_err(|err| RaftError::Storage(format!("failed to fsync truncated WAL: {err}")))
+}
+
+/// Opens the active segment for appending frames, converting it first if it was
+/// written as JSON by an earlier build.
+///
+/// The conversion is what keeps a file from ever holding both shapes. Only the
+/// active segment is ever appended to, so converting it here is enough: a
+/// sealed legacy segment stays readable through the legacy arm and is rewritten
+/// in the new shape the next time compaction touches it.
 fn open_segment_for_append(dir: &Path, segment_id: u64) -> Result<File, RaftError> {
-    OpenOptions::new()
+    let path = wal_segment_path(dir, segment_id);
+    let existing = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    if existing > 0 {
+        let head = fs::read(&path)
+            .map(|bytes| bytes.starts_with(crate::wal_binary::SEGMENT_MAGIC))
+            .unwrap_or(false);
+        if !head {
+            let bytes =
+                fs::read(&path).map_err(|err| wal_file_error("failed to read WAL segment", &err))?;
+            let (records, _) = read_legacy_json_segment(&path, &bytes)?;
+            let converted = WalSegment {
+                segment_id,
+                first_index: records.first().map(wal_record_index).unwrap_or_default(),
+                last_index: records.last().map(wal_record_index).unwrap_or_default(),
+                record_count: records.len() as u64,
+                records,
+                sealed: false,
+            };
+            write_wal_segment_file(dir, &converted)?;
+        }
+    }
+    let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .read(true)
-        .open(wal_segment_path(dir, segment_id))
-        .map_err(|err| wal_file_error("failed to open WAL segment", &err))
+        .open(&path)
+        .map_err(|err| wal_file_error("failed to open WAL segment", &err))?;
+    if fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) == 0 {
+        file.write_all(crate::wal_binary::SEGMENT_MAGIC)
+            .and_then(|_| file.flush())
+            .map_err(|err| RaftError::Storage(format!("failed to write WAL magic: {err}")))?;
+    }
+    Ok(file)
 }
 
 fn write_wal_segment_file(dir: &Path, segment: &WalSegment) -> Result<(), RaftError> {
     let mut file = File::create(wal_segment_path(dir, segment.segment_id))
         .map_err(|err| wal_file_error("failed to create WAL segment", &err))?;
+    // The magic goes down even for a segment with no records: it is what tells a
+    // later reader this file is framed rather than newline-delimited, and an
+    // empty file would otherwise be indistinguishable from a legacy one.
+    file.write_all(crate::wal_binary::SEGMENT_MAGIC)
+        .map_err(|err| RaftError::Storage(format!("failed to write WAL segment: {err}")))?;
     for record in &segment.records {
-        let encoded = serde_json::to_string(record)
-            .map_err(|err| RaftError::Storage(format!("failed to encode WAL segment: {err}")))?;
-        file.write_all(encoded.as_bytes())
-            .and_then(|_| file.write_all(b"\n"))
+        let encoded = crate::wal_binary::encode_framed(record)?;
+        file.write_all(&encoded)
             .map_err(|err| RaftError::Storage(format!("failed to write WAL segment: {err}")))?;
     }
     if segment.records.is_empty() {
@@ -1422,7 +1570,7 @@ fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<WalSegment>, bool), Raf
     let mut truncated_corrupt_tail = false;
     let last_file_index = files.len().saturating_sub(1);
     for (file_position, (segment_id, path)) in files.into_iter().enumerate() {
-        let (records, truncated) = read_wal_segment_file(&path)?;
+        let (records, truncated, _legacy) = read_wal_segment_file(&path)?;
         truncated_corrupt_tail |= truncated;
         let first_index = records.first().map(wal_record_index).unwrap_or_default();
         let last_index = records.last().map(wal_record_index).unwrap_or_default();
@@ -1438,46 +1586,49 @@ fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<WalSegment>, bool), Raf
     Ok((segments, truncated_corrupt_tail))
 }
 
-fn read_wal_segment_file(path: &Path) -> Result<(Vec<WalRecord>, bool), RaftError> {
-    let file = File::open(path)
-        .map_err(|err| wal_file_error("failed to open WAL segment", &err))?;
-    let reader = BufReader::new(file);
+/// Reads a segment, framed or newline-delimited.
+///
+/// A segment written by this build starts with `crate::wal_binary::SEGMENT_MAGIC`; one written
+/// before it starts with `{`, because it is a JSON object per line. Those are
+/// the only two shapes, and the first byte separates them -- which is why the
+/// magic is chosen not to be `{`.
+///
+/// The legacy arm exists so a WAL already on disk still recovers. It is a read
+/// path only: nothing appends a frame to a newline-delimited file, because the
+/// active segment is converted before the first append reaches it.
+fn read_wal_segment_file(path: &Path) -> Result<(Vec<WalRecord>, bool, bool), RaftError> {
+    let bytes = fs::read(path).map_err(|err| wal_file_error("failed to open WAL segment", &err))?;
+    if !bytes.starts_with(crate::wal_binary::SEGMENT_MAGIC) {
+        let (records, truncated) = read_legacy_json_segment(path, &bytes)?;
+        return Ok((records, truncated, true));
+    }
+
     let mut records = Vec::new();
-    let mut valid_end_offset = 0u64;
-    let mut current_offset = 0u64;
+    let mut offset = crate::wal_binary::SEGMENT_MAGIC.len();
+    let mut valid_end_offset = offset as u64;
     let mut truncated = false;
-    for line in reader.split(b'\n') {
-        let line = line.map_err(|err| {
-            RaftError::Storage(format!(
-                "failed to read WAL segment {}: {err}",
-                path.display()
-            ))
-        })?;
-        current_offset += line.len() as u64 + 1;
-        if line.is_empty() {
-            valid_end_offset = current_offset;
-            continue;
+    while offset < bytes.len() {
+        match crate::wal_binary::decode_framed(&bytes[offset..])? {
+            Some((record, used)) => {
+                if !matrixraft_wal_checksum_valid(&record) {
+                    truncated = true;
+                    break;
+                }
+                offset += used;
+                valid_end_offset = offset as u64;
+                records.push(record);
+            }
+            // An incomplete or shredded frame is a torn tail: keep what came
+            // before it and cut the file back to the last whole record, which
+            // is the answer the newline reader gave for a half-written line.
+            None => {
+                truncated = true;
+                break;
+            }
         }
-        let Ok(record) = serde_json::from_slice::<WalRecord>(&line) else {
-            truncated = true;
-            break;
-        };
-        if !matrixraft_wal_checksum_valid(&record) {
-            truncated = true;
-            break;
-        }
-        valid_end_offset = current_offset;
-        records.push(record);
     }
     if truncated {
-        let file = OpenOptions::new()
-            .write(true)
-            .open(path)
-            .map_err(|err| wal_file_error("failed to reopen WAL segment", &err))?;
-        file.set_len(valid_end_offset)
-            .map_err(|err| RaftError::Storage(format!("failed to truncate WAL segment: {err}")))?;
-        file.sync_data()
-            .map_err(|err| RaftError::Storage(format!("failed to fsync truncated WAL: {err}")))?;
+        truncate_wal_segment(path, valid_end_offset)?;
     }
-    Ok((records, truncated))
+    Ok((records, truncated, false))
 }
