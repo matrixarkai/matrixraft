@@ -180,6 +180,19 @@ pub(crate) struct WalRecordProto {
     pub checksum_digest: Option<u64>,
 }
 
+impl TryFrom<LogEntryProto> for LogEntry {
+    type Error = RaftError;
+
+    fn try_from(proto: LogEntryProto) -> Result<Self, Self::Error> {
+        let log_id = proto.log_id.ok_or_else(|| missing("an entry's log id"))?;
+        Ok(Self {
+            log_id: LogId::from(&log_id),
+            payload: proto.payload,
+            is_command: proto.is_command,
+        })
+    }
+}
+
 impl From<&LogEntry> for LogEntryProto {
     fn from(entry: &LogEntry) -> Self {
         Self {
@@ -438,12 +451,7 @@ pub fn matrixraft_decode_log(bytes: &[u8]) -> Result<Vec<LogEntry>, RaftError> {
         .map_err(|err| RaftError::Storage(format!("failed to decode a log: {err}")))?;
     let mut entries = Vec::with_capacity(proto.entries.len());
     for entry in proto.entries {
-        let log_id = entry.log_id.ok_or_else(|| missing("an entry's log id"))?;
-        entries.push(LogEntry {
-            log_id: LogId::from(&log_id),
-            payload: entry.payload,
-            is_command: entry.is_command,
-        });
+        entries.push(LogEntry::try_from(entry)?);
     }
     Ok(entries)
 }
@@ -679,7 +687,7 @@ impl FrameDigest {
         }
     }
 
-    fn of(self, bytes: &[u8]) -> u32 {
+    pub(crate) fn of(self, bytes: &[u8]) -> u32 {
         match self {
             Self::Fnv1a32 => fnv1a32(bytes),
             Self::Crc32c => crc32c(bytes),

@@ -553,16 +553,15 @@ impl TcpRaftTransport {
         &self,
         mut connection: BufReader<TcpStream>,
         encoded: &[u8],
-    ) -> Result<(String, BufReader<TcpStream>), RaftError> {
+    ) -> Result<(Vec<u8>, BufReader<TcpStream>), RaftError> {
         self.apply_timeout(connection.get_ref());
         connection
             .get_mut()
             .write_all(encoded)
             .map_err(|err| RaftError::Transport(format!("failed to write raft RPC: {err}")))?;
-        let mut response = String::new();
-        connection
-            .read_line(&mut response)
-            .map_err(|err| RaftError::Transport(format!("failed to read raft RPC: {err}")))?;
+        let response = read_rpc_message(&mut connection)?.ok_or_else(|| {
+            RaftError::Transport("raft RPC connection closed before a response".to_string())
+        })?;
         if response.is_empty() {
             return Err(RaftError::Transport(
                 "raft RPC connection closed before a response".to_string(),
@@ -814,12 +813,11 @@ impl TcpRaftTransport {
             user_payload,
             request,
         };
-        let mut encoded = serde_json::to_vec(&envelope)
-            .map_err(|err| RaftError::Transport(format!("failed to encode raft RPC: {err}")))?;
-        // One write, not a body followed by a one-byte newline: the peer reads
-        // a line, so splitting them puts a round trip between the request and
-        // the peer being able to see it.
-        encoded.push(b'\n');
+        // Protobuf behind a frame. The frame carries the length, so there is
+        // no delimiter to append -- and it is still a single write, for the
+        // reason the newline was: splitting a message across two writes puts a
+        // round trip between it and the peer being able to see it.
+        let encoded = crate::matrixraft_encode_rpc_envelope(&envelope)?;
 
         // A pooled connection can have been closed by the peer while it sat
         // idle, and there is no way to learn that but to use it. So a failure
@@ -831,9 +829,7 @@ impl TcpRaftTransport {
         if let Some(connection) = self.take_idle(target) {
             if let Ok((response, connection)) = self.exchange(connection, &encoded) {
                 self.store_idle(target, connection);
-                return serde_json::from_str(&response).map_err(|err| {
-                    RaftError::Transport(format!("failed to decode raft RPC: {err}"))
-                });
+                return decode_rpc_response(&response);
             }
         }
 
@@ -865,14 +861,13 @@ impl TcpRaftTransport {
             }
         };
         // Raft RPCs are small request/response exchanges, which is the shape
-        // Nagle delays. Without this the framing newline below can sit in the
+        // Nagle delays. Without this the tail of a message can sit in the
         // sender's buffer waiting for an ACK the peer will not send until it
-        // has the newline -- the classic write/write/read stall.
+        // has the whole message -- the classic write/write/read stall.
         let _ = stream.set_nodelay(true);
         let (response, connection) = self.exchange(BufReader::new(stream), &encoded)?;
         self.store_idle(target, connection);
-        serde_json::from_str(&response)
-            .map_err(|err| RaftError::Transport(format!("failed to decode raft RPC: {err}")))
+        decode_rpc_response(&response)
     }
 
     pub fn send_batch_rpc(
@@ -1200,34 +1195,34 @@ where
     T: Transport + ?Sized,
 {
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
     loop {
         if shutdown.load(Ordering::Relaxed) {
             return Ok(());
         }
-        line.clear();
-        let read = reader.read_line(&mut line).map_err(|err| {
-            RaftError::Transport(format!("failed to read raft TCP request: {err}"))
-        })?;
-        // A zero-length read is the peer closing, which is the ordinary way a
-        // kept-alive connection ends rather than a failure.
-        if read == 0 {
+        // Either shape: a framed protobuf request, or a JSON line from a peer
+        // that predates the frame. `None` is the peer closing, which is the
+        // ordinary way a kept-alive connection ends rather than a failure.
+        let Some(message) = read_rpc_message(&mut reader)? else {
             return Ok(());
-        }
-        if line.trim().is_empty() {
+        };
+        if message.is_empty() || message.iter().all(|byte| byte.is_ascii_whitespace()) {
             continue;
         }
+        let framed_request = crate::rpc_binary::is_framed_rpc(&message);
         // Re-checked after the read, not only before it. A thread parked in
-        // `read_line` when shutdown was signalled would otherwise wake on the
-        // next request and serve it, so a kept-alive connection could be served
-        // by a server that had already been shut down.
+        // the read when shutdown was signalled would otherwise wake on the next
+        // request and serve it, so a kept-alive connection could be served by a
+        // server that had already been shut down.
         if shutdown.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let envelope: TcpRaftTransportEnvelope =
-            serde_json::from_str(&line).map_err(|err| {
+        let envelope: TcpRaftTransportEnvelope = if framed_request {
+            crate::matrixraft_decode_rpc_envelope(&message)?
+        } else {
+            serde_json::from_slice(&message).map_err(|err| {
                 RaftError::Transport(format!("failed to decode raft TCP request: {err}"))
-            })?;
+            })?
+        };
         require_transport_validation(matrixraft_validate_tcp_transport_request(
             &envelope.request,
         ))?;
@@ -1258,13 +1253,25 @@ where
                 }
             }
         };
-        let mut encoded = serde_json::to_vec(&response).map_err(|err| {
-            RaftError::Transport(format!("failed to encode raft TCP response: {err}"))
-        })?;
-        // One write, for the same reason the request side does it: the caller
-        // is reading a line, so a separate one-byte newline puts a round trip
-        // between the response and the caller being able to see it.
-        encoded.push(b'\n');
+        // ANSWERED IN THE SHAPE IT ARRIVED IN, which is what makes a staged
+        // upgrade possible. A peer that sent a JSON line predates the frame and
+        // cannot read one back, so replying framed would break every old sender
+        // the moment a receiver was upgraded -- the opposite of the order this
+        // migration needs. Answering in kind means an upgraded receiver serves
+        // old and new senders alike, and once every sender frames its requests
+        // no JSON arrives and this arm is dead.
+        //
+        // Still one write in both arms: splitting a message across two puts a
+        // round trip between it and the caller being able to see it.
+        let encoded = if framed_request {
+            crate::matrixraft_encode_rpc_response(&response)?
+        } else {
+            let mut json = serde_json::to_vec(&response).map_err(|err| {
+                RaftError::Transport(format!("failed to encode raft TCP response: {err}"))
+            })?;
+            json.push(b'\n');
+            json
+        };
         reader.get_mut().write_all(&encoded).map_err(|err| {
             RaftError::Transport(format!("failed to write raft TCP response: {err}"))
         })?;
@@ -1277,6 +1284,64 @@ where
 /// back as that same kind with the error set -- not as a single generic error,
 /// which the caller could not decode, and not as a dropped connection, which
 /// it would read as the peer being down.
+/// One RPC message, in whichever shape the peer sent it.
+///
+/// `None` is the peer closing, which is the ordinary way a kept-alive
+/// connection ends rather than a failure.
+///
+/// A framed RPC opens with the first byte of its magic and a JSON object opens
+/// with `{`, so one peeked byte decides which to read -- and anything else, a
+/// blank line from a peer that sent one, is read as a line and skipped by the
+/// caller as it always was. That one byte is the whole of the compatibility
+/// mechanism: a receiver takes either shape, which is what lets a cluster
+/// upgrade receivers before senders.
+fn read_rpc_message(reader: &mut BufReader<TcpStream>) -> Result<Option<Vec<u8>>, RaftError> {
+    let first = {
+        let buffered = reader
+            .fill_buf()
+            .map_err(|err| RaftError::Transport(format!("failed to read raft RPC: {err}")))?;
+        match buffered.first() {
+            None => return Ok(None),
+            Some(byte) => *byte,
+        }
+    };
+    if first != crate::rpc_binary::RPC_MAGIC[0] {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .map_err(|err| RaftError::Transport(format!("failed to read raft RPC: {err}")))?;
+        return Ok(Some(line.into_bytes()));
+    }
+    // A frame carries its own length, so the head comes first and the body is
+    // read to exactly the size it declares -- there is no delimiter to look
+    // for, which is the reason the encoding and the framing had to change
+    // together: a protobuf message can contain a newline.
+    let mut head = [0u8; crate::rpc_binary::RPC_HEAD_BYTES];
+    std::io::Read::read_exact(reader, &mut head).map_err(|err| {
+        RaftError::Transport(format!("failed to read a framed raft RPC: {err}"))
+    })?;
+    let total = crate::rpc_binary::framed_rpc_len(&head).ok_or_else(|| {
+        RaftError::Transport(
+            "a raft RPC opened with the frame magic and did not carry a frame".to_string(),
+        )
+    })?;
+    let mut out = vec![0u8; total];
+    out[..head.len()].copy_from_slice(&head);
+    std::io::Read::read_exact(reader, &mut out[head.len()..]).map_err(|err| {
+        RaftError::Transport(format!("failed to read a framed raft RPC: {err}"))
+    })?;
+    Ok(Some(out))
+}
+
+/// The response a peer sent, in whichever shape it sent it.
+fn decode_rpc_response(bytes: &[u8]) -> Result<TcpRaftTransportResponse, RaftError> {
+    if crate::rpc_binary::is_framed_rpc(bytes) {
+        return crate::matrixraft_decode_rpc_response(bytes);
+    }
+    serde_json::from_slice(bytes)
+        .map_err(|err| RaftError::Transport(format!("failed to decode raft RPC: {err}")))
+}
+
 fn refuse_foreign_cluster(
     request: &TcpRaftTransportRequest,
     local: u64,

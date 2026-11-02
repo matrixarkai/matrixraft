@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
+use matrixraft::matrixraft_encode_rpc_response;
 use matrixraft::{
     matrixraft_is_health_check_request, matrixraft_validate_read_index_response,
     matrixraft_validate_tcp_transport_request, matrixraft_validate_vote_request,
@@ -2294,7 +2295,7 @@ fn a_peer_that_answers_once_and_then_goes_quiet_is_still_bounded() {
     // peer that was never reachable has no pooled connection to reuse, so
     // only a peer that answered *first* exercises this. It is also the
     // realistic failure -- a follower that was healthy and then wedged.
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufReader, Write};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr").to_string();
@@ -2305,8 +2306,16 @@ fn a_peer_that_answers_once_and_then_goes_quiet_is_still_bounded() {
             return;
         };
         let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        if reader.read_line(&mut line).is_err() {
+        // The request is framed, so it is read by its own declared length --
+        // there is no newline to read up to. The bytes are discarded: this peer
+        // is here to answer once and then go quiet, not to interpret anything.
+        let mut head = [0u8; 12];
+        if std::io::Read::read_exact(&mut reader, &mut head).is_err() {
+            return;
+        }
+        let length = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        let mut body = vec![0u8; length];
+        if std::io::Read::read_exact(&mut reader, &mut body).is_err() {
             return;
         }
         let response = TcpRaftTransportResponse::AppendEntries(TcpRaftRpcResult {
@@ -2323,8 +2332,7 @@ fn a_peer_that_answers_once_and_then_goes_quiet_is_still_bounded() {
             }),
             error: None,
         });
-        let mut encoded = serde_json::to_vec(&response).expect("encode");
-        encoded.push(b'\n');
+        let encoded = matrixraft_encode_rpc_response(&response).expect("encode");
         if reader.get_mut().write_all(&encoded).is_err() {
             return;
         }
