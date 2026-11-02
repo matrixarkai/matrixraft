@@ -1258,7 +1258,7 @@ pub fn matrixraft_read_wal_segment_file(path: &Path) -> Result<Vec<WalRecord>, R
     };
     let mut offset = crate::wal_binary::SEGMENT_MAGIC.len();
     while offset < bytes.len() {
-        match crate::wal_binary::decode_framed_with(&bytes[offset..], digest_kind)? {
+        match crate::wal_binary::decode_framed(&bytes[offset..], digest_kind)? {
             Some((record, used)) => {
                 offset += used;
                 records.push(record);
@@ -1618,7 +1618,7 @@ fn read_wal_segment_file(path: &Path) -> Result<(Vec<WalRecord>, bool, bool), Ra
     let mut valid_end_offset = offset as u64;
     let mut truncated = false;
     while offset < bytes.len() {
-        match crate::wal_binary::decode_framed_with(&bytes[offset..], digest_kind)? {
+        match crate::wal_binary::decode_framed(&bytes[offset..], digest_kind)? {
             Some((record, used)) => {
                 if !matrixraft_wal_checksum_valid(&record) {
                     truncated = true;

@@ -439,23 +439,18 @@ impl FrameDigest {
 
 /// CRC-32C (Castagnoli) over a record's bytes, as the frame's integrity check.
 ///
-/// The shape around it already matched the authority: `byteraft`'s
-/// `RecordAppender::EmitPhysicalRecord` writes a little-endian `u32` length,
-/// then a little-endian `u32` digest over the serialized protobuf, then the
-/// body -- the same field order, endianness and coverage this frame has. What
-/// did not match was the function, and `base/checksum.h` declares `kCRC32`
-/// beside `kMurmurhash32` and includes `butil/crc32c.h`.
+/// A length and a 32-bit CRC in front of each record, both little-endian, with
+/// the CRC covering the serialized message and nothing else. That is the
+/// ordinary shape for a log record frame, and CRC-32C is the ordinary choice of
+/// function for it -- standardised for iSCSI in RFC 3720 and for SCTP in
+/// RFC 4960, and carried in hardware since SSE4.2.
 ///
-/// So this matches the FAMILY it uses, and not a verified byte-for-byte match:
-/// its record frame calls `byte::CRCUtil::ComputeCRC32`, whose header lives in
-/// a submodule that is empty in this checkout, so the polynomial it compiles
-/// against cannot be read here. Claiming the bytes agree would be claiming more
-/// than was checked.
-///
-/// Worth doing on its own merit regardless. A frame digest exists to catch a
-/// torn or rotted record before its bytes reach a decoder, and a CRC is an
-/// error-DETECTING code built for that, with a guarantee -- every burst error
-/// up to 32 bits -- where FNV-1a is a hash function with none.
+/// It replaced an FNV-1a-32 here, which was the wrong tool rather than a slow
+/// one. A frame digest exists to catch a torn or rotted record before its bytes
+/// reach a decoder, and a CRC is an error-DETECTING code built for exactly that,
+/// with a guarantee: every burst error up to 32 bits. FNV-1a is a hash
+/// function and offers no such guarantee -- it is built to spread keys over
+/// buckets, which is a different job.
 ///
 /// Hand-rolled for the same reason the base64 in `wal.rs` is: this crate adds
 /// no dependency, and a gating licence-and-advisory check makes taking one for
@@ -516,15 +511,10 @@ pub(crate) fn encode_framed(record: &WalRecord) -> Result<Vec<u8>, RaftError> {
 /// tail, which the caller truncates to the last whole record. That is the same
 /// answer the JSON reader gave for a half-written line, and it must stay the
 /// same answer: a crash between a write and its barrier is ordinary.
-pub(crate) fn decode_framed(bytes: &[u8]) -> Result<Option<(WalRecord, usize)>, RaftError> {
-    decode_framed_with(bytes, FrameDigest::Crc32c)
-}
-
-/// The same, checking the frame against the digest a given segment uses.
 ///
-/// Separate from [`decode_framed`] so that the only callers who have to think
-/// about the variant are the two that read a segment file and know its magic.
-pub(crate) fn decode_framed_with(
+/// Takes the digest the segment's magic calls for, rather than assuming the
+/// current one. Every caller reads a segment file and therefore knows it.
+pub(crate) fn decode_framed(
     bytes: &[u8],
     digest_kind: FrameDigest,
 ) -> Result<Option<(WalRecord, usize)>, RaftError> {
@@ -596,7 +586,9 @@ mod tests {
             for is_command in [false, true] {
                 let original = record(payload, is_command);
                 let framed = encode_framed(&original).expect("encodes");
-                let (read, used) = decode_framed(&framed).expect("decodes").expect("whole");
+                let (read, used) = decode_framed(&framed, FrameDigest::Crc32c)
+                    .expect("decodes")
+                    .expect("whole");
                 assert_eq!(read, original, "payload {payload}, command {is_command}");
                 assert_eq!(used, framed.len(), "the frame must report its own width");
             }
@@ -640,7 +632,9 @@ mod tests {
         original.checksum = matrixraft_wal_checksum(&original);
 
         let framed = encode_framed(&original).expect("encodes");
-        let (read, _) = decode_framed(&framed).expect("decodes").expect("whole");
+        let (read, _) = decode_framed(&framed, FrameDigest::Crc32c)
+            .expect("decodes")
+            .expect("whole");
         assert_eq!(read, original);
         assert_eq!(
             read.installed_snapshot.as_ref().unwrap().members[1].role,
@@ -666,7 +660,7 @@ mod tests {
         let framed = encode_framed(&record(9, false)).expect("encodes");
         for cut in [0usize, 1, 4, 7, FRAME_BYTES, framed.len() - 1] {
             assert!(
-                decode_framed(&framed[..cut])
+                decode_framed(&framed[..cut], FrameDigest::Crc32c)
                     .expect("no hard error")
                     .is_none(),
                 "a frame cut at {cut} must read as incomplete"
@@ -677,7 +671,9 @@ mod tests {
         let last = shredded.len() - 1;
         shredded[last] ^= 0xff;
         assert!(
-            decode_framed(&shredded).expect("no hard error").is_none(),
+            decode_framed(&shredded, FrameDigest::Crc32c)
+                .expect("no hard error")
+                .is_none(),
             "a frame whose body changed must fail its digest"
         );
     }
@@ -783,7 +779,9 @@ mod tests {
         let mut value = record(0, true);
         value.checksum = String::new();
         let framed = encode_framed(&value).expect("encodes");
-        let (back, _) = decode_framed(&framed).expect("decodes").expect("whole");
+        let (back, _) = decode_framed(&framed, FrameDigest::Crc32c)
+            .expect("decodes")
+            .expect("whole");
         assert_eq!(
             back.checksum, "",
             "an absent checksum came back as {:?}, so the wire cannot tell absent from zero",
@@ -801,7 +799,9 @@ mod tests {
         let mut value = record(0, true);
         value.checksum = "0000000000000000".to_string();
         let framed = encode_framed(&value).expect("encodes");
-        let (back, _) = decode_framed(&framed).expect("decodes").expect("whole");
+        let (back, _) = decode_framed(&framed, FrameDigest::Crc32c)
+            .expect("decodes")
+            .expect("whole");
         assert_eq!(back.checksum, "0000000000000000");
         assert_eq!(
             WalRecordProto::from(&value).checksum_digest,
@@ -832,7 +832,9 @@ mod tests {
             let mut value = record(0, true);
             value.checksum = odd.to_string();
             let framed = encode_framed(&value).expect("encodes");
-            let (back, _) = decode_framed(&framed).expect("decodes").expect("whole");
+            let (back, _) = decode_framed(&framed, FrameDigest::Crc32c)
+                .expect("decodes")
+                .expect("whole");
             assert_eq!(
                 back.checksum, odd,
                 "the checksum {odd:?} did not survive the round trip"
@@ -932,14 +934,14 @@ mod tests {
     fn a_frame_read_with_the_wrong_digest_looks_torn_rather_than_valid() {
         let framed = encode_framed(&record(9, true)).expect("encodes");
 
-        let (whole, used) = decode_framed_with(&framed, FrameDigest::Crc32c)
+        let (whole, used) = decode_framed(&framed, FrameDigest::Crc32c)
             .expect("no hard error")
             .expect("the right digest reads it whole");
         assert_eq!(used, framed.len());
         assert_eq!(whole.entries.len(), 1);
 
         assert!(
-            decode_framed_with(&framed, FrameDigest::Fnv1a32)
+            decode_framed(&framed, FrameDigest::Fnv1a32)
                 .expect("no hard error")
                 .is_none(),
             "a CRC-32C frame read as FNV-1a passed its digest check, so the two functions agree on this body and the magic would not need a version"
@@ -955,9 +957,8 @@ mod tests {
         assert_eq!(SEGMENT_MAGIC_FNV.len(), 4);
         for magic in [SEGMENT_MAGIC, SEGMENT_MAGIC_FNV] {
             assert_ne!(magic[0], b'{', "a segment could be mistaken for JSON");
-            assert_eq!(
+            assert!(
                 FrameDigest::from_segment(magic).is_some(),
-                true,
                 "a magic this crate writes is not recognised by the reader that dispatches on it"
             );
         }
