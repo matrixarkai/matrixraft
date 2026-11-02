@@ -3,31 +3,37 @@
 
 //! What a checkpoint snapshot's payload costs, and what reads it.
 //!
-//! `RaftCluster::checkpoint_snapshot` fills a snapshot's payload with
-//! `serde_json::to_vec(&node.log)` -- the whole log, as JSON. Measured:
+//! `RaftCluster::checkpoint_snapshot` fills a snapshot's payload with the
+//! node's log. It did that as JSON, and now does it as protobuf. Measured:
 //!
 //! ```text
-//!  commands   bytes each   command bytes   payload bytes   per command byte
-//!        10          9 B              90           1,065            11.83x
-//!       100          9 B             900           9,977            11.09x
-//!       100        300 B          30,000         126,377             4.21x
-//!        10       4096 B          40,960         164,545             4.02x
+//!  commands   bytes each   command bytes      as JSON   as protobuf
+//!        10          9 B              90        1,065           225
+//!       100          9 B             900        9,977         2,115
+//!       100        300 B          30,000      126,377        31,415
+//!        10       4096 B          40,960      164,545        41,115
 //! ```
 //!
-//! **4.0x asymptotically, and 11.1x for small commands.** Two costs, each with
-//! a known cause and a known alternative already in this crate:
+//! Per command byte, **11.09x -> 2.35x** for small commands and
+//! **4.02x -> 1.004x** for large ones.
+//!
+//! Both JSON costs had a cause and an alternative already in this crate:
 //!
 //! - `serde_json` writes a `Vec<u8>` as decimal numbers, so a payload byte of
-//!   value 120 spells `120,`. That is the 4.0x, and `wal.rs`'s own
+//!   value 120 spelled `120,`. That was the 4.0x, and `wal.rs`'s own
 //!   `costs_a_third_of_what_a_number_array_costs` measures the same thing from
-//!   the other side. The `wal_entry_payloads` codec beside it costs ~1.37x and
-//!   is applied to the WAL record and to `AppendEntriesRequest.entries` -- and
-//!   not here.
-//! - A JSON entry envelope of about 64 bytes per entry, which is what takes
-//!   9-byte commands to 11.1x. The WAL record's protobuf entry is 10 bytes.
+//!   the other side.
+//! - A JSON entry envelope of about 90 bytes, which is what took 9-byte
+//!   commands to 11.1x.
 //!
-//! So a protobuf log would be roughly 2.1x for small commands and 1.0x for
-//! large ones, against 11.1x and 4.0x.
+//! An entry now costs exactly **21 bytes at a 9-byte payload** -- 9 of payload
+//! and 12 of envelope -- which the marginal identity below asserts rather than
+//! divides for, since it is the difference between two measured points.
+//!
+//! **The payload is also decodable now**, which it was not: `matrixraft_decode_log`
+//! reads back what `matrixraft_encode_log` wrote. The JSON form offered that in
+//! principle and nothing took it up; this makes the bytes a format rather than
+//! a cost.
 //!
 //! ## And the payload is opaque: nothing reads it back
 //!
@@ -58,17 +64,17 @@
 //! - Anything about compression, which nothing on this path does.
 
 use matrixraft::{
-    ApplySnapshotFence, Config, GenericSnapshot, LogId, Peer, RaftCluster, ReplicaRole,
-    SnapshotMetadata,
+    matrixraft_decode_log, ApplySnapshotFence, Config, GenericSnapshot, LogId, Peer, RaftCluster,
+    ReplicaRole, SnapshotMetadata,
 };
 
 const GROUP: u64 = 9;
 
 /// Measured, exact: the same proposals always produce the same payload.
-const PAYLOAD_10_X_9: usize = 1_065;
-const PAYLOAD_100_X_9: usize = 9_977;
-const PAYLOAD_100_X_300: usize = 126_377;
-const PAYLOAD_10_X_4096: usize = 164_545;
+const PAYLOAD_10_X_9: usize = 225;
+const PAYLOAD_100_X_9: usize = 2_115;
+const PAYLOAD_100_X_300: usize = 31_415;
+const PAYLOAD_10_X_4096: usize = 41_115;
 
 fn peer(node_id: u64) -> Peer {
     Peer {
@@ -104,7 +110,7 @@ fn payload_bytes(count: usize, size: usize) -> usize {
 }
 
 #[test]
-fn a_checkpoint_payload_costs_four_times_its_commands_and_eleven_for_small_ones() {
+fn a_checkpoint_payload_costs_its_commands_and_twelve_bytes_an_entry() {
     let small_few = payload_bytes(10, 9);
     let small_many = payload_bytes(100, 9);
     let medium = payload_bytes(100, 300);
@@ -116,28 +122,38 @@ fn a_checkpoint_payload_costs_four_times_its_commands_and_eleven_for_small_ones(
     assert_eq!(large, PAYLOAD_10_X_4096, "the 10 x 4096 point moved");
 
     // The asymptote, where the per-entry envelope is small beside the payload:
-    // 4.0x, which is what a JSON number array costs.
+    // a payload byte costs a payload byte.
     assert_eq!(
         large * 100 / (10 * 4_096),
-        401,
-        "a large command should cost about 4.01x in the payload, got {:.4}x",
+        100,
+        "a large command should cost about 1.00x in the payload, got {:.4}x",
         large as f64 / (10.0 * 4_096.0)
     );
 
-    // And the small-command figure, where the envelope dominates.
+    // And the small-command figure, where the envelope still shows.
     assert_eq!(
         small_many * 100 / (100 * 9),
-        1_108,
-        "a 9-byte command should cost about 11.09x in the payload, got {:.4}x",
+        235,
+        "a 9-byte command should cost about 2.35x in the payload, got {:.4}x",
         small_many as f64 / 900.0
     );
 
-    // The claim that survives any re-pinning: a number array cannot cost less
-    // than about four times its bytes, so the payload is never near 1x. If this
-    // ever fails, the encoding changed and every figure above needs re-reading.
+    // The marginal cost of an entry, as a difference between two measured
+    // points rather than a division -- so it is exact, and it is the figure
+    // that moves if the entry's shape changes rather than its payload's.
+    let marginal = (small_many - small_few) / 90;
+    assert_eq!(
+        marginal, 21,
+        "an entry with a 9-byte payload costs {marginal} bytes, not the 9 of payload and 12 of envelope this file describes"
+    );
+
+    // The claim that survives any re-pinning: the payload is now within a
+    // small multiple of the bytes it carries, where a JSON number array could
+    // not be under about four times them. If this fails, the encoding went
+    // back.
     assert!(
-        large > 10 * 4_096 * 7 / 2,
-        "a 40,960-byte log produced a {large}-byte payload, under 3.5x, so it is no longer a number array"
+        large < 10 * 4_096 * 3 / 2,
+        "a 40,960-byte log produced a {large}-byte payload, over 1.5x, which is the number-array regime this left"
     );
 }
 
@@ -214,5 +230,48 @@ fn a_snapshot_installs_with_a_payload_that_is_not_a_log() {
             .map(|meta| meta.snapshot_id.as_str()),
         Some("nonsense-1"),
         "the installed snapshot on the record is not the one with the nonsense payload"
+    );
+}
+
+/// The payload reads back as the log it was written from.
+///
+/// New with the protobuf form. The JSON payload was decodable in principle and
+/// nothing decoded it; this makes the bytes a format rather than only a cost,
+/// and asserts it for every byte value and either `is_command`, since those are
+/// where an encoder gets a field wrong and a readable fixture cannot see it.
+#[test]
+fn a_checkpoint_payload_reads_back_as_the_log_it_came_from() {
+    let (mut cluster, leader) = started();
+    let mut sent: Vec<Vec<u8>> = Vec::new();
+    for length in [0usize, 1, 2, 3, 127, 128, 255, 256] {
+        let command: Vec<u8> = (0..length).map(|index| (index % 256) as u8).collect();
+        cluster.propose(command.clone()).expect("propose");
+        sent.push(command);
+    }
+
+    let snapshot = cluster
+        .checkpoint_snapshot(leader, "roundtrip-1")
+        .expect("the checkpoint is produced");
+    let entries = matrixraft_decode_log(&snapshot.payload).expect("the payload decodes");
+
+    let commands: Vec<Vec<u8>> = entries
+        .iter()
+        .filter(|entry| entry.is_command)
+        .map(|entry| entry.payload.clone())
+        .collect();
+    assert_eq!(
+        commands, sent,
+        "the commands did not survive the round trip through the payload"
+    );
+
+    // And the log ids are intact and in order, which a payload that merely
+    // happened to decode could still get wrong.
+    let indices: Vec<u64> = entries.iter().map(|entry| entry.log_id.index).collect();
+    let mut sorted = indices.clone();
+    sorted.sort_unstable();
+    assert_eq!(indices, sorted, "the entries came back out of order");
+    assert!(
+        indices.windows(2).all(|pair| pair[0] != pair[1]),
+        "the payload holds a duplicated index: {indices:?}"
     );
 }

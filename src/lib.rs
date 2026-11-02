@@ -108,6 +108,10 @@ pub mod transport;
 pub mod unique_id;
 pub mod wal;
 mod wal_binary;
+// The log codec only: the proto mirrors beside it are an implementation detail
+// and stay private, so the crate's surface gains two functions rather than a
+// dozen message types whose field numbers would then be a contract.
+pub use wal_binary::{matrixraft_decode_log, matrixraft_encode_log};
 
 pub use applier::{
     matrixraft_apply_task_through_index, Applier, ApplierOptions, ApplyHandler, ApplyReport,

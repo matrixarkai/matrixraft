@@ -5698,9 +5698,11 @@ impl RaftCluster {
         // Encoded before the metadata is built, so the declared length is the
         // length of the payload beside it rather than a number that has to be
         // kept in step by hand.
-        let payload = serde_json::to_vec(&node.log).map_err(|err| {
-            RaftError::Storage(format!("failed to encode checkpoint snapshot: {err}"))
-        })?;
+        // Protobuf, not JSON. The JSON form cost 4.0 bytes per command byte
+        // asymptotically and 11.1x for a log of small commands, measured in
+        // `what_a_checkpoint_payload_costs`.
+        let entries: Vec<LogEntry> = node.log.iter().map(|entry| (**entry).clone()).collect();
+        let payload = crate::wal_binary::matrixraft_encode_log(&entries);
         Ok(RaftSnapshot {
             group_id: self.group_id,
             meta: SnapshotMetadata {
