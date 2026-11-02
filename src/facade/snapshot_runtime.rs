@@ -766,8 +766,7 @@ impl PersistentRaftSnapshotStore {
 
     pub fn save_checkpoint(&self, snapshot: &RaftSnapshot) -> Result<PathBuf, RaftError> {
         let path = self.snapshot_path(&snapshot.meta.snapshot_id);
-        let encoded = serde_json::to_vec(snapshot)
-            .map_err(|err| RaftError::Storage(format!("failed to encode snapshot: {err}")))?;
+        let encoded = crate::wal_binary::encode_checkpoint(snapshot)?;
         // Written under a staging name and renamed into place, because
         // `File::create` on the final path TRUNCATES it. A crash between that
         // create and the sync left a torn checkpoint where a good one had
@@ -986,6 +985,13 @@ impl PersistentRaftSnapshotStore {
         let bytes = fs::read(&path).map_err(|err| {
             RaftError::Storage(format!("failed to read snapshot {}: {err}", path.display()))
         })?;
+        // Either shape: a framed checkpoint, or the JSON an earlier build
+        // wrote. The JSON arm still accepts both payload spellings it ever
+        // used, a base64 string and a number array, so no checkpoint is
+        // stranded and the saving closes behind each file as it is rewritten.
+        if crate::wal_binary::is_framed_checkpoint(&bytes) {
+            return crate::wal_binary::decode_checkpoint(&bytes);
+        }
         serde_json::from_slice(&bytes)
             .map_err(|err| RaftError::Storage(format!("failed to decode snapshot: {err}")))
     }
