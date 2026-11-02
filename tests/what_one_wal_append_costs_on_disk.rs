@@ -61,6 +61,36 @@
 //! field. The last test below pins the checksum's width so it cannot drift
 //! either way without going red.
 //!
+//! ## The file is not the device, and the difference decides what to optimise
+//!
+//! Every figure above is **file** bytes. A filesystem allocates in blocks, so
+//! what the device is charged is `st_blocks`, and the two part company exactly
+//! where it matters. Measured here on 4 KiB blocks:
+//!
+//! | records | payload | file B | allocated B | device per payload byte |
+//! |---|---|---|---|---|
+//! | 1 | 9 B | 77 | **4,096** | **455x** |
+//! | 10 | 9 B | 752 | 4,096 | 45.5x |
+//! | 100 | 9 B | 7,502 | 8,192 | **9.10x** |
+//! | 1000 | 9 B | 78,494 | 81,920 | 9.10x |
+//!
+//! **A single append is a whole block whatever the envelope weighs.** One
+//! record was 424 bytes before the record became protobuf and is 77 now; both
+//! fit in one 4 KiB block, so the device was charged 4,096 bytes then and is
+//! charged 4,096 now. The 6.4x envelope reduction moved that figure by nothing.
+//! Anyone shaving further bytes off the envelope to help a one-record WAL is
+//! optimising something the filesystem rounds away.
+//!
+//! **For a WAL of any length it reached the device in full.** At 100 records
+//! allocation is 8,192 against 7,502 file bytes, within 9%, and at 1000 records
+//! 81,920 against 78,494, within 4.4%. So the envelope is the lever there, and
+//! the figures above are the right ones to watch.
+//!
+//! The fsync count is a separate axis and already answered: appending 100
+//! records one at a time pays 100 fsyncs, and `append_batch` of the same 100
+//! pays **1**, for byte-identical allocation. Barriers are what batching buys,
+//! not bytes.
+//!
 //! ## Verified by planting, not by passing
 //!
 //! A green figure proves nothing about what it would catch, so each regression
@@ -394,4 +424,133 @@ fn framed_bytes(record: &WalRecord) -> u64 {
     let bytes = fs::metadata(&path).expect("meta").len() - SEGMENT_MAGIC;
     let _ = fs::remove_dir_all(&dir);
     bytes
+}
+
+/// What the device is charged, against what the file weighs.
+///
+/// Pins the relationships rather than the byte counts, because `st_blocks` is
+/// the filesystem's answer and a different one would give different numbers
+/// while the claims stay true. The block size is read from the directory rather
+/// than assumed.
+///
+/// Here to stop a particular mistake: the envelope above went from 412 bytes to
+/// 64, and it is tempting to read that as making a small append cheap. It does
+/// not. A one-record WAL costs one block either way, and the only figures the
+/// envelope moves are the ones for a WAL long enough to fill blocks.
+#[cfg(unix)]
+#[test]
+fn a_single_append_costs_a_whole_block_whatever_the_envelope_weighs() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = temp_wal_dir("one-block");
+    fs::create_dir_all(&dir).expect("create the wal dir");
+    let block = fs::metadata(&dir).expect("dir metadata").blksize();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        block >= 512 && block.is_power_of_two(),
+        "a block size of {block} is not one this test can reason about"
+    );
+
+    let (file_one, alloc_one) = weigh(1, 9);
+    assert!(
+        file_one < block,
+        "one record and a 9-byte payload is {file_one} bytes, which no longer fits in a {block}-byte block, so this test is about something else now"
+    );
+    assert_eq!(
+        alloc_one, block,
+        "one small append allocated {alloc_one} bytes against a {block}-byte block"
+    );
+
+    // The point, as a comparison rather than a constant: the device charges
+    // many times what the record weighs, and the envelope cannot change it.
+    assert!(
+        alloc_one >= file_one * 50,
+        "one append allocated {alloc_one} for {file_one} file bytes, under 50x -- if the block size shrank this test needs rereading, and if the record grew the envelope figures above moved"
+    );
+
+    // And at length, allocation tracks the file, so the envelope IS the lever.
+    let (file_many, alloc_many) = weigh(RECORDS, 9);
+    assert_eq!(
+        file_many, DISK_AT_9,
+        "the 100-record file size disagrees with the figure this file pins"
+    );
+    assert!(
+        alloc_many >= file_many && alloc_many < file_many + block,
+        "100 records weigh {file_many} bytes and allocated {alloc_many}, which is not within one {block}-byte block -- allocation has stopped tracking the file, and the envelope figures above would no longer describe the device"
+    );
+}
+
+/// A batch pays one barrier for every record in it, and the same bytes.
+///
+/// The other axis. Kept beside the device figures because the two are easy to
+/// conflate: batching changes the number of fsyncs and not the number of bytes,
+/// and the envelope changes the number of bytes and not the number of fsyncs.
+#[cfg(unix)]
+#[test]
+fn a_batch_changes_the_barrier_count_and_not_the_byte_count() {
+    use std::os::unix::fs::MetadataExt;
+
+    let one_at_a_time = {
+        let dir = temp_wal_dir("barrier-each");
+        let mut options = one_wide_segment(dir.clone());
+        options.fsync_on_append = true;
+        let mut wal = PersistentRaftWal::open(options).expect("open");
+        for index in 1..=RECORDS {
+            wal.append(record(index, 9)).expect("append");
+        }
+        let fsyncs = wal.fsync_count();
+        drop(wal);
+        let meta = fs::metadata(dir.join(format!("{:020}.wal", 0))).expect("meta");
+        let out = (fsyncs, meta.len(), meta.blocks() * 512);
+        let _ = fs::remove_dir_all(&dir);
+        out
+    };
+
+    let batched = {
+        let dir = temp_wal_dir("barrier-batch");
+        let mut options = one_wide_segment(dir.clone());
+        options.fsync_on_append = true;
+        let mut wal = PersistentRaftWal::open(options).expect("open");
+        let batch: Vec<WalRecord> = (1..=RECORDS).map(|index| record(index, 9)).collect();
+        wal.append_batch(batch).expect("append a batch");
+        let fsyncs = wal.fsync_count();
+        drop(wal);
+        let meta = fs::metadata(dir.join(format!("{:020}.wal", 0))).expect("meta");
+        let out = (fsyncs, meta.len(), meta.blocks() * 512);
+        let _ = fs::remove_dir_all(&dir);
+        out
+    };
+
+    assert_eq!(
+        one_at_a_time.0, RECORDS,
+        "appending {RECORDS} records one at a time paid {} fsyncs, not one each",
+        one_at_a_time.0
+    );
+    assert_eq!(
+        batched.0, 1,
+        "a batch of {RECORDS} records paid {} fsyncs, not one",
+        batched.0
+    );
+    assert_eq!(
+        (one_at_a_time.1, one_at_a_time.2),
+        (batched.1, batched.2),
+        "batching changed the bytes as well as the barriers, so one of the two figures this file reports is measuring the other"
+    );
+}
+
+/// File bytes and allocated bytes for `records` appends of `payload_len`.
+#[cfg(unix)]
+fn weigh(records: u64, payload_len: usize) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = temp_wal_dir("weigh");
+    let mut wal = PersistentRaftWal::open(one_wide_segment(dir.clone())).expect("open");
+    for index in 1..=records {
+        wal.append(record(index, payload_len)).expect("append");
+    }
+    drop(wal);
+    let meta = fs::metadata(dir.join(format!("{:020}.wal", 0))).expect("meta");
+    let out = (meta.len(), meta.blocks() * 512);
+    let _ = fs::remove_dir_all(&dir);
+    out
 }
