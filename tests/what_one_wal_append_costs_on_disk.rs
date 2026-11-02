@@ -63,16 +63,37 @@
 //!
 //! ## Verified by planting, not by passing
 //!
-//! A green figure proves nothing about what it would catch, so both regressions
-//! this file exists for were planted against it and the reddening was read off
-//! the output rather than predicted:
+//! A green figure proves nothing about what it would catch, so each regression
+//! this file exists for was planted against it and the reddening was read off
+//! the output rather than predicted. All three figures below are against the
+//! current 64-byte envelope:
 //!
-//! - **Storing the whole log per record instead of a delta** reddens all four
-//!   points, by roughly fiftyfold at the hundredth record -- which is the shape
-//!   of the failure, since the cost would then grow with the log.
-//! - **Widening the checksum** moves the empty-payload envelope and every
-//!   point above it, and correctly leaves the slope identity alone, because the
-//!   slope is a property of the payload field and not of the envelope.
+//! - **Storing the whole log per record instead of a delta** reddens all six
+//!   assertions: 6,402 -> 55,704 bytes at an empty payload, 36,802 ->
+//!   1,590,904 at a 300-byte one, and a single stored record 64 -> 72. The
+//!   drift test reddens too, which is the shape of the failure -- the cost
+//!   would then grow with the log rather than staying flat.
+//! - **Widening the checksum to 32 hex characters** reddens every absolute
+//!   point and the width assertion, 6,402 -> 8,902. That is 25 bytes a record
+//!   rather than 16, and the extra 9 are worth following: a 32-character value
+//!   is not sixteen lowercase hex, so it stops qualifying for the `fixed64` and
+//!   falls back to travelling as text at a tag, a length and 32 bytes. The
+//!   plant therefore exercises the fallback as well as the width. The slope
+//!   identity stays green, because both of its points move by the same 2,500
+//!   bytes -- which is the blindness this file claims for itself, and the
+//!   reason the slope and the envelope are asserted separately.
+//! - **Carrying every checksum as text instead of a `fixed64`** puts every
+//!   point back exactly where it sat before the checksum narrowed: 6,402 ->
+//!   7,302, 7,502 -> 8,402, 36,802 -> 37,702, envelope 64 -> 73. That is what
+//!   makes those nine bytes a measured saving rather than an intention.
+//!
+//! One plant in this file's history did **not** land, and its green run was
+//! nearly read as evidence that an assertion here was blind. The matcher looked
+//! for `format!("{:016x}", hash)` where the code spells it
+//! `format!("{hash:016x}")`, so nothing was planted and the suite passed for
+//! the most boring possible reason. A plant is evidence only once the diff is
+//! confirmed, which is why every bullet above was read off a run with its
+//! `git diff --shortstat` printed beside it.
 //!
 //! ## What these assertions cannot see
 //!
