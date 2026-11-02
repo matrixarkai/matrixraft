@@ -107,6 +107,7 @@ pub mod storage;
 pub mod transport;
 pub mod unique_id;
 pub mod wal;
+mod wal_binary;
 
 pub use applier::{
     matrixraft_apply_task_through_index, Applier, ApplierOptions, ApplyHandler, ApplyReport,

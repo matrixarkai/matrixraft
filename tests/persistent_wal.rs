@@ -2,9 +2,10 @@
 // Copyright 2026 MatrixArkAI
 
 use matrixraft::{
-    matrixraft_fold_wal_records, matrixraft_recover_from_wal_records,
-    matrixraft_recover_latest_wal_record, matrixraft_wal_checksum, matrixraft_wal_checksum_format,
-    matrixraft_wal_lifecycle_evidence, ApplySnapshotFence, HardState, LogEntry, LogId, Membership,
+    matrixraft_fold_wal_records, matrixraft_read_wal_segment_file,
+    matrixraft_recover_from_wal_records, matrixraft_recover_latest_wal_record,
+    matrixraft_wal_checksum, matrixraft_wal_checksum_format, matrixraft_wal_lifecycle_evidence,
+    matrixraft_write_wal_segment_file, ApplySnapshotFence, HardState, LogEntry, LogId, Membership,
     PersistentRaftWal, PersistentRaftWalOptions, StorageApplyFence, WalRecord,
 };
 use std::fs;
@@ -388,12 +389,30 @@ fn stored_bytes(dir: &PathBuf) -> u64 {
         .sum()
 }
 
+/// How many stored records are deltas, counted from the records rather than
+/// from the bytes.
+///
+/// This used to count the substring `"entries_are_delta":true` in the file
+/// text, which asserts on the encoding instead of on the content -- and went to
+/// zero the moment the record stopped being JSON, taking seven tests with it
+/// that are not about the encoding at all.
 fn stored_delta_count(dir: &PathBuf) -> usize {
     fs::read_dir(dir)
         .expect("read wal dir")
         .flatten()
-        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
-        .map(|text| text.matches("\"entries_are_delta\":true").count())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "wal")
+        })
+        .filter_map(|entry| matrixraft_read_wal_segment_file(&entry.path()).ok())
+        .map(|records| {
+            records
+                .iter()
+                .filter(|record| record.entries_are_delta)
+                .count()
+        })
         .sum()
 }
 
@@ -826,10 +845,12 @@ fn in_memory_record_count(wal: &PersistentRaftWal) -> usize {
 /// wants to see what was *stored* has to read the file, which is the point.
 fn first_stored_record(dir: &Path, segment_id: u64) -> WalRecord {
     let path = dir.join(format!("{segment_id:020}.wal"));
-    let text =
-        fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-    let line = text.lines().next().expect("the segment has a record");
-    serde_json::from_str(line).expect("a stored record parses")
+    let records = matrixraft_read_wal_segment_file(&path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    records
+        .into_iter()
+        .next()
+        .expect("the segment has a record")
 }
 
 /// A segment roll used to rewrite the whole retained log, so N appends cost
@@ -1016,10 +1037,14 @@ fn a_fresh_wal_can_lose_its_empty_segment_and_still_be_opened() {
         segment.exists(),
         "the first segment file was not written at all"
     );
-    assert_eq!(
-        fs::metadata(&segment).expect("segment metadata").len(),
-        0,
-        "the first segment is not empty, so this test is not about an empty one"
+    // Empty means holding no records, not holding no bytes: a framed segment
+    // names its shape in its first four bytes, so the file this test is about
+    // is four bytes long and carries nothing.
+    assert!(
+        matrixraft_read_wal_segment_file(&segment)
+            .expect("read the fresh segment")
+            .is_empty(),
+        "the first segment already holds records, so this test is not about an empty one"
     );
     drop(wal);
 
@@ -1075,35 +1100,24 @@ fn copy_wal_dir(from: &Path, to: &Path) {
 /// record that parses and then fails its checksum does, and without a state like
 /// this the comparison below cannot tell `removed_records` from a constant zero --
 /// which is how it was first written, and a mutation planting exactly that survived.
+/// Damages one stored record's checksum without damaging the frame holding it.
+///
+/// The distinction is the whole point of the helper: the record has to still
+/// DECODE, so that what fails is the checksum check rather than the parse --
+/// an unparseable record is a different test. The text form of this edited a
+/// `"checksum":"` field in place; the binary form goes through the codec,
+/// which is also what keeps the frame's own digest correct.
 fn break_checksum_of_record(dir: &Path, segment_id: u64, record_index: usize) {
     let path = dir.join(format!("{segment_id:020}.wal"));
-    let text = fs::read_to_string(&path).expect("read the segment");
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut records = matrixraft_read_wal_segment_file(&path).expect("read the segment");
     assert!(
-        record_index < lines.len(),
-        "segment {segment_id} holds {} records, so there is no record {record_index}          to damage and this state would silently be the undamaged one",
-        lines.len()
+        record_index < records.len(),
+        "segment {segment_id} holds {} records, so there is no record {record_index} \
+         to damage and this state would silently be the undamaged one",
+        records.len()
     );
-    let line = &mut lines[record_index];
-    let marker = "\"checksum\":\"";
-    let start = line.find(marker).expect("a checksum field") + marker.len();
-    let end = start
-        + line[start..]
-            .find('"')
-            .expect("the checksum's closing quote");
-    line.replace_range(start..end, "not-the-right-checksum");
-    fs::write(
-        &path,
-        format!(
-            "{}
-",
-            lines.join(
-                "
-"
-            )
-        ),
-    )
-    .expect("write the segment back");
+    records[record_index].checksum = "not-the-right-checksum".to_string();
+    matrixraft_write_wal_segment_file(&path, &records).expect("write the segment back");
 }
 
 /// `open` then `recover` against `open_recovered`, on the same bytes.
