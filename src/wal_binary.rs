@@ -395,6 +395,10 @@ pub(crate) struct CheckpointProto {
     pub payload: Vec<u8>,
 }
 
+/// `CheckpointProto`'s payload field number, named because the encoder writes
+/// that field by hand and the two must agree.
+const CHECKPOINT_PAYLOAD_TAG: u32 = 3;
+
 /// The four bytes that open a framed checkpoint.
 ///
 /// Distinct from the WAL segment's magic on purpose: the two files live in
@@ -416,20 +420,76 @@ pub(crate) const CHECKPOINT_MAGIC: &[u8; 4] = b"MRCP";
 /// otherwise-encoded message by hand. That is a change worth making on its own
 /// rather than inside a format change.
 pub(crate) fn encode_checkpoint(snapshot: &crate::RaftSnapshot) -> Result<Vec<u8>, RaftError> {
-    let proto = CheckpointProto {
+    use prost::bytes::BufMut;
+
+    // The payload is appended by hand rather than put in the message, and the
+    // message is encoded straight into the output buffer. Both are about
+    // copies, not bytes: the result is identical to what a filled-in
+    // `CheckpointProto` encodes, which `the_hand_written_payload_field_matches_what_prost_would_write`
+    // asserts for a range of shapes.
+    //
+    // Measured before this, saving a checkpoint allocated 3.0x the payload --
+    // a clone into the message, an encode buffer, and a second copy of that
+    // buffer into the framed output. The last of those was introduced with the
+    // frame itself. Only the output buffer is unavoidable, so this is 1.0x, and
+    // for a snapshot of real state that is the difference between holding one
+    // copy and three.
+    let head = CheckpointProto {
         group_id: snapshot.group_id,
         meta: Some(SnapshotMetadataProto::from(&snapshot.meta)),
-        payload: snapshot.payload.clone(),
+        // Left empty on purpose: proto3 omits an empty `bytes` field entirely,
+        // so it contributes nothing here and the real one is appended below.
+        // It has the highest tag, and prost writes fields in tag order, so
+        // appending it is where prost would have put it.
+        payload: Vec::new(),
     };
-    let body = prost::Message::encode_to_vec(&proto);
-    let length = u32::try_from(body.len()).map_err(|_| {
+
+    let payload = snapshot.payload.as_slice();
+    // An EMPTY payload contributes nothing, because proto3 omits an empty
+    // `bytes` field and writing a zero-length one by hand would produce two
+    // bytes prost does not. That difference is invisible to a byte count on any
+    // realistic snapshot and was caught by comparing against prost at a 0-byte
+    // payload.
+    let payload_len = if payload.is_empty() {
+        0
+    } else {
+        prost::encoding::key_len(CHECKPOINT_PAYLOAD_TAG)
+            + prost::encoding::encoded_len_varint(payload.len() as u64)
+            + payload.len()
+    };
+    let body_len = prost::Message::encoded_len(&head) + payload_len;
+    let length = u32::try_from(body_len).map_err(|_| {
         RaftError::Storage("snapshot checkpoint exceeds a frame length".to_string())
     })?;
-    let mut out = Vec::with_capacity(CHECKPOINT_MAGIC.len() + FRAME_BYTES + body.len());
+
+    let mut out = Vec::with_capacity(CHECKPOINT_MAGIC.len() + FRAME_BYTES + body_len);
     out.extend_from_slice(CHECKPOINT_MAGIC);
-    out.extend_from_slice(&length.to_le_bytes());
-    out.extend_from_slice(&FrameDigest::Crc32c.of(&body).to_le_bytes());
-    out.extend_from_slice(&body);
+    // The frame's two words go down as zeroes and are patched once the body is
+    // written, because the digest cannot be known before the bytes it covers.
+    out.extend_from_slice(&[0u8; FRAME_BYTES]);
+    let body_start = out.len();
+
+    prost::Message::encode(&head, &mut out)
+        .map_err(|err| RaftError::Storage(format!("failed to encode snapshot: {err}")))?;
+    if !payload.is_empty() {
+        prost::encoding::encode_key(
+            CHECKPOINT_PAYLOAD_TAG,
+            prost::encoding::WireType::LengthDelimited,
+            &mut out,
+        );
+        prost::encoding::encode_varint(payload.len() as u64, &mut out);
+        out.put_slice(payload);
+    }
+
+    debug_assert_eq!(
+        out.len() - body_start,
+        body_len,
+        "the body was not the length this reserved for it"
+    );
+    let digest = FrameDigest::Crc32c.of(&out[body_start..]);
+    let frame = CHECKPOINT_MAGIC.len();
+    out[frame..frame + 4].copy_from_slice(&length.to_le_bytes());
+    out[frame + 4..frame + 8].copy_from_slice(&digest.to_le_bytes());
     Ok(out)
 }
 
@@ -1235,5 +1295,98 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// The hand-written payload field is byte-identical to prost's own.
+    ///
+    /// `encode_checkpoint` leaves the message's payload empty and appends that
+    /// field itself, to avoid cloning a potentially enormous payload into a
+    /// message that is about to be copied again. That is only safe if the bytes
+    /// are the same, so this builds the filled-in message the obvious way and
+    /// compares, across the shapes where an encoder gets it wrong: an empty
+    /// payload, lengths either side of a varint boundary, and every byte value.
+    #[test]
+    fn the_hand_written_payload_field_matches_what_prost_would_write() {
+        for length in [0usize, 1, 2, 127, 128, 129, 16_383, 16_384, 16_385] {
+            let mut value = checkpoint(0);
+            value.payload = (0..length).map(|index| (index % 256) as u8).collect();
+            value.meta.payload_bytes = length as u64;
+
+            let ours = encode_checkpoint(&value).expect("encodes");
+
+            // The obvious way: one message with the payload in it.
+            let whole = CheckpointProto {
+                group_id: value.group_id,
+                meta: Some(SnapshotMetadataProto::from(&value.meta)),
+                payload: value.payload.clone(),
+            };
+            let body = prost::Message::encode_to_vec(&whole);
+            let mut expected = Vec::new();
+            expected.extend_from_slice(CHECKPOINT_MAGIC);
+            expected.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            expected.extend_from_slice(&FrameDigest::Crc32c.of(&body).to_le_bytes());
+            expected.extend_from_slice(&body);
+
+            assert_eq!(
+                ours, expected,
+                "the hand-written field differs from prost's at a {length}-byte payload"
+            );
+
+            // And it still round trips, which the equality above implies but is
+            // cheap to state outright.
+            let back = decode_checkpoint(&ours).expect("decodes");
+            assert_eq!(back.payload, value.payload, "at {length} bytes");
+            assert_eq!(back.meta, value.meta, "at {length} bytes");
+        }
+    }
+
+    /// The reserved capacity is exactly what gets written.
+    ///
+    /// The encoder computes the body length before writing, to size the buffer
+    /// and to fill in the frame. If that arithmetic and the encoder disagreed,
+    /// the frame would declare a length the body does not have -- which the
+    /// decoder refuses, so the failure would be a refusal to read back what was
+    /// just written rather than anything subtler. A `debug_assert!` in the
+    /// encoder catches it there; this catches it here, in a release build too.
+    #[test]
+    fn the_reserved_body_length_is_what_the_encoder_writes() {
+        for length in [0usize, 9, 300, 16_384] {
+            let mut value = checkpoint(0);
+            value.payload = vec![b'x'; length];
+            value.meta.payload_bytes = length as u64;
+            let framed = encode_checkpoint(&value).expect("encodes");
+
+            let frame = CHECKPOINT_MAGIC.len();
+            let declared = u32::from_le_bytes([
+                framed[frame],
+                framed[frame + 1],
+                framed[frame + 2],
+                framed[frame + 3],
+            ]) as usize;
+            let actual = framed.len() - frame - FRAME_BYTES;
+            assert_eq!(
+                declared, actual,
+                "the frame declares {declared} body bytes and the file carries {actual} at a {length}-byte payload"
+            );
+        }
+    }
+
+    fn checkpoint(payload_len: usize) -> crate::RaftSnapshot {
+        crate::GenericSnapshot {
+            group_id: 9,
+            meta: SnapshotMetadata {
+                snapshot_id: "cp-1".to_string(),
+                last_log_id: LogId { term: 3, index: 7 },
+                membership: vec![1, 2, 3],
+                members: vec![Peer {
+                    node_id: 2,
+                    raft_addr: "127.0.0.1:1".to_string(),
+                    snapshot_addr: "127.0.0.1:2".to_string(),
+                    role: ReplicaRole::Learner,
+                    auto_promote: true,
+                }],
+                payload_bytes: payload_len as u64,
+            },
+            payload: vec![b'x'; payload_len],
+        }
     }
 }
