@@ -21,7 +21,7 @@
 //! so **64 bytes per record, plus the payload, plus 2 bytes per segment file.**
 //!
 //! That `+ 2` is not a file header, and reading it as one would be wrong in a
-//! way that matters: it is four bytes of segment magic (`MRWB`) less the two
+//! way that matters: it is four bytes of segment magic (`MRWC`) less the two
 //! bytes the *first* record saves by being the only one that is not a delta,
 //! since proto3 does not write a `false`. Both halves are measured rather than
 //! argued -- a fresh segment's first four bytes, and `entries_are_delta` read
@@ -255,7 +255,7 @@ fn the_segments_two_bytes_are_four_of_magic_less_the_first_records_two() {
     let bytes = fs::read(&path).expect("read the segment");
     assert_eq!(
         &bytes[..SEGMENT_MAGIC as usize],
-        b"MRWB",
+        b"MRWC",
         "the segment does not open with the four magic bytes this figure charges for"
     );
 
