@@ -3,10 +3,10 @@
 
 //! What the WAL record would cost in other encodings.
 //!
-//! A sibling suite pins what an append costs today: 43 bytes per segment file,
-//! 412 bytes per record, plus 4/3 of the payload, so a 9-byte command costs
-//! about forty-six times its own size. Roughly three quarters of a record is
-//! its own field names.
+//! A sibling suite pins what an append costs: 2 bytes per segment file, 73
+//! bytes per record, plus the payload, so a 9-byte command costs about nine
+//! times its own size. It cost forty-seven times under the JSON record this
+//! file prices, roughly three quarters of which was its own field names.
 //!
 //! The JSON column moved from 437 to 408 when the record stopped writing an
 //! empty `learners` and `witnesses` on every append, and the three computed
@@ -21,10 +21,11 @@
 //!
 //! | encoding | envelope | 9-byte command | large payloads |
 //! |---|---|---|---|
-//! | JSON, as written today | 408 B | 46.7x | 1.333x |
+//! | JSON, as it was written until this change | 408 B | 46.7x | 1.333x |
 //! | JSON with one-character keys | 183 B | 21.7x | 1.333x |
 //! | binary, every integer eight bytes | 169 B | 19.8x | 1.000x |
 //! | binary, varint integers | **35 B** | **4.9x** | 1.000x |
+//! | **protobuf, as written today, measured** | **73 B** | **9.3x** | 1.000x |
 //!
 //! Two things fall out of that table.
 //!
@@ -37,17 +38,40 @@
 //! record's integers are a term of 3, an index of 1, a node of 1, an epoch of
 //! 3: each costs one byte as a varint and up to twenty-six characters as
 //! `"installed_snapshot_index":0`. Collapsing both at once is what takes 408
-//! bytes to 35 -- an envelope **12.5x smaller than short keys achieve** -- and
-//! it is also what moves the payload slope from 4/3 to 1, because a binary
-//! record has no reason to base64 anything.
+//! bytes to 35 on this file's arithmetic -- and to 73 in the format that
+//! actually landed -- and it is also what moves the payload slope from 4/3 to
+//! 1, because a binary record has no reason to base64 anything.
 //!
-//! ## What this file is and is not
+//! ## The decision this file priced has been taken, and the price was wrong
 //!
-//! It is a **pricing, not a proposal**, and it changes no format. Moving the
-//! WAL to a binary record is a durable-format decision with a migration to
-//! design -- the reader would have to keep taking JSON segments written by
-//! earlier builds, exactly as it already keeps taking the pre-base64 number
-//! arrays -- and that decision is not this file's to make.
+//! This was a pricing rather than a proposal, and it said so: moving the WAL to
+//! a binary record was a durable-format decision with a migration to design,
+//! and not this file's to make. That decision has since been made -- the WAL
+//! stores prost messages, and reads JSON segments written by earlier builds the
+//! same way it already read pre-base64 number arrays.
+//!
+//! So the varint row stopped being hypothetical, and it can be checked. It is
+//! **wrong by 2.1x**: the landed envelope is 73 bytes, not 35. The direction
+//! held and the magnitude did not, and the three reasons are the lesson worth
+//! keeping, because they are what pricing a format from its field widths
+//! leaves out:
+//!
+//! - **No record frame was priced.** A record on disk carries 8 bytes in front
+//!   of it -- a length and a digest of the body -- so a torn tail can be found
+//!   and cut. Arithmetic over field widths has no reason to invent that.
+//! - **The checksum was priced as the `u64` it encodes**, at 8 bytes. It is
+//!   still a 16-character hex `String`, which costs 18 on the wire. That is
+//!   +10, and it is the one line in `varint_bytes` below that says what it
+//!   assumed out loud: "the raw u64 the hex text already encodes".
+//! - **Tags and nested lengths were not priced.** protobuf pays a tag for each
+//!   field present and a tag plus a length for each nested message, and
+//!   `hard_state`, `membership`, `apply_snapshot_fence` and every entry are
+//!   nested messages.
+//!
+//! The first two are exact. The remaining 20 bytes are attributed to the third
+//! as a **remainder**, not measured field by field, and the identity below
+//! holds the three terms together so that changing one without re-reading the
+//! others goes red.
 //!
 //! ## How the figures are produced, which differs per column
 //!
@@ -116,7 +140,7 @@ fn record(payload_len: usize) -> WalRecord {
 }
 
 #[test]
-fn the_envelope_is_408_bytes_today_and_35_as_varints() {
+fn the_envelope_was_408_bytes_as_json_and_is_73_as_protobuf() {
     let empty = record(0);
     assert_eq!(
         serde_json::to_string(&empty).expect("encode").len(),
@@ -265,4 +289,45 @@ fn varint_bytes(record: &WalRecord) -> usize {
             + 1;
     }
     bytes
+}
+
+/// What this file's arithmetic missed, held together as an identity.
+///
+/// The computed varint column is 35 bytes and the landed format measures 73.
+/// The difference is not a mystery and it is not fully attributed either: two
+/// terms are exact and the third is a remainder. Writing it as an equality
+/// means nobody can revise one term and leave the other two telling a story
+/// that no longer adds up -- which is the failure this whole file is a guard
+/// against, one level up.
+///
+/// Worth stating plainly rather than burying: the remainder is the **largest**
+/// of the three terms. The single biggest thing field-width arithmetic misses
+/// about protobuf is protobuf's own framing, not the frame around the record
+/// and not the checksum. That is an observation and not a guard, so it is
+/// written here -- as an `assert!` it would compare three constants, be folded
+/// at compile time and check nothing.
+#[test]
+fn the_computed_varint_price_missed_the_landed_format_by_a_frame_a_checksum_and_its_tags() {
+    /// Measured by the sibling suite, from two directions: 100 appends weighing
+    /// 7,302 bytes, and one stored record written alone weighing 73.
+    const LANDED: usize = 73;
+    /// A length and a digest, in front of every record on disk.
+    const FRAME: usize = 8;
+    /// 16 hex characters, a tag and a length, where this file priced the `u64`
+    /// they encode at 8 bytes.
+    const CHECKSUM_EXCESS: usize = 18 - 8;
+    /// A tag per present field, and a tag and a length per nested message. Not
+    /// measured field by field: this is what is left over.
+    const TAGS_AND_NESTED_LENGTHS: usize = 20;
+
+    let computed = varint_bytes(&record(0));
+    assert_eq!(
+        computed, 35,
+        "the computed varint envelope moved, so the identity below is pricing something else"
+    );
+    assert_eq!(
+        computed + FRAME + CHECKSUM_EXCESS + TAGS_AND_NESTED_LENGTHS,
+        LANDED,
+        "the computed price plus what it left out no longer reaches the landed envelope"
+    );
 }
