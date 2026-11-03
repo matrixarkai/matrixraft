@@ -44,6 +44,69 @@ use crate::{
 
 /// Marks a segment file as binary. Deliberately not starting with `{`, so the
 /// first byte alone separates this format from the JSON one.
+// ## One frame shape, three policies on a bad frame
+//
+// Every durable and on-wire format in this crate carries the same frame: four
+// bytes of magic, a little-endian `u32` length, a little-endian `u32` CRC-32C
+// over the body, then the body. What differs is what a bad frame *means*, and
+// that is decided at the call site rather than in the frame:
+//
+// | magic | stream | a bad frame means |
+// |---|---|---|
+// | `MRWC` | a WAL segment | stop reading here. The recovery reader truncates at that point |
+// | `MRCP` | a checkpoint | damage, always. The file is staged and renamed, so a rename is atomic and a half-written one is never under its final name |
+// | `MRSD` | a checkpoint descriptor | a hint that cannot be used: fall back to the checkpoint itself |
+// | `MRRP` | an RPC message | a corrupt or desynchronised stream: refuse and drop the connection |
+//
+// So a shared shape does not imply a shared failure model, and the two are
+// worth keeping separate on purpose. A reader reaching here to make the
+// policies agree should know they were chosen to differ.
+//
+// ### The WAL row is coarser than it looks, and deliberately so
+//
+// `decode_framed` returns `Ok(None)` for a short frame, a short body, a failed
+// digest and an undecodable payload alike. It has no notion of *where* in the
+// segment it is, so it cannot say "a torn tail here, damage there".
+//
+// That is not an oversight, and the obvious refinement does not work: to learn
+// whether valid records follow a bad one, a reader has to step over the bad one
+// by its **declared length** -- the single field a failed digest gives it no
+// reason to trust. Too large and it runs off the end exactly as a torn tail
+// does; too small and it resyncs onto a boundary inside a record. Position is
+// not knowable from a frame you have already failed to validate.
+//
+// What the digest buys, then, is not a tail-versus-damage verdict. It is the
+// knowledge that the frame is invalid *at all* -- which a length-only frame
+// cannot provide, because a corrupted length field produces a frame that is
+// structurally plausible and simply wrong.
+//
+// ### An open consequence, not yet addressed
+//
+// Because a failed digest stops the read wherever it sits, a record whose bytes
+// are **all present** but whose digest fails is discarded along with everything
+// after it. Such a record was written completely, and therefore acknowledged, so
+// this is loss of acknowledged data rather than repair of a torn tail.
+//
+// Shortness is the acknowledgement test: a short record was never completed, so
+// truncating it is correct. A failed digest is not that test. A stricter reader
+// would refuse rather than truncate in that case. This is recorded here because
+// it is a property of the recovery policy rather than of the frame, and
+// changing it is a behaviour change that wants its own measurement.
+//
+// ### Byte order does not travel
+//
+// The length and digest here are little-endian, as they are in every other
+// frame in this crate.
+//
+// That is this crate's convention and not a shared one. A repository that pins
+// this crate is known to use a different byte order in at least one of its own
+// durable frames, and to have more than one framing besides. Which stream uses
+// which is not verified here and is not this crate's business -- that is
+// exactly the point. Two frames looking alike is no evidence that their fields
+// agree, and the only thing that would differ is the byte order of two
+// multi-byte integers, which fails silently rather than loudly. Read the other
+// format before assuming it matches, and do not "harmonise" either into the
+// other on the strength of the resemblance.
 pub(crate) const SEGMENT_MAGIC: &[u8; 4] = b"MRWC";
 
 /// The first framed shape, still read.
@@ -419,6 +482,98 @@ pub(crate) struct CheckpointProto {
 }
 
 /// A log, as the bytes a checkpoint's payload carries.
+/// A checkpoint descriptor, without the byte count.
+///
+/// `StoredSnapshot` has a `bytes` field and this does not, deliberately. Every
+/// reader of a descriptor overwrites that field with the length of the
+/// checkpoint file itself -- a sidecar that disagrees with the disk would make
+/// the byte totals fiction, and `describe` has said so since it was written.
+/// A durable copy that every reader discards is weight, so the binary form
+/// does not carry one, and `decode_descriptor` returns zero for it.
+///
+/// The JSON form still has the field, because files already on disk have it
+/// written and the decoder still reads them.
+#[derive(Clone, PartialEq, prost::Message)]
+pub(crate) struct DescriptorProto {
+    #[prost(string, tag = "1")]
+    pub snapshot_id: String,
+    #[prost(uint64, tag = "2")]
+    pub group_id: u64,
+    #[prost(message, optional, tag = "3")]
+    pub last_log_id: Option<LogIdProto>,
+}
+
+/// Encodes a descriptor into a framed protobuf record.
+pub(crate) fn encode_descriptor(
+    snapshot_id: &str,
+    group_id: u64,
+    last_log_id: &LogId,
+) -> Result<Vec<u8>, RaftError> {
+    let proto = DescriptorProto {
+        snapshot_id: snapshot_id.to_string(),
+        group_id,
+        last_log_id: Some(LogIdProto::from(last_log_id)),
+    };
+    let mut body = Vec::with_capacity(prost::Message::encoded_len(&proto));
+    prost::Message::encode(&proto, &mut body).map_err(|err| {
+        RaftError::Storage(format!("failed to encode a snapshot descriptor: {err}"))
+    })?;
+
+    let mut out = Vec::with_capacity(DESCRIPTOR_MAGIC.len() + FRAME_BYTES + body.len());
+    out.extend_from_slice(DESCRIPTOR_MAGIC);
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&FrameDigest::Crc32c.of(&body).to_le_bytes());
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Whether these bytes are a framed descriptor rather than the JSON one.
+pub(crate) fn is_framed_descriptor(bytes: &[u8]) -> bool {
+    bytes.starts_with(DESCRIPTOR_MAGIC)
+}
+
+/// Decodes a framed descriptor, returning the snapshot id, group and log id.
+///
+/// The byte count is not returned because it is not stored -- see
+/// [`DescriptorProto`].
+pub(crate) fn decode_descriptor(bytes: &[u8]) -> Result<(String, u64, LogId), RaftError> {
+    if !is_framed_descriptor(bytes) {
+        return Err(RaftError::Storage(
+            "a snapshot descriptor does not open with its magic".to_string(),
+        ));
+    }
+    let rest = &bytes[DESCRIPTOR_MAGIC.len()..];
+    if rest.len() < FRAME_BYTES {
+        return Err(RaftError::Storage(
+            "a snapshot descriptor is shorter than its frame".to_string(),
+        ));
+    }
+    let length = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+    let digest = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]);
+    let end = FRAME_BYTES.checked_add(length).ok_or_else(|| {
+        RaftError::Storage("a snapshot descriptor's length overflows".to_string())
+    })?;
+    if rest.len() < end {
+        return Err(RaftError::Storage(format!(
+            "a snapshot descriptor declares {length} bytes and carries {}",
+            rest.len() - FRAME_BYTES
+        )));
+    }
+    let body = &rest[FRAME_BYTES..end];
+    if FrameDigest::Crc32c.of(body) != digest {
+        return Err(RaftError::Storage(
+            "a snapshot descriptor fails its frame digest".to_string(),
+        ));
+    }
+    let proto: DescriptorProto = prost::Message::decode(body).map_err(|err| {
+        RaftError::Storage(format!("failed to decode a snapshot descriptor: {err}"))
+    })?;
+    let last_log_id = proto.last_log_id.ok_or_else(|| {
+        RaftError::Storage("a snapshot descriptor carries no last log id".to_string())
+    })?;
+    Ok((proto.snapshot_id, proto.group_id, LogId::from(&last_log_id)))
+}
+
 #[derive(Clone, PartialEq, prost::Message)]
 pub(crate) struct LogProto {
     #[prost(message, repeated, tag = "1")]
@@ -467,6 +622,12 @@ const CHECKPOINT_PAYLOAD_TAG: u32 = 3;
 /// identified only "some framed thing" would let a decoder try a WAL record
 /// against a checkpoint and report a torn file rather than the wrong file.
 pub(crate) const CHECKPOINT_MAGIC: &[u8; 4] = b"MRCP";
+
+/// A checkpoint's descriptor sidecar.
+///
+/// `S` for sidecar, and distinct from `MRCP` so a descriptor handed to the
+/// checkpoint decoder is refused by its magic rather than by its contents.
+pub(crate) const DESCRIPTOR_MAGIC: &[u8; 4] = b"MRSD";
 
 /// One checkpoint, framed exactly as a WAL record is.
 ///

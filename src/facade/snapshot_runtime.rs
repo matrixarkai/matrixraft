@@ -917,10 +917,27 @@ impl PersistentRaftSnapshotStore {
         })?;
         let descriptor_path = self.descriptor_path(snapshot_id);
         if let Ok(raw) = fs::read(&descriptor_path) {
-            if let Ok(mut stored) = serde_json::from_slice::<StoredSnapshot>(&raw) {
-                // The file's own length wins over the recorded one: the
-                // sidecar is a hint, and a hint that disagrees with the disk
-                // would make the byte totals fiction.
+            // Either shape: a framed descriptor, or the JSON an earlier build
+            // wrote. A sidecar that will not decode is not an error -- it is a
+            // hint that cannot be used, and the fallback below reads the
+            // checkpoint itself.
+            if crate::wal_binary::is_framed_descriptor(&raw) {
+                if let Ok((snapshot_id, group_id, last_log_id)) =
+                    crate::wal_binary::decode_descriptor(&raw)
+                {
+                    // `bytes` comes from the file, never from the sidecar: the
+                    // binary form does not carry it, and the JSON form's copy
+                    // was always overwritten here for the same reason -- a
+                    // hint that disagrees with the disk would make the byte
+                    // totals fiction.
+                    return Ok(StoredSnapshot {
+                        snapshot_id,
+                        group_id,
+                        last_log_id,
+                        bytes,
+                    });
+                }
+            } else if let Ok(mut stored) = serde_json::from_slice::<StoredSnapshot>(&raw) {
                 stored.bytes = bytes;
                 return Ok(stored);
             }
@@ -943,9 +960,15 @@ impl PersistentRaftSnapshotStore {
             bytes,
         };
         let path = self.descriptor_path(&stored.snapshot_id);
-        let encoded = serde_json::to_vec(&stored).map_err(|err| {
-            RaftError::Storage(format!("failed to encode a snapshot descriptor: {err}"))
-        })?;
+        // Framed protobuf, like the checkpoint it sits beside. The byte count
+        // in `stored` is deliberately not written: every reader replaces it
+        // with the checkpoint file's own length, so a durable copy would be a
+        // field nothing reads.
+        let encoded = crate::wal_binary::encode_descriptor(
+            &stored.snapshot_id,
+            stored.group_id,
+            &stored.last_log_id,
+        )?;
         let mut file = File::create(&path).map_err(|err| {
             RaftError::Storage(format!(
                 "failed to create snapshot descriptor {}: {err}",
