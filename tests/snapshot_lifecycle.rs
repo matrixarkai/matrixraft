@@ -868,9 +868,30 @@ fn a_descriptor_that_disagrees_with_the_disk_does_not_decide_the_bytes() {
         .expect("stat")
         .len();
     let descriptor = dir.join("checkpoint-0010.descriptor");
-    let mut stale: serde_json::Value =
-        serde_json::from_slice(&fs::read(&descriptor).expect("read")).expect("decode");
-    stale["bytes"] = serde_json::json!(999_999);
+
+    // The descriptor written today is framed protobuf and carries no byte
+    // count at all, so there is nothing in it that could disagree with the
+    // disk. That is the stronger form of what this test holds, and it is
+    // asserted rather than assumed.
+    let raw = fs::read(&descriptor).expect("read");
+    assert_eq!(&raw[..4], b"MRSD", "the sidecar is not a framed descriptor");
+    let listed = store.list_checkpoints().expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].bytes, on_disk);
+
+    // The legacy JSON shape does carry the field, so it is the one that can
+    // lie, and it is still read. Written by hand from what the store just
+    // reported, because nothing writes this shape any more -- a sidecar
+    // produced by the encoder could not carry a wrong count to begin with.
+    let stale = serde_json::json!({
+        "snapshot_id": listed[0].snapshot_id,
+        "group_id": listed[0].group_id,
+        "last_log_id": {
+            "term": listed[0].last_log_id.term,
+            "index": listed[0].last_log_id.index,
+        },
+        "bytes": 999_999,
+    });
     fs::write(&descriptor, serde_json::to_vec(&stale).expect("encode")).expect("write");
 
     let listed = store.list_checkpoints().expect("list");
@@ -878,6 +899,10 @@ fn a_descriptor_that_disagrees_with_the_disk_does_not_decide_the_bytes() {
     assert_eq!(
         listed[0].bytes, on_disk,
         "the file's own length should win over the recorded one"
+    );
+    assert_eq!(
+        listed[0].last_log_id.index, 10,
+        "the legacy sidecar's other fields should still be read"
     );
     assert_eq!(store.owned_bytes().expect("bytes"), on_disk);
 }
