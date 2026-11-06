@@ -5,7 +5,12 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct WalAssembly {
-    pending: Option<(WalBatch, prost::bytes::BytesMut)>,
+    pending: Option<WalFragments>,
+}
+struct WalFragments {
+    record: WalBatch,
+    fragments: Vec<prost::bytes::Bytes>,
+    length: usize,
 }
 impl WalAssembly {
     pub(super) fn accept(
@@ -31,18 +36,19 @@ impl WalAssembly {
         {
             return Err(storage_error("invalid checkpoint record bounds"));
         }
-        if let Some((pending, snapshot)) = &mut self.pending {
-            if record.snapshot_offset != snapshot.len() as u64
-                || record.snapshot_total != pending.snapshot_total
-                || record.snapshot_digest != pending.snapshot_digest
+        if let Some(pending) = &mut self.pending {
+            if record.snapshot_offset != pending.length as u64
+                || record.snapshot_total != pending.record.snapshot_total
+                || record.snapshot_digest != pending.record.snapshot_digest
                 || !record.hard_state.is_empty()
             {
                 return Err(storage_error("noncontiguous checkpoint records"));
             }
-            if snapshot.len() + record.snapshot.len() > pending.snapshot_total as usize {
+            if pending.length + record.snapshot.len() > pending.record.snapshot_total as usize {
                 return Err(storage_error("checkpoint records exceed declared length"));
             }
-            snapshot.extend_from_slice(&record.snapshot);
+            pending.length += record.snapshot.len();
+            pending.fragments.push(record.snapshot);
         } else {
             if position != 0
                 || record.snapshot_offset != 0
@@ -53,18 +59,26 @@ impl WalAssembly {
             }
             // Never allocate the advertised total before its bytes actually arrive.
             record.snapshot_offset = 0;
-            let snapshot = prost::bytes::BytesMut::from(record.snapshot.as_ref());
-            record.snapshot = Default::default();
-            self.pending = Some((record, snapshot));
+            let snapshot = std::mem::take(&mut record.snapshot);
+            self.pending = Some(WalFragments {
+                length: snapshot.len(),
+                record,
+                fragments: vec![snapshot],
+            });
         }
-        let (pending, snapshot) = self.pending.as_ref().unwrap();
-        if snapshot.len() != pending.snapshot_total as usize {
+        let pending = self.pending.as_ref().unwrap();
+        if pending.length != pending.record.snapshot_total as usize {
             return Ok(None);
         }
-        if digest(snapshot) != pending.snapshot_digest {
+        let pending = self.pending.take().unwrap();
+        let mut snapshot = prost::bytes::BytesMut::with_capacity(pending.length);
+        for fragment in pending.fragments {
+            snapshot.extend_from_slice(&fragment);
+        }
+        if digest(&snapshot) != pending.record.snapshot_digest {
             return Err(storage_error("checkpoint record stream checksum mismatch"));
         }
-        let (mut record, snapshot) = self.pending.take().unwrap();
+        let mut record = pending.record;
         record.snapshot = snapshot.freeze();
         record.version = 2;
         record.snapshot_total = 0;
@@ -897,6 +911,46 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(assembly.accept(next, 100).is_err(), "case {kind}");
+        }
+    }
+    #[test]
+    fn wal_assembly_retains_fragments_until_one_final_copy() {
+        let options = PeerOptions {
+            group_id: 1,
+            node_id: 2,
+            voters: vec![1, 2, 3],
+            wal_path: PathBuf::new(),
+        };
+        let bytes: Vec<_> = (0..48).collect();
+        let mut assembly = WalAssembly::default();
+        for (number, chunk) in bytes.chunks(16).enumerate() {
+            let mut record = batch(
+                &options,
+                (number == 0).then_some(&HardState {
+                    term: 4,
+                    commit: 9,
+                    ..Default::default()
+                }),
+                &[],
+            );
+            record.version = 3;
+            record.snapshot = chunk.to_vec().into();
+            record.snapshot_offset = (number * 16) as u64;
+            record.snapshot_total = bytes.len() as u64;
+            record.snapshot_digest = digest(&bytes);
+            let pointer = record.snapshot.as_ptr();
+            let result = assembly.accept(record, number as u64 * 100).unwrap();
+            if number + 1 < 3 {
+                let pending = assembly.pending.as_ref().unwrap();
+                assert_eq!(pending.fragments.last().unwrap().as_ptr(), pointer);
+                assert_eq!(pending.length, (number + 1) * 16);
+                assert!(result.is_none());
+            } else {
+                let record = result.unwrap();
+                assert_eq!(record.version, 2);
+                assert_eq!(record.snapshot.as_ref(), bytes);
+                assert!(assembly.pending.is_none());
+            }
         }
     }
     #[test]
