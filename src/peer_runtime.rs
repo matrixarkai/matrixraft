@@ -700,12 +700,20 @@ impl Journal {
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
             }
-            if let Some(record) = assembly.accept(record, offset, &mut validation)? {
-                install_with_scratch(store, record, &mut validation)?;
+            if record.version == 2 {
+                drop(wire);
+                if let Some(record) = assembly.accept(record, offset, &mut validation)? {
+                    install_with_scratch(store, record, &mut validation)?;
+                }
+                bytes = Default::default();
+            } else {
+                if let Some(record) = assembly.accept(record, offset, &mut validation)? {
+                    install_with_scratch(store, record, &mut validation)?;
+                }
+                // A future retained field may keep the wire alive; allocate on the
+                // next record in that case instead of making recovery depend on reuse.
+                bytes = wire.try_into_mut().unwrap_or_default();
             }
-            // A future retained field may keep the wire alive; allocate on the
-            // next record in that case instead of making recovery depend on reuse.
-            bytes = wire.try_into_mut().unwrap_or_default();
             offset += 24 + size as u64;
         }
         assembly.finish()?;
