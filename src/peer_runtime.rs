@@ -91,6 +91,12 @@ fn canonical_packet(packet: &Packet, bytes: &[u8]) -> bool {
         && bytes[length..] == packet.message
 }
 
+fn exact_encoding(message: &impl ProstMessage, bytes: &[u8], output: &mut Vec<u8>) -> bool {
+    output.clear();
+    output.reserve(message.encoded_len());
+    message.encode(&mut *output).is_ok() && output == bytes
+}
+
 fn encode_packet(group: u64, message: &Message) -> Result<Vec<u8>, RaftError> {
     encode_envelope(1, group, message)
 }
@@ -259,7 +265,14 @@ enum SnapshotSource {
     Received(Arc<checkpoint_file::Blob>),
 }
 fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
-    install_from(store, batch, SnapshotSource::Journal)
+    install_from(store, batch, SnapshotSource::Journal, &mut Vec::new())
+}
+fn install_with_scratch(
+    store: &PeerStorage,
+    batch: &WalBatch,
+    validation: &mut Vec<u8>,
+) -> Result<(), RaftError> {
+    install_from(store, batch, SnapshotSource::Journal, validation)
 }
 fn install_local(
     store: &PeerStorage,
@@ -270,6 +283,7 @@ fn install_local(
         store,
         batch,
         captured.map_or(SnapshotSource::Journal, SnapshotSource::LocalCapture),
+        &mut Vec::new(),
     )
 }
 fn install_received(
@@ -281,12 +295,14 @@ fn install_received(
         store,
         batch,
         payload.map_or(SnapshotSource::Journal, SnapshotSource::Received),
+        &mut Vec::new(),
     )
 }
 fn install_from(
     store: &PeerStorage,
     batch: &WalBatch,
     source: SnapshotSource,
+    validation: &mut Vec<u8>,
 ) -> Result<(), RaftError> {
     let entries = batch
         .entries
@@ -298,7 +314,7 @@ fn install_from(
     } else {
         Some(HardState::decode(batch.hard_state.as_slice()).map_err(storage_error)?)
     };
-    install_decoded(store, batch, source, &entries, hs)
+    install_decoded_with_scratch(store, batch, source, &entries, hs, validation)
 }
 
 // Live Ready entries already have their decoded form. Journal recovery decodes
@@ -309,6 +325,16 @@ fn install_decoded(
     source: SnapshotSource,
     entries: &[Entry],
     hs: Option<HardState>,
+) -> Result<(), RaftError> {
+    install_decoded_with_scratch(store, batch, source, entries, hs, &mut Vec::new())
+}
+fn install_decoded_with_scratch(
+    store: &PeerStorage,
+    batch: &WalBatch,
+    source: SnapshotSource,
+    entries: &[Entry],
+    hs: Option<HardState>,
+    validation: &mut Vec<u8>,
 ) -> Result<(), RaftError> {
     // A validated incoming payload does not authorize local compaction rules.
     // It still must not replace state below the durable commit position.
@@ -348,7 +374,7 @@ fn install_decoded(
                 return Err(storage_error("file checkpoint contains inline data"));
             }
             Some(if let Some(payload) = captured {
-                if payload.manifest.encode_to_vec() != batch.payload_manifest {
+                if !exact_encoding(&payload.manifest, &batch.payload_manifest, validation) {
                     return Err(storage_error("captured checkpoint manifest mismatch"));
                 }
                 payload
@@ -363,7 +389,7 @@ fn install_decoded(
         let next = hs
             .as_ref()
             .ok_or_else(|| storage_error("snapshot needs hard state"))?;
-        if snapshot.encode_to_vec() != batch.snapshot
+        if !exact_encoding(&snapshot, &batch.snapshot, validation)
             || (!local_capture && meta.index < previous.commit)
             || meta.index > next.commit
             || meta.term > next.term
@@ -494,6 +520,7 @@ impl Journal {
         }
         let mut offset = 0;
         let mut assembly = snapshot_stream::WalAssembly::default();
+        let mut validation = Vec::new();
         while offset < length {
             let remaining = length - offset;
             if remaining < 24 {
@@ -539,12 +566,12 @@ impl Journal {
                 || record.node != options.node_id
                 || record.voters != options.voters
                 || record.permitted != store.permitted
-                || record.encode_to_vec() != bytes
+                || !exact_encoding(&record, &bytes, &mut validation)
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
             }
             if let Some(record) = assembly.accept(record, offset)? {
-                install(store, &record)?;
+                install_with_scratch(store, &record, &mut validation)?;
             }
             offset += 24 + size as u64;
         }
@@ -1992,6 +2019,32 @@ mod tests {
         for (encoded, expected) in shared.entries.iter().zip(&entries) {
             assert_eq!(Entry::decode(encoded.clone()).unwrap(), *expected);
         }
+    }
+
+    #[test]
+    fn canonical_validation_reuses_its_output_buffer_and_rejects_extra_fields() {
+        use super::*;
+        let record = WalBatch {
+            version: 2,
+            group: 17,
+            node: 1,
+            voters: vec![1, 2, 3],
+            snapshot: vec![37; SNAPSHOT_FRAGMENT_BYTES].into(),
+            ..Default::default()
+        };
+        let bytes = record.encode_to_vec();
+        let mut validation = Vec::new();
+        assert!(exact_encoding(&record, &bytes, &mut validation));
+        let pointer = validation.as_ptr();
+        let capacity = validation.capacity();
+        assert!(exact_encoding(&record, &bytes, &mut validation));
+        assert_eq!(validation.as_ptr(), pointer);
+        assert_eq!(validation.capacity(), capacity);
+
+        let mut extra_field = bytes;
+        extra_field.extend_from_slice(&[0x68, 0x01]);
+        let decoded = WalBatch::decode(extra_field.as_slice()).unwrap();
+        assert!(!exact_encoding(&decoded, &extra_field, &mut validation));
     }
 
     #[test]
