@@ -194,6 +194,13 @@ mod probe {
             let before = BYTES.load(Ordering::Relaxed);
             let mut peer = DurablePeer::open(options).unwrap();
             let allocated = BYTES.load(Ordering::Relaxed) - before;
+            if width > 4 * 1024 * 1024 {
+                assert!(
+                    allocated < 17 * width / 2,
+                    "checkpoint reopen allocated 8.5 or more payload widths: \
+                     payload={width} allocated={allocated}"
+                );
+            }
             let mut seen = false;
             peer.process_ready_with_snapshot_reader(
                 |_, _| panic!("unexpected suffix"),
