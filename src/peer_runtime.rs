@@ -97,6 +97,99 @@ fn exact_encoding(message: &impl ProstMessage, bytes: &[u8], output: &mut Vec<u8
     message.encode(&mut *output).is_ok() && output == bytes
 }
 
+fn exact_batch_encoding(batch: &WalBatch, bytes: &[u8], output: &mut Vec<u8>) -> bool {
+    fn consume<'a>(input: &mut &'a [u8], output: &mut Vec<u8>) -> bool {
+        if input.len() < output.len() || input[..output.len()] != *output {
+            return false;
+        }
+        *input = &input[output.len()..];
+        output.clear();
+        true
+    }
+    fn consume_bytes<'a>(
+        tag: u32,
+        value: &[u8],
+        present: bool,
+        input: &mut &'a [u8],
+        output: &mut Vec<u8>,
+    ) -> bool {
+        if !present {
+            return true;
+        }
+        prost::encoding::encode_key(
+            tag,
+            prost::encoding::WireType::LengthDelimited,
+            &mut *output,
+        );
+        prost::encoding::encode_varint(value.len() as u64, &mut *output);
+        if !consume(input, output) || input.len() < value.len() || input[..value.len()] != *value {
+            return false;
+        }
+        *input = &input[value.len()..];
+        true
+    }
+
+    let mut input = bytes;
+    output.clear();
+    if batch.version != 0 {
+        prost::encoding::uint32::encode(1, &batch.version, &mut *output);
+    }
+    if batch.group != 0 {
+        prost::encoding::uint64::encode(2, &batch.group, &mut *output);
+    }
+    if batch.node != 0 {
+        prost::encoding::uint64::encode(3, &batch.node, &mut *output);
+    }
+    prost::encoding::uint64::encode_packed(4, &batch.voters, &mut *output);
+    if !consume(&mut input, output)
+        || !consume_bytes(
+            5,
+            &batch.hard_state,
+            !batch.hard_state.is_empty(),
+            &mut input,
+            output,
+        )
+    {
+        return false;
+    }
+    for entry in &batch.entries {
+        if !consume_bytes(6, entry, true, &mut input, output) {
+            return false;
+        }
+    }
+    if !consume_bytes(
+        7,
+        &batch.snapshot,
+        !batch.snapshot.is_empty(),
+        &mut input,
+        output,
+    ) {
+        return false;
+    }
+    if batch.snapshot_offset != 0 {
+        prost::encoding::uint64::encode(8, &batch.snapshot_offset, &mut *output);
+    }
+    if batch.snapshot_total != 0 {
+        prost::encoding::uint64::encode(9, &batch.snapshot_total, &mut *output);
+    }
+    if batch.snapshot_digest != 0 {
+        prost::encoding::uint64::encode(10, &batch.snapshot_digest, &mut *output);
+    }
+    if !consume(&mut input, output)
+        || !consume_bytes(
+            11,
+            &batch.payload_manifest,
+            !batch.payload_manifest.is_empty(),
+            &mut input,
+            output,
+        )
+    {
+        return false;
+    }
+    prost::encoding::uint64::encode_packed(12, &batch.permitted, &mut *output);
+    consume(&mut input, output) && input.is_empty()
+}
+
 fn exact_snapshot_encoding(snapshot: &Snapshot, bytes: &[u8], output: &mut Vec<u8>) -> bool {
     output.clear();
     if !snapshot.data.is_empty() {
@@ -696,7 +789,7 @@ impl Journal {
                 || record.node != options.node_id
                 || record.voters != options.voters
                 || record.permitted != store.permitted
-                || !exact_encoding(&record, &wire, &mut validation)
+                || !exact_batch_encoding(&record, &wire, &mut validation)
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
             }
@@ -2174,29 +2267,50 @@ mod tests {
     }
 
     #[test]
-    fn canonical_validation_reuses_its_output_buffer_and_rejects_extra_fields() {
+    fn batch_validation_compares_payloads_directly_and_rejects_extra_fields() {
         use super::*;
         let record = WalBatch {
-            version: 2,
+            version: 3,
             group: 17,
             node: 1,
             voters: vec![1, 2, 3],
+            hard_state: vec![11; 64],
+            entries: vec![vec![19; 4096].into(), vec![23; 65536].into()],
             snapshot: vec![37; SNAPSHOT_FRAGMENT_BYTES].into(),
-            ..Default::default()
+            snapshot_offset: 4096,
+            snapshot_total: 2 * SNAPSHOT_FRAGMENT_BYTES as u64,
+            snapshot_digest: 47,
+            payload_manifest: vec![53; 96],
+            permitted: vec![1, 2, 3, 4],
         };
         let bytes = record.encode_to_vec();
         let mut validation = Vec::new();
-        assert!(exact_encoding(&record, &bytes, &mut validation));
+        assert!(exact_batch_encoding(&record, &bytes, &mut validation));
         let pointer = validation.as_ptr();
         let capacity = validation.capacity();
-        assert!(exact_encoding(&record, &bytes, &mut validation));
+        assert!(capacity < 256);
+        assert!(exact_batch_encoding(&record, &bytes, &mut validation));
         assert_eq!(validation.as_ptr(), pointer);
         assert_eq!(validation.capacity(), capacity);
+
+        let empty_entry = WalBatch {
+            entries: vec![Default::default()],
+            ..Default::default()
+        };
+        assert!(exact_batch_encoding(
+            &empty_entry,
+            &empty_entry.encode_to_vec(),
+            &mut validation,
+        ));
 
         let mut extra_field = bytes;
         extra_field.extend_from_slice(&[0x68, 0x01]);
         let decoded = WalBatch::decode(extra_field.as_slice()).unwrap();
-        assert!(!exact_encoding(&decoded, &extra_field, &mut validation));
+        assert!(!exact_batch_encoding(
+            &decoded,
+            &extra_field,
+            &mut validation
+        ));
     }
 
     #[test]
