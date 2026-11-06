@@ -146,17 +146,39 @@ fn decode_canonical_packet(bytes: &[u8]) -> Option<(u32, u64, &[u8])> {
     Some((version, group, message))
 }
 
-fn exact_message_without_snapshot(message: &Message, bytes: &[u8], metadata: &mut Vec<u8>) -> bool {
-    struct Fields {
-        before_data: (usize, usize),
-        before_context: (usize, usize),
+fn canonical_message_entry_count(bytes: &[u8]) -> Option<usize> {
+    let mut input = bytes;
+    for tag in 1..=6 {
+        if input.first() == Some(&((tag << 3) as u8)) {
+            input = &input[1..];
+            take_canonical_varint(&mut input)?;
+        }
     }
+    let mut count = 0usize;
+    while input.first() == Some(&0x3a) {
+        input = &input[1..];
+        let length = usize::try_from(take_canonical_varint(&mut input)?).ok()?;
+        if input.len() < length {
+            return None;
+        }
+        input = &input[length..];
+        count = count.checked_add(1)?;
+    }
+    Some(count)
+}
+
+fn exact_message_without_snapshot(message: &Message, bytes: &[u8], metadata: &mut Vec<u8>) -> bool {
     fn consume<'a>(input: &mut &'a [u8], expected: &[u8]) -> bool {
         if input.len() < expected.len() || input[..expected.len()] != *expected {
             return false;
         }
         *input = &input[expected.len()..];
         true
+    }
+    fn consume_metadata(input: &mut &[u8], metadata: &mut Vec<u8>) -> bool {
+        let matches = consume(input, metadata);
+        metadata.clear();
+        matches
     }
 
     if message.snapshot.is_some() {
@@ -181,10 +203,11 @@ fn exact_message_without_snapshot(message: &Message, bytes: &[u8], metadata: &mu
     if message.index != 0 {
         prost::encoding::uint64::encode(6, &message.index, &mut *metadata);
     }
-    let prefix_len = metadata.len();
-    let mut fields = Vec::with_capacity(message.entries.len());
+    let mut input = bytes;
+    if !consume_metadata(&mut input, metadata) {
+        return false;
+    }
     for entry in &message.entries {
-        let before_data = metadata.len();
         prost::encoding::encode_key(
             7,
             prost::encoding::WireType::LengthDelimited,
@@ -208,8 +231,9 @@ fn exact_message_without_snapshot(message: &Message, bytes: &[u8], metadata: &mu
             );
             prost::encoding::encode_varint(entry.data.len() as u64, &mut *metadata);
         }
-        let before_data_end = metadata.len();
-        let before_context = metadata.len();
+        if !consume_metadata(&mut input, metadata) || !consume(&mut input, &entry.data) {
+            return false;
+        }
         if entry.sync_log {
             prost::encoding::bool::encode(5, &entry.sync_log, &mut *metadata);
         }
@@ -221,12 +245,10 @@ fn exact_message_without_snapshot(message: &Message, bytes: &[u8], metadata: &mu
             );
             prost::encoding::encode_varint(entry.context.len() as u64, &mut *metadata);
         }
-        fields.push(Fields {
-            before_data: (before_data, before_data_end),
-            before_context: (before_context, metadata.len()),
-        });
+        if !consume_metadata(&mut input, metadata) || !consume(&mut input, &entry.context) {
+            return false;
+        }
     }
-    let before_context = metadata.len();
     if message.commit != 0 {
         prost::encoding::uint64::encode(8, &message.commit, &mut *metadata);
     }
@@ -244,8 +266,9 @@ fn exact_message_without_snapshot(message: &Message, bytes: &[u8], metadata: &mu
         );
         prost::encoding::encode_varint(message.context.len() as u64, &mut *metadata);
     }
-    let before_context_end = metadata.len();
-    let after_context = metadata.len();
+    if !consume_metadata(&mut input, metadata) || !consume(&mut input, &message.context) {
+        return false;
+    }
     if message.request_snapshot != 0 {
         prost::encoding::uint64::encode(13, &message.request_snapshot, &mut *metadata);
     }
@@ -258,29 +281,7 @@ fn exact_message_without_snapshot(message: &Message, bytes: &[u8], metadata: &mu
     if message.priority != 0 {
         prost::encoding::int64::encode(16, &message.priority, &mut *metadata);
     }
-
-    let mut input = bytes;
-    if !consume(&mut input, &metadata[..prefix_len]) {
-        return false;
-    }
-    for (field, entry) in fields.iter().zip(&message.entries) {
-        if !consume(
-            &mut input,
-            &metadata[field.before_data.0..field.before_data.1],
-        ) || !consume(&mut input, &entry.data)
-            || !consume(
-                &mut input,
-                &metadata[field.before_context.0..field.before_context.1],
-            )
-            || !consume(&mut input, &entry.context)
-        {
-            return false;
-        }
-    }
-    consume(&mut input, &metadata[before_context..before_context_end])
-        && consume(&mut input, &message.context)
-        && consume(&mut input, &metadata[after_context..])
-        && input.is_empty()
+    consume_metadata(&mut input, metadata) && input.is_empty()
 }
 
 fn exact_encoding(message: &impl ProstMessage, bytes: &[u8], output: &mut Vec<u8>) -> bool {
@@ -2424,7 +2425,12 @@ impl DurablePeer {
             }
             return Ok(());
         }
-        let message = Message::decode(original_message).map_err(invalid)?;
+        let entry_count = canonical_message_entry_count(original_message).unwrap_or(0);
+        let mut message = Message {
+            entries: Vec::with_capacity(entry_count),
+            ..Default::default()
+        };
+        message.merge(original_message).map_err(invalid)?;
         let mut validation = Vec::new();
         let canonical = if message.snapshot.is_none() {
             exact_message_without_snapshot(&message, original_message, &mut validation)
@@ -3356,6 +3362,7 @@ mod tests {
             ..Default::default()
         };
         let encoded = message.encode_to_vec();
+        assert_eq!(canonical_message_entry_count(&encoded), Some(2));
         let packet = Packet {
             version: 1,
             group: 17,
@@ -3371,7 +3378,28 @@ mod tests {
             payload,
             &mut metadata
         ));
-        assert!(metadata.capacity() < 4096);
+        assert!(metadata.capacity() < 128);
+
+        let many_entries = Message {
+            entries: (0..1024)
+                .map(|index| Entry {
+                    term: 7,
+                    index: index + 1,
+                    data: vec![index as u8],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let many_encoded = many_entries.encode_to_vec();
+        assert_eq!(canonical_message_entry_count(&many_encoded), Some(1024));
+        assert!(exact_message_without_snapshot(
+            &many_entries,
+            &many_encoded,
+            &mut metadata
+        ));
+        assert!(metadata.capacity() < 128);
+        assert_eq!(canonical_message_entry_count(&[0x3a, 2, 0x08]), None);
 
         let mut extra_inner = encoded;
         extra_inner.extend_from_slice(&[0xf8, 0x07, 1]);

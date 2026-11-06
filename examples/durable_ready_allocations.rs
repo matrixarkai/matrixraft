@@ -63,8 +63,8 @@ mod probe {
     }
 
     fn receive_cost() {
-        println!("voters,payload_bytes,packets,packet_bytes,step_allocated_bytes");
-        for width in [64, 4096, 1024 * 1024] {
+        println!("voters,entries,payload_bytes,packets,packet_bytes,step_allocated_bytes");
+        for (count, width) in [(1, 64), (1, 4096), (1, 1024 * 1024), (1024, 1)] {
             let dir = tempfile::tempdir().unwrap();
             let options: Vec<_> = (1..=3)
                 .map(|node_id| PeerOptions {
@@ -86,21 +86,34 @@ mod probe {
             exchange(&mut peers, &mut applied);
             assert!(peers[0].is_leader());
             assert!(applied.iter().all(Vec::is_empty));
-            let data = vec![42; width];
-            let id = peers[0].propose(data.clone()).unwrap();
+            let expected = if count == 1 {
+                let data = vec![42; width];
+                vec![(peers[0].propose(data.clone()).unwrap(), data)]
+            } else {
+                let payloads: Vec<_> = (0..count).map(|i| vec![i as u8; width]).collect();
+                let expected_payloads = payloads.clone();
+                peers[0]
+                    .propose_batch(payloads)
+                    .unwrap()
+                    .into_iter()
+                    .zip(expected_payloads)
+                    .collect()
+            };
             let (packets, bytes, allocated) = exchange(&mut peers, &mut applied);
-            let expected = vec![(id, data)];
             assert!(packets >= 4);
             assert!(applied.iter().all(|values| *values == expected));
-            if width == 1024 * 1024 {
+            if count == 1 && width == 1024 * 1024 {
                 assert!(allocated < bytes * 13 / 4);
+            }
+            if count == 1024 {
+                assert!(allocated < bytes * 17);
             }
             drop(peers);
             let mut peers = open();
             let mut replay = vec![Vec::new(); 3];
             exchange(&mut peers, &mut replay);
             assert_eq!(replay, applied);
-            println!("3,{width},{packets},{bytes},{allocated}");
+            println!("3,{count},{width},{packets},{bytes},{allocated}");
         }
     }
 
