@@ -29,17 +29,26 @@
 //! allocator.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use matrixraft::{Config, Peer, RaftCluster, ReplicaRole};
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    static TRACK_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+}
+
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        let _ = TRACK_ALLOCATIONS.try_with(|tracking| {
+            if tracking.get() {
+                ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            }
+        });
         unsafe { System.alloc(layout) }
     }
 
@@ -75,12 +84,15 @@ fn per_round(peers: usize, rounds: usize) -> (f64, u64) {
         cluster.broadcast_heartbeat().expect("warm");
     }
 
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    TRACK_ALLOCATIONS.with(|tracking| tracking.set(false));
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    TRACK_ALLOCATIONS.with(|tracking| tracking.set(true));
     for _ in 0..rounds {
         let sent = cluster.broadcast_heartbeat().expect("heartbeat");
         assert_eq!(sent, reached, "every round must reach the same peers");
     }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
+    TRACK_ALLOCATIONS.with(|tracking| tracking.set(false));
+    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
     (allocations as f64 / rounds as f64, reached)
 }
 

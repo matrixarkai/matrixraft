@@ -4400,57 +4400,73 @@ impl RaftCluster {
             .active_leader_transfer()
             .map(|transfer| transfer.transferee_id);
         let target_role = self.nodes.get(&target).map(|node| node.replica_role);
-        let admission = crate::matrixraft_leader_transfer_admission(
+        let admission_kind = crate::status::matrixraft_leader_transfer_admission_kind(
             leader_id,
             target,
             current_transferee_id,
             target_role,
         );
-        if admission.is_duplicate() {
+        if admission_kind == LeaderTransferAdmissionKind::Duplicate {
             self.duplicate_leader_transfer_requests =
                 self.duplicate_leader_transfer_requests.saturating_add(1);
             if let Some(transfer) = self.active_leader_transfer_mut() {
                 transfer.duplicate_requests = transfer.duplicate_requests.saturating_add(1);
-                transfer.reason = admission.reason;
+                transfer.reason.clear();
+                transfer.reason.push_str("duplicate_transfer_in_progress");
             }
             return Ok(self.active_leader_transfer().cloned());
         }
-        if !admission.is_accepted() {
+        if !matches!(
+            admission_kind,
+            LeaderTransferAdmissionKind::Accepted | LeaderTransferAdmissionKind::Replaced
+        ) {
             return Ok(None);
         }
-        let target_node = self
-            .nodes
-            .get(&target)
-            .ok_or(RaftError::NodeNotFound(target))?;
-        let target_caught_up = target_node.match_index() >= self.last_log_index;
+        let (target_healthy, target_caught_up) = {
+            let target_node = self
+                .nodes
+                .get(&target)
+                .ok_or(RaftError::NodeNotFound(target))?;
+            (
+                target_node.healthy,
+                target_node.match_index() >= self.last_log_index,
+            )
+        };
         let replacing_a_transfer_in_flight = self.active_leader_transfer().is_some();
         let aborted_transfers =
             self.aborted_leader_transfers + u64::from(replacing_a_transfer_in_flight);
         if replacing_a_transfer_in_flight {
             self.aborted_leader_transfers = aborted_transfers;
         }
-        let state = LeaderTransferState {
-            transferee_id: target,
-            elapsed_ticks: 0,
-            timeout_ticks: self.leader_transfer_timeout_ticks,
-            aborted_transfers,
-            duplicate_requests: self.duplicate_leader_transfer_requests,
-            reason: if !target_node.healthy {
-                "waiting_for_transferee_available".to_string()
-            } else if target_caught_up {
-                "transfer_ready".to_string()
-            } else {
-                "waiting_for_transferee_catchup".to_string()
-            },
-            conclusion: None,
+        let reason = if !target_healthy {
+            "waiting_for_transferee_available"
+        } else if target_caught_up {
+            "transfer_ready"
+        } else {
+            "waiting_for_transferee_catchup"
         };
-        // The slot may already hold the record of a transfer that ended. Writing
-        // through it reuses that allocation instead of freeing one Box and
-        // asking for another the same size, which is what a group that transfers
-        // repeatedly used to do once per transfer.
         match self.leader_transfer.as_deref_mut() {
-            Some(slot) => *slot = state,
-            None => self.leader_transfer = Some(Box::new(state)),
+            Some(slot) => {
+                slot.transferee_id = target;
+                slot.elapsed_ticks = 0;
+                slot.timeout_ticks = self.leader_transfer_timeout_ticks;
+                slot.aborted_transfers = aborted_transfers;
+                slot.duplicate_requests = self.duplicate_leader_transfer_requests;
+                slot.reason.clear();
+                slot.reason.push_str(reason);
+                slot.conclusion = None;
+            }
+            None => {
+                self.leader_transfer = Some(Box::new(LeaderTransferState {
+                    transferee_id: target,
+                    elapsed_ticks: 0,
+                    timeout_ticks: self.leader_transfer_timeout_ticks,
+                    aborted_transfers,
+                    duplicate_requests: self.duplicate_leader_transfer_requests,
+                    reason: reason.to_string(),
+                    conclusion: None,
+                }));
+            }
         }
         Ok(self.active_leader_transfer().cloned())
     }
@@ -4603,11 +4619,12 @@ impl RaftCluster {
         self.leader_transfer.as_deref().cloned()
     }
 
-    pub fn abort_leader_transfer(&mut self, reason: impl Into<String>) -> bool {
+    pub fn abort_leader_transfer(&mut self, reason: impl AsRef<str>) -> bool {
         let Some(transfer) = self.active_leader_transfer_mut() else {
             return false;
         };
-        transfer.reason = reason.into();
+        transfer.reason.clear();
+        transfer.reason.push_str(reason.as_ref());
         transfer.conclusion = Some(LeaderTransferConclusion::Aborted);
         self.aborted_leader_transfers = self.aborted_leader_transfers.saturating_add(1);
         true
@@ -4618,11 +4635,12 @@ impl RaftCluster {
     /// Returns false when no transfer is in flight, which is what makes it safe
     /// to call on a path that may already have concluded one: the first
     /// conclusion keeps its reason.
-    fn complete_leader_transfer(&mut self, reason: impl Into<String>) -> bool {
+    fn complete_leader_transfer(&mut self, reason: impl AsRef<str>) -> bool {
         let Some(transfer) = self.active_leader_transfer_mut() else {
             return false;
         };
-        transfer.reason = reason.into();
+        transfer.reason.clear();
+        transfer.reason.push_str(reason.as_ref());
         transfer.conclusion = Some(LeaderTransferConclusion::Completed);
         true
     }

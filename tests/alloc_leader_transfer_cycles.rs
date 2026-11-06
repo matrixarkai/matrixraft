@@ -9,16 +9,14 @@
 //! "Supposed to be free" is the kind of claim that wants measuring, so this
 //! counts.
 //!
-//! Each cycle begins a transfer and aborts it, and allocates five times for it
-//! before this change: four `String`s -- the admission's reason, the record's
-//! reason, the copy of it in the record the call returns, and the abort's
-//! reason -- and the `Box`. Measured A/B against the same tree with only the
-//! reuse undone, it is **5.000 allocations a cycle before and 4.000 after**:
-//! exactly the `Box`, and nothing else moved.
+//! Each cycle begins a transfer and aborts it. It used to allocate four times:
+//! an unused accepted-admission reason, a replacement reason in the retained
+//! record, the owned state returned to the caller, and another replacement
+//! reason on abort. The admission path now classifies without formatting a
+//! report, and the retained record reuses its reason buffer throughout.
 //!
-//! The four `String`s stay. Each one carries different text, so there is
-//! nothing to reuse there and this test is not claiming otherwise; they are
-//! what the headroom in the ceiling is for.
+//! The single remaining allocation is the owned state clone returned by the
+//! public API. Measured after warmup: **1.000 allocation a cycle**.
 //!
 //! It needs its own test binary because a `#[global_allocator]` is per-process
 //! and would otherwise count every other test's allocations too.
@@ -57,11 +55,9 @@ fn peer(node_id: u64) -> Peer {
 
 const CYCLES: usize = 200;
 
-/// A ceiling, not a target: lowering it is the point. The measured figure is
-/// 4.000 and a `Box` per cycle puts it at 5.000, so the ceiling sits between
-/// them rather than comfortably above both. A threshold set above the number it
-/// is meant to catch asserts nothing.
-const CEILING_PER_CYCLE: f64 = 4.5;
+/// A ceiling, not a target: the measured figure is 1.000, while any one of the
+/// removed reason allocations puts it at 2.000.
+const CEILING_PER_CYCLE: f64 = 1.5;
 
 #[test]
 fn repeating_a_leader_transfer_does_not_reallocate_its_record() {
