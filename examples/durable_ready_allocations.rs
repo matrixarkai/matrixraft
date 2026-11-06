@@ -140,8 +140,8 @@ mod probe {
                 assert!(reopen_allocated < 6 * count * width + 16384 + 1024 * count);
                 if count == 32 && width == 65536 {
                     assert!(
-                        reopen_allocated < 9 * count * width / 2,
-                        "large replay allocated 4.5 or more payload widths: \
+                        reopen_allocated < 7 * count * width / 2,
+                        "large replay allocated 3.5 or more payload widths: \
                          payload={} allocated={reopen_allocated}",
                         count * width
                     );
@@ -208,11 +208,19 @@ mod probe {
             let before = BYTES.load(Ordering::Relaxed);
             let mut peer = DurablePeer::open(options).unwrap();
             let allocated = BYTES.load(Ordering::Relaxed) - before;
-            assert!(
-                allocated < 5 * width / 2,
-                "checkpoint reopen allocated 2.5 or more payload widths: \
-                 payload={width} allocated={allocated}"
-            );
+            if width > 4 * 1024 * 1024 {
+                assert!(
+                    allocated < 9 * width / 4,
+                    "segmented checkpoint reopen allocated 2.25 or more payload widths: \
+                     payload={width} allocated={allocated}"
+                );
+            } else {
+                assert!(
+                    allocated < 3 * width / 2,
+                    "inline checkpoint reopen allocated 1.5 or more payload widths: \
+                     payload={width} allocated={allocated}"
+                );
+            }
             let mut seen = false;
             peer.process_ready_with_snapshot_reader(
                 |_, _| panic!("unexpected suffix"),
