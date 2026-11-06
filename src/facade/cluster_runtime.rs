@@ -4538,31 +4538,31 @@ impl RaftCluster {
 
     pub fn closest_follower(&self) -> Option<NodeId> {
         let leader_id = self.leader_id?;
-        let max_match_index = self
-            .nodes
-            .values()
-            .filter(|node| {
-                node.id != leader_id && node.healthy && node.replica_role.can_be_leader()
-            })
-            .map(Node::match_index)
-            .max()?;
-        let mut candidates = self
-            .nodes
-            .values()
-            .filter(|node| {
-                node.id != leader_id
-                    && node.healthy
-                    && node.replica_role.can_be_leader()
-                    && node.match_index() == max_match_index
-            })
-            .map(|node| node.id)
-            .collect::<Vec<_>>();
-        candidates.sort_unstable();
-        candidates
-            .iter()
-            .copied()
-            .find(|candidate| *candidate > leader_id)
-            .or_else(|| candidates.first().copied())
+        let mut best_match_index = None;
+        let mut successor = None;
+        let mut wrapped = None;
+        for node in self.nodes.values() {
+            if node.id == leader_id || !node.healthy || !node.replica_role.can_be_leader() {
+                continue;
+            }
+            let match_index = node.match_index();
+            match best_match_index {
+                Some(best) if match_index < best => continue,
+                Some(best) if match_index == best => {}
+                _ => {
+                    best_match_index = Some(match_index);
+                    successor = None;
+                    wrapped = None;
+                }
+            }
+            wrapped = Some(wrapped.map_or(node.id, |current: NodeId| current.min(node.id)));
+            if node.id > leader_id {
+                successor = Some(
+                    successor.map_or(node.id, |current: NodeId| current.min(node.id)),
+                );
+            }
+        }
+        successor.or(wrapped)
     }
 
     pub fn step_down(
