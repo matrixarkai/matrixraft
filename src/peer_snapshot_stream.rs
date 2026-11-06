@@ -5,7 +5,7 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct WalAssembly {
-    pending: Option<WalBatch>,
+    pending: Option<(WalBatch, prost::bytes::BytesMut)>,
 }
 impl WalAssembly {
     pub(super) fn accept(
@@ -31,18 +31,18 @@ impl WalAssembly {
         {
             return Err(storage_error("invalid checkpoint record bounds"));
         }
-        if let Some(pending) = &mut self.pending {
-            if record.snapshot_offset != pending.snapshot.len() as u64
+        if let Some((pending, snapshot)) = &mut self.pending {
+            if record.snapshot_offset != snapshot.len() as u64
                 || record.snapshot_total != pending.snapshot_total
                 || record.snapshot_digest != pending.snapshot_digest
                 || !record.hard_state.is_empty()
             {
                 return Err(storage_error("noncontiguous checkpoint records"));
             }
-            if pending.snapshot.len() + record.snapshot.len() > pending.snapshot_total as usize {
+            if snapshot.len() + record.snapshot.len() > pending.snapshot_total as usize {
                 return Err(storage_error("checkpoint records exceed declared length"));
             }
-            pending.snapshot.extend_from_slice(&record.snapshot);
+            snapshot.extend_from_slice(&record.snapshot);
         } else {
             if position != 0
                 || record.snapshot_offset != 0
@@ -53,16 +53,19 @@ impl WalAssembly {
             }
             // Never allocate the advertised total before its bytes actually arrive.
             record.snapshot_offset = 0;
-            self.pending = Some(record);
+            let snapshot = prost::bytes::BytesMut::from(record.snapshot.as_ref());
+            record.snapshot = Default::default();
+            self.pending = Some((record, snapshot));
         }
-        let pending = self.pending.as_ref().unwrap();
-        if pending.snapshot.len() != pending.snapshot_total as usize {
+        let (pending, snapshot) = self.pending.as_ref().unwrap();
+        if snapshot.len() != pending.snapshot_total as usize {
             return Ok(None);
         }
-        if digest(&pending.snapshot) != pending.snapshot_digest {
+        if digest(snapshot) != pending.snapshot_digest {
             return Err(storage_error("checkpoint record stream checksum mismatch"));
         }
-        let mut record = self.pending.take().unwrap();
+        let (mut record, snapshot) = self.pending.take().unwrap();
+        record.snapshot = snapshot.freeze();
         record.version = 2;
         record.snapshot_total = 0;
         record.snapshot_digest = 0;
@@ -876,7 +879,7 @@ mod tests {
             &[],
         );
         first.version = 3;
-        first.snapshot = vec![1; 16];
+        first.snapshot = vec![1; 16].into();
         first.snapshot_total = 32;
         first.snapshot_digest = 42;
         for kind in 0..5 {

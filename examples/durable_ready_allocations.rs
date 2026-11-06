@@ -183,6 +183,13 @@ mod probe {
                 "checkpoint creation allocated seven or more payload widths: \
                  payload={width} allocated={checkpoint_allocated}"
             );
+            if width > 4 * 1024 * 1024 {
+                assert!(
+                    checkpoint_allocated < 6 * width,
+                    "segmented checkpoint copied one or more full payloads: \
+                     payload={width} allocated={checkpoint_allocated}"
+                );
+            }
             drop(peer);
             let before = BYTES.load(Ordering::Relaxed);
             let mut peer = DurablePeer::open(options).unwrap();
