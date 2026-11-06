@@ -161,7 +161,7 @@ mod probe {
     }
 
     fn reopen_cost() {
-        println!("checkpoint_bytes,reopen_allocated_bytes");
+        println!("checkpoint_bytes,checkpoint_allocated_bytes,reopen_allocated_bytes");
         for width in [1024 * 1024, 5 * 1024 * 1024] {
             let dir = tempfile::tempdir().unwrap();
             let options = PeerOptions {
@@ -174,7 +174,15 @@ mod probe {
             peer.campaign().unwrap();
             peer.process_ready(|_, _| Ok(())).unwrap();
             let position = peer.applied_index();
-            peer.checkpoint(vec![42; width]).unwrap();
+            let payload = vec![42; width];
+            let before = BYTES.load(Ordering::Relaxed);
+            peer.checkpoint(payload).unwrap();
+            let checkpoint_allocated = BYTES.load(Ordering::Relaxed) - before;
+            assert!(
+                checkpoint_allocated < 7 * width,
+                "checkpoint creation allocated seven or more payload widths: \
+                 payload={width} allocated={checkpoint_allocated}"
+            );
             drop(peer);
             let before = BYTES.load(Ordering::Relaxed);
             let mut peer = DurablePeer::open(options).unwrap();
@@ -202,7 +210,7 @@ mod probe {
             )
             .unwrap();
             assert!(seen);
-            println!("{width},{allocated}");
+            println!("{width},{checkpoint_allocated},{allocated}");
         }
     }
 }

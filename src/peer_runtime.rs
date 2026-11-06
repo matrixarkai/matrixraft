@@ -610,6 +610,7 @@ impl Journal {
             barriers: 0,
             records: 0,
         };
+        let mut record_buffer = Vec::new();
         let mut floor_state = hs.clone();
         floor_state.commit = snapshot.get_metadata().index;
         let mut first = batch(options, Some(&floor_state), &[]);
@@ -626,9 +627,9 @@ impl Journal {
             checkpoint_crash_point("after_payload_sync");
             first.version = 4;
             first.payload_manifest = payload.manifest.encode_to_vec();
-            replacement.write_record(&first)?;
+            replacement.write_record_into(&first, &mut record_buffer)?;
         } else if snapshot.data.len() <= INLINE_CHECKPOINT_BYTES {
-            replacement.write_record(&first)?;
+            replacement.write_record_into(&first, &mut record_buffer)?;
         } else {
             let encoded = std::mem::take(&mut first.snapshot);
             first.version = 3;
@@ -640,7 +641,7 @@ impl Journal {
                 if number != 0 {
                     first.hard_state.clear();
                 }
-                replacement.write_record(&first)?;
+                replacement.write_record_into(&first, &mut record_buffer)?;
                 #[cfg(test)]
                 checkpoint_crash_point("during_write");
             }
@@ -660,7 +661,7 @@ impl Journal {
             if !suffix.entries.is_empty()
                 && (suffix.entries.len() == 1024 || size.saturating_add(field) > 1024 * 1024)
             {
-                replacement.write_record(&suffix)?;
+                replacement.write_record_into(&suffix, &mut record_buffer)?;
                 suffix.entries.clear();
                 size = overhead;
             }
@@ -668,10 +669,10 @@ impl Journal {
             size += field;
         }
         if !suffix.entries.is_empty() {
-            replacement.write_record(&suffix)?;
+            replacement.write_record_into(&suffix, &mut record_buffer)?;
         }
         if hs != &floor_state {
-            replacement.write_record(&batch(options, Some(hs), &[]))?;
+            replacement.write_record_into(&batch(options, Some(hs), &[]), &mut record_buffer)?;
         }
         // No replacement record is observable until publication. Flush the
         // complete image and retained suffix once, before replacing the live WAL.
@@ -804,6 +805,13 @@ impl Journal {
     }
     // Only rewrite may defer durability until the entire replacement is written.
     fn write_record(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
+        self.write_record_into(batch, &mut Vec::new())
+    }
+    fn write_record_into(
+        &mut self,
+        batch: &WalBatch,
+        record: &mut Vec<u8>,
+    ) -> Result<(), RaftError> {
         let normalized = if batch.permitted == self.permitted {
             std::borrow::Cow::Borrowed(batch)
         } else {
@@ -821,13 +829,14 @@ impl Journal {
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
-        let mut record = Vec::with_capacity(24 + size);
+        record.clear();
+        record.reserve_exact(24 + size);
         record.extend_from_slice(MAGIC);
         record.extend_from_slice(&(size as u32).to_be_bytes());
         record.extend_from_slice(&digest(&record).to_be_bytes());
         // Encode directly after the frame header to avoid a second payload buffer.
         record.extend_from_slice(&[0; 8]);
-        batch.encode(&mut record).map_err(storage_error)?;
+        batch.encode(&mut *record).map_err(storage_error)?;
         let checksum = digest(&record[24..]).to_be_bytes();
         record[16..24].copy_from_slice(&checksum);
         self.file.write_all(&record).map_err(storage_error)?;
