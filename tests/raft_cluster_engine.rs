@@ -5025,20 +5025,49 @@ fn step_down_transfers_to_closest_healthy_follower() {
     assert_eq!(cluster.leader_id(), Some(2));
     assert_eq!(cluster.closest_follower(), Some(3));
 
+    let transferee = cluster.step_down(None).expect("step down again");
+    assert_eq!(transferee, Some(3));
+    assert_eq!(cluster.leader_id(), Some(3));
+    assert_eq!(cluster.closest_follower(), Some(1));
+
     cluster.set_node_healthy(1, false).expect("node 1 down");
-    cluster.set_node_healthy(3, false).expect("node 3 down");
+    cluster.set_node_healthy(2, false).expect("node 2 down");
     assert!(cluster.step_down(None).is_err());
     assert!(cluster
         .resign_leader("operator_resign")
         .expect("resign without transfer target"));
     assert_eq!(cluster.leader_id(), None);
     assert_eq!(
-        cluster.status(2).expect("resigned leader status").role,
+        cluster.status(3).expect("resigned leader status").role,
         StateRole::Follower
     );
     assert!(!cluster
         .resign_leader("already_resigned")
         .expect("second resign is ignored"));
+}
+
+#[test]
+fn closest_follower_prefers_replication_progress_before_node_id_order() {
+    let mut cluster = three_node_cluster();
+    cluster.start().expect("cluster starts");
+    cluster
+        .set_node_healthy(2, false)
+        .expect("hold the lower-id follower back");
+    cluster.propose(b"new entry".to_vec()).expect("propose");
+    cluster
+        .set_node_healthy(2, true)
+        .expect("restore the lower-id follower");
+
+    assert_eq!(
+        cluster.closest_follower(),
+        Some(3),
+        "the caught-up follower must win before node-id tie-breaking"
+    );
+
+    cluster
+        .set_node_healthy(3, false)
+        .expect("remove the caught-up follower");
+    assert_eq!(cluster.closest_follower(), Some(2));
 }
 
 #[test]
