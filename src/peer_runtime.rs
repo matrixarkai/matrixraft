@@ -456,6 +456,9 @@ fn install_with_scratch(
     validation: &mut Vec<u8>,
 ) -> Result<(), RaftError> {
     let snapshot_stream::RecoveredBatch { record, snapshot } = recovered;
+    if snapshot.is_none() && record.snapshot.is_empty() && !record.entries.is_empty() {
+        return install_recovered_entries(store, record);
+    }
     let snapshot_wire_validated = snapshot.is_some();
     install_from(
         store,
@@ -465,6 +468,92 @@ fn install_with_scratch(
         snapshot_wire_validated,
         validation,
     )
+}
+fn merge_entry_reusing_payload_storage(
+    encoded: prost::bytes::Bytes,
+    entry: &mut Entry,
+) -> Result<(), RaftError> {
+    entry.clear();
+    entry.merge(encoded).map_err(storage_error)
+}
+#[derive(Clone, Copy)]
+struct RecoveredEntryHeader {
+    index: u64,
+    term: u64,
+}
+fn install_recovered_entries(store: &PeerStorage, batch: WalBatch) -> Result<(), RaftError> {
+    let hs = if batch.hard_state.is_empty() {
+        None
+    } else {
+        Some(HardState::decode(batch.hard_state.as_slice()).map_err(storage_error)?)
+    };
+    let previous = store.initial_state().map_err(storage_error)?.hard_state;
+    let last = store.last_index().map_err(storage_error)?;
+    let first = store.first_index().unwrap_or(u64::MAX);
+    let mut headers = Vec::with_capacity(batch.entries.len());
+    let mut decoded = Entry::default();
+    for encoded in &batch.entries {
+        merge_entry_reusing_payload_storage(encoded.clone(), &mut decoded)?;
+        if decoded.entry_type != EntryType::EntryNormal as i32 {
+            membership::decode_change(&decoded, &store.permitted).map_err(storage_error)?;
+        }
+        if decoded.index <= previous.commit {
+            let saved = store
+                .entries(
+                    decoded.index,
+                    decoded.index + 1,
+                    None,
+                    raft_core::GetEntriesContext::empty(false),
+                )
+                .map_err(storage_error)?;
+            if saved.as_slice() != std::slice::from_ref(&decoded) {
+                return Err(storage_error("peer WAL changes a committed entry"));
+            }
+        }
+        headers.push(RecoveredEntryHeader {
+            index: decoded.index,
+            term: decoded.term,
+        });
+    }
+    if headers
+        .windows(2)
+        .any(|w| w[0].index.checked_add(1) != Some(w[1].index) || w[0].term > w[1].term)
+        || headers
+            .first()
+            .is_some_and(|entry| entry.index < first || entry.index > last.saturating_add(1))
+    {
+        return Err(storage_error("peer WAL log positions are invalid"));
+    }
+    let next = hs.as_ref().unwrap_or(&previous);
+    let next_last = headers.last().map_or(last, |entry| entry.index);
+    if next.term < previous.term
+        || next.commit < previous.commit
+        || next.commit > next_last
+        || (next.term == previous.term && previous.vote != 0 && next.vote != previous.vote)
+        || (next.vote != 0
+            && !if store.permitted.is_empty() {
+                &batch.voters
+            } else {
+                &store.permitted
+            }
+            .contains(&next.vote))
+        || headers
+            .iter()
+            .any(|entry| entry.term == 0 || entry.term > next.term)
+    {
+        return Err(storage_error("peer WAL hard state is invalid"));
+    }
+
+    let mut core = store.wl();
+    for encoded in batch.entries {
+        merge_entry_reusing_payload_storage(encoded, &mut decoded)?;
+        core.append(std::slice::from_ref(&decoded))
+            .map_err(storage_error)?;
+    }
+    if let Some(hs) = hs {
+        core.set_hardstate(hs);
+    }
+    Ok(())
 }
 fn install_local(
     store: &PeerStorage,
@@ -2342,6 +2431,74 @@ mod tests {
         for (encoded, expected) in shared.entries.iter().zip(&entries) {
             assert_eq!(Entry::decode(encoded.clone()).unwrap(), *expected);
         }
+    }
+
+    #[test]
+    fn recovered_entries_reuse_one_payload_decode_buffer() {
+        use super::*;
+        let first = Entry {
+            term: 3,
+            index: 1,
+            data: vec![11; 65536],
+            context: vec![13; 64],
+            ..Default::default()
+        };
+        let second = Entry {
+            term: 3,
+            index: 2,
+            data: vec![17; 65536],
+            context: vec![19; 64],
+            ..Default::default()
+        };
+        let mut decoded = Entry::default();
+        merge_entry_reusing_payload_storage(first.encode_to_vec().into(), &mut decoded).unwrap();
+        assert_eq!(decoded, first);
+        let data = decoded.data.as_ptr();
+        let data_capacity = decoded.data.capacity();
+        let context = decoded.context.as_ptr();
+        let context_capacity = decoded.context.capacity();
+
+        merge_entry_reusing_payload_storage(second.encode_to_vec().into(), &mut decoded).unwrap();
+        assert_eq!(decoded, second);
+        assert_eq!(decoded.data.as_ptr(), data);
+        assert_eq!(decoded.data.capacity(), data_capacity);
+        assert_eq!(decoded.context.as_ptr(), context);
+        assert_eq!(decoded.context.capacity(), context_capacity);
+    }
+
+    #[test]
+    fn recovered_entry_batch_validates_completely_before_append() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let peer = DurablePeer::open(options(directory.path().join("peer.wal"))).unwrap();
+        let entries = [
+            Entry {
+                term: 3,
+                index: 1,
+                data: vec![11; 4096],
+                ..Default::default()
+            },
+            Entry {
+                term: 3,
+                index: 3,
+                data: vec![17; 4096],
+                ..Default::default()
+            },
+        ];
+        let record = batch(
+            &peer.options,
+            Some(&HardState {
+                term: 3,
+                ..Default::default()
+            }),
+            &entries,
+        );
+        assert!(install_recovered_entries(&peer.store, record).is_err());
+        assert_eq!(peer.store.last_index().unwrap(), 0);
+        assert_eq!(
+            peer.store.initial_state().unwrap().hard_state,
+            HardState::default()
+        );
     }
 
     #[test]
