@@ -781,6 +781,18 @@ impl Drop for Driver {
 /// itself.
 pub trait DriverMailHandler<Mail>: Send + Sync {
     fn handle_mail(&self, mails: Vec<Mail>);
+
+    /// Handles a batch and returns storage the worker may reuse.
+    ///
+    /// The default preserves the original ownership contract: the handler may
+    /// keep or consume the vector, and the worker receives an empty one. A
+    /// handler that only consumes the items can override this, drain the
+    /// vector, and return it with its capacity intact. Returned contents are
+    /// discarded before the next delivery.
+    fn handle_mail_recycling(&self, mails: Vec<Mail>) -> Vec<Mail> {
+        self.handle_mail(mails);
+        Vec::new()
+    }
 }
 
 /// Wraps a host's mail so the pool has something of its own to send.
@@ -1351,10 +1363,12 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
             timeout_ms: MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
         };
         let selector = &self.slots[worker].selector;
-        // Three buffers for the life of this worker, lent to every pass. A
+        // Four buffers for the life of this worker, lent to every pass. A
         // fresh vector per pass was an allocation per pass for the selection
-        // and one per group for the drain.
+        // and one per group for the drain. Handlers that opt into recycling
+        // return the mail buffer after consuming its contents.
         let mut envelopes: Vec<Envelope<Mail>> = Vec::new();
+        let mut mails: Vec<Mail> = Vec::new();
         let mut channels: Vec<Arc<MailChannel<Envelope<Mail>>>> = Vec::new();
         let mut global_mails: Vec<Envelope<Mail>> = Vec::new();
         while !self.exit.load(Ordering::Relaxed) {
@@ -1393,7 +1407,7 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
                 if self.exit.load(Ordering::Relaxed) {
                     return;
                 }
-                self.drain_channel(worker, &channel, &mut envelopes);
+                self.drain_channel(worker, &channel, &mut envelopes, &mut mails);
             }
         }
     }
@@ -1428,25 +1442,26 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
 
     /// Drains one channel into the handler, borrowing the worker's buffer.
     ///
-    /// `envelopes` arrives empty and leaves empty; it is the worker's, kept for
-    /// the life of the worker so a drain does not allocate one. It leaves empty
-    /// even on the `Stop` path, because breaking out of a `drain` still drops
-    /// the `Drain` guard and that removes whatever is left -- the `debug_assert`
-    /// is what says so out loud, since the next channel in the same pass is
-    /// drained with the same buffer.
+    /// Both lent buffers arrive empty and leave empty. `envelopes` always keeps
+    /// its capacity; `mails` keeps it when the handler opts into recycling.
+    /// They leave empty even on the `Stop` path, because breaking out of an
+    /// envelope drain removes whatever is left and the mail buffer is cleared
+    /// before returning.
     fn drain_channel(
         &self,
         worker: usize,
         channel: &Arc<MailChannel<Envelope<Mail>>>,
         envelopes: &mut Vec<Envelope<Mail>>,
+        mails: &mut Vec<Mail>,
     ) {
         debug_assert!(envelopes.is_empty(), "the lent buffer arrives drained");
+        debug_assert!(mails.is_empty(), "the lent mail buffer arrives drained");
         let channel_id = channel.replica_id();
         channel.fetch_into(&self.slots[worker].selector, envelopes);
         if envelopes.is_empty() {
             return;
         }
-        let mut mails = Vec::with_capacity(envelopes.len());
+        mails.reserve(envelopes.len());
         let mut stopping = false;
         for envelope in envelopes.drain(..) {
             match envelope {
@@ -1458,6 +1473,7 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
             }
         }
         if stopping || mails.is_empty() {
+            mails.clear();
             return;
         }
         let handler = {
@@ -1480,6 +1496,7 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
         // A group cancelled between selection and drain has no handler; its
         // mail is dropped rather than held for a group that is gone.
         let Some(handler) = handler else {
+            mails.clear();
             return;
         };
         // Without a mail sizer there is exactly one batch, and it is the vector
@@ -1495,14 +1512,19 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
         };
         if self.mail_size.is_none() {
             let count = mails.len() as u64;
-            handler.handle_mail(mails);
+            *mails = handler.handle_mail_recycling(std::mem::take(mails));
+            mails.clear();
             self.batches_handled.fetch_add(1, Ordering::Relaxed);
             self.mails_handled.fetch_add(count, Ordering::Relaxed);
             return;
         }
-        for batch in self.split_on_byte_budget(mails) {
+        for batch in self.split_on_byte_budget(std::mem::take(mails)) {
             let count = batch.len() as u64;
-            handler.handle_mail(batch);
+            let mut returned = handler.handle_mail_recycling(batch);
+            returned.clear();
+            if returned.capacity() > mails.capacity() {
+                *mails = returned;
+            }
             self.batches_handled.fetch_add(1, Ordering::Relaxed);
             self.mails_handled.fetch_add(count, Ordering::Relaxed);
         }

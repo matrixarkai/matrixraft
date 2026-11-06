@@ -139,6 +139,14 @@ impl<Work: Send + 'static> DriverMailHandler<Work> for PhaseAdapter<Work> {
             self.handled.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    fn handle_mail_recycling(&self, mut work: Vec<Work>) -> Vec<Work> {
+        for item in work.drain(..) {
+            self.handler.run(self.phase, item);
+            self.handled.fetch_add(1, Ordering::Relaxed);
+        }
+        work
+    }
 }
 
 /// What each pool has done.
