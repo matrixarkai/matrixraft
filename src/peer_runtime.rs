@@ -19,7 +19,7 @@ use raft_core::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{IoSlice, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -342,6 +342,23 @@ fn digest_extend(state: u64, bytes: &[u8]) -> u64 {
     bytes.iter().fold(state, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
     })
+}
+fn write_all_vectored(file: &mut File, buffers: &mut [IoSlice<'_>]) -> std::io::Result<()> {
+    let mut remaining = buffers;
+    while !remaining.is_empty() {
+        match file.write_vectored(remaining) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write complete peer WAL record",
+                ));
+            }
+            Ok(written) => IoSlice::advance_slices(&mut remaining, written),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> WalBatch {
     WalBatch {
@@ -1245,6 +1262,9 @@ impl Journal {
         batch: &WalBatch,
         record: &mut Vec<u8>,
     ) -> Result<(), RaftError> {
+        if !batch.entries.is_empty() && batch.snapshot.is_empty() {
+            return self.write_entry_record_into(batch, record);
+        }
         let normalized = if batch.permitted == self.permitted {
             std::borrow::Cow::Borrowed(batch)
         } else {
@@ -1274,6 +1294,96 @@ impl Journal {
         record[16..24].copy_from_slice(&checksum);
         self.file.write_all(&record).map_err(storage_error)?;
         self.length += record.len() as u64;
+        self.records = self.records.saturating_add(1);
+        Ok(())
+    }
+    fn write_entry_record_into(
+        &mut self,
+        batch: &WalBatch,
+        metadata: &mut Vec<u8>,
+    ) -> Result<(), RaftError> {
+        if batch.entries.is_empty()
+            || !batch.snapshot.is_empty()
+            || batch.snapshot_offset != 0
+            || batch.snapshot_total != 0
+            || batch.snapshot_digest != 0
+            || !batch.payload_manifest.is_empty()
+        {
+            return Err(storage_error("entry WAL record shape is invalid"));
+        }
+        metadata.clear();
+        if batch.version != 0 {
+            prost::encoding::uint32::encode(1, &batch.version, &mut *metadata);
+        }
+        if batch.group != 0 {
+            prost::encoding::uint64::encode(2, &batch.group, &mut *metadata);
+        }
+        if batch.node != 0 {
+            prost::encoding::uint64::encode(3, &batch.node, &mut *metadata);
+        }
+        prost::encoding::uint64::encode_packed(4, &batch.voters, &mut *metadata);
+        if !batch.hard_state.is_empty() {
+            prost::encoding::bytes::encode(5, &batch.hard_state, &mut *metadata);
+        }
+        let prefix_len = metadata.len();
+        let mut fields = Vec::with_capacity(batch.entries.len());
+        for entry in &batch.entries {
+            let start = metadata.len();
+            prost::encoding::encode_key(
+                6,
+                prost::encoding::WireType::LengthDelimited,
+                &mut *metadata,
+            );
+            prost::encoding::encode_varint(entry.len() as u64, &mut *metadata);
+            fields.push((start, metadata.len()));
+        }
+        let suffix_start = metadata.len();
+        prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
+        let size = batch
+            .entries
+            .iter()
+            .try_fold(metadata.len(), |size, entry| size.checked_add(entry.len()));
+        let Some(size) = size else {
+            return Err(storage_error("peer WAL record exceeds size bound"));
+        };
+        if size > LIMIT {
+            return Err(storage_error("peer WAL record exceeds size bound"));
+        }
+        if self.length.saturating_add(24 + size as u64) > WAL_LIMIT {
+            return Err(storage_error(
+                "peer WAL capacity reached; checkpoint support is required",
+            ));
+        }
+
+        let mut checksum = digest(&metadata[..prefix_len]);
+        for ((start, end), entry) in fields.iter().zip(&batch.entries) {
+            checksum = digest_extend(checksum, &metadata[*start..*end]);
+            checksum = digest_extend(checksum, entry);
+        }
+        checksum = digest_extend(checksum, &metadata[suffix_start..]);
+        let mut header = [0u8; 24];
+        header[..4].copy_from_slice(MAGIC);
+        header[4..8].copy_from_slice(&(size as u32).to_be_bytes());
+        let header_checksum = digest(&header[..8]).to_be_bytes();
+        header[8..16].copy_from_slice(&header_checksum);
+        header[16..24].copy_from_slice(&checksum.to_be_bytes());
+        self.file.write_all(&header).map_err(storage_error)?;
+
+        let mut slices = Vec::with_capacity(2 * batch.entries.len() + 2);
+        if prefix_len != 0 {
+            slices.push(IoSlice::new(&metadata[..prefix_len]));
+        }
+        for ((start, end), entry) in fields.iter().zip(&batch.entries) {
+            slices.push(IoSlice::new(&metadata[*start..*end]));
+            slices.push(IoSlice::new(entry));
+        }
+        if suffix_start != metadata.len() {
+            slices.push(IoSlice::new(&metadata[suffix_start..]));
+        }
+        for chunk in slices.chunks_mut(64) {
+            write_all_vectored(&mut self.file, chunk).map_err(storage_error)?;
+        }
+        self.length += 24 + size as u64;
         self.records = self.records.saturating_add(1);
         Ok(())
     }
@@ -2872,6 +2982,56 @@ mod tests {
             voters: vec![1],
             wal_path: path,
         }
+    }
+    #[test]
+    fn entry_record_writer_matches_canonical_protobuf_without_payload_staging() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        let entries: Vec<_> = (1..=32)
+            .map(|index| Entry {
+                term: 3,
+                index,
+                data: vec![index as u8; 65536],
+                ..Default::default()
+            })
+            .collect();
+        let record = batch(
+            &config,
+            Some(&HardState {
+                term: 3,
+                vote: 1,
+                commit: 32,
+            }),
+            &entries,
+        );
+        let mut expected = record.clone();
+        expected.permitted.clone_from(&peer.journal.permitted);
+        let expected = expected.encode_to_vec();
+        let start = peer.journal.length as usize;
+        let mut metadata = Vec::new();
+        peer.journal
+            .write_record_into(&record, &mut metadata)
+            .unwrap();
+        assert!(metadata.capacity() < 4096);
+
+        let bytes = std::fs::read(config.wal_path).unwrap();
+        let frame = &bytes[start..];
+        assert_eq!(&frame[..4], MAGIC);
+        assert_eq!(
+            u32::from_be_bytes(frame[4..8].try_into().unwrap()) as usize,
+            expected.len()
+        );
+        assert_eq!(
+            u64::from_be_bytes(frame[8..16].try_into().unwrap()),
+            digest(&frame[..8])
+        );
+        assert_eq!(
+            u64::from_be_bytes(frame[16..24].try_into().unwrap()),
+            digest(&expected)
+        );
+        assert_eq!(&frame[24..], expected);
     }
     #[test]
     fn snapshot_record_writer_matches_canonical_protobuf_without_payload_staging() {

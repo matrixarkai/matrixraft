@@ -133,6 +133,14 @@ mod probe {
                 let allocated = BYTES.load(Ordering::Relaxed) - before;
                 assert!(packets.is_empty());
                 assert_eq!(applied, count);
+                if count == 32 && width == 65536 {
+                    assert!(
+                        allocated < 17 * count * width / 4,
+                        "large Ready allocated 4.25 or more payload widths: \
+                         payload={} allocated={allocated}",
+                        count * width
+                    );
+                }
                 drop(peer);
                 let before = BYTES.load(Ordering::Relaxed);
                 let mut replay = DurablePeer::open(options).unwrap();
