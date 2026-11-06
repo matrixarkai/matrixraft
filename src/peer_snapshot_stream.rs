@@ -7,6 +7,10 @@ use super::*;
 pub(super) struct WalAssembly {
     pending: Option<WalFragments>,
 }
+pub(super) struct RecoveredBatch {
+    pub(super) record: WalBatch,
+    pub(super) snapshot: Option<Arc<Snapshot>>,
+}
 struct WalFragments {
     record: WalBatch,
     fragments: Vec<prost::bytes::Bytes>,
@@ -17,7 +21,8 @@ impl WalAssembly {
         &mut self,
         mut record: WalBatch,
         position: u64,
-    ) -> Result<Option<WalBatch>, RaftError> {
+        validation: &mut Vec<u8>,
+    ) -> Result<Option<RecoveredBatch>, RaftError> {
         if record.version != 3 {
             if self.pending.is_some()
                 || record.snapshot_offset != 0
@@ -26,7 +31,10 @@ impl WalAssembly {
             {
                 return Err(storage_error("interrupted or invalid checkpoint records"));
             }
-            return Ok(Some(record));
+            return Ok(Some(RecoveredBatch {
+                record,
+                snapshot: None,
+            }));
         }
         if record.snapshot_total == 0
             || record.snapshot_total > SNAPSHOT_ENCODED_LIMIT as u64
@@ -78,12 +86,15 @@ impl WalAssembly {
         if digest(&snapshot) != pending.record.snapshot_digest {
             return Err(storage_error("checkpoint record stream checksum mismatch"));
         }
+        let recovered = decode_owned_snapshot(snapshot, validation)?;
         let mut record = pending.record;
-        record.snapshot = snapshot.freeze();
         record.version = 2;
         record.snapshot_total = 0;
         record.snapshot_digest = 0;
-        Ok(Some(record))
+        Ok(Some(RecoveredBatch {
+            record,
+            snapshot: Some(recovered),
+        }))
     }
     pub(super) fn finish(&self) -> Result<(), RaftError> {
         if self.pending.is_some() {
@@ -898,7 +909,11 @@ mod tests {
         first.snapshot_digest = 42;
         for kind in 0..5 {
             let mut assembly = WalAssembly::default();
-            assert!(assembly.accept(first.clone(), 0).unwrap().is_none());
+            let mut validation = Vec::new();
+            assert!(assembly
+                .accept(first.clone(), 0, &mut validation)
+                .unwrap()
+                .is_none());
             let mut next = first.clone();
             next.hard_state.clear();
             next.snapshot_offset = 16;
@@ -910,19 +925,34 @@ mod tests {
                 4 => {}
                 _ => unreachable!(),
             }
-            assert!(assembly.accept(next, 100).is_err(), "case {kind}");
+            assert!(
+                assembly.accept(next, 100, &mut validation).is_err(),
+                "case {kind}"
+            );
         }
     }
     #[test]
-    fn wal_assembly_retains_fragments_until_one_final_copy() {
+    fn wal_assembly_retains_fragments_and_moves_the_completed_snapshot() {
         let options = PeerOptions {
             group_id: 1,
             node_id: 2,
             voters: vec![1, 2, 3],
             wal_path: PathBuf::new(),
         };
-        let bytes: Vec<_> = (0..48).collect();
+        let snapshot = Snapshot {
+            data: (0..48).collect(),
+            metadata: Some(SnapshotMetadata {
+                index: 9,
+                term: 4,
+                conf_state: Some(ConfState {
+                    voters: vec![1, 2, 3],
+                    ..Default::default()
+                }),
+            }),
+        };
+        let bytes = snapshot.encode_to_vec();
         let mut assembly = WalAssembly::default();
+        let mut validation = Vec::new();
         for (number, chunk) in bytes.chunks(16).enumerate() {
             let mut record = batch(
                 &options,
@@ -939,16 +969,19 @@ mod tests {
             record.snapshot_total = bytes.len() as u64;
             record.snapshot_digest = digest(&bytes);
             let pointer = record.snapshot.as_ptr();
-            let result = assembly.accept(record, number as u64 * 100).unwrap();
-            if number + 1 < 3 {
+            let result = assembly
+                .accept(record, number as u64 * 100, &mut validation)
+                .unwrap();
+            if number + 1 < bytes.len().div_ceil(16) {
                 let pending = assembly.pending.as_ref().unwrap();
                 assert_eq!(pending.fragments.last().unwrap().as_ptr(), pointer);
                 assert_eq!(pending.length, (number + 1) * 16);
                 assert!(result.is_none());
             } else {
-                let record = result.unwrap();
-                assert_eq!(record.version, 2);
-                assert_eq!(record.snapshot.as_ref(), bytes);
+                let recovered = result.unwrap();
+                assert_eq!(recovered.record.version, 2);
+                assert!(recovered.record.snapshot.is_empty());
+                assert_eq!(recovered.snapshot.unwrap().as_ref(), &snapshot);
                 assert!(assembly.pending.is_none());
             }
         }

@@ -114,6 +114,69 @@ fn exact_snapshot_encoding(snapshot: &Snapshot, bytes: &[u8], output: &mut Vec<u
         && bytes[data_end..] == output[prefix..]
 }
 
+fn decode_owned_snapshot(
+    bytes: prost::bytes::BytesMut,
+    output: &mut Vec<u8>,
+) -> Result<Arc<Snapshot>, RaftError> {
+    let wire = bytes.as_ref();
+    if wire.first() != Some(&0x0a) {
+        return Err(storage_error("checkpoint snapshot encoding is invalid"));
+    }
+    let mut cursor = &wire[1..];
+    let data_len =
+        usize::try_from(prost::encoding::decode_varint(&mut cursor).map_err(storage_error)?)
+            .map_err(storage_error)?;
+    if data_len == 0 {
+        return Err(storage_error("checkpoint snapshot data is empty"));
+    }
+    let data_start = wire.len() - cursor.len();
+    let data_end = data_start
+        .checked_add(data_len)
+        .filter(|end| *end < wire.len())
+        .ok_or_else(|| storage_error("checkpoint snapshot data is truncated"))?;
+    if wire[data_end] != 0x12 {
+        return Err(storage_error("checkpoint snapshot metadata is missing"));
+    }
+    let mut metadata_cursor = &wire[data_end + 1..];
+    let metadata_len = usize::try_from(
+        prost::encoding::decode_varint(&mut metadata_cursor).map_err(storage_error)?,
+    )
+    .map_err(storage_error)?;
+    let metadata_start = wire.len() - metadata_cursor.len();
+    let metadata_end = metadata_start
+        .checked_add(metadata_len)
+        .filter(|end| *end == wire.len())
+        .ok_or_else(|| storage_error("checkpoint snapshot metadata is truncated"))?;
+    let metadata =
+        SnapshotMetadata::decode(&wire[metadata_start..metadata_end]).map_err(storage_error)?;
+
+    let mut prefix = [0u8; 16];
+    let prefix_capacity = prefix.len();
+    let mut prefix_output = prefix.as_mut_slice();
+    prost::encoding::encode_key(
+        1,
+        prost::encoding::WireType::LengthDelimited,
+        &mut prefix_output,
+    );
+    prost::encoding::encode_varint(data_len as u64, &mut prefix_output);
+    let prefix_len = prefix_capacity - prefix_output.len();
+    output.clear();
+    prost::encoding::message::encode(2, &metadata, &mut *output);
+    if wire[..data_start] != prefix[..prefix_len] || wire[data_end..] != *output {
+        return Err(storage_error(
+            "checkpoint snapshot encoding is not canonical",
+        ));
+    }
+
+    let mut data = Vec::from(bytes);
+    data.copy_within(data_start..data_end, 0);
+    data.truncate(data_len);
+    Ok(Arc::new(Snapshot {
+        data,
+        metadata: Some(metadata),
+    }))
+}
+
 fn encode_packet(group: u64, message: &Message) -> Result<Vec<u8>, RaftError> {
     encode_envelope(1, group, message)
 }
@@ -282,14 +345,30 @@ enum SnapshotSource {
     Received(Arc<checkpoint_file::Blob>),
 }
 fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
-    install_from(store, batch, SnapshotSource::Journal, None, &mut Vec::new())
+    install_from(
+        store,
+        batch,
+        SnapshotSource::Journal,
+        None,
+        false,
+        &mut Vec::new(),
+    )
 }
 fn install_with_scratch(
     store: &PeerStorage,
-    batch: &WalBatch,
+    recovered: snapshot_stream::RecoveredBatch,
     validation: &mut Vec<u8>,
 ) -> Result<(), RaftError> {
-    install_from(store, batch, SnapshotSource::Journal, None, validation)
+    let snapshot_stream::RecoveredBatch { record, snapshot } = recovered;
+    let snapshot_wire_validated = snapshot.is_some();
+    install_from(
+        store,
+        &record,
+        SnapshotSource::Journal,
+        snapshot,
+        snapshot_wire_validated,
+        validation,
+    )
 }
 fn install_local(
     store: &PeerStorage,
@@ -302,6 +381,7 @@ fn install_local(
         batch,
         captured.map_or(SnapshotSource::Journal, SnapshotSource::LocalCapture),
         Some(snapshot),
+        false,
         &mut Vec::new(),
     )
 }
@@ -316,6 +396,7 @@ fn install_received(
         batch,
         payload.map_or(SnapshotSource::Journal, SnapshotSource::Received),
         Some(snapshot),
+        false,
         &mut Vec::new(),
     )
 }
@@ -324,6 +405,7 @@ fn install_from(
     batch: &WalBatch,
     source: SnapshotSource,
     snapshot: Option<Arc<Snapshot>>,
+    snapshot_wire_validated: bool,
     validation: &mut Vec<u8>,
 ) -> Result<(), RaftError> {
     let entries = batch
@@ -336,7 +418,16 @@ fn install_from(
     } else {
         Some(HardState::decode(batch.hard_state.as_slice()).map_err(storage_error)?)
     };
-    install_decoded_with_scratch(store, batch, source, snapshot, &entries, hs, validation)
+    install_decoded_with_scratch(
+        store,
+        batch,
+        source,
+        snapshot,
+        snapshot_wire_validated,
+        &entries,
+        hs,
+        validation,
+    )
 }
 
 // Live Ready entries already have their decoded form. Journal recovery decodes
@@ -348,13 +439,23 @@ fn install_decoded(
     entries: &[Entry],
     hs: Option<HardState>,
 ) -> Result<(), RaftError> {
-    install_decoded_with_scratch(store, batch, source, None, entries, hs, &mut Vec::new())
+    install_decoded_with_scratch(
+        store,
+        batch,
+        source,
+        None,
+        false,
+        entries,
+        hs,
+        &mut Vec::new(),
+    )
 }
 fn install_decoded_with_scratch(
     store: &PeerStorage,
     batch: &WalBatch,
     source: SnapshotSource,
     snapshot: Option<Arc<Snapshot>>,
+    snapshot_wire_validated: bool,
     entries: &[Entry],
     hs: Option<HardState>,
     validation: &mut Vec<u8>,
@@ -390,7 +491,7 @@ fn install_decoded_with_scratch(
             }
         }
     }
-    if !batch.snapshot.is_empty() {
+    if snapshot.is_some() || !batch.snapshot.is_empty() {
         let snapshot = match snapshot {
             Some(snapshot) => snapshot,
             None => Arc::new(Snapshot::decode(batch.snapshot.as_ref()).map_err(storage_error)?),
@@ -415,7 +516,8 @@ fn install_decoded_with_scratch(
         let next = hs
             .as_ref()
             .ok_or_else(|| storage_error("snapshot needs hard state"))?;
-        if !exact_snapshot_encoding(&snapshot, &batch.snapshot, validation)
+        if (!snapshot_wire_validated
+            && !exact_snapshot_encoding(&snapshot, &batch.snapshot, validation))
             || (!local_capture && meta.index < previous.commit)
             || meta.index > next.commit
             || meta.term > next.term
@@ -598,8 +700,8 @@ impl Journal {
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
             }
-            if let Some(record) = assembly.accept(record, offset)? {
-                install_with_scratch(store, &record, &mut validation)?;
+            if let Some(record) = assembly.accept(record, offset, &mut validation)? {
+                install_with_scratch(store, record, &mut validation)?;
             }
             // A future retained field may keep the wire alive; allocate on the
             // next record in that case instead of making recovery depend on reuse.
@@ -2087,6 +2189,56 @@ mod tests {
         extra_field.extend_from_slice(&[0x68, 0x01]);
         let decoded = WalBatch::decode(extra_field.as_slice()).unwrap();
         assert!(!exact_encoding(&decoded, &extra_field, &mut validation));
+    }
+
+    #[test]
+    fn owned_snapshot_decode_reuses_assembly_and_rejects_noncanonical_fields() {
+        use super::*;
+        let snapshot = Snapshot {
+            data: vec![42; SNAPSHOT_FRAGMENT_BYTES + 17],
+            metadata: Some(SnapshotMetadata {
+                index: 17,
+                term: 3,
+                conf_state: Some(ConfState {
+                    voters: vec![1, 2, 3],
+                    ..Default::default()
+                }),
+            }),
+        };
+        let wire = snapshot.encode_to_vec();
+        let assembled = prost::bytes::BytesMut::from(wire.as_slice());
+        let allocation = assembled.as_ptr();
+        let mut validation = Vec::new();
+        let decoded = decode_owned_snapshot(assembled, &mut validation).unwrap();
+        assert_eq!(decoded.as_ref(), &snapshot);
+        assert_eq!(decoded.data.as_ptr(), allocation);
+
+        let mut extra = prost::bytes::BytesMut::from(wire.as_slice());
+        extra.extend_from_slice(&[0x18, 0x01]);
+        assert!(decode_owned_snapshot(extra, &mut validation).is_err());
+
+        let small = Snapshot {
+            data: vec![42],
+            metadata: snapshot.metadata,
+        }
+        .encode_to_vec();
+        assert_eq!(&small[..2], &[0x0a, 0x01]);
+        let mut overlong = Vec::with_capacity(small.len() + 1);
+        overlong.extend_from_slice(&[0x0a, 0x81, 0x00]);
+        overlong.extend_from_slice(&small[2..]);
+        assert!(decode_owned_snapshot(
+            prost::bytes::BytesMut::from(overlong.as_slice()),
+            &mut validation,
+        )
+        .is_err());
+
+        let mut explicit_empty = vec![0x0a, 0x00];
+        explicit_empty.extend_from_slice(&small[3..]);
+        assert!(decode_owned_snapshot(
+            prost::bytes::BytesMut::from(explicit_empty.as_slice()),
+            &mut validation,
+        )
+        .is_err());
     }
 
     #[test]
