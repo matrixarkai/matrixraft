@@ -282,36 +282,40 @@ enum SnapshotSource {
     Received(Arc<checkpoint_file::Blob>),
 }
 fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
-    install_from(store, batch, SnapshotSource::Journal, &mut Vec::new())
+    install_from(store, batch, SnapshotSource::Journal, None, &mut Vec::new())
 }
 fn install_with_scratch(
     store: &PeerStorage,
     batch: &WalBatch,
     validation: &mut Vec<u8>,
 ) -> Result<(), RaftError> {
-    install_from(store, batch, SnapshotSource::Journal, validation)
+    install_from(store, batch, SnapshotSource::Journal, None, validation)
 }
 fn install_local(
     store: &PeerStorage,
     batch: &WalBatch,
+    snapshot: Arc<Snapshot>,
     captured: Option<Arc<checkpoint_file::Blob>>,
 ) -> Result<(), RaftError> {
     install_from(
         store,
         batch,
         captured.map_or(SnapshotSource::Journal, SnapshotSource::LocalCapture),
+        Some(snapshot),
         &mut Vec::new(),
     )
 }
 fn install_received(
     store: &PeerStorage,
     batch: &WalBatch,
+    snapshot: Arc<Snapshot>,
     payload: Option<Arc<checkpoint_file::Blob>>,
 ) -> Result<(), RaftError> {
     install_from(
         store,
         batch,
         payload.map_or(SnapshotSource::Journal, SnapshotSource::Received),
+        Some(snapshot),
         &mut Vec::new(),
     )
 }
@@ -319,6 +323,7 @@ fn install_from(
     store: &PeerStorage,
     batch: &WalBatch,
     source: SnapshotSource,
+    snapshot: Option<Arc<Snapshot>>,
     validation: &mut Vec<u8>,
 ) -> Result<(), RaftError> {
     let entries = batch
@@ -331,7 +336,7 @@ fn install_from(
     } else {
         Some(HardState::decode(batch.hard_state.as_slice()).map_err(storage_error)?)
     };
-    install_decoded_with_scratch(store, batch, source, &entries, hs, validation)
+    install_decoded_with_scratch(store, batch, source, snapshot, &entries, hs, validation)
 }
 
 // Live Ready entries already have their decoded form. Journal recovery decodes
@@ -343,12 +348,13 @@ fn install_decoded(
     entries: &[Entry],
     hs: Option<HardState>,
 ) -> Result<(), RaftError> {
-    install_decoded_with_scratch(store, batch, source, entries, hs, &mut Vec::new())
+    install_decoded_with_scratch(store, batch, source, None, entries, hs, &mut Vec::new())
 }
 fn install_decoded_with_scratch(
     store: &PeerStorage,
     batch: &WalBatch,
     source: SnapshotSource,
+    snapshot: Option<Arc<Snapshot>>,
     entries: &[Entry],
     hs: Option<HardState>,
     validation: &mut Vec<u8>,
@@ -385,7 +391,10 @@ fn install_decoded_with_scratch(
         }
     }
     if !batch.snapshot.is_empty() {
-        let snapshot = Snapshot::decode(batch.snapshot.as_ref()).map_err(storage_error)?;
+        let snapshot = match snapshot {
+            Some(snapshot) => snapshot,
+            None => Arc::new(Snapshot::decode(batch.snapshot.as_ref()).map_err(storage_error)?),
+        };
         let payload = if batch.version == 4 {
             if !snapshot.data.is_empty() {
                 return Err(storage_error("file checkpoint contains inline data"));
@@ -424,7 +433,7 @@ fn install_decoded_with_scratch(
                 ..Default::default()
             })
             .map_err(storage_error)?;
-        *store.checkpoint.lock().unwrap() = Some(Arc::new(snapshot));
+        *store.checkpoint.lock().unwrap() = Some(snapshot);
         let mut current = store.payload.lock().unwrap();
         if let Some(old) = current.as_ref() {
             if payload
@@ -1310,7 +1319,7 @@ impl DurablePeer {
                 "checkpoint requires a settled applied state within the snapshot bound",
             ));
         }
-        let snapshot = Snapshot {
+        let snapshot = Arc::new(Snapshot {
             data,
             metadata: Some(SnapshotMetadata {
                 index,
@@ -1324,7 +1333,7 @@ impl DurablePeer {
                     ),
                 ),
             }),
-        };
+        });
         validate_snapshot_for(&snapshot, &self.options.voters, &self.store.permitted)?;
         let first = self.store.first_index().map_err(storage_error)?;
         if index < first {
@@ -1369,7 +1378,7 @@ impl DurablePeer {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
                 }
-                install_local(&self.store, &record, payload.clone())?;
+                install_local(&self.store, &record, snapshot, payload.clone())?;
                 self.store.wl().set_conf_state(current_configuration);
                 Ok(())
             });
@@ -1789,7 +1798,7 @@ impl DurablePeer {
                 }
             }
             if !ready.snapshot().is_empty() {
-                let snapshot = ready.snapshot().clone();
+                let snapshot = Arc::new(ready.snapshot().clone());
                 validate_snapshot_for(&snapshot, &self.options.voters, &self.store.permitted)?;
                 let hs = ready
                     .hs()
@@ -1822,7 +1831,7 @@ impl DurablePeer {
                 }
                 // Receive finalization already validated and synced this owned
                 // payload. Reuse it without scanning it again on the Raft loop.
-                install_received(&self.store, &record, payload)?;
+                install_received(&self.store, &record, Arc::clone(&snapshot), payload)?;
                 self.restore_payload(&snapshot, restore)?;
                 self.incoming_payload = None;
             } else if ready.hs().is_some() || !ready.entries().is_empty() {
@@ -2525,19 +2534,42 @@ mod tests {
         record.snapshot = snapshot.encode_to_vec().into();
         record.payload_manifest = payload.manifest.encode_to_vec();
         let before = peer.store.first_index().unwrap();
-        assert!(install_received(&peer.store, &record, Some(Arc::clone(&payload))).is_err());
+        assert!(install_received(
+            &peer.store,
+            &record,
+            Arc::new(snapshot.clone()),
+            Some(Arc::clone(&payload)),
+        )
+        .is_err());
         assert_eq!(peer.store.first_index().unwrap(), before);
         assert!(peer.store.checkpoint.lock().unwrap().is_none());
 
         snapshot.metadata.as_mut().unwrap().index = hard.commit;
         record.snapshot = snapshot.encode_to_vec().into();
         record.payload_manifest.push(0);
-        assert!(install_received(&peer.store, &record, Some(Arc::clone(&payload))).is_err());
+        assert!(install_received(
+            &peer.store,
+            &record,
+            Arc::new(snapshot.clone()),
+            Some(Arc::clone(&payload)),
+        )
+        .is_err());
         assert_eq!(peer.store.first_index().unwrap(), before);
         assert!(peer.store.checkpoint.lock().unwrap().is_none());
 
         record.payload_manifest = payload.manifest.encode_to_vec();
-        install_received(&peer.store, &record, Some(Arc::clone(&payload))).unwrap();
+        let snapshot = Arc::new(snapshot);
+        install_received(
+            &peer.store,
+            &record,
+            Arc::clone(&snapshot),
+            Some(Arc::clone(&payload)),
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(
+            peer.store.checkpoint.lock().unwrap().as_ref().unwrap(),
+            &snapshot
+        ));
         let installed = peer.store.payload.lock().unwrap().clone().unwrap();
         assert!(
             Arc::ptr_eq(&installed, &payload),
