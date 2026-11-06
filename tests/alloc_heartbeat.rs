@@ -17,16 +17,14 @@
 //!
 //! | peers reached | before | after | per peer before | after |
 //! |---|---|---|---|---|
-//! | 2 | 3.00 | 2.00 | 1.50 | 1.00 |
-//! | 4 | 9.00 | 3.00 | 2.25 | 0.75 |
-//! | 6 | 14.00 | 4.00 | 2.33 | 0.67 |
-//! | 8 | 26.00 | 5.00 | 3.25 | 0.62 |
+//! | 2 | 2.00 | 1.00 | 1.00 | 0.50 |
+//! | 4 | 3.00 | 1.00 | 0.75 | 0.25 |
+//! | 6 | 4.00 | 1.00 | 0.67 | 0.17 |
+//! | 8 | 5.00 | 1.00 | 0.62 | 0.12 |
 //!
-//! **This asserts the shape, not a constant.** The defect was that the cost
-//! per peer *rose* with the group; the fix is that it does not. A shape
-//! assertion needs no tuned threshold and cannot drift, so it says what the
-//! change is actually about. A loose slope bound sits beside it to catch a
-//! regression that stays linear but gets much worse.
+//! The single allocation is the node-id routing buffer. The commit-index pass
+//! clears and reuses that buffer, so neither the number of allocations nor the
+//! number of growth steps rises with the group.
 //!
 //! One test, in a file of its own, because the counter is the process
 //! allocator.
@@ -98,6 +96,8 @@ fn a_heartbeat_does_not_cost_more_per_peer_as_the_group_grows() {
     println!("per round: {small_reached} peers {small:.2}, {large_reached} peers {large:.2}");
     println!("per peer: {small_per_peer:.2} -> {large_per_peer:.2}, slope {slope:.3}");
 
+    assert_eq!(small, 1.0, "a heartbeat should allocate one routing buffer");
+    assert_eq!(large, 1.0, "that buffer should also serve commit selection");
     assert!(
         large_per_peer <= small_per_peer,
         "the cost per peer must not grow with the group: {small_per_peer:.2} at \

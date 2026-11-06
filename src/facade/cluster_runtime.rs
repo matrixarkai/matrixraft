@@ -959,14 +959,21 @@ impl RaftCluster {
             return Ok(0);
         }
         self.mark_peer_active(leader_id)?;
-        let peer_ids = self
-            .nodes
-            .keys()
-            .copied()
-            .filter(|peer_id| *peer_id != leader_id)
-            .collect::<Vec<_>>();
+        if self.nodes.len() == 1 {
+            return Ok(0);
+        }
+        // Size this from the node count because the filtered iterator has no
+        // useful lower bound: collecting it grows through several buffers.
+        // The same allocation becomes commit-index scratch after routing.
+        let mut peer_ids = Vec::with_capacity(self.nodes.len());
+        peer_ids.extend(
+            self.nodes
+                .keys()
+                .copied()
+                .filter(|peer_id| *peer_id != leader_id),
+        );
         let mut sent = 0_u64;
-        for peer_id in peer_ids {
+        for &peer_id in &peer_ids {
             let peer_healthy = self
                 .nodes
                 .get(&peer_id)
@@ -1037,7 +1044,7 @@ impl RaftCluster {
         // reached nobody changes nothing, which is what the per-response form
         // did: with no responses there was no recompute.
         if sent > 0 {
-            self.refresh_commit_index();
+            self.refresh_commit_index_with_scratch(&mut peer_ids);
             self.leader_lease_valid = self.leader_lease_quorum_reached();
         }
         Ok(sent)
