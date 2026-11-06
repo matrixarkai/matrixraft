@@ -94,16 +94,18 @@ core storage does not retain application data. The allocation probe also creates
 and reopens 1 MiB and 5 MiB checkpoints, then verifies every restored byte outside
 the measured open call:
 
-| Checkpoint bytes | Old reopen allocated bytes | Retained payload | Shared WAL snapshot bytes | Reused validation buffer |
-| ---: | ---: | ---: | ---: | ---: |
-| 1048576 | 9439915 | 7342779 | 6294212 | 5245621 |
-| 5242880 | 61869246 | 51383502 | 47189350 | 42994863 |
+| Checkpoint bytes | Old reopen allocated bytes | Retained payload | Shared WAL snapshot bytes | Reused validation buffer | Reused read buffer |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1048576 | 9439915 | 7342779 | 6294212 | 5245621 | 5245621 |
+| 5242880 | 61869246 | 51383502 | 47189350 | 42994863 | 38800376 |
 
 The retained payload and shared snapshot changes remove approximately two
 payload-sized copies. Reusing one canonical-encoding buffer across WAL records
 removes another 1,048,591 allocated bytes for 1 MiB and 4,194,487 bytes for the
 segmented 5 MiB checkpoint. These local release-mode results measure allocation
-volume, not peak resident memory or restart latency.
+volume, not peak resident memory or restart latency. Reusing the bounded record
+read buffer removes another 4,194,487 allocated bytes from the segmented case;
+the single-record case is unchanged.
 
 Checkpoint replacement reuses one encoded WAL frame buffer across snapshot
 fragments, retained suffix records and the final hard-state record. The same
