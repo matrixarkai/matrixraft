@@ -6858,20 +6858,36 @@ impl RaftCluster {
     fn reset_replication_pipelines_for_leader(&mut self, leader_id: NodeId) {
         let next_index = self.last_log_index.saturating_add(1);
         let limits = self.config.pipeline_limits();
-        for node_id in self.nodes.keys().copied().collect::<Vec<_>>() {
-            let pipeline = self.peer_pipelines.entry(node_id).or_insert_with(|| {
-                ReplicationPipeline::new(node_id, next_index, limits)
-            });
-            let is_leader = node_id == leader_id;
-            pipeline.reset_for_leader_transition(
-                if is_leader { self.last_log_index } else { 0 },
-                next_index,
-                if is_leader {
-                    ProgressState::Replicate
-                } else {
-                    ProgressState::Probe
-                },
-            );
+        let mut after = std::ops::Bound::Unbounded;
+        loop {
+            let mut node_ids = [0; NODE_ID_CHUNK];
+            let mut node_count = 0;
+            for (&node_id, _) in self.nodes.range((after, std::ops::Bound::Unbounded)) {
+                node_ids[node_count] = node_id;
+                node_count += 1;
+                if node_count == node_ids.len() {
+                    break;
+                }
+            }
+            if node_count == 0 {
+                break;
+            }
+            after = std::ops::Bound::Excluded(node_ids[node_count - 1]);
+            for &node_id in &node_ids[..node_count] {
+                let pipeline = self.peer_pipelines.entry(node_id).or_insert_with(|| {
+                    ReplicationPipeline::new(node_id, next_index, limits)
+                });
+                let is_leader = node_id == leader_id;
+                pipeline.reset_for_leader_transition(
+                    if is_leader { self.last_log_index } else { 0 },
+                    next_index,
+                    if is_leader {
+                        ProgressState::Replicate
+                    } else {
+                        ProgressState::Probe
+                    },
+                );
+            }
         }
     }
 
