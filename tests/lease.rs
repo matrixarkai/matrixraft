@@ -107,6 +107,23 @@ fn leader_lease_quorum_math_tracks_membership_changes() {
 }
 
 #[test]
+fn leader_lease_selects_the_large_membership_quorum_expiry() {
+    let mut lease = LeaderLease::new(1, 100);
+    lease.update_members(voters(&(1..=33).collect::<Vec<_>>()));
+    lease.reset(1);
+
+    for node_id in 2..=33 {
+        assert!(lease.on_recv_lease_confirm(1, node_id, 100 + node_id, 100));
+    }
+
+    assert!(lease.in_lease(1, 100));
+    // Thirty-three voters need seventeen live expiries. The leader contributes
+    // 200, and followers contribute 202 through 233, so the seventeenth value
+    // in ascending order is 217.
+    assert_eq!(lease.last_active_lease_end_ms(), Some(217));
+}
+
+#[test]
 fn leader_lease_excludes_learners_and_resets_promoted_learner_state() {
     let mut lease = LeaderLease::new(1, 100);
     lease.update_members(peers_with_roles(&[
