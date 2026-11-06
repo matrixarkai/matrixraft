@@ -17,14 +17,13 @@
 //!
 //! | peers reached | before | after | per peer before | after |
 //! |---|---|---|---|---|
-//! | 2 | 2.00 | 1.00 | 1.00 | 0.50 |
-//! | 4 | 3.00 | 1.00 | 0.75 | 0.25 |
-//! | 6 | 4.00 | 1.00 | 0.67 | 0.17 |
-//! | 8 | 5.00 | 1.00 | 0.62 | 0.12 |
+//! | 2 | 2.00 | 0.00 | 1.00 | 0.00 |
+//! | 4 | 3.00 | 0.00 | 0.75 | 0.00 |
+//! | 6 | 4.00 | 0.00 | 0.67 | 0.00 |
+//! | 8 | 5.00 | 0.00 | 0.62 | 0.00 |
 //!
-//! The single allocation is the node-id routing buffer. The commit-index pass
-//! clears and reuses that buffer, so neither the number of allocations nor the
-//! number of growth steps rises with the group.
+//! Peer ids move through fixed stack chunks, and commit selection uses a stack
+//! order statistic with an allocation-free fallback for larger memberships.
 //!
 //! One test, in a file of its own, because the counter is the process
 //! allocator.
@@ -86,9 +85,11 @@ fn per_round(peers: usize, rounds: usize) -> (f64, u64) {
 }
 
 #[test]
-fn a_heartbeat_does_not_cost_more_per_peer_as_the_group_grows() {
+fn a_heartbeat_allocates_nothing_after_warmup() {
     let (small, small_reached) = per_round(3, 300);
-    let (large, large_reached) = per_round(9, 300);
+    // Thirty-three members cross both stack bounds: routing needs more than
+    // one peer chunk and commit selection uses its large-membership path.
+    let (large, large_reached) = per_round(33, 300);
     let small_per_peer = small / small_reached as f64;
     let large_per_peer = large / large_reached as f64;
     let slope = (large - small) / (large_reached - small_reached) as f64;
@@ -96,8 +97,14 @@ fn a_heartbeat_does_not_cost_more_per_peer_as_the_group_grows() {
     println!("per round: {small_reached} peers {small:.2}, {large_reached} peers {large:.2}");
     println!("per peer: {small_per_peer:.2} -> {large_per_peer:.2}, slope {slope:.3}");
 
-    assert_eq!(small, 1.0, "a heartbeat should allocate one routing buffer");
-    assert_eq!(large, 1.0, "that buffer should also serve commit selection");
+    assert_eq!(
+        small, 0.0,
+        "a warmed heartbeat should retain no heap scratch"
+    );
+    assert_eq!(
+        large, 0.0,
+        "a larger group should also need no heap scratch"
+    );
     assert!(
         large_per_peer <= small_per_peer,
         "the cost per peer must not grow with the group: {small_per_peer:.2} at \

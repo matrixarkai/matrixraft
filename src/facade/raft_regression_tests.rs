@@ -1811,6 +1811,47 @@ mod tests {
     }
 
     #[test]
+    fn commit_quorum_selection_scales_past_inline_candidates() {
+        let peers = (1..=17)
+            .map(|node_id| Peer {
+                node_id,
+                raft_addr: format!("127.0.0.1:{}", 21_000 + node_id),
+                snapshot_addr: format!("127.0.0.1:{}", 22_000 + node_id),
+                role: ReplicaRole::Voter,
+                auto_promote: false,
+            })
+            .collect();
+        let mut cluster = RaftCluster::new(11, Config::default(), peers).expect("cluster");
+        cluster.current_term = 1;
+        cluster.leader_id = Some(17);
+        for node in cluster.nodes.values_mut() {
+            node.hard_state.current_term = 1;
+            node.raft_role = if node.id == 17 {
+                StateRole::Leader
+            } else {
+                StateRole::Follower
+            };
+            for index in 1..=node.id {
+                node.append_entry(std::sync::Arc::new(LogEntry {
+                    log_id: LogId { term: 1, index },
+                    payload: Vec::new(),
+                    is_command: true,
+                }));
+            }
+        }
+
+        cluster.refresh_commit_index();
+
+        // Seventeen voters need nine copies. Match indexes are 1 through 17,
+        // so exactly nodes 9 through 17 hold index 9.
+        assert_eq!(cluster.commit_index, 9);
+        assert_eq!(
+            cluster.nodes.get(&17).expect("leader").hard_state.committed,
+            Some(LogId { term: 1, index: 9 })
+        );
+    }
+
+    #[test]
     fn runtime_read_safety_rejects_stale_leader_lease() {
         let decision = matrixraft_read_safety_runtime_decision(ReadSafetyRuntimeInput {
             operation: ReadSafetyOperation::LeaseRead,
