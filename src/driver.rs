@@ -1363,12 +1363,15 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
             timeout_ms: MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
         };
         let selector = &self.slots[worker].selector;
-        // Four buffers for the life of this worker, lent to every pass. A
+        // Five buffers for the life of this worker, lent to every pass. A
         // fresh vector per pass was an allocation per pass for the selection
         // and one per group for the drain. Handlers that opt into recycling
-        // return the mail buffer after consuming its contents.
+        // return the mail buffer after consuming its contents. Byte-bounded
+        // delivery uses a second mail buffer so it can stream pieces without
+        // building a vector of vectors.
         let mut envelopes: Vec<Envelope<Mail>> = Vec::new();
         let mut mails: Vec<Mail> = Vec::new();
+        let mut batch: Vec<Mail> = Vec::new();
         let mut channels: Vec<Arc<MailChannel<Envelope<Mail>>>> = Vec::new();
         let mut global_mails: Vec<Envelope<Mail>> = Vec::new();
         while !self.exit.load(Ordering::Relaxed) {
@@ -1407,37 +1410,9 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
                 if self.exit.load(Ordering::Relaxed) {
                     return;
                 }
-                self.drain_channel(worker, &channel, &mut envelopes, &mut mails);
+                self.drain_channel(worker, &channel, &mut envelopes, &mut mails, &mut batch);
             }
         }
-    }
-
-    /// Cuts a drained batch into pieces no larger than `driver_batch_bytes`.
-    ///
-    /// Without a size function there is nothing to measure, so the whole batch
-    /// goes as one and only the count bound applies.
-    fn split_on_byte_budget(&self, mails: Vec<Mail>) -> Vec<Vec<Mail>> {
-        let Some(mail_size) = self.mail_size.as_ref() else {
-            return vec![mails];
-        };
-        let budget = self.options.driver_batch_bytes.max(1);
-        let mut batches: Vec<Vec<Mail>> = Vec::new();
-        let mut current: Vec<Mail> = Vec::new();
-        let mut current_bytes = 0_usize;
-        for mail in mails {
-            let bytes = mail_size(&mail);
-            // A single oversized mail goes on its own rather than never.
-            if !current.is_empty() && current_bytes.saturating_add(bytes) > budget {
-                batches.push(std::mem::take(&mut current));
-                current_bytes = 0;
-            }
-            current_bytes = current_bytes.saturating_add(bytes);
-            current.push(mail);
-        }
-        if !current.is_empty() {
-            batches.push(current);
-        }
-        batches
     }
 
     /// Drains one channel into the handler, borrowing the worker's buffer.
@@ -1453,9 +1428,11 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
         channel: &Arc<MailChannel<Envelope<Mail>>>,
         envelopes: &mut Vec<Envelope<Mail>>,
         mails: &mut Vec<Mail>,
+        batch: &mut Vec<Mail>,
     ) {
         debug_assert!(envelopes.is_empty(), "the lent buffer arrives drained");
         debug_assert!(mails.is_empty(), "the lent mail buffer arrives drained");
+        debug_assert!(batch.is_empty(), "the lent batch buffer arrives drained");
         let channel_id = channel.replica_id();
         channel.fetch_into(&self.slots[worker].selector, envelopes);
         if envelopes.is_empty() {
@@ -1511,23 +1488,42 @@ impl<Mail: Send + 'static> PoolInner<Mail> {
             worker,
         };
         if self.mail_size.is_none() {
-            let count = mails.len() as u64;
-            *mails = handler.handle_mail_recycling(std::mem::take(mails));
-            mails.clear();
-            self.batches_handled.fetch_add(1, Ordering::Relaxed);
-            self.mails_handled.fetch_add(count, Ordering::Relaxed);
+            self.handle_recycling_batch(handler.as_ref(), mails);
             return;
         }
-        for batch in self.split_on_byte_budget(std::mem::take(mails)) {
-            let count = batch.len() as u64;
-            let mut returned = handler.handle_mail_recycling(batch);
-            returned.clear();
-            if returned.capacity() > mails.capacity() {
-                *mails = returned;
+
+        // Keep the full-drain buffer and one byte-bounded batch for the life
+        // of the worker. Building `Vec<Vec<Mail>>` here allocated its outer
+        // list on every drain and allocated each piece before handing it to a
+        // handler that could immediately return the same storage.
+        let mail_size = self.mail_size.as_ref().expect("mail size checked");
+        let budget = self.options.driver_batch_bytes.max(1);
+        let mut source = std::mem::take(mails);
+        let mut batch_bytes = 0_usize;
+        for mail in source.drain(..) {
+            let bytes = mail_size(&mail);
+            // A single oversized mail goes on its own rather than never.
+            if !batch.is_empty() && batch_bytes.saturating_add(bytes) > budget {
+                self.handle_recycling_batch(handler.as_ref(), batch);
+                batch_bytes = 0;
             }
-            self.batches_handled.fetch_add(1, Ordering::Relaxed);
-            self.mails_handled.fetch_add(count, Ordering::Relaxed);
+            batch_bytes = batch_bytes.saturating_add(bytes);
+            batch.push(mail);
         }
+        if !batch.is_empty() {
+            self.handle_recycling_batch(handler.as_ref(), batch);
+        }
+        // `drain` emptied the source without releasing its capacity, so the
+        // next channel visit can gather the full input without growing again.
+        *mails = source;
+    }
+
+    fn handle_recycling_batch(&self, handler: &dyn DriverMailHandler<Mail>, batch: &mut Vec<Mail>) {
+        let count = batch.len() as u64;
+        *batch = handler.handle_mail_recycling(std::mem::take(batch));
+        batch.clear();
+        self.batches_handled.fetch_add(1, Ordering::Relaxed);
+        self.mails_handled.fetch_add(count, Ordering::Relaxed);
     }
 }
 
