@@ -1013,7 +1013,7 @@ impl RaftCluster {
             // N, which is why a heartbeat cost more per peer the more peers
             // there were. The deferral is the one the inner function's own doc
             // comment describes: both results depend only on the final state.
-            self.handle_append_entries_response_inner(leader_id, peer_id, response, false)?;
+            self.handle_append_entries_response_inner(leader_id, peer_id, response, false, true)?;
             if let Some(pipeline) = self.peer_pipelines.get_mut(&peer_id) {
                 pipeline.record_heartbeat_response();
             }
@@ -1333,6 +1333,16 @@ impl RaftCluster {
     where
         I: IntoIterator<Item = NodeId>,
     {
+        if !self.begin_leader_lease_renewal() {
+            return false;
+        }
+        for node_id in acknowledgements {
+            self.record_leader_lease_confirmation_inner(node_id, false);
+        }
+        self.finish_leader_lease_renewal()
+    }
+
+    fn begin_leader_lease_renewal(&mut self) -> bool {
         if self.leader_id.is_none() {
             self.invalidate_leader_lease();
             return false;
@@ -1356,12 +1366,10 @@ impl RaftCluster {
         // departed node's cannot be counted either: the quorum loop walks
         // `self.nodes` and looks the confirmation up by id, so an id that is
         // no longer a member is never asked about.
-        for node_id in acknowledgements {
-            // Deferred: the quorum is evaluated once below, so evaluating it
-            // per acknowledgement was O(N^2) for a result that only depends on
-            // the final set.
-            self.record_leader_lease_confirmation_inner(node_id, false);
-        }
+        true
+    }
+
+    fn finish_leader_lease_renewal(&mut self) -> bool {
         self.leader_lease_valid = self.leader_lease_quorum_reached();
         self.leader_lease_valid
     }
@@ -3063,7 +3071,7 @@ impl RaftCluster {
         peer_id: NodeId,
         response: AppendEntriesResponse,
     ) -> Result<(), RaftError> {
-        self.handle_append_entries_response_inner(local_node_id, peer_id, response, true)
+        self.handle_append_entries_response_inner(local_node_id, peer_id, response, true, true)
     }
 
     /// `recompute_aggregates` exists so a caller applying a whole round of
@@ -3077,12 +3085,16 @@ impl RaftCluster {
     /// round of N responses cost O(N^2). Both results depend only on the final
     /// state, so the intermediate passes cannot change the outcome -- only how
     /// long it takes to reach it.
+    ///
+    /// `record_lease_confirmation` is false when the caller owns a fresh lease
+    /// epoch and records only the successful responses itself.
     fn handle_append_entries_response_inner(
         &mut self,
         local_node_id: NodeId,
         peer_id: NodeId,
         response: AppendEntriesResponse,
         recompute_aggregates: bool,
+        record_lease_confirmation: bool,
     ) -> Result<(), RaftError> {
         self.nodes
             .get(&local_node_id)
@@ -3116,14 +3128,17 @@ impl RaftCluster {
             }
             return Ok(());
         }
-        if response.lease_confirmation_epoch > 0 && response.lease_duration_ms > 0 {
+        if record_lease_confirmation
+            && response.lease_confirmation_epoch > 0
+            && response.lease_duration_ms > 0
+        {
             let _ = self.receive_leader_lease_confirmation_inner(
                 peer_id,
                 response.lease_confirmation_epoch,
                 response.lease_duration_ms,
                 recompute_aggregates,
             );
-        } else if self.config.enable_lease_read {
+        } else if record_lease_confirmation && self.config.enable_lease_read {
             self.record_leader_lease_confirmation_inner(peer_id, recompute_aggregates);
         }
         let mut append_response_result = Ok(());
@@ -3411,17 +3426,21 @@ impl RaftCluster {
         // than a clone per node.
         let entry = Arc::new(entry);
 
-        // Sized for every node up front. It started at capacity one and
-        // grew by doubling as peers acknowledged, which is an allocation per
-        // power of two for a length the node count already says.
-        let mut lease_acknowledgements = Vec::with_capacity(self.nodes.len());
-        lease_acknowledgements.push(leader_id);
-        let node_ids: Vec<_> = self.nodes.keys().copied().collect();
+        // Start the fresh epoch before responses arrive, then record only
+        // successful acknowledgements into it. The generic response handler
+        // skips its independent lease update for this synthetic local round.
+        let renewing_lease = self.begin_leader_lease_renewal();
+        if renewing_lease {
+            self.record_leader_lease_confirmation_inner(leader_id, false);
+        }
+        // Keep the ids across the loop: once iteration ends, this allocation
+        // becomes the commit-index candidate scratch.
+        let mut node_ids: Vec<_> = self.nodes.keys().copied().collect();
         // No buffer at all. The flush result is discarded here -- it is the
         // pipeline's own state that matters -- and one buffer lent across the
         // followers still allocated its minimum capacity of four, 192 bytes a
         // proposal, for batches nobody read.
-        for node_id in node_ids {
+        for &node_id in &node_ids {
             let Some(node) = self.nodes.get_mut(&node_id) else {
                 continue;
             };
@@ -3463,19 +3482,21 @@ impl RaftCluster {
                 None
             };
             if let Some(response) = response {
-                if response.success {
-                    lease_acknowledgements.push(node_id);
+                if response.success && renewing_lease {
+                    self.record_leader_lease_confirmation_inner(node_id, false);
                 }
                 // Defer the commit-index refresh: this loop applies one response
                 // per node and then refreshes once below, so refreshing inside
                 // each response made a proposal cost O(N^2 log N) in group size.
                 let _ = self.handle_append_entries_response_inner(
-                    leader_id, node_id, response, false,
+                    leader_id, node_id, response, false, false,
                 );
             }
         }
-        self.refresh_commit_index();
-        self.renew_leader_lease_from_acknowledgements(lease_acknowledgements);
+        self.refresh_commit_index_with_scratch(&mut node_ids);
+        if renewing_lease {
+            self.finish_leader_lease_renewal();
+        }
         Ok(log_id)
     }
 
@@ -6619,17 +6640,18 @@ impl RaftCluster {
     }
 
     fn refresh_commit_index(&mut self) {
-        let mut candidate_indexes: Vec<_> = self
-            .nodes
-            .values()
-            .filter(|node| {
-                node.replica_role.participates_in_quorum()
-                    && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness)
-                    && (node.replica_role != ReplicaRole::Witness
-                        || self.count_witness_in_commit_quorum)
-            })
-            .map(Node::match_index)
-            .collect();
+        self.refresh_commit_index_with_scratch(&mut Vec::new());
+    }
+
+    fn refresh_commit_index_with_scratch(&mut self, candidate_indexes: &mut Vec<LogIndex>) {
+        candidate_indexes.clear();
+        candidate_indexes.extend(self.nodes.values().filter_map(|node| {
+            (node.replica_role.participates_in_quorum()
+                && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness)
+                && (node.replica_role != ReplicaRole::Witness
+                    || self.count_witness_in_commit_quorum))
+                .then(|| node.match_index())
+        }));
         let quorum_size = self.commit_quorum_size();
         if candidate_indexes.len() < quorum_size {
             return;
