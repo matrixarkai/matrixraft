@@ -138,6 +138,14 @@ mod probe {
                 let mut replay = DurablePeer::open(options).unwrap();
                 let reopen_allocated = BYTES.load(Ordering::Relaxed) - before;
                 assert!(reopen_allocated < 6 * count * width + 16384 + 1024 * count);
+                if count == 32 && width == 65536 {
+                    assert!(
+                        reopen_allocated < 9 * count * width / 2,
+                        "large replay allocated 4.5 or more payload widths: \
+                         payload={} allocated={reopen_allocated}",
+                        count * width
+                    );
+                }
                 let mut restored = 0;
                 replay
                     .process_ready(|id, bytes| {
@@ -196,8 +204,14 @@ mod probe {
             let allocated = BYTES.load(Ordering::Relaxed) - before;
             if width > 4 * 1024 * 1024 {
                 assert!(
-                    allocated < 15 * width / 2,
-                    "checkpoint reopen allocated 7.5 or more payload widths: \
+                    allocated < 13 * width / 2,
+                    "checkpoint reopen allocated 6.5 or more payload widths: \
+                     payload={width} allocated={allocated}"
+                );
+            } else {
+                assert!(
+                    allocated < 5 * width,
+                    "checkpoint reopen allocated five or more payload widths: \
                      payload={width} allocated={allocated}"
                 );
             }

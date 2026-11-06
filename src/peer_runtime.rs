@@ -520,7 +520,7 @@ impl Journal {
         }
         let mut offset = 0;
         let mut assembly = snapshot_stream::WalAssembly::default();
-        let mut bytes = Vec::new();
+        let mut bytes = prost::bytes::BytesMut::new();
         let mut validation = Vec::new();
         while offset < length {
             let remaining = length - offset;
@@ -558,7 +558,8 @@ impl Journal {
             if digest(&bytes) != u64::from_be_bytes(header[16..24].try_into().unwrap()) {
                 return Err(storage_error("peer WAL payload checksum mismatch"));
             }
-            let record = WalBatch::decode(bytes.as_slice()).map_err(storage_error)?;
+            let wire = bytes.freeze();
+            let record = WalBatch::decode(wire.clone()).map_err(storage_error)?;
             if !matches!(
                 (record.version, record.snapshot.is_empty()),
                 (1, true) | (2, false) | (3, false) | (4, false)
@@ -567,13 +568,16 @@ impl Journal {
                 || record.node != options.node_id
                 || record.voters != options.voters
                 || record.permitted != store.permitted
-                || !exact_encoding(&record, &bytes, &mut validation)
+                || !exact_encoding(&record, &wire, &mut validation)
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
             }
             if let Some(record) = assembly.accept(record, offset)? {
                 install_with_scratch(store, &record, &mut validation)?;
             }
+            // A future retained field may keep the wire alive; allocate on the
+            // next record in that case instead of making recovery depend on reuse.
+            bytes = wire.try_into_mut().unwrap_or_default();
             offset += 24 + size as u64;
         }
         assembly.finish()?;
@@ -2046,6 +2050,31 @@ mod tests {
         extra_field.extend_from_slice(&[0x68, 0x01]);
         let decoded = WalBatch::decode(extra_field.as_slice()).unwrap();
         assert!(!exact_encoding(&decoded, &extra_field, &mut validation));
+    }
+
+    #[test]
+    fn owned_wal_decode_shares_byte_fields_and_reclaims_input() {
+        use super::*;
+        let record = WalBatch {
+            version: 2,
+            group: 17,
+            node: 1,
+            voters: vec![1, 2, 3],
+            entries: vec![vec![19; 4096].into()],
+            snapshot: vec![37; 65536].into(),
+            ..Default::default()
+        };
+        let wire: prost::bytes::Bytes = record.encode_to_vec().into();
+        let start = wire.as_ptr() as usize;
+        let end = start + wire.len();
+        let decoded = WalBatch::decode(wire.clone()).unwrap();
+        for bytes in decoded.entries.iter().chain([&decoded.snapshot]) {
+            let pointer = bytes.as_ptr() as usize;
+            assert!(pointer >= start && pointer + bytes.len() <= end);
+        }
+        drop(decoded);
+        let mutable = wire.try_into_mut().unwrap();
+        assert_eq!(mutable.as_ptr() as usize, start);
     }
 
     #[test]

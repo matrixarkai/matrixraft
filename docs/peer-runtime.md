@@ -71,6 +71,11 @@ Local debug-build measurements with the old decode call and the borrowed call:
 These are allocation volumes (about 29% lower here), not peak memory or
 throughput. WAL bytes and persistence ordering are unchanged.
 
+Owned-buffer WAL decoding also avoids copying encoded byte fields during
+recovery. In the release-mode probe, reopening 32 entries of 65536 bytes fell
+from 10,499,578 to 8,401,478 allocated bytes, a reduction of 2,098,100 bytes.
+The probe still verifies every replayed value after the measured open call.
+
 The same probe also routes a proposal through three durable voters, measures
 allocations only inside `step`, and checks exact committed values and WAL replay
 on every voter. Packet envelope validation compares a stack-encoded header and
@@ -94,10 +99,10 @@ core storage does not retain application data. The allocation probe also creates
 and reopens 1 MiB and 5 MiB checkpoints, then verifies every restored byte outside
 the measured open call:
 
-| Checkpoint bytes | Old reopen allocated bytes | Retained payload | Shared WAL snapshot bytes | Reused validation buffer | Reused read buffer |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1048576 | 9439915 | 7342779 | 6294212 | 5245621 | 5245621 |
-| 5242880 | 61869246 | 51383502 | 47189350 | 42994863 | 38800376 |
+| Checkpoint bytes | Old reopen allocated bytes | Retained payload | Shared WAL snapshot bytes | Reused validation buffer | Reused read buffer | Owned decode buffer |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1048576 | 9439915 | 7342779 | 6294212 | 5245621 | 5245621 | 4197024 |
+| 5242880 | 61869246 | 51383502 | 47189350 | 42994863 | 38800376 | 33557474 |
 
 The retained payload and shared snapshot changes remove approximately two
 payload-sized copies. Reusing one canonical-encoding buffer across WAL records
@@ -105,7 +110,9 @@ removes another 1,048,591 allocated bytes for 1 MiB and 4,194,487 bytes for the
 segmented 5 MiB checkpoint. These local release-mode results measure allocation
 volume, not peak resident memory or restart latency. Reusing the bounded record
 read buffer removes another 4,194,487 allocated bytes from the segmented case;
-the single-record case is unchanged.
+the single-record case is unchanged. Decoding byte fields from the owned read
+buffer and reclaiming that storage removes another 1,048,597 bytes for 1 MiB
+and 5,242,902 bytes for 5 MiB.
 
 Checkpoint replacement reuses one encoded WAL frame buffer across snapshot
 fragments, retained suffix records and the final hard-state record. The same
