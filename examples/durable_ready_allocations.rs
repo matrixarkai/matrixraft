@@ -92,6 +92,9 @@ mod probe {
             let expected = vec![(id, data)];
             assert!(packets >= 4);
             assert!(applied.iter().all(|values| *values == expected));
+            if width == 1024 * 1024 {
+                assert!(allocated < bytes * 13 / 4);
+            }
             drop(peers);
             let mut peers = open();
             let mut replay = vec![Vec::new(); 3];
