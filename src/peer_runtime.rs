@@ -1078,6 +1078,106 @@ impl Journal {
     // entries need not fit one WAL record. Persist the new term/vote first,
     // entries in order, and the commit watermark last, then sync once before
     // the runtime exposes any acknowledgment. Every complete prefix reopens.
+    fn append_decoded_ready(
+        &mut self,
+        record: &mut WalBatch,
+        entries: &[Entry],
+        previous: &HardState,
+    ) -> Result<(), RaftError> {
+        if entries.is_empty() {
+            return self.append(record);
+        }
+        if !record.entries.is_empty()
+            || record.version != 1
+            || !record.snapshot.is_empty()
+            || !record.payload_manifest.is_empty()
+        {
+            return Err(storage_error("decoded append record shape is invalid"));
+        }
+        record.permitted.clone_from(&self.permitted);
+        let complete_size = entries
+            .iter()
+            .try_fold(record.encoded_len(), |size, entry| {
+                let length = entry.encoded_len();
+                size.checked_add(1 + prost::encoding::encoded_len_varint(length as u64) + length)
+            });
+        let Some(complete_size) = complete_size else {
+            return Err(storage_error("peer WAL record exceeds size bound"));
+        };
+        if complete_size <= LIMIT {
+            self.write_decoded_entry_record_into(record, entries, &mut Vec::new())?;
+            self.barriers = self.barriers.saturating_add(1);
+            return self.file.sync_all().map_err(storage_error);
+        }
+
+        let envelope = WalBatch {
+            version: 1,
+            group: record.group,
+            node: record.node,
+            voters: record.voters.clone(),
+            permitted: self.permitted.clone(),
+            ..Default::default()
+        };
+        let overhead = envelope.encoded_len();
+        let mut spans = Vec::new();
+        let mut start = 0;
+        let mut size = overhead;
+        for (index, entry) in entries.iter().enumerate() {
+            let length = entry.encoded_len();
+            let field = 1 + prost::encoding::encoded_len_varint(length as u64) + length;
+            if overhead.saturating_add(field) > LIMIT {
+                return Err(storage_error("peer WAL entry exceeds record bound"));
+            }
+            if size + field > LIMIT {
+                spans.push((start, index, size));
+                start = index;
+                size = overhead;
+            }
+            size += field;
+        }
+        spans.push((start, entries.len(), size));
+        let mut prefix = envelope.clone();
+        if !record.hard_state.is_empty() {
+            let mut floor =
+                HardState::decode(record.hard_state.as_slice()).map_err(storage_error)?;
+            floor.commit = previous.commit;
+            prefix.hard_state = floor.encode_to_vec();
+        }
+        let mut final_state = envelope.clone();
+        if record.hard_state != prefix.hard_state {
+            final_state.hard_state.clone_from(&record.hard_state);
+        }
+        let mut bytes = spans
+            .iter()
+            .map(|(_, _, size)| 24 + *size as u64)
+            .sum::<u64>();
+        for state in [&prefix, &final_state] {
+            if !state.hard_state.is_empty() {
+                if state.encoded_len() > LIMIT {
+                    return Err(storage_error("peer WAL hard state exceeds record bound"));
+                }
+                bytes = bytes.saturating_add(24 + state.encoded_len() as u64);
+            }
+        }
+        if self.length.saturating_add(bytes) > WAL_LIMIT {
+            return Err(storage_error(
+                "peer WAL capacity reached; checkpoint support is required",
+            ));
+        }
+        if !prefix.hard_state.is_empty() {
+            self.write_record(&prefix)?;
+        }
+        let mut metadata = Vec::new();
+        for (start, end, _) in spans {
+            self.write_decoded_entry_record_into(&envelope, &entries[start..end], &mut metadata)?;
+        }
+        if !final_state.hard_state.is_empty() {
+            self.write_record(&final_state)?;
+        }
+        self.barriers = self.barriers.saturating_add(1);
+        self.file.sync_all().map_err(storage_error)
+    }
+    #[cfg(test)]
     fn append_ready(
         &mut self,
         record: &mut WalBatch,
@@ -1376,6 +1476,156 @@ impl Journal {
         for ((start, end), entry) in fields.iter().zip(&batch.entries) {
             slices.push(IoSlice::new(&metadata[*start..*end]));
             slices.push(IoSlice::new(entry));
+        }
+        if suffix_start != metadata.len() {
+            slices.push(IoSlice::new(&metadata[suffix_start..]));
+        }
+        for chunk in slices.chunks_mut(64) {
+            write_all_vectored(&mut self.file, chunk).map_err(storage_error)?;
+        }
+        self.length += 24 + size as u64;
+        self.records = self.records.saturating_add(1);
+        Ok(())
+    }
+    fn write_decoded_entry_record_into(
+        &mut self,
+        batch: &WalBatch,
+        entries: &[Entry],
+        metadata: &mut Vec<u8>,
+    ) -> Result<(), RaftError> {
+        struct Fields {
+            before_data: (usize, usize),
+            before_context: (usize, usize),
+        }
+
+        if entries.is_empty()
+            || !batch.entries.is_empty()
+            || !batch.snapshot.is_empty()
+            || batch.snapshot_offset != 0
+            || batch.snapshot_total != 0
+            || batch.snapshot_digest != 0
+            || !batch.payload_manifest.is_empty()
+        {
+            return Err(storage_error("decoded entry WAL record shape is invalid"));
+        }
+        metadata.clear();
+        if batch.version != 0 {
+            prost::encoding::uint32::encode(1, &batch.version, &mut *metadata);
+        }
+        if batch.group != 0 {
+            prost::encoding::uint64::encode(2, &batch.group, &mut *metadata);
+        }
+        if batch.node != 0 {
+            prost::encoding::uint64::encode(3, &batch.node, &mut *metadata);
+        }
+        prost::encoding::uint64::encode_packed(4, &batch.voters, &mut *metadata);
+        if !batch.hard_state.is_empty() {
+            prost::encoding::bytes::encode(5, &batch.hard_state, &mut *metadata);
+        }
+        let prefix_len = metadata.len();
+        let mut fields = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let before_data = metadata.len();
+            prost::encoding::encode_key(
+                6,
+                prost::encoding::WireType::LengthDelimited,
+                &mut *metadata,
+            );
+            prost::encoding::encode_varint(entry.encoded_len() as u64, &mut *metadata);
+            if entry.entry_type != 0 {
+                prost::encoding::int32::encode(1, &entry.entry_type, &mut *metadata);
+            }
+            if entry.term != 0 {
+                prost::encoding::uint64::encode(2, &entry.term, &mut *metadata);
+            }
+            if entry.index != 0 {
+                prost::encoding::uint64::encode(3, &entry.index, &mut *metadata);
+            }
+            if !entry.data.is_empty() {
+                prost::encoding::encode_key(
+                    4,
+                    prost::encoding::WireType::LengthDelimited,
+                    &mut *metadata,
+                );
+                prost::encoding::encode_varint(entry.data.len() as u64, &mut *metadata);
+            }
+            let before_data_end = metadata.len();
+            let before_context = metadata.len();
+            if entry.sync_log {
+                prost::encoding::bool::encode(5, &entry.sync_log, &mut *metadata);
+            }
+            if !entry.context.is_empty() {
+                prost::encoding::encode_key(
+                    6,
+                    prost::encoding::WireType::LengthDelimited,
+                    &mut *metadata,
+                );
+                prost::encoding::encode_varint(entry.context.len() as u64, &mut *metadata);
+            }
+            fields.push(Fields {
+                before_data: (before_data, before_data_end),
+                before_context: (before_context, metadata.len()),
+            });
+        }
+        let suffix_start = metadata.len();
+        prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
+        let size = entries.iter().try_fold(metadata.len(), |size, entry| {
+            size.checked_add(entry.data.len())
+                .and_then(|size| size.checked_add(entry.context.len()))
+        });
+        let Some(size) = size else {
+            return Err(storage_error("peer WAL record exceeds size bound"));
+        };
+        if size > LIMIT {
+            return Err(storage_error("peer WAL record exceeds size bound"));
+        }
+        if self.length.saturating_add(24 + size as u64) > WAL_LIMIT {
+            return Err(storage_error(
+                "peer WAL capacity reached; checkpoint support is required",
+            ));
+        }
+
+        let mut checksum = digest(&metadata[..prefix_len]);
+        for (field, entry) in fields.iter().zip(entries) {
+            checksum = digest_extend(
+                checksum,
+                &metadata[field.before_data.0..field.before_data.1],
+            );
+            checksum = digest_extend(checksum, &entry.data);
+            checksum = digest_extend(
+                checksum,
+                &metadata[field.before_context.0..field.before_context.1],
+            );
+            checksum = digest_extend(checksum, &entry.context);
+        }
+        checksum = digest_extend(checksum, &metadata[suffix_start..]);
+        let mut header = [0u8; 24];
+        header[..4].copy_from_slice(MAGIC);
+        header[4..8].copy_from_slice(&(size as u32).to_be_bytes());
+        let header_checksum = digest(&header[..8]).to_be_bytes();
+        header[8..16].copy_from_slice(&header_checksum);
+        header[16..24].copy_from_slice(&checksum.to_be_bytes());
+        self.file.write_all(&header).map_err(storage_error)?;
+
+        let mut slices = Vec::with_capacity(4 * entries.len() + 2);
+        if prefix_len != 0 {
+            slices.push(IoSlice::new(&metadata[..prefix_len]));
+        }
+        for (field, entry) in fields.iter().zip(entries) {
+            slices.push(IoSlice::new(
+                &metadata[field.before_data.0..field.before_data.1],
+            ));
+            if !entry.data.is_empty() {
+                slices.push(IoSlice::new(&entry.data));
+            }
+            if field.before_context.0 != field.before_context.1 {
+                slices.push(IoSlice::new(
+                    &metadata[field.before_context.0..field.before_context.1],
+                ));
+            }
+            if !entry.context.is_empty() {
+                slices.push(IoSlice::new(&entry.context));
+            }
         }
         if suffix_start != metadata.len() {
             slices.push(IoSlice::new(&metadata[suffix_start..]));
@@ -2315,13 +2565,14 @@ impl DurablePeer {
                 self.restore_payload(&snapshot, restore)?;
                 self.incoming_payload = None;
             } else if ready.hs().is_some() || !ready.entries().is_empty() {
-                let mut record = batch(&self.options, ready.hs(), ready.entries());
+                let mut record = batch(&self.options, ready.hs(), &[]);
                 let previous = self
                     .store
                     .initial_state()
                     .map_err(storage_error)?
                     .hard_state;
-                self.journal.append_ready(&mut record, &previous)?;
+                self.journal
+                    .append_decoded_ready(&mut record, ready.entries(), &previous)?;
                 install_decoded(
                     &self.store,
                     &record,
@@ -2368,9 +2619,8 @@ mod tests {
     /// asserted it, so a change to a barrier per record would have cost a barrier per 8 MiB of
     /// Ready and stayed green.
     ///
-    /// The arm deliberately crosses `LIMIT` so it sits on the span path: under it `append_ready`
-    /// delegates to `append`, which writes one record, and one record cannot tell a per-record
-    /// barrier from a per-Ready one.
+    /// The arm deliberately crosses `LIMIT` so it sits on the decoded span path. A Ready that
+    /// fits one record cannot tell a per-record barrier from a per-Ready one.
     #[test]
     fn a_ready_split_into_several_records_still_costs_one_barrier() {
         use super::*;
@@ -2413,16 +2663,27 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let mut record = batch(&options, None, &entries);
+        let mut record = batch(
+            &options,
+            Some(&HardState {
+                term: 3,
+                ..Default::default()
+            }),
+            &[],
+        );
+        let encoded = entries.iter().fold(record.encoded_len(), |size, entry| {
+            let length = entry.encoded_len();
+            size + 1 + prost::encoding::encoded_len_varint(length as u64) + length
+        });
         assert!(
-            record.encoded_len() > LIMIT,
+            encoded > LIMIT,
             "positive control: the Ready must exceed LIMIT ({LIMIT}) so this runs on the \
              span-splitting path; it encoded to {}",
-            record.encoded_len()
+            encoded
         );
 
         journal
-            .append_ready(&mut record, &HardState::default())
+            .append_decoded_ready(&mut record, &entries, &HardState::default())
             .unwrap();
 
         let barriers = journal.barriers - barriers_before;
@@ -2435,6 +2696,26 @@ mod tests {
         assert_eq!(
             barriers, 1,
             "{records} records from one Ready must cost exactly ONE barrier, not one apiece"
+        );
+        drop(journal);
+        let recovered = PeerStorage {
+            permitted: Vec::new(),
+            memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
+            checkpoint: Arc::new(Mutex::new(None)),
+            payload_directory: checkpoint_file::directory(&options.wal_path),
+            payload: Arc::new(Mutex::new(None)),
+        };
+        let _reopened = Journal::open(&options, &recovered).unwrap();
+        assert_eq!(
+            recovered
+                .entries(
+                    1,
+                    ENTRIES + 1,
+                    None,
+                    raft_core::GetEntriesContext::empty(false),
+                )
+                .unwrap(),
+            entries
         );
     }
     #[test]
@@ -3013,6 +3294,67 @@ mod tests {
         let mut metadata = Vec::new();
         peer.journal
             .write_record_into(&record, &mut metadata)
+            .unwrap();
+        assert!(metadata.capacity() < 4096);
+
+        let bytes = std::fs::read(config.wal_path).unwrap();
+        let frame = &bytes[start..];
+        assert_eq!(&frame[..4], MAGIC);
+        assert_eq!(
+            u32::from_be_bytes(frame[4..8].try_into().unwrap()) as usize,
+            expected.len()
+        );
+        assert_eq!(
+            u64::from_be_bytes(frame[8..16].try_into().unwrap()),
+            digest(&frame[..8])
+        );
+        assert_eq!(
+            u64::from_be_bytes(frame[16..24].try_into().unwrap()),
+            digest(&expected)
+        );
+        assert_eq!(&frame[24..], expected);
+    }
+    #[test]
+    fn decoded_entry_writer_matches_every_canonical_entry_field() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        let entries: Vec<_> = (1..=32)
+            .map(|index| {
+                if index % 2 == 0 {
+                    Entry {
+                        entry_type: EntryType::EntryConfChange as i32,
+                        term: 3,
+                        index,
+                        data: vec![index as u8; 65536],
+                        context: vec![index as u8 + 1; 64],
+                        sync_log: true,
+                    }
+                } else {
+                    Entry {
+                        term: 3,
+                        index,
+                        data: vec![index as u8; 65536],
+                        ..Default::default()
+                    }
+                }
+            })
+            .collect();
+        let state = HardState {
+            term: 3,
+            vote: 1,
+            commit: 32,
+        };
+        let mut envelope = batch(&config, Some(&state), &[]);
+        envelope.permitted.clone_from(&peer.journal.permitted);
+        let mut expected = batch(&config, Some(&state), &entries);
+        expected.permitted.clone_from(&peer.journal.permitted);
+        let expected = expected.encode_to_vec();
+        let start = peer.journal.length as usize;
+        let mut metadata = Vec::new();
+        peer.journal
+            .write_decoded_entry_record_into(&envelope, &entries, &mut metadata)
             .unwrap();
         assert!(metadata.capacity() < 4096);
 

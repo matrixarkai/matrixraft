@@ -135,8 +135,8 @@ mod probe {
                 assert_eq!(applied, count);
                 if count == 32 && width == 65536 {
                     assert!(
-                        allocated < 17 * count * width / 4,
-                        "large Ready allocated 4.25 or more payload widths: \
+                        allocated < 13 * count * width / 4,
+                        "large Ready allocated 3.25 or more payload widths: \
                          payload={} allocated={allocated}",
                         count * width
                     );
