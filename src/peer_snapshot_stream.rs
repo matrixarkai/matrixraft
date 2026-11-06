@@ -31,10 +31,19 @@ impl WalAssembly {
             {
                 return Err(storage_error("interrupted or invalid checkpoint records"));
             }
-            return Ok(Some(RecoveredBatch {
-                record,
-                snapshot: None,
-            }));
+            let snapshot = if record.version == 2 {
+                let encoded = std::mem::take(&mut record.snapshot);
+                match encoded.try_into_mut() {
+                    Ok(encoded) => Some(decode_owned_snapshot(encoded, validation)?),
+                    Err(encoded) => {
+                        record.snapshot = encoded;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            return Ok(Some(RecoveredBatch { record, snapshot }));
         }
         if record.snapshot_total == 0
             || record.snapshot_total > SNAPSHOT_ENCODED_LIMIT as u64
@@ -930,6 +939,58 @@ mod tests {
                 "case {kind}"
             );
         }
+    }
+    #[test]
+    fn wal_assembly_moves_inline_snapshot_storage_when_unique() {
+        let options = PeerOptions {
+            group_id: 1,
+            node_id: 2,
+            voters: vec![1, 2, 3],
+            wal_path: PathBuf::new(),
+        };
+        let snapshot = Snapshot {
+            data: vec![42; 4096],
+            metadata: Some(SnapshotMetadata {
+                index: 9,
+                term: 4,
+                conf_state: Some(ConfState {
+                    voters: vec![1, 2, 3],
+                    ..Default::default()
+                }),
+            }),
+        };
+        let mut record = batch(
+            &options,
+            Some(&HardState {
+                term: 4,
+                commit: 9,
+                ..Default::default()
+            }),
+            &[],
+        );
+        record.version = 2;
+        record.snapshot = snapshot.encode_to_vec().into();
+        let allocation = record.snapshot.as_ptr();
+        let mut validation = Vec::new();
+        let recovered = WalAssembly::default()
+            .accept(record, 0, &mut validation)
+            .unwrap()
+            .unwrap();
+        assert!(recovered.record.snapshot.is_empty());
+        let recovered = recovered.snapshot.unwrap();
+        assert_eq!(recovered.as_ref(), &snapshot);
+        assert_eq!(recovered.data.as_ptr(), allocation);
+
+        let mut shared_record = batch(&options, None, &[]);
+        shared_record.version = 2;
+        shared_record.snapshot = snapshot.encode_to_vec().into();
+        let shared = shared_record.snapshot.clone();
+        let recovered = WalAssembly::default()
+            .accept(shared_record, 0, &mut validation)
+            .unwrap()
+            .unwrap();
+        assert!(recovered.snapshot.is_none());
+        assert_eq!(recovered.record.snapshot.as_ptr(), shared.as_ptr());
     }
     #[test]
     fn wal_assembly_retains_fragments_and_moves_the_completed_snapshot() {
