@@ -71,6 +71,11 @@ Local debug-build measurements with the old decode call and the borrowed call:
 These are allocation volumes (about 29% lower here), not peak memory or
 throughput. WAL bytes and persistence ordering are unchanged.
 
+Owned-buffer WAL decoding also avoids copying encoded byte fields during
+recovery. In the release-mode probe, reopening 32 entries of 65536 bytes fell
+from 10,499,578 to 8,401,478 allocated bytes, a reduction of 2,098,100 bytes.
+The probe still verifies every replayed value after the measured open call.
+
 The same probe also routes a proposal through three durable voters, measures
 allocations only inside `step`, and checks exact committed values and WAL replay
 on every voter. Packet envelope validation compares a stack-encoded header and
