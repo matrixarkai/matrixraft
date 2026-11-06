@@ -520,6 +520,7 @@ impl Journal {
         }
         let mut offset = 0;
         let mut assembly = snapshot_stream::WalAssembly::default();
+        let mut bytes = Vec::new();
         let mut validation = Vec::new();
         while offset < length {
             let remaining = length - offset;
@@ -552,7 +553,7 @@ impl Journal {
                 }
                 break;
             }
-            let mut bytes = vec![0; size];
+            bytes.resize(size, 0);
             file.read_exact(&mut bytes).map_err(storage_error)?;
             if digest(&bytes) != u64::from_be_bytes(header[16..24].try_into().unwrap()) {
                 return Err(storage_error("peer WAL payload checksum mismatch"));
