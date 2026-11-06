@@ -140,8 +140,8 @@ mod probe {
                 assert!(reopen_allocated < 6 * count * width + 16384 + 1024 * count);
                 if count == 32 && width == 65536 {
                     assert!(
-                        reopen_allocated < 7 * count * width / 2,
-                        "large replay allocated 3.5 or more payload widths: \
+                        reopen_allocated < 9 * count * width / 4,
+                        "large replay allocated 2.25 or more payload widths: \
                          payload={} allocated={reopen_allocated}",
                         count * width
                     );
