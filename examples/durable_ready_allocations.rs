@@ -187,23 +187,10 @@ mod probe {
             peer.checkpoint(payload).unwrap();
             let checkpoint_allocated = BYTES.load(Ordering::Relaxed) - before;
             assert!(
-                checkpoint_allocated < 3 * width,
-                "checkpoint creation allocated three or more payload widths: \
+                checkpoint_allocated < 5 * width / 4,
+                "checkpoint creation allocated 1.25 or more payload widths: \
                  payload={width} allocated={checkpoint_allocated}"
             );
-            if width > 4 * 1024 * 1024 {
-                assert!(
-                    checkpoint_allocated < 3 * width / 2,
-                    "segmented checkpoint creation allocated 1.5 or more payload widths: \
-                     payload={width} allocated={checkpoint_allocated}"
-                );
-            } else {
-                assert!(
-                    checkpoint_allocated < 5 * width / 2,
-                    "checkpoint creation allocated 2.5 or more payload widths: \
-                     payload={width} allocated={checkpoint_allocated}"
-                );
-            }
             drop(peer);
             let before = BYTES.load(Ordering::Relaxed);
             let mut peer = DurablePeer::open(options).unwrap();

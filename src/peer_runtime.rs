@@ -336,7 +336,10 @@ fn storage_error(s: impl ToString) -> RaftError {
     RaftError::Storage(s.to_string())
 }
 fn digest(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf29ce484222325, |h, b| {
+    digest_extend(0xcbf29ce484222325, bytes)
+}
+fn digest_extend(state: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(state, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
     })
 }
@@ -889,9 +892,9 @@ impl Journal {
             checkpoint_crash_point("after_payload_sync");
             first.version = 4;
             first.payload_manifest = payload.manifest.encode_to_vec();
-            replacement.write_record_into(&first, &mut record_buffer)?;
+            replacement.write_snapshot_record_into(&first, &mut record_buffer)?;
         } else if snapshot.data.len() <= INLINE_CHECKPOINT_BYTES {
-            replacement.write_record_into(&first, &mut record_buffer)?;
+            replacement.write_snapshot_record_into(&first, &mut record_buffer)?;
         } else {
             let encoded = std::mem::take(&mut first.snapshot);
             first.version = 3;
@@ -907,7 +910,7 @@ impl Journal {
                 if number != 0 {
                     first.hard_state.clear();
                 }
-                replacement.write_record_into(&first, &mut record_buffer)?;
+                replacement.write_snapshot_record_into(&first, &mut record_buffer)?;
                 #[cfg(test)]
                 checkpoint_crash_point("during_write");
             }
@@ -1072,6 +1075,81 @@ impl Journal {
     // Only rewrite may defer durability until the entire replacement is written.
     fn write_record(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
         self.write_record_into(batch, &mut Vec::new())
+    }
+    fn write_snapshot_record_into(
+        &mut self,
+        batch: &WalBatch,
+        metadata: &mut Vec<u8>,
+    ) -> Result<(), RaftError> {
+        if batch.snapshot.is_empty() || !batch.entries.is_empty() {
+            return Err(storage_error("snapshot WAL record shape is invalid"));
+        }
+        metadata.clear();
+        if batch.version != 0 {
+            prost::encoding::uint32::encode(1, &batch.version, &mut *metadata);
+        }
+        if batch.group != 0 {
+            prost::encoding::uint64::encode(2, &batch.group, &mut *metadata);
+        }
+        if batch.node != 0 {
+            prost::encoding::uint64::encode(3, &batch.node, &mut *metadata);
+        }
+        prost::encoding::uint64::encode_packed(4, &batch.voters, &mut *metadata);
+        if !batch.hard_state.is_empty() {
+            prost::encoding::bytes::encode(5, &batch.hard_state, &mut *metadata);
+        }
+        prost::encoding::encode_key(
+            7,
+            prost::encoding::WireType::LengthDelimited,
+            &mut *metadata,
+        );
+        prost::encoding::encode_varint(batch.snapshot.len() as u64, &mut *metadata);
+        let prefix_len = metadata.len();
+        if batch.snapshot_offset != 0 {
+            prost::encoding::uint64::encode(8, &batch.snapshot_offset, &mut *metadata);
+        }
+        if batch.snapshot_total != 0 {
+            prost::encoding::uint64::encode(9, &batch.snapshot_total, &mut *metadata);
+        }
+        if batch.snapshot_digest != 0 {
+            prost::encoding::uint64::encode(10, &batch.snapshot_digest, &mut *metadata);
+        }
+        if !batch.payload_manifest.is_empty() {
+            prost::encoding::bytes::encode(11, &batch.payload_manifest, &mut *metadata);
+        }
+        prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
+
+        let size = metadata.len() + batch.snapshot.len();
+        if size > LIMIT {
+            return Err(storage_error("peer WAL record exceeds size bound"));
+        }
+        if self.length.saturating_add(24 + size as u64) > WAL_LIMIT {
+            return Err(storage_error(
+                "peer WAL capacity reached; checkpoint support is required",
+            ));
+        }
+        let mut checksum = digest(&metadata[..prefix_len]);
+        checksum = digest_extend(checksum, &batch.snapshot);
+        checksum = digest_extend(checksum, &metadata[prefix_len..]);
+        let mut header = [0u8; 24];
+        header[..4].copy_from_slice(MAGIC);
+        header[4..8].copy_from_slice(&(size as u32).to_be_bytes());
+        let header_checksum = digest(&header[..8]).to_be_bytes();
+        header[8..16].copy_from_slice(&header_checksum);
+        header[16..24].copy_from_slice(&checksum.to_be_bytes());
+        self.file.write_all(&header).map_err(storage_error)?;
+        self.file
+            .write_all(&metadata[..prefix_len])
+            .map_err(storage_error)?;
+        self.file
+            .write_all(&batch.snapshot)
+            .map_err(storage_error)?;
+        self.file
+            .write_all(&metadata[prefix_len..])
+            .map_err(storage_error)?;
+        self.length += 24 + size as u64;
+        self.records = self.records.saturating_add(1);
+        Ok(())
     }
     fn write_record_into(
         &mut self,
@@ -2637,6 +2715,53 @@ mod tests {
             voters: vec![1],
             wal_path: path,
         }
+    }
+    #[test]
+    fn snapshot_record_writer_matches_canonical_protobuf_without_payload_staging() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        let mut record = batch(
+            &config,
+            Some(&HardState {
+                term: 3,
+                vote: 1,
+                commit: 9,
+            }),
+            &[],
+        );
+        record.version = 3;
+        record.snapshot = vec![42; SNAPSHOT_FRAGMENT_BYTES].into();
+        record.snapshot_offset = SNAPSHOT_FRAGMENT_BYTES as u64;
+        record.snapshot_total = 2 * SNAPSHOT_FRAGMENT_BYTES as u64;
+        record.snapshot_digest = digest(&record.snapshot);
+        let mut expected = record.clone();
+        expected.permitted.clone_from(&peer.journal.permitted);
+        let expected = expected.encode_to_vec();
+        let start = peer.journal.length as usize;
+        let mut metadata = Vec::new();
+        peer.journal
+            .write_snapshot_record_into(&record, &mut metadata)
+            .unwrap();
+        assert!(metadata.capacity() < 4096);
+
+        let bytes = std::fs::read(config.wal_path).unwrap();
+        let frame = &bytes[start..];
+        assert_eq!(&frame[..4], MAGIC);
+        assert_eq!(
+            u32::from_be_bytes(frame[4..8].try_into().unwrap()) as usize,
+            expected.len()
+        );
+        assert_eq!(
+            u64::from_be_bytes(frame[8..16].try_into().unwrap()),
+            digest(&frame[..8])
+        );
+        assert_eq!(
+            u64::from_be_bytes(frame[16..24].try_into().unwrap()),
+            digest(&expected)
+        );
+        assert_eq!(&frame[24..], expected);
     }
     #[test]
     fn checkpoint_rewrite_bounds_suffix_batches_and_replays_committed_entries() {
