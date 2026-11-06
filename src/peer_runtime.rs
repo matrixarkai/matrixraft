@@ -743,7 +743,7 @@ impl Journal {
             return Err(storage_error("peer WAL exceeds size limit"));
         }
         let mut offset = 0;
-        let mut assembly = snapshot_stream::WalAssembly::default();
+        let mut assembly = snapshot_stream::WalAssembly::new(length);
         let mut bytes = prost::bytes::BytesMut::new();
         let mut validation = Vec::new();
         while offset < length {

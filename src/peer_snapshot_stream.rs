@@ -3,9 +3,9 @@
 //! Bounded checkpoint framing for the independent peer runtime.
 use super::*;
 
-#[derive(Default)]
 pub(super) struct WalAssembly {
     pending: Option<WalFragments>,
+    wal_length: u64,
 }
 pub(super) struct RecoveredBatch {
     pub(super) record: WalBatch,
@@ -13,10 +13,16 @@ pub(super) struct RecoveredBatch {
 }
 struct WalFragments {
     record: WalBatch,
-    fragments: Vec<prost::bytes::Bytes>,
-    length: usize,
+    snapshot: prost::bytes::BytesMut,
 }
 impl WalAssembly {
+    pub(super) fn new(wal_length: u64) -> Self {
+        Self {
+            pending: None,
+            wal_length,
+        }
+    }
+
     pub(super) fn accept(
         &mut self,
         mut record: WalBatch,
@@ -47,6 +53,7 @@ impl WalAssembly {
         }
         if record.snapshot_total == 0
             || record.snapshot_total > SNAPSHOT_ENCODED_LIMIT as u64
+            || record.snapshot_total > self.wal_length
             || record.snapshot.is_empty()
             || record.snapshot.len() > SNAPSHOT_FRAGMENT_BYTES
             || !record.entries.is_empty()
@@ -54,18 +61,19 @@ impl WalAssembly {
             return Err(storage_error("invalid checkpoint record bounds"));
         }
         if let Some(pending) = &mut self.pending {
-            if record.snapshot_offset != pending.length as u64
+            if record.snapshot_offset != pending.snapshot.len() as u64
                 || record.snapshot_total != pending.record.snapshot_total
                 || record.snapshot_digest != pending.record.snapshot_digest
                 || !record.hard_state.is_empty()
             {
                 return Err(storage_error("noncontiguous checkpoint records"));
             }
-            if pending.length + record.snapshot.len() > pending.record.snapshot_total as usize {
+            if pending.snapshot.len() + record.snapshot.len()
+                > pending.record.snapshot_total as usize
+            {
                 return Err(storage_error("checkpoint records exceed declared length"));
             }
-            pending.length += record.snapshot.len();
-            pending.fragments.push(record.snapshot);
+            pending.snapshot.extend_from_slice(&record.snapshot);
         } else {
             if position != 0
                 || record.snapshot_offset != 0
@@ -74,24 +82,19 @@ impl WalAssembly {
             {
                 return Err(storage_error("checkpoint records must begin the WAL"));
             }
-            // Never allocate the advertised total before its bytes actually arrive.
             record.snapshot_offset = 0;
-            let snapshot = std::mem::take(&mut record.snapshot);
-            self.pending = Some(WalFragments {
-                length: snapshot.len(),
-                record,
-                fragments: vec![snapshot],
-            });
+            let first = std::mem::take(&mut record.snapshot);
+            let mut snapshot =
+                prost::bytes::BytesMut::with_capacity(record.snapshot_total as usize);
+            snapshot.extend_from_slice(&first);
+            self.pending = Some(WalFragments { record, snapshot });
         }
         let pending = self.pending.as_ref().unwrap();
-        if pending.length != pending.record.snapshot_total as usize {
+        if pending.snapshot.len() != pending.record.snapshot_total as usize {
             return Ok(None);
         }
         let pending = self.pending.take().unwrap();
-        let mut snapshot = prost::bytes::BytesMut::with_capacity(pending.length);
-        for fragment in pending.fragments {
-            snapshot.extend_from_slice(&fragment);
-        }
+        let snapshot = pending.snapshot;
         if digest(&snapshot) != pending.record.snapshot_digest {
             return Err(storage_error("checkpoint record stream checksum mismatch"));
         }
@@ -916,9 +919,13 @@ mod tests {
         first.snapshot = vec![1; 16].into();
         first.snapshot_total = 32;
         first.snapshot_digest = 42;
+        let mut short_wal = WalAssembly::new(31);
+        let mut validation = Vec::new();
+        assert!(short_wal.accept(first.clone(), 0, &mut validation).is_err());
+        assert!(short_wal.pending.is_none());
         for kind in 0..5 {
-            let mut assembly = WalAssembly::default();
-            let mut validation = Vec::new();
+            let mut assembly = WalAssembly::new(32);
+            validation.clear();
             assert!(assembly
                 .accept(first.clone(), 0, &mut validation)
                 .unwrap()
@@ -972,7 +979,7 @@ mod tests {
         record.snapshot = snapshot.encode_to_vec().into();
         let allocation = record.snapshot.as_ptr();
         let mut validation = Vec::new();
-        let recovered = WalAssembly::default()
+        let recovered = WalAssembly::new(0)
             .accept(record, 0, &mut validation)
             .unwrap()
             .unwrap();
@@ -985,7 +992,7 @@ mod tests {
         shared_record.version = 2;
         shared_record.snapshot = snapshot.encode_to_vec().into();
         let shared = shared_record.snapshot.clone();
-        let recovered = WalAssembly::default()
+        let recovered = WalAssembly::new(0)
             .accept(shared_record, 0, &mut validation)
             .unwrap()
             .unwrap();
@@ -993,7 +1000,7 @@ mod tests {
         assert_eq!(recovered.record.snapshot.as_ptr(), shared.as_ptr());
     }
     #[test]
-    fn wal_assembly_retains_fragments_and_moves_the_completed_snapshot() {
+    fn wal_assembly_reuses_one_exact_buffer_and_moves_the_completed_snapshot() {
         let options = PeerOptions {
             group_id: 1,
             node_id: 2,
@@ -1012,8 +1019,9 @@ mod tests {
             }),
         };
         let bytes = snapshot.encode_to_vec();
-        let mut assembly = WalAssembly::default();
+        let mut assembly = WalAssembly::new(bytes.len() as u64);
         let mut validation = Vec::new();
+        let mut allocation = None;
         for (number, chunk) in bytes.chunks(16).enumerate() {
             let mut record = batch(
                 &options,
@@ -1029,14 +1037,15 @@ mod tests {
             record.snapshot_offset = (number * 16) as u64;
             record.snapshot_total = bytes.len() as u64;
             record.snapshot_digest = digest(&bytes);
-            let pointer = record.snapshot.as_ptr();
             let result = assembly
                 .accept(record, number as u64 * 100, &mut validation)
                 .unwrap();
             if number + 1 < bytes.len().div_ceil(16) {
                 let pending = assembly.pending.as_ref().unwrap();
-                assert_eq!(pending.fragments.last().unwrap().as_ptr(), pointer);
-                assert_eq!(pending.length, (number + 1) * 16);
+                let allocation = *allocation.get_or_insert(pending.snapshot.as_ptr());
+                assert_eq!(pending.snapshot.as_ptr(), allocation);
+                assert_eq!(pending.snapshot.capacity(), bytes.len());
+                assert_eq!(pending.snapshot.len(), (number + 1) * 16);
                 assert!(result.is_none());
             } else {
                 let recovered = result.unwrap();
