@@ -637,6 +637,7 @@ impl Journal {
         &mut self,
         options: &PeerOptions,
         snapshot: &Snapshot,
+        snapshot_wire: prost::bytes::Bytes,
         hs: &HardState,
         entries: &[Entry],
         payload: Option<&checkpoint_file::Blob>,
@@ -664,7 +665,7 @@ impl Journal {
         floor_state.commit = snapshot.get_metadata().index;
         let mut first = batch(options, Some(&floor_state), &[]);
         first.version = 2;
-        first.snapshot = snapshot.encode_to_vec().into();
+        first.snapshot = snapshot_wire;
         if let Some(payload) = payload {
             if !snapshot.data.is_empty() {
                 return Err(invalid("file checkpoint must not contain inline data"));
@@ -1349,13 +1350,21 @@ impl DurablePeer {
             .initial_state()
             .map_err(storage_error)?
             .conf_state;
+        let snapshot_wire: prost::bytes::Bytes = snapshot.encode_to_vec().into();
         let result = self
             .journal
-            .rewrite(&self.options, &snapshot, &hs, &suffix, payload.as_deref())
+            .rewrite(
+                &self.options,
+                &snapshot,
+                snapshot_wire.clone(),
+                &hs,
+                &suffix,
+                payload.as_deref(),
+            )
             .and_then(|()| {
                 let mut record = batch(&self.options, Some(&hs), &suffix);
                 record.version = 2;
-                record.snapshot = snapshot.encode_to_vec().into();
+                record.snapshot = snapshot_wire;
                 if let Some(payload) = &payload {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
@@ -1795,16 +1804,18 @@ impl DurablePeer {
                     .as_ref()
                     .filter(|(id, _)| *id == position)
                     .map(|(_, p)| Arc::clone(p));
+                let snapshot_wire: prost::bytes::Bytes = snapshot.encode_to_vec().into();
                 self.journal.rewrite(
                     &self.options,
                     &snapshot,
+                    snapshot_wire.clone(),
                     &hs,
                     ready.entries(),
                     payload.as_deref(),
                 )?;
                 let mut record = batch(&self.options, Some(&hs), ready.entries());
                 record.version = 2;
-                record.snapshot = snapshot.encode_to_vec().into();
+                record.snapshot = snapshot_wire;
                 if let Some(payload) = &payload {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
@@ -2389,9 +2400,18 @@ mod tests {
                     24 + record.encoded_len()
                 })
                 .sum();
+            let snapshot_wire: prost::bytes::Bytes = snapshot.encode_to_vec().into();
             peer.journal
-                .rewrite(&config, &snapshot, &hard, &entries, None)
+                .rewrite(
+                    &config,
+                    &snapshot,
+                    snapshot_wire.clone(),
+                    &hard,
+                    &entries,
+                    None,
+                )
                 .unwrap();
+            assert_eq!(snapshot_wire.as_ref(), snapshot.encode_to_vec());
             let bytes = std::fs::read(&config.wal_path).unwrap();
             let mut offset = 0;
             let mut records = 0;
@@ -2432,7 +2452,14 @@ mod tests {
                 };
                 assert!(peer
                     .journal
-                    .rewrite(&config, &snapshot, &hard, &[oversized], None)
+                    .rewrite(
+                        &config,
+                        &snapshot,
+                        snapshot_wire.clone(),
+                        &hard,
+                        &[oversized],
+                        None,
+                    )
                     .is_err());
                 assert_eq!(std::fs::read(&config.wal_path).unwrap(), bytes);
                 assert_eq!(peer.persisted_wal_bytes().unwrap(), bytes.len() as u64);
