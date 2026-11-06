@@ -99,10 +99,10 @@ core storage does not retain application data. The allocation probe also creates
 and reopens 1 MiB and 5 MiB checkpoints, then verifies every restored byte outside
 the measured open call:
 
-| Checkpoint bytes | Old reopen allocated bytes | Retained payload | Shared WAL snapshot bytes | Reused validation buffer | Reused read buffer | Owned decode buffer | Single assembly allocation |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1048576 | 9439915 | 7342779 | 6294212 | 5245621 | 5245621 | 4197024 | 4197024 |
-| 5242880 | 61869246 | 51383502 | 47189350 | 42994863 | 38800376 | 33557474 | 27266609 |
+| Checkpoint bytes | Old reopen allocated bytes | Retained payload | Shared WAL snapshot bytes | Reused validation buffer | Reused read buffer | Owned decode buffer | Single assembly allocation | Direct payload check |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1048576 | 9439915 | 7342779 | 6294212 | 5245621 | 5245621 | 4197024 | 4197024 | 4197024 |
+| 5242880 | 61869246 | 51383502 | 47189350 | 42994863 | 38800376 | 33557474 | 27266609 | 22023713 |
 
 The retained payload and shared snapshot changes remove approximately two
 payload-sized copies. Reusing one canonical-encoding buffer across WAL records
@@ -114,23 +114,26 @@ the single-record case is unchanged. Decoding byte fields from the owned read
 buffer and reclaiming that storage removes another 1,048,597 bytes for 1 MiB
 and 5,242,902 bytes for 5 MiB. Retaining verified fragments until completion,
 then allocating their contiguous form once, removes another 6,290,865 bytes
-from the segmented case without changing the single-record case.
+from the segmented case without changing the single-record case. Comparing the
+decoded snapshot payload directly while encoding only bounded metadata removes
+another 5,242,896 bytes from segmented reopen.
 
 Checkpoint replacement reuses one encoded WAL frame buffer across snapshot
 fragments, retained suffix records and the final hard-state record. The same
 release-mode allocation probe measures checkpoint creation separately from
 payload construction and reopen:
 
-| Checkpoint bytes | Fresh frame buffers | Reused frame buffer | Shared fragment slices |
-| ---: | ---: | ---: | ---: |
-| 1048576 | 6291888 | 6291888 | 6291912 |
-| 5242880 | 36700915 | 32506308 | 27263436 |
+| Checkpoint bytes | Fresh frame buffers | Reused frame buffer | Shared fragment slices | Direct payload check |
+| ---: | ---: | ---: | ---: | ---: |
+| 1048576 | 6291888 | 6291888 | 6291912 | 5243345 |
+| 5242880 | 36700915 | 32506308 | 27263436 | 22020564 |
 
 The reusable frame removes 4,194,607 allocated bytes from the segmented 5 MiB
 case. Shared slices remove another 5,242,872 bytes during creation and 4,194,152
 bytes during reopen. Snapshot framing, checksums, persistence barriers and replay
 bytes are unchanged. This is allocation volume, not peak memory, device traffic
-or checkpoint throughput.
+or checkpoint throughput. Direct payload comparison removes another 1,048,567
+allocated bytes for 1 MiB and 5,242,872 bytes for 5 MiB during creation.
 
 The application callback receives election no-ops as empty payloads. On reopen,
 the WAL restores term, vote, log, and commit state, and committed entries replay
