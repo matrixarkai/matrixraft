@@ -197,8 +197,8 @@ mod probe {
             let allocated = BYTES.load(Ordering::Relaxed) - before;
             if width > 4 * 1024 * 1024 {
                 assert!(
-                    allocated < 9 * width / 4,
-                    "segmented checkpoint reopen allocated 2.25 or more payload widths: \
+                    allocated < 5 * width / 4,
+                    "segmented checkpoint reopen allocated 1.25 or more payload widths: \
                      payload={width} allocated={allocated}"
                 );
             } else {
