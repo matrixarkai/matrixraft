@@ -9,9 +9,8 @@
 //! with no payload to carry is structure, and structure rebuilt every proposal
 //! is structure that could have been kept.
 //!
-//! Two were, found by recording the size of every allocation a proposal makes
-//! and reading the histogram -- `examples/propose_allocation_sizes.rs`, where a
-//! size identifies a site the way a profile would:
+//! Earlier measurements found two large avoidable sites by recording every
+//! allocation size in `examples/propose_allocation_sizes.rs`:
 //!
 //! - a **544-byte** `BTreeMap` node, because the leader-lease renewal cleared
 //!   the confirmations and refilled them, and `clear()` frees a map's nodes.
@@ -20,45 +19,35 @@
 //! - a **192-byte** `Vec<InflightAppend>` at its minimum capacity of four,
 //!   lent to a flush whose result the replication path discards.
 //!
-//! The ladder behind the bound, from that example at five peers and a zero
-//! payload, each row this code with one piece put back:
+//! The current change removes the remaining node-id vector: the same 200-round
+//! probe moved from **193.6** to **153.6 bytes per proposal**. The bound is 180,
+//! between those measured states, so rebuilding that vector fails the test.
 //!
-//! | state | bytes/proposal |
-//! |---|---|
-//! | as shipped | **393.6** |
-//! | the lent buffer put back | 585.6 |
-//! | the lease-confirmation `clear()` put back | 937.6 |
-//! | both put back, which is what main had | 1,129.6 |
-//! | a fresh buffer per peer, the pre-lending shape | 1,161.6 |
-//!
-//! The "both put back" row reproduces the 1,129.6 that main measures directly,
-//! which is the check that the ladder is measuring what it claims. An earlier
-//! version of it put a fresh buffer back *inside* the per-peer loop and
-//! labelled that row "the lent buffer put back" -- a different and worse state,
-//! and now the last row rather than the second.
-//!
-//! So the bound is **450**: above the shipped figure with room, and below every
-//! one of those. This test's own figure is lower than 393.6 because it spreads
-//! the same amortised growth over 200 proposals rather than 50; the bound sits
-//! in the gap either way, and the figure is printed so the next reader does not
-//! have to wonder which instrument said what.
-//!
-//! One test, in a file of its own, because the counter is the process
-//! allocator: a second test in the same binary would be allocating at the same
-//! time and neither figure would belong to either test.
+//! The allocator is process-wide, but counting is enabled only on the thread
+//! exercising the synchronous proposal path so test-harness work cannot enter
+//! the measurement.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use matrixraft::{Config, Peer, RaftCluster, ReplicaRole};
 
 static BYTES: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    static TRACK_BYTES: Cell<bool> = const { Cell::new(false) };
+}
+
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        let _ = TRACK_BYTES.try_with(|tracking| {
+            if tracking.get() {
+                BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+        });
         unsafe { System.alloc(layout) }
     }
 
@@ -93,7 +82,9 @@ fn a_proposal_does_not_allocate_a_kilobyte_of_bookkeeping() {
     }
 
     let proposals = 200;
-    let before = BYTES.load(Ordering::Relaxed);
+    TRACK_BYTES.with(|tracking| tracking.set(false));
+    BYTES.store(0, Ordering::Relaxed);
+    TRACK_BYTES.with(|tracking| tracking.set(true));
     let mut last_index = 0;
     for _ in 0..proposals {
         // Asserted rather than ignored: an arm that has stopped doing the work
@@ -105,7 +96,8 @@ fn a_proposal_does_not_allocate_a_kilobyte_of_bookkeeping() {
         );
         last_index = log_id.index;
     }
-    let bytes = BYTES.load(Ordering::Relaxed) - before;
+    TRACK_BYTES.with(|tracking| tracking.set(false));
+    let bytes = BYTES.load(Ordering::Relaxed);
     let per_proposal = bytes as f64 / proposals as f64;
 
     // Printed because a guard that only says "too high" sends the next reader
@@ -113,9 +105,8 @@ fn a_proposal_does_not_allocate_a_kilobyte_of_bookkeeping() {
     println!("bytes per proposal at five peers, zero payload: {per_proposal:.1}");
 
     assert!(
-        per_proposal < 450.0,
-        "a proposal with no payload should not allocate {per_proposal:.1} bytes. The ladder in \
-         this file's header says which piece each value corresponds to -- about 586 is the lent \
-         flush buffer back, about 938 the lease-confirmation clear() back, about 1,130 both"
+        per_proposal < 180.0,
+        "a proposal with no payload should stay below 180 bytes of allocation, got \
+         {per_proposal:.1}; rebuilding the node-id vector raises the measured figure to 193.6"
     );
 }

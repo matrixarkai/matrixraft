@@ -2283,6 +2283,26 @@ mod fail_stop_after_failed_durable_write_tests {
     }
 
     #[test]
+    fn transfer_failure_cannot_leave_a_fatally_failed_node_serving() {
+        let mut cluster = RaftCluster::new(92, Config::default(), vec![peer(1)])
+            .expect("build the cluster");
+        cluster.start().expect("start the cluster");
+        let leader = cluster.leader_id().expect("a leader");
+
+        let outcome: Result<(), RaftError> = after_durable_write(
+            &mut cluster,
+            leader,
+            Err(RaftError::Storage("wal append failed".to_string())),
+        );
+
+        assert!(matches!(outcome, Err(RaftError::Storage(_))));
+        assert!(
+            !healthy(&cluster, leader),
+            "fatal failure must clear health even when no transfer target exists"
+        );
+    }
+
+    #[test]
     fn a_durable_write_that_succeeded_changes_nothing() {
         // The other arm, and the one that stops this being "always fire".
         let mut cluster = started();

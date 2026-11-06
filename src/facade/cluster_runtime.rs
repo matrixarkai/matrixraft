@@ -29,7 +29,7 @@ impl From<ConfigError> for RaftError {
 }
 
 const INLINE_QUORUM_CANDIDATES: usize = 16;
-const HEARTBEAT_PEER_CHUNK: usize = 16;
+const NODE_ID_CHUNK: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Node {
@@ -973,7 +973,7 @@ impl RaftCluster {
             // cluster, so iterating the map directly would hold a borrow
             // across those calls. Chunking keeps arbitrary membership sizes
             // allocation-free without widening every `RaftCluster`.
-            let mut peer_ids = [0; HEARTBEAT_PEER_CHUNK];
+            let mut peer_ids = [0; NODE_ID_CHUNK];
             let mut peer_count = 0;
             for (&peer_id, _) in self.nodes.range((after, std::ops::Bound::Unbounded)) {
                 if peer_id == leader_id {
@@ -3461,62 +3461,78 @@ impl RaftCluster {
         if renewing_lease {
             self.record_leader_lease_confirmation_inner(leader_id, false);
         }
-        let node_ids: Vec<_> = self.nodes.keys().copied().collect();
         // No buffer at all. The flush result is discarded here -- it is the
         // pipeline's own state that matters -- and one buffer lent across the
         // followers still allocated its minimum capacity of four, 192 bytes a
         // proposal, for batches nobody read.
-        for &node_id in &node_ids {
-            let Some(node) = self.nodes.get_mut(&node_id) else {
-                continue;
-            };
-            if node_id == leader_id {
-                node.append_entry(Arc::clone(&entry));
-                continue;
+        let mut after = std::ops::Bound::Unbounded;
+        loop {
+            let mut node_ids = [0; NODE_ID_CHUNK];
+            let mut node_count = 0;
+            for (&node_id, _) in self.nodes.range((after, std::ops::Bound::Unbounded)) {
+                node_ids[node_count] = node_id;
+                node_count += 1;
+                if node_count == node_ids.len() {
+                    break;
+                }
             }
-            let response = if let Some(pipeline) = self.peer_pipelines.get_mut(&node_id) {
-                pipeline.queue_append(&entry)?;
-                let _ = pipeline
-                    .flush_append_batch_counted(64, self.config.max_payload_bytes.max(1));
-                if node.healthy {
-                    let match_index = node.match_index();
-                    let append_is_contiguous = match_index.saturating_add(1) == entry.log_id.index;
-                    if append_is_contiguous {
-                        if node.replica_role.can_serve_data() {
-                            node.append_entry(Arc::clone(&entry));
-                        } else if node.replica_role == ReplicaRole::Witness {
-                            node.append_witness_entry(&entry, proposed_as_membership_change);
+            if node_count == 0 {
+                break;
+            }
+            after = std::ops::Bound::Excluded(node_ids[node_count - 1]);
+            for &node_id in &node_ids[..node_count] {
+                let Some(node) = self.nodes.get_mut(&node_id) else {
+                    continue;
+                };
+                if node_id == leader_id {
+                    node.append_entry(Arc::clone(&entry));
+                    continue;
+                }
+                let response = if let Some(pipeline) = self.peer_pipelines.get_mut(&node_id) {
+                    pipeline.queue_append(&entry)?;
+                    let _ = pipeline
+                        .flush_append_batch_counted(64, self.config.max_payload_bytes.max(1));
+                    if node.healthy {
+                        let match_index = node.match_index();
+                        let append_is_contiguous =
+                            match_index.saturating_add(1) == entry.log_id.index;
+                        if append_is_contiguous {
+                            if node.replica_role.can_serve_data() {
+                                node.append_entry(Arc::clone(&entry));
+                            } else if node.replica_role == ReplicaRole::Witness {
+                                node.append_witness_entry(&entry, proposed_as_membership_change);
+                            }
                         }
+                        let match_index = node.match_index();
+                        Some(AppendEntriesResponse {
+                            term: node.hard_state.current_term,
+                            success: append_is_contiguous,
+                            match_index,
+                            rejection_hint: (!append_is_contiguous)
+                                .then_some(match_index.saturating_add(1)),
+                            rejected_index: (!append_is_contiguous).then_some(entry.log_id.index),
+                            require_snapshot: None,
+                            snapshot_state: SnapshotState::None,
+                            lease_confirmation_epoch: 0,
+                            lease_duration_ms: 0,
+                        })
+                    } else {
+                        None
                     }
-                    let match_index = node.match_index();
-                    Some(AppendEntriesResponse {
-                        term: node.hard_state.current_term,
-                        success: append_is_contiguous,
-                        match_index,
-                        rejection_hint: (!append_is_contiguous)
-                            .then_some(match_index.saturating_add(1)),
-                        rejected_index: (!append_is_contiguous).then_some(entry.log_id.index),
-                        require_snapshot: None,
-                        snapshot_state: SnapshotState::None,
-                        lease_confirmation_epoch: 0,
-                        lease_duration_ms: 0,
-                    })
                 } else {
                     None
+                };
+                if let Some(response) = response {
+                    if response.success && renewing_lease {
+                        self.record_leader_lease_confirmation_inner(node_id, false);
+                    }
+                    // Defer the commit-index refresh: this loop applies one response
+                    // per node and then refreshes once below, so refreshing inside
+                    // each response made a proposal cost O(N^2 log N) in group size.
+                    let _ = self.handle_append_entries_response_inner(
+                        leader_id, node_id, response, false, false,
+                    );
                 }
-            } else {
-                None
-            };
-            if let Some(response) = response {
-                if response.success && renewing_lease {
-                    self.record_leader_lease_confirmation_inner(node_id, false);
-                }
-                // Defer the commit-index refresh: this loop applies one response
-                // per node and then refreshes once below, so refreshing inside
-                // each response made a proposal cost O(N^2 log N) in group size.
-                let _ = self.handle_append_entries_response_inner(
-                    leader_id, node_id, response, false, false,
-                );
             }
         }
         self.refresh_commit_index();
@@ -3734,13 +3750,13 @@ impl RaftCluster {
     ///
     /// Returns the node leadership moved to, if it had to move.
     pub fn apply_fatal_event(&mut self, node_id: NodeId) -> Result<Option<NodeId>, RaftError> {
-        let target = if self.leader_id() == Some(node_id) {
-            self.step_down(None)?
+        let transfer = if self.leader_id() == Some(node_id) {
+            self.step_down(None)
         } else {
-            None
+            Ok(None)
         };
         self.set_node_healthy(node_id, false)?;
-        Ok(target)
+        transfer
     }
 
     pub fn append_entries_to(
