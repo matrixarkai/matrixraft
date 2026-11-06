@@ -10,6 +10,8 @@ use crate::{NodeId, ReplicaRole, Term};
 
 pub type LeaseEpochId = u64;
 
+const INLINE_LEASE_ENDS: usize = 16;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LeasePeer {
     pub node_id: NodeId,
@@ -126,7 +128,20 @@ impl LeaderLease {
     }
 
     pub fn in_lease(&mut self, term: Term, now_ms: u64) -> bool {
-        self.status(term, now_ms).in_lease
+        if term != self.current_term {
+            return false;
+        }
+        if self
+            .last_active_lease_end_ms
+            .is_some_and(|lease_end| now_ms < lease_end)
+        {
+            return true;
+        }
+        if !self.maybe_renew_lease_point(now_ms) {
+            return false;
+        }
+        self.last_active_lease_end_ms
+            .is_some_and(|lease_end| now_ms < lease_end)
     }
 
     pub fn status(&mut self, term: Term, now_ms: u64) -> LeaderLeaseStatus {
@@ -163,24 +178,73 @@ impl LeaderLease {
     }
 
     fn valid_lease_end_ms(&self, now_ms: u64) -> Option<u64> {
-        let mut end_times = Vec::new();
+        let mut end_times = [0; INLINE_LEASE_ENDS];
+        let mut end_count = 0;
         for (node_id, info) in &self.peers {
             if !info.role.participates_in_quorum() {
                 continue;
             }
-            if *node_id == self.peer_id {
-                end_times.push(now_ms.saturating_add(self.lease_duration_ms));
-            } else {
-                end_times.push(info.lease_end_ms.unwrap_or(0));
+            if end_count == end_times.len() {
+                return self.valid_lease_end_ms_by_counting(now_ms);
             }
+            end_times[end_count] = self.peer_lease_end_ms(*node_id, info, now_ms);
+            end_count += 1;
         }
-        if end_times.is_empty() {
+        if end_count == 0 {
             return None;
         }
-        end_times.sort_unstable();
-        let quorum = end_times.len() / 2 + 1;
-        let safe_idx = end_times.len() - quorum;
-        Some(end_times[safe_idx])
+        let quorum = end_count / 2 + 1;
+        let safe_idx = end_count - quorum;
+        let (_, lease_end, _) = end_times[..end_count].select_nth_unstable(safe_idx);
+        Some(*lease_end)
+    }
+
+    /// Selects the quorum expiry without heap scratch for uncommon large groups.
+    ///
+    /// The usual membership fits in `INLINE_LEASE_ENDS` and uses one linear
+    /// selection. Larger memberships trade repeated comparisons for bounded
+    /// storage rather than rebuilding a vector on every lease renewal.
+    fn valid_lease_end_ms_by_counting(&self, now_ms: u64) -> Option<u64> {
+        let voting_peer_count = self
+            .peers
+            .values()
+            .filter(|info| info.role.participates_in_quorum())
+            .count();
+        if voting_peer_count == 0 {
+            return None;
+        }
+        let quorum = voting_peer_count / 2 + 1;
+        let mut best = None;
+        for (node_id, info) in self
+            .peers
+            .iter()
+            .filter(|(_, info)| info.role.participates_in_quorum())
+        {
+            let candidate = self.peer_lease_end_ms(*node_id, info, now_ms);
+            if best.is_some_and(|current| current >= candidate) {
+                continue;
+            }
+            let live = self
+                .peers
+                .iter()
+                .filter(|(_, other)| other.role.participates_in_quorum())
+                .filter(|(other_id, other)| {
+                    self.peer_lease_end_ms(**other_id, other, now_ms) >= candidate
+                })
+                .count();
+            if live >= quorum {
+                best = Some(candidate);
+            }
+        }
+        best
+    }
+
+    fn peer_lease_end_ms(&self, node_id: NodeId, info: &PeerLeaseInfo, now_ms: u64) -> u64 {
+        if node_id == self.peer_id {
+            now_ms.saturating_add(self.lease_duration_ms)
+        } else {
+            info.lease_end_ms.unwrap_or(0)
+        }
     }
 
     /// Status for a term this lease does not track: never in lease, and with
