@@ -126,3 +126,19 @@ fn renewing_twice_keeps_the_lease() {
         );
     }
 }
+
+#[test]
+fn proposal_renewal_requires_a_fresh_live_quorum() {
+    let (mut cluster, leader) = leased();
+    for node_id in [3, 4, 5] {
+        cluster
+            .set_node_healthy(node_id, false)
+            .expect("mark a peer down");
+    }
+
+    cluster.propose(vec![7]).expect("admit proposal");
+    assert!(
+        !held(&cluster, leader),
+        "a proposal round with only two live voters must not retain the previous lease"
+    );
+}
