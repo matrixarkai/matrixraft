@@ -137,8 +137,8 @@ struct WalBatch {
     hard_state: Vec<u8>,
     #[prost(bytes = "bytes", repeated, tag = "6")]
     entries: Vec<prost::bytes::Bytes>,
-    #[prost(bytes = "vec", tag = "7")]
-    snapshot: Vec<u8>,
+    #[prost(bytes = "bytes", tag = "7")]
+    snapshot: prost::bytes::Bytes,
     #[prost(uint64, tag = "8")]
     snapshot_offset: u64,
     #[prost(uint64, tag = "9")]
@@ -172,7 +172,7 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
             .iter()
             .map(|entry| entry.encode_to_vec().into())
             .collect(),
-        snapshot: Vec::new(),
+        snapshot: Default::default(),
         snapshot_offset: 0,
         snapshot_total: 0,
         snapshot_digest: 0,
@@ -342,7 +342,7 @@ fn install_decoded(
         }
     }
     if !batch.snapshot.is_empty() {
-        let snapshot = Snapshot::decode(batch.snapshot.as_slice()).map_err(storage_error)?;
+        let snapshot = Snapshot::decode(batch.snapshot.as_ref()).map_err(storage_error)?;
         let payload = if batch.version == 4 {
             if !snapshot.data.is_empty() {
                 return Err(storage_error("file checkpoint contains inline data"));
@@ -615,7 +615,7 @@ impl Journal {
         floor_state.commit = snapshot.get_metadata().index;
         let mut first = batch(options, Some(&floor_state), &[]);
         first.version = 2;
-        first.snapshot = snapshot.encode_to_vec();
+        first.snapshot = snapshot.encode_to_vec().into();
         if let Some(payload) = payload {
             if !snapshot.data.is_empty() {
                 return Err(invalid("file checkpoint must not contain inline data"));
@@ -635,9 +635,13 @@ impl Journal {
             first.version = 3;
             first.snapshot_total = encoded.len() as u64;
             first.snapshot_digest = digest(&encoded);
-            for (number, fragment) in encoded.chunks(SNAPSHOT_FRAGMENT_BYTES).enumerate() {
-                first.snapshot_offset = (number * SNAPSHOT_FRAGMENT_BYTES) as u64;
-                first.snapshot = fragment.to_vec();
+            for (number, start) in (0..encoded.len())
+                .step_by(SNAPSHOT_FRAGMENT_BYTES)
+                .enumerate()
+            {
+                let end = (start + SNAPSHOT_FRAGMENT_BYTES).min(encoded.len());
+                first.snapshot_offset = start as u64;
+                first.snapshot = encoded.slice(start..end);
                 if number != 0 {
                     first.hard_state.clear();
                 }
@@ -1302,7 +1306,7 @@ impl DurablePeer {
             .and_then(|()| {
                 let mut record = batch(&self.options, Some(&hs), &suffix);
                 record.version = 2;
-                record.snapshot = snapshot.encode_to_vec();
+                record.snapshot = snapshot.encode_to_vec().into();
                 if let Some(payload) = &payload {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
@@ -1751,7 +1755,7 @@ impl DurablePeer {
                 )?;
                 let mut record = batch(&self.options, Some(&hs), ready.entries());
                 record.version = 2;
-                record.snapshot = snapshot.encode_to_vec();
+                record.snapshot = snapshot.encode_to_vec().into();
                 if let Some(payload) = &payload {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
@@ -2351,7 +2355,7 @@ mod tests {
         };
         let mut record = batch(&config, Some(&hard), &[]);
         record.version = 4;
-        record.snapshot = snapshot.encode_to_vec();
+        record.snapshot = snapshot.encode_to_vec().into();
         record.payload_manifest = payload.manifest.encode_to_vec();
         let before = peer.store.first_index().unwrap();
         assert!(install_received(&peer.store, &record, Some(Arc::clone(&payload))).is_err());
@@ -2359,7 +2363,7 @@ mod tests {
         assert!(peer.store.checkpoint.lock().unwrap().is_none());
 
         snapshot.metadata.as_mut().unwrap().index = hard.commit;
-        record.snapshot = snapshot.encode_to_vec();
+        record.snapshot = snapshot.encode_to_vec().into();
         record.payload_manifest.push(0);
         assert!(install_received(&peer.store, &record, Some(Arc::clone(&payload))).is_err());
         assert_eq!(peer.store.first_index().unwrap(), before);

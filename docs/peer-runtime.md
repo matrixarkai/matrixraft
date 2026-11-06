@@ -94,12 +94,12 @@ core storage does not retain application data. The allocation probe also creates
 and reopens 1 MiB and 5 MiB checkpoints, then verifies every restored byte outside
 the measured open call:
 
-| Checkpoint bytes | Old reopen allocated bytes | Shared reopen allocated bytes |
-| ---: | ---: | ---: |
-| 1048576 | 9439915 | 7342779 |
-| 5242880 | 61869246 | 51383502 |
+| Checkpoint bytes | Old reopen allocated bytes | Retained payload | Shared WAL snapshot bytes |
+| ---: | ---: | ---: | ---: |
+| 1048576 | 9439915 | 7342779 | 6294212 |
+| 5242880 | 61869246 | 51383502 | 47189350 |
 
-These local debug-build results remove approximately two payload-sized copies.
+These local release-mode results remove approximately two payload-sized copies.
 They measure allocation volume, not peak resident memory or restart latency.
 
 Checkpoint replacement reuses one encoded WAL frame buffer across snapshot
@@ -107,14 +107,16 @@ fragments, retained suffix records and the final hard-state record. The same
 release-mode allocation probe measures checkpoint creation separately from
 payload construction and reopen:
 
-| Checkpoint bytes | Fresh frame buffers | Reused frame buffer |
-| ---: | ---: | ---: |
-| 1048576 | 6291888 | 6291888 |
-| 5242880 | 36700915 | 32506308 |
+| Checkpoint bytes | Fresh frame buffers | Reused frame buffer | Shared fragment slices |
+| ---: | ---: | ---: | ---: |
+| 1048576 | 6291888 | 6291888 | 6291912 |
+| 5242880 | 36700915 | 32506308 | 27263436 |
 
-The segmented 5 MiB case removes 4,194,607 allocated bytes. Snapshot framing,
-checksums, persistence barriers and replay bytes are unchanged. This is
-allocation volume, not peak memory, device traffic or checkpoint throughput.
+The reusable frame removes 4,194,607 allocated bytes from the segmented 5 MiB
+case. Shared slices remove another 5,242,872 bytes during creation and 4,194,152
+bytes during reopen. Snapshot framing, checksums, persistence barriers and replay
+bytes are unchanged. This is allocation volume, not peak memory, device traffic
+or checkpoint throughput.
 
 The application callback receives election no-ops as empty payloads. On reopen,
 the WAL restores term, vote, log, and commit state, and committed entries replay
