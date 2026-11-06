@@ -238,6 +238,51 @@ struct GroupApplier {
     batch_limit: usize,
 }
 
+impl GroupApplier {
+    /// Applies one already-bounded batch and returns whether it stalled.
+    fn apply_batch(&self, tasks: Vec<ApplyTask>) -> bool {
+        let count = tasks.len() as u64;
+        // Computed before ownership moves to the handler. The task vector and
+        // every entry payload now travel there without being cloned.
+        let ceiling = matrixraft_apply_batch_ceiling(&tasks);
+        let report = self.handler.apply_reporting(tasks);
+        let reported = report.applied_index();
+        let reached = reported.min(ceiling);
+
+        let mut applied = self.state.applied.lock().expect("applied mutex poisoned");
+        if reported > ceiling {
+            applied.over_reports = applied.over_reports.saturating_add(1);
+        }
+        // Never moves backwards: a handler that reports an older index than
+        // the group already reached does not un-apply anything.
+        if reached > applied.applied_index {
+            applied.applied_index = reached;
+        }
+        applied.batches += 1;
+        applied.tasks += count;
+        if let ApplyReport::Stalled {
+            applied_index,
+            reason,
+        } = report
+        {
+            applied.stall = Some(ApplyStall {
+                // Clamped as well: a stall reports where the group stopped,
+                // and a stop beyond the batch is no more meaningful than a
+                // success beyond it.
+                applied_index: applied_index.min(ceiling),
+                reason,
+            });
+            // Woken, because a waiter on a later index will never be reached
+            // now and should find that out from `wait_for_applied` rather than
+            // by sitting out its timeout.
+            self.state.advanced.notify_all();
+            return true;
+        }
+        self.state.advanced.notify_all();
+        false
+    }
+}
+
 impl DriverMailHandler<ApplyTask> for GroupApplier {
     fn handle_mail(&self, tasks: Vec<ApplyTask>) {
         // The pool already bounds a batch by `max_messages_each_poll`, which is
@@ -251,11 +296,11 @@ impl DriverMailHandler<ApplyTask> for GroupApplier {
         // this function, so a submit that read the stall as absent a moment
         // earlier can still queue a task, and the worker will hand it over.
         // `a_stalled_group_is_not_handed_anything_else` cannot force that --
-        // the pool hands this test its whole batch in one call, so the guard
-        // inside the chunk loop below is the one that fires, and a plant that
-        // removes this one passes. It is kept because the alternative is
-        // applying past an entry the state machine refused, which is the one
-        // thing a stall exists to prevent.
+        // the pool hands this test its whole batch in one call, so the stall
+        // handling in `apply_batch` is what fires, and a plant that removes
+        // this guard passes. It is kept because the alternative is applying
+        // past an entry the state machine refused, which is the one thing a
+        // stall exists to prevent.
         if self
             .state
             .applied
@@ -266,45 +311,26 @@ impl DriverMailHandler<ApplyTask> for GroupApplier {
         {
             return;
         }
-        for batch in tasks.chunks(self.batch_limit.max(1)) {
-            let count = batch.len() as u64;
-            let report = self.handler.apply_reporting(batch.to_vec());
-            // Bounded by the work the handler was actually given. See
-            // `matrixraft_apply_batch_ceiling` for what went wrong without it.
-            let ceiling = matrixraft_apply_batch_ceiling(batch);
-            let reported = report.applied_index();
-            let reached = reported.min(ceiling);
+        if tasks.is_empty() {
+            return;
+        }
 
-            let mut applied = self.state.applied.lock().expect("applied mutex poisoned");
-            if reported > ceiling {
-                applied.over_reports = applied.over_reports.saturating_add(1);
-            }
-            // Never moves backwards: a handler that reports an older index than
-            // the group already reached does not un-apply anything.
-            if reached > applied.applied_index {
-                applied.applied_index = reached;
-            }
-            applied.batches += 1;
-            applied.tasks += count;
-            if let ApplyReport::Stalled {
-                applied_index,
-                reason,
-            } = report
-            {
-                applied.stall = Some(ApplyStall {
-                    // Clamped as well: a stall reports where the group stopped,
-                    // and a stop beyond the batch is no more meaningful than a
-                    // success beyond it.
-                    applied_index: applied_index.min(ceiling),
-                    reason,
-                });
-                // Woken, because a waiter on a later index will never be
-                // reached now and should find that out from `wait_for_applied`
-                // rather than by sitting out its timeout.
-                self.state.advanced.notify_all();
+        let batch_limit = self.batch_limit.max(1);
+        if tasks.len() <= batch_limit {
+            self.apply_batch(tasks);
+            return;
+        }
+
+        // This guard remains for a pool built with a larger poll limit. Move
+        // tasks into bounded vectors instead of cloning their entries and
+        // payloads. The normal Applier path takes the branch above because its
+        // pool limit is the same as this limit.
+        let mut remaining = tasks.into_iter();
+        loop {
+            let batch = remaining.by_ref().take(batch_limit).collect::<Vec<_>>();
+            if batch.is_empty() || self.apply_batch(batch) {
                 return;
             }
-            self.state.advanced.notify_all();
         }
     }
 }
