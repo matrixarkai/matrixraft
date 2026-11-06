@@ -193,8 +193,14 @@ mod probe {
             );
             if width > 4 * 1024 * 1024 {
                 assert!(
+                    checkpoint_allocated < 9 * width / 2,
+                    "segmented checkpoint creation allocated 4.5 or more payload widths: \
+                     payload={width} allocated={checkpoint_allocated}"
+                );
+            } else {
+                assert!(
                     checkpoint_allocated < 6 * width,
-                    "segmented checkpoint copied one or more full payloads: \
+                    "checkpoint creation allocated six or more payload widths: \
                      payload={width} allocated={checkpoint_allocated}"
                 );
             }
@@ -204,8 +210,8 @@ mod probe {
             let allocated = BYTES.load(Ordering::Relaxed) - before;
             if width > 4 * 1024 * 1024 {
                 assert!(
-                    allocated < 11 * width / 2,
-                    "checkpoint reopen allocated 5.5 or more payload widths: \
+                    allocated < 9 * width / 2,
+                    "checkpoint reopen allocated 4.5 or more payload widths: \
                      payload={width} allocated={allocated}"
                 );
             } else {

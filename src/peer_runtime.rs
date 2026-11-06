@@ -97,6 +97,23 @@ fn exact_encoding(message: &impl ProstMessage, bytes: &[u8], output: &mut Vec<u8
     message.encode(&mut *output).is_ok() && output == bytes
 }
 
+fn exact_snapshot_encoding(snapshot: &Snapshot, bytes: &[u8], output: &mut Vec<u8>) -> bool {
+    output.clear();
+    if !snapshot.data.is_empty() {
+        prost::encoding::encode_key(1, prost::encoding::WireType::LengthDelimited, &mut *output);
+        prost::encoding::encode_varint(snapshot.data.len() as u64, &mut *output);
+    }
+    let prefix = output.len();
+    if let Some(metadata) = &snapshot.metadata {
+        prost::encoding::message::encode(2, metadata, &mut *output);
+    }
+    let data_end = prefix + snapshot.data.len();
+    bytes.len() == data_end + output.len() - prefix
+        && bytes[..prefix] == output[..prefix]
+        && bytes[prefix..data_end] == snapshot.data
+        && bytes[data_end..] == output[prefix..]
+}
+
 fn encode_packet(group: u64, message: &Message) -> Result<Vec<u8>, RaftError> {
     encode_envelope(1, group, message)
 }
@@ -389,7 +406,7 @@ fn install_decoded_with_scratch(
         let next = hs
             .as_ref()
             .ok_or_else(|| storage_error("snapshot needs hard state"))?;
-        if !exact_encoding(&snapshot, &batch.snapshot, validation)
+        if !exact_snapshot_encoding(&snapshot, &batch.snapshot, validation)
             || (!local_capture && meta.index < previous.commit)
             || meta.index > next.commit
             || meta.term > next.term
@@ -2050,6 +2067,46 @@ mod tests {
         extra_field.extend_from_slice(&[0x68, 0x01]);
         let decoded = WalBatch::decode(extra_field.as_slice()).unwrap();
         assert!(!exact_encoding(&decoded, &extra_field, &mut validation));
+    }
+
+    #[test]
+    fn bounded_snapshot_check_matches_full_protobuf_encoding() {
+        use super::*;
+        let check = |bytes: &[u8]| {
+            if let Ok(snapshot) = Snapshot::decode(bytes) {
+                let mut validation = Vec::new();
+                assert_eq!(
+                    exact_snapshot_encoding(&snapshot, bytes, &mut validation),
+                    snapshot.encode_to_vec() == bytes,
+                );
+            }
+        };
+        for length in [0, 1, 127, 128, 16384, SNAPSHOT_FRAGMENT_BYTES] {
+            for metadata in [
+                None,
+                Some(SnapshotMetadata {
+                    index: 17,
+                    term: 3,
+                    conf_state: Some(ConfState {
+                        voters: vec![1, 2, 3],
+                        learners: vec![4],
+                        ..Default::default()
+                    }),
+                }),
+            ] {
+                let snapshot = Snapshot {
+                    data: vec![42; length],
+                    metadata,
+                };
+                let bytes = snapshot.encode_to_vec();
+                check(&bytes);
+                for suffix in [&[0x18, 1][..], &[0x0a, 0], &[0x12, 0]] {
+                    let mut malformed = bytes.clone();
+                    malformed.extend_from_slice(suffix);
+                    check(&malformed);
+                }
+            }
+        }
     }
 
     #[test]
