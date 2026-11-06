@@ -145,7 +145,7 @@ pub struct LeaderTransferState {
     pub conclusion: Option<LeaderTransferConclusion>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LeaderTransferAdmissionKind {
     Accepted,
     IgnoredSelf,
@@ -207,51 +207,53 @@ pub fn matrixraft_leader_transfer_admission(
     current_transferee_id: Option<NodeId>,
     transferee_role: Option<ReplicaRole>,
 ) -> LeaderTransferAdmission {
-    if transferee_id == local_id {
-        return LeaderTransferAdmission {
-            kind: LeaderTransferAdmissionKind::IgnoredSelf,
-            transferee_id,
-            previous_transferee_id: current_transferee_id,
-            reason: "ignored_self_transfer".to_string(),
-        };
-    }
-    let Some(role) = transferee_role else {
-        return LeaderTransferAdmission {
-            kind: LeaderTransferAdmissionKind::IgnoredUnknownPeer,
-            transferee_id,
-            previous_transferee_id: current_transferee_id,
-            reason: "ignored_unknown_transferee".to_string(),
-        };
+    let kind = matrixraft_leader_transfer_admission_kind(
+        local_id,
+        transferee_id,
+        current_transferee_id,
+        transferee_role,
+    );
+    let reason = match kind {
+        LeaderTransferAdmissionKind::IgnoredSelf => "ignored_self_transfer".to_string(),
+        LeaderTransferAdmissionKind::IgnoredUnknownPeer => "ignored_unknown_transferee".to_string(),
+        LeaderTransferAdmissionKind::IgnoredIneligiblePeer => format!(
+            "ignored_ineligible_transferee_{:?}",
+            transferee_role.expect("ineligible admission has a role")
+        ),
+        LeaderTransferAdmissionKind::Duplicate => "duplicate_transfer_in_progress".to_string(),
+        LeaderTransferAdmissionKind::Replaced => "replaced_transfer_in_progress".to_string(),
+        LeaderTransferAdmissionKind::Accepted => "accepted_transfer".to_string(),
     };
-    if !role.can_be_leader() {
-        return LeaderTransferAdmission {
-            kind: LeaderTransferAdmissionKind::IgnoredIneligiblePeer,
-            transferee_id,
-            previous_transferee_id: current_transferee_id,
-            reason: format!("ignored_ineligible_transferee_{role:?}"),
-        };
-    }
-    if current_transferee_id == Some(transferee_id) {
-        return LeaderTransferAdmission {
-            kind: LeaderTransferAdmissionKind::Duplicate,
-            transferee_id,
-            previous_transferee_id: current_transferee_id,
-            reason: "duplicate_transfer_in_progress".to_string(),
-        };
-    }
     LeaderTransferAdmission {
-        kind: if current_transferee_id.is_some() {
-            LeaderTransferAdmissionKind::Replaced
-        } else {
-            LeaderTransferAdmissionKind::Accepted
-        },
+        kind,
         transferee_id,
         previous_transferee_id: current_transferee_id,
-        reason: if current_transferee_id.is_some() {
-            "replaced_transfer_in_progress".to_string()
-        } else {
-            "accepted_transfer".to_string()
-        },
+        reason,
+    }
+}
+
+pub(crate) fn matrixraft_leader_transfer_admission_kind(
+    local_id: NodeId,
+    transferee_id: NodeId,
+    current_transferee_id: Option<NodeId>,
+    transferee_role: Option<ReplicaRole>,
+) -> LeaderTransferAdmissionKind {
+    if transferee_id == local_id {
+        return LeaderTransferAdmissionKind::IgnoredSelf;
+    }
+    let Some(role) = transferee_role else {
+        return LeaderTransferAdmissionKind::IgnoredUnknownPeer;
+    };
+    if !role.can_be_leader() {
+        return LeaderTransferAdmissionKind::IgnoredIneligiblePeer;
+    }
+    if current_transferee_id == Some(transferee_id) {
+        return LeaderTransferAdmissionKind::Duplicate;
+    }
+    if current_transferee_id.is_some() {
+        LeaderTransferAdmissionKind::Replaced
+    } else {
+        LeaderTransferAdmissionKind::Accepted
     }
 }
 
