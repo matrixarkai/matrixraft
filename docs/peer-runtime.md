@@ -102,6 +102,20 @@ the measured open call:
 These local debug-build results remove approximately two payload-sized copies.
 They measure allocation volume, not peak resident memory or restart latency.
 
+Checkpoint replacement reuses one encoded WAL frame buffer across snapshot
+fragments, retained suffix records and the final hard-state record. The same
+release-mode allocation probe measures checkpoint creation separately from
+payload construction and reopen:
+
+| Checkpoint bytes | Fresh frame buffers | Reused frame buffer |
+| ---: | ---: | ---: |
+| 1048576 | 6291888 | 6291888 |
+| 5242880 | 36700915 | 32506308 |
+
+The segmented 5 MiB case removes 4,194,607 allocated bytes. Snapshot framing,
+checksums, persistence barriers and replay bytes are unchanged. This is
+allocation volume, not peak memory, device traffic or checkpoint throughput.
+
 The application callback receives election no-ops as empty payloads. On reopen,
 the WAL restores term, vote, log, and commit state, and committed entries replay
 from the beginning, or from the latest application checkpoint and its suffix.
