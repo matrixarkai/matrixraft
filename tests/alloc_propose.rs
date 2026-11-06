@@ -5,39 +5,45 @@
 //!
 //! Replication used to allocate a discarded flush result per follower. After
 //! that was removed, proposal admission still built separate vectors for node
-//! ids, lease acknowledgements, and commit candidates. The node-id vector now
-//! serves as commit scratch, while confirmations enter the fresh lease epoch
-//! directly during the replication loop.
+//! ids, lease acknowledgements, and commit candidates. Confirmations now enter
+//! the fresh lease epoch directly, commit selection uses bounded stack state,
+//! and node ids move through fixed stack chunks.
 //!
 //! Measured per proposal, at a 256-byte payload:
 //!
 //! | peers | before | after |
 //! |---|---|---|
-//! | 1 | 5.02 | 3.02 |
-//! | 3 | 5.06 | 3.06 |
-//! | 5 | 6.10 | 3.10 |
-//! | 7 | 6.14 | 3.14 |
-//! | 9 | 7.18 | 3.18 |
+//! | 3 | 3.06 | 2.06 |
+//! | 9 | 3.18 | 2.18 |
 //!
 //! The slope guard catches work added per peer. The absolute guard catches a
 //! fixed vector rebuilt per proposal, which a slope-only test cannot see.
 //!
-//! One test, in a file of its own, because the counter is the process
-//! allocator: a second test in the same binary would be allocating at the same
-//! time and neither figure would belong to either test.
+//! The allocator is process-wide, but counting is enabled only on the thread
+//! exercising the synchronous proposal path so test-harness work cannot enter
+//! the measurement.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use matrixraft::{Config, Peer, RaftCluster, ReplicaRole};
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    static TRACK_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+}
+
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        let _ = TRACK_ALLOCATIONS.try_with(|tracking| {
+            if tracking.get() {
+                ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            }
+        });
         unsafe { System.alloc(layout) }
     }
 
@@ -76,35 +82,40 @@ fn allocations_per_proposal(peers: usize, proposals: usize) -> f64 {
         cluster.propose(payload.clone()).expect("warm");
     }
 
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    TRACK_ALLOCATIONS.with(|tracking| tracking.set(false));
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    TRACK_ALLOCATIONS.with(|tracking| tracking.set(true));
     for _ in 0..proposals {
         cluster.propose(payload.clone()).expect("propose");
     }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
+    TRACK_ALLOCATIONS.with(|tracking| tracking.set(false));
+    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
     allocations as f64 / proposals as f64
 }
 
 #[test]
 fn a_proposal_does_not_allocate_per_follower() {
     let at_three = allocations_per_proposal(3, 200);
-    let at_nine = allocations_per_proposal(9, 200);
-    let per_peer = (at_nine - at_three) / 6.0;
+    // Thirty-three members force proposal routing through multiple stack
+    // chunks and keep the large-membership commit-selection path exercised.
+    let at_thirty_three = allocations_per_proposal(33, 200);
+    let per_peer = (at_thirty_three - at_three) / 30.0;
 
     // Printed because a guard that only says "too high" sends the next reader
     // to re-measure what it already knew.
-    println!("allocations per proposal: 3 peers {at_three:.2}, 9 peers {at_nine:.2}");
+    println!("allocations per proposal: 3 peers {at_three:.2}, 33 peers {at_thirty_three:.2}");
     println!("per additional peer: {per_peer:.3}");
 
     assert!(
         per_peer < 0.45,
         "a proposal should not pay an allocation per follower: {per_peer:.3} per peer \
-         ({at_three:.2} at 3 peers, {at_nine:.2} at 9); inspect the replication \
+         ({at_three:.2} at 3 peers, {at_thirty_three:.2} at 33); inspect the replication \
          loop for buffers created once per follower"
     );
     assert!(
-        at_three < 4.0 && at_nine < 4.0,
-        "proposal scratch should stay below four allocations: got {at_three:.2} at three \
-         peers and {at_nine:.2} at nine; rebuilding lease acknowledgements or commit \
+        at_three < 3.0 && at_thirty_three < 3.0,
+        "proposal scratch should stay below three allocations: got {at_three:.2} at three \
+         peers and {at_thirty_three:.2} at thirty-three; rebuilding node ids, lease acknowledgements, or commit \
          candidates pushes this above the bound"
     );
 }
