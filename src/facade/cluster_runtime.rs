@@ -28,6 +28,9 @@ impl From<ConfigError> for RaftError {
     }
 }
 
+const INLINE_QUORUM_CANDIDATES: usize = 16;
+const HEARTBEAT_PEER_CHUNK: usize = 16;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Node {
     id: NodeId,
@@ -962,81 +965,99 @@ impl RaftCluster {
         if self.nodes.len() == 1 {
             return Ok(0);
         }
-        // Size this from the node count because the filtered iterator has no
-        // useful lower bound: collecting it grows through several buffers.
-        // The same allocation becomes commit-index scratch after routing.
-        let mut peer_ids = Vec::with_capacity(self.nodes.len());
-        peer_ids.extend(
-            self.nodes
-                .keys()
-                .copied()
-                .filter(|peer_id| *peer_id != leader_id),
-        );
         let mut sent = 0_u64;
-        for &peer_id in &peer_ids {
-            let peer_healthy = self
-                .nodes
-                .get(&peer_id)
-                .map(|node| node.healthy)
-                .unwrap_or(false);
-            let liveness_timed_out = self
-                .peer_pipelines
-                .get(&peer_id)
-                .map(|pipeline| pipeline.status().offline_timeout_reached)
-                .unwrap_or(false);
-            if !peer_healthy && !liveness_timed_out {
-                continue;
+        let mut after = std::ops::Bound::Unbounded;
+        loop {
+            // Copy a bounded run of ids to the stack, then release the map
+            // borrow before routing them. The response path mutates the
+            // cluster, so iterating the map directly would hold a borrow
+            // across those calls. Chunking keeps arbitrary membership sizes
+            // allocation-free without widening every `RaftCluster`.
+            let mut peer_ids = [0; HEARTBEAT_PEER_CHUNK];
+            let mut peer_count = 0;
+            for (&peer_id, _) in self.nodes.range((after, std::ops::Bound::Unbounded)) {
+                if peer_id == leader_id {
+                    continue;
+                }
+                peer_ids[peer_count] = peer_id;
+                peer_count += 1;
+                if peer_count == peer_ids.len() {
+                    break;
+                }
             }
-            if self
-                .peer_pipelines
-                .get(&peer_id)
-                .map(|pipeline| {
-                    let status = pipeline.status();
-                    status.snapshot_sending || status.snapshot_installing
-                })
-                .unwrap_or(false)
-            {
-                continue;
+            if peer_count == 0 {
+                break;
             }
-            let peer_match_index = self
-                .nodes
-                .get(&peer_id)
-                .map(Node::match_index)
-                .unwrap_or_default();
-            let request = AppendEntriesRequest {
-                group_id: self.group_id,
-                term: self.current_term,
-                leader_id,
-                prev_log_id: None,
-                entries: Vec::new(),
-                leader_commit: self.commit_index.min(peer_match_index),
-                lease_epoch: self.leader_lease_epoch,
-            };
-            let response = self.append_entries_to(peer_id, request)?;
-            // Deferred, exactly as the propose path defers it. The public
-            // handler recomputes both group-wide aggregates per response, and
-            // `refresh_commit_index` collects and sorts a vector over every
-            // quorum node -- so a round of N responses allocated N vectors of
-            // N, which is why a heartbeat cost more per peer the more peers
-            // there were. The deferral is the one the inner function's own doc
-            // comment describes: both results depend only on the final state.
-            self.handle_append_entries_response_inner(leader_id, peer_id, response, false, true)?;
-            if let Some(pipeline) = self.peer_pipelines.get_mut(&peer_id) {
-                pipeline.record_heartbeat_response();
-            }
-            sent = sent.saturating_add(1);
+            after = std::ops::Bound::Excluded(peer_ids[peer_count - 1]);
+            for &peer_id in &peer_ids[..peer_count] {
+                let peer_healthy = self
+                    .nodes
+                    .get(&peer_id)
+                    .map(|node| node.healthy)
+                    .unwrap_or(false);
+                let liveness_timed_out = self
+                    .peer_pipelines
+                    .get(&peer_id)
+                    .map(|pipeline| pipeline.status().offline_timeout_reached)
+                    .unwrap_or(false);
+                if !peer_healthy && !liveness_timed_out {
+                    continue;
+                }
+                if self
+                    .peer_pipelines
+                    .get(&peer_id)
+                    .map(|pipeline| {
+                        let status = pipeline.status();
+                        status.snapshot_sending || status.snapshot_installing
+                    })
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let peer_match_index = self
+                    .nodes
+                    .get(&peer_id)
+                    .map(Node::match_index)
+                    .unwrap_or_default();
+                let request = AppendEntriesRequest {
+                    group_id: self.group_id,
+                    term: self.current_term,
+                    leader_id,
+                    prev_log_id: None,
+                    entries: Vec::new(),
+                    leader_commit: self.commit_index.min(peer_match_index),
+                    lease_epoch: self.leader_lease_epoch,
+                };
+                let response = self.append_entries_to(peer_id, request)?;
+                // Deferred, exactly as the propose path defers it. The public
+                // handler recomputes both group-wide aggregates per response,
+                // and `refresh_commit_index` used to collect and sort over every
+                // quorum node, so a round of N responses allocated N vectors of
+                // N. The selection is allocation-free now, but recomputing both
+                // aggregates per response would still repeat group-wide work
+                // whose result depends only on the final state.
+                self.handle_append_entries_response_inner(
+                    leader_id, peer_id, response, false, true,
+                )?;
+                if let Some(pipeline) = self.peer_pipelines.get_mut(&peer_id) {
+                    pipeline.record_heartbeat_response();
+                }
+                sent = sent.saturating_add(1);
 
-            let should_probe_tail = self
-                .peer_pipelines
-                .get(&peer_id)
-                .map(|pipeline| {
-                    let status = pipeline.status();
-                    status.match_index < self.last_log_index
-                        && status.next_index == self.last_log_index.saturating_add(1)
-                })
-                .unwrap_or(false);
-            if should_probe_tail {
-                let _ = self.catch_up_peer_with_reason(peer_id, "heartbeat_tail_probe")?;
+                let should_probe_tail = self
+                    .peer_pipelines
+                    .get(&peer_id)
+                    .map(|pipeline| {
+                        let status = pipeline.status();
+                        status.match_index < self.last_log_index
+                            && status.next_index == self.last_log_index.saturating_add(1)
+                    })
+                    .unwrap_or(false);
+                if should_probe_tail {
+                    let _ = self.catch_up_peer_with_reason(
+                        peer_id, "heartbeat_tail_probe",
+                    )?;
+                }
             }
         }
         // The two group-wide aggregates, once for the round instead of once
@@ -1044,7 +1065,7 @@ impl RaftCluster {
         // reached nobody changes nothing, which is what the per-response form
         // did: with no responses there was no recompute.
         if sent > 0 {
-            self.refresh_commit_index_with_scratch(&mut peer_ids);
+            self.refresh_commit_index();
             self.leader_lease_valid = self.leader_lease_quorum_reached();
         }
         Ok(sent)
@@ -3440,9 +3461,7 @@ impl RaftCluster {
         if renewing_lease {
             self.record_leader_lease_confirmation_inner(leader_id, false);
         }
-        // Keep the ids across the loop: once iteration ends, this allocation
-        // becomes the commit-index candidate scratch.
-        let mut node_ids: Vec<_> = self.nodes.keys().copied().collect();
+        let node_ids: Vec<_> = self.nodes.keys().copied().collect();
         // No buffer at all. The flush result is discarded here -- it is the
         // pipeline's own state that matters -- and one buffer lent across the
         // followers still allocated its minimum capacity of four, 192 bytes a
@@ -3500,7 +3519,7 @@ impl RaftCluster {
                 );
             }
         }
-        self.refresh_commit_index_with_scratch(&mut node_ids);
+        self.refresh_commit_index();
         if renewing_lease {
             self.finish_leader_lease_renewal();
         }
@@ -6647,25 +6666,9 @@ impl RaftCluster {
     }
 
     fn refresh_commit_index(&mut self) {
-        self.refresh_commit_index_with_scratch(&mut Vec::new());
-    }
-
-    fn refresh_commit_index_with_scratch(&mut self, candidate_indexes: &mut Vec<LogIndex>) {
-        candidate_indexes.clear();
-        candidate_indexes.extend(self.nodes.values().filter_map(|node| {
-            (node.replica_role.participates_in_quorum()
-                && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness)
-                && (node.replica_role != ReplicaRole::Witness
-                    || self.count_witness_in_commit_quorum))
-                .then(|| node.match_index())
-        }));
-        let quorum_size = self.commit_quorum_size();
-        if candidate_indexes.len() < quorum_size {
+        let Some(commit_index) = self.commit_quorum_match_index() else {
             return;
-        }
-        candidate_indexes.sort_unstable();
-        let quorum_index = candidate_indexes.len() - quorum_size;
-        let commit_index = candidate_indexes[quorum_index];
+        };
         let Some(leader_id) = self.leader_id else {
             return;
         };
@@ -6682,6 +6685,74 @@ impl RaftCluster {
             }
         }
         self.refresh_cluster_indexes();
+    }
+
+    /// The highest index held by a commit quorum, without heap scratch.
+    ///
+    /// Raft groups are normally small, so the common path selects the order
+    /// statistic in a fixed stack array. Larger memberships use repeated
+    /// counting: more comparisons, but still bounded storage and no hidden
+    /// per-refresh allocation.
+    fn commit_quorum_match_index(&self) -> Option<LogIndex> {
+        let quorum_size = self.commit_quorum_size();
+        let mut candidates = [0; INLINE_QUORUM_CANDIDATES];
+        let mut candidate_count = 0;
+        for node in self
+            .nodes
+            .values()
+            .filter(|node| self.counts_toward_commit_quorum(node))
+        {
+            if candidate_count == candidates.len() {
+                return self.commit_quorum_match_index_by_counting(quorum_size);
+            }
+            candidates[candidate_count] = node.match_index();
+            candidate_count += 1;
+        }
+        if candidate_count < quorum_size {
+            return None;
+        }
+        let quorum_index = candidate_count - quorum_size;
+        let (_, match_index, _) = candidates[..candidate_count].select_nth_unstable(quorum_index);
+        Some(*match_index)
+    }
+
+    fn commit_quorum_match_index_by_counting(&self, quorum_size: usize) -> Option<LogIndex> {
+        let mut eligible = 0usize;
+        let mut best = None;
+        for node in self
+            .nodes
+            .values()
+            .filter(|node| self.counts_toward_commit_quorum(node))
+        {
+            eligible += 1;
+            let candidate = node.match_index();
+            if best.is_some_and(|current| current >= candidate) {
+                continue;
+            }
+            let votes = self
+                .nodes
+                .values()
+                .filter(|other| {
+                    self.counts_toward_commit_quorum(other)
+                        && other.match_index() >= candidate
+                })
+                .count();
+            if votes >= quorum_size {
+                best = Some(candidate);
+            }
+        }
+        if eligible < quorum_size {
+            None
+        } else {
+            best
+        }
+    }
+
+    fn counts_toward_commit_quorum(&self, node: &Node) -> bool {
+        node.replica_role.participates_in_quorum()
+            && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness)
+            && (node.replica_role != ReplicaRole::Witness
+                || self.count_witness_in_commit_quorum)
     }
 
     fn refresh_cluster_indexes(&mut self) {
