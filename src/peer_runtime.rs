@@ -168,7 +168,7 @@ fn canonical_message_entry_count(bytes: &[u8]) -> Option<usize> {
 }
 
 fn exact_message_without_snapshot(message: &Message, bytes: &[u8], metadata: &mut Vec<u8>) -> bool {
-    fn consume<'a>(input: &mut &'a [u8], expected: &[u8]) -> bool {
+    fn consume(input: &mut &[u8], expected: &[u8]) -> bool {
         if input.len() < expected.len() || input[..expected.len()] != *expected {
             return false;
         }
@@ -291,7 +291,7 @@ fn exact_encoding(message: &impl ProstMessage, bytes: &[u8], output: &mut Vec<u8
 }
 
 fn exact_batch_encoding(batch: &WalBatch, bytes: &[u8], output: &mut Vec<u8>) -> bool {
-    fn consume<'a>(input: &mut &'a [u8], output: &mut Vec<u8>) -> bool {
+    fn consume(input: &mut &[u8], output: &mut Vec<u8>) -> bool {
         if input.len() < output.len() || input[..output.len()] != *output {
             return false;
         }
@@ -299,11 +299,11 @@ fn exact_batch_encoding(batch: &WalBatch, bytes: &[u8], output: &mut Vec<u8>) ->
         output.clear();
         true
     }
-    fn consume_bytes<'a>(
+    fn consume_bytes(
         tag: u32,
         value: &[u8],
         present: bool,
-        input: &mut &'a [u8],
+        input: &mut &[u8],
         output: &mut Vec<u8>,
     ) -> bool {
         if !present {
@@ -1579,13 +1579,13 @@ impl Journal {
         record.reserve_exact(24 + size);
         record.extend_from_slice(MAGIC);
         record.extend_from_slice(&(size as u32).to_be_bytes());
-        record.extend_from_slice(&digest(&record).to_be_bytes());
+        record.extend_from_slice(&digest(record).to_be_bytes());
         // Encode directly after the frame header to avoid a second payload buffer.
         record.extend_from_slice(&[0; 8]);
         batch.encode(&mut *record).map_err(storage_error)?;
         let checksum = digest(&record[24..]).to_be_bytes();
         record[16..24].copy_from_slice(&checksum);
-        self.file.write_all(&record).map_err(storage_error)?;
+        self.file.write_all(record).map_err(storage_error)?;
         self.length += record.len() as u64;
         self.records = self.records.saturating_add(1);
         Ok(())
