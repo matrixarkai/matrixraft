@@ -3939,6 +3939,36 @@ fn stale_snapshot_ready_does_not_clear_active_trigger() {
 }
 
 #[test]
+fn failed_snapshot_ready_discards_trigger_without_publishing() {
+    let mut cluster = three_node_cluster();
+    cluster.start().expect("cluster starts");
+    let leader = cluster.leader_id().expect("leader");
+
+    let trigger = cluster.trigger_snapshot().expect("trigger snapshot");
+    cluster
+        .handle_snapshot_ready(&trigger.snapshot_id, false)
+        .expect("failed snapshot completion is recorded");
+
+    assert!(!cluster.snapshot_trigger_status().in_progress);
+    assert_eq!(
+        cluster
+            .status(leader)
+            .expect("leader status")
+            .last_snapshot_index,
+        0
+    );
+    for peer_id in [2, 3] {
+        assert!(
+            !cluster
+                .peer_pipeline_status(peer_id)
+                .expect("peer pipeline")
+                .snapshot_sending,
+            "peer {peer_id} started a transfer for a failed snapshot"
+        );
+    }
+}
+
+#[test]
 fn same_term_snapshot_response_finishes_send_and_resumes_catchup() {
     let mut cluster = three_node_cluster();
     cluster.start().expect("cluster starts");

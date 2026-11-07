@@ -6461,8 +6461,11 @@ impl RaftCluster {
         if trigger.meta.snapshot_id != snapshot_id {
             return Ok(());
         }
-        let meta = trigger.meta.clone();
-        self.snapshot_trigger = None;
+        let meta = self
+            .snapshot_trigger
+            .take()
+            .expect("the matching snapshot trigger was just observed")
+            .meta;
         if success {
             self.publish_ready_snapshot_to_waiting_peers(meta)?;
         }
@@ -6477,6 +6480,7 @@ impl RaftCluster {
             return Ok(());
         };
         let snapshot_index = meta.last_log_id.index;
+        let mut meta = Some(meta);
         if let Some(leader) = self.nodes.get_mut(&leader_id) {
             let current_snapshot_index = leader
                 .installed_snapshot
@@ -6484,10 +6488,19 @@ impl RaftCluster {
                 .map(|snapshot| snapshot.last_log_id.index)
                 .unwrap_or_default();
             if snapshot_index >= current_snapshot_index {
-                leader.installed_snapshot = Some(meta.clone());
+                leader.installed_snapshot = meta.take();
             }
         }
-        let snapshot_id = meta.snapshot_id;
+        let snapshot_id = meta
+            .as_ref()
+            .or_else(|| {
+                self.nodes
+                    .get(&leader_id)
+                    .and_then(|leader| leader.installed_snapshot.as_ref())
+            })
+            .expect("snapshot metadata remains owned by the cluster")
+            .snapshot_id
+            .as_str();
         for (&peer_id, pipeline) in &mut self.peer_pipelines {
             if peer_id == leader_id {
                 continue;
@@ -6498,7 +6511,7 @@ impl RaftCluster {
                 && !status.snapshot_sending
                 && !status.snapshot_installing
             {
-                pipeline.begin_snapshot_send(snapshot_id.clone(), snapshot_index, 1)?;
+                pipeline.begin_snapshot_send(snapshot_id, snapshot_index, 1)?;
             }
         }
         Ok(())
