@@ -1528,6 +1528,28 @@ fn runtime_step_message(
     }
 }
 
+fn apply_unpersisted_proposal(
+    cluster: &mut RaftCluster,
+    wal: &mut Option<PersistentRaftWal>,
+    membership_executor: &mut MembershipExecutor,
+    node_id: NodeId,
+    proposal: (Message, mpsc::Sender<Result<StepResult, RaftError>>),
+) -> (
+    Result<StepResult, RaftError>,
+    mpsc::Sender<Result<StepResult, RaftError>>,
+) {
+    let (message, reply) = proposal;
+    let result = runtime_step_message(
+        cluster,
+        wal,
+        membership_executor,
+        node_id,
+        message,
+        false,
+    );
+    (result, reply)
+}
+
 /// Everything one raft group's runtime owns.
 ///
 /// This was twenty-odd locals inside `raft_node_runtime_loop`. State shaped
@@ -1957,40 +1979,62 @@ impl NodeCore {
             NodeRuntimeOp::Step(message @ Message::Propose { .. }, reply)
                 if *state == NodeRuntimeState::Running =>
             {
-                let mut pending = vec![(message, reply)];
-                // Bounded so a saturated queue cannot starve ticks and other
-                // commands indefinitely.
-                while pending.len() < 128 {
-                    match command_rx.try_recv() {
-                        Ok(NodeRuntimeOp::Step(next @ Message::Propose { .. }, next_reply)) => {
-                            pending.push((next, next_reply));
-                        }
-                        Ok(other) => {
-                            *carried_command = Some(other);
-                            break;
-                        }
-                        Err(_) => break,
+                let first = (message, reply);
+                let second = match command_rx.try_recv() {
+                    Ok(NodeRuntimeOp::Step(next @ Message::Propose { .. }, next_reply)) => {
+                        Some((next, next_reply))
                     }
-                }
-                if pending.len() == 1 {
-                    let (message, reply) = pending.pop().expect("one pending proposal");
-                    NodeRuntimeOp::Step(message, reply)
-                } else {
-                    let mut results = Vec::with_capacity(pending.len());
-                    let mut replies = Vec::with_capacity(pending.len());
+                    Ok(other) => {
+                        *carried_command = Some(other);
+                        None
+                    }
+                    Err(_) => None,
+                };
+                if let Some(second) = second {
+                    let mut outcomes = Vec::with_capacity(4);
                     let mut any_applied = false;
-                    for (message, reply) in pending {
-                        let result = runtime_step_message(
-                            cluster,
-                            wal,
-                            membership_executor,
-                            node_id,
-                            message,
-                            false,
-                        );
-                        any_applied |= result.is_ok();
-                        results.push(result);
-                        replies.push(reply);
+                    let outcome = apply_unpersisted_proposal(
+                        cluster,
+                        wal,
+                        membership_executor,
+                        node_id,
+                        first,
+                    );
+                    any_applied |= outcome.0.is_ok();
+                    outcomes.push(outcome);
+                    let outcome = apply_unpersisted_proposal(
+                        cluster,
+                        wal,
+                        membership_executor,
+                        node_id,
+                        second,
+                    );
+                    any_applied |= outcome.0.is_ok();
+                    outcomes.push(outcome);
+                    // Bounded so a saturated queue cannot starve ticks and other
+                    // commands indefinitely.
+                    while outcomes.len() < 128 {
+                        match command_rx.try_recv() {
+                            Ok(NodeRuntimeOp::Step(
+                                next @ Message::Propose { .. },
+                                next_reply,
+                            )) => {
+                                let outcome = apply_unpersisted_proposal(
+                                    cluster,
+                                    wal,
+                                    membership_executor,
+                                    node_id,
+                                    (next, next_reply),
+                                );
+                                any_applied |= outcome.0.is_ok();
+                                outcomes.push(outcome);
+                            }
+                            Ok(other) => {
+                                *carried_command = Some(other);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
                     }
                     // One record covers every proposal applied above, exactly
                     // as step_batch persists. Nothing applied means nothing to
@@ -2007,7 +2051,7 @@ impl NodeCore {
                     } else {
                         Ok(())
                     };
-                    for (result, reply) in results.into_iter().zip(replies) {
+                    for (result, reply) in outcomes {
                         // A proposal that applied but did not persist is not
                         // durable, and must not be acknowledged as if it were.
                         let result = match (&persisted, result) {
@@ -2022,6 +2066,9 @@ impl NodeCore {
                         ));
                     }
                     return ControlFlow::Continue(());
+                } else {
+                    let (message, reply) = first;
+                    NodeRuntimeOp::Step(message, reply)
                 }
             }
             other => other,
