@@ -287,7 +287,14 @@ impl PersistentRaftWalOptions {
 pub struct PersistentRaftWal {
     options: PersistentRaftWalOptions,
     segments: Vec<WalSegment>,
-    active_segment: File,
+    /// The active segment, opened on the first operation that needs it.
+    ///
+    /// An idle group still holds its directory lock, which is the descriptor
+    /// that protects its writer ownership. Keeping the segment open as well
+    /// doubled the descriptor cost before the group had written anything.
+    /// Once opened for real work it stays open, so steady-state appends do not
+    /// pay an open syscall per record.
+    active_segment: Option<File>,
     /// The directory's writer lock, held for exactly as long as this handle.
     ///
     /// Never read. It exists so that closing it -- which happens when this
@@ -504,7 +511,7 @@ impl PersistentRaftWal {
         let mut wal = Self {
             options,
             segments,
-            active_segment,
+            active_segment: Some(active_segment),
             _directory_lock: directory_lock,
             next_segment_id,
             released_segment_count: 0,
@@ -524,6 +531,10 @@ impl PersistentRaftWal {
         // purpose in memory. The files remain the source of truth for lazy
         // inspection and compaction.
         wal.release_segment_records();
+        // The scan above was the only reason an idle WAL needed its segment
+        // descriptor. Its directory lock remains held; the segment is opened
+        // again on the first read or write and then retained.
+        wal.active_segment = None;
         let report = want_report.then(|| {
             let (surviving_records, recovered) = matrixraft_recover_from_wal_records(&stored);
             WalRecoveryReport {
@@ -537,6 +548,20 @@ impl PersistentRaftWal {
             }
         });
         Ok((wal, report))
+    }
+
+    fn open_active_segment(&mut self) -> Result<&mut File, RaftError> {
+        if self.active_segment.is_none() {
+            let segment_id = self
+                .segments
+                .last()
+                .map(|segment| segment.segment_id)
+                .unwrap_or_default();
+            self.active_segment = Some(open_segment_for_append(&self.options.dir, segment_id)?);
+        }
+        self.active_segment
+            .as_mut()
+            .ok_or_else(|| RaftError::Storage("WAL active segment did not open".to_string()))
     }
 
     /// Advances coverage using the record just appended. The whole-log case
@@ -596,8 +621,10 @@ impl PersistentRaftWal {
             .last()
             .is_some_and(|active| active.segment_id == segment.segment_id)
         {
-            if let Ok(bytes) = read_open_wal_segment(&self.active_segment) {
-                return decode_wal_segment_records(&bytes);
+            if let Some(active_segment) = self.active_segment.as_ref() {
+                if let Ok(bytes) = read_open_wal_segment(active_segment) {
+                    return decode_wal_segment_records(&bytes);
+                }
             }
         }
         let (records, _, _) =
@@ -644,7 +671,7 @@ impl PersistentRaftWal {
         if let Some(delay_ms) = self.inject_next_fsync_delay_ms.take() {
             thread::sleep(Duration::from_millis(delay_ms));
         }
-        self.active_segment
+        self.open_active_segment()?
             .sync_data()
             .map_err(|err| RaftError::Storage(format!("failed to fsync WAL record: {err}")))?;
         self.fsync_count += 1;
@@ -834,7 +861,7 @@ impl PersistentRaftWal {
     ) -> Result<Option<WalWriteReport>, RaftError> {
         let hard_state_persisted = matrixraft_validate_hard_state_persistence(&record).is_ok();
         let active_len = self
-            .active_segment
+            .open_active_segment()?
             .metadata()
             .map_err(|err| {
                 RaftError::Storage(format!("failed to read WAL active segment metadata: {err}"))
@@ -872,7 +899,7 @@ impl PersistentRaftWal {
                 segment_rolled = true;
             }
 
-            self.active_segment
+            self.open_active_segment()?
                 .write_all(encoded)
                 .map_err(|err| RaftError::Storage(format!("failed to append WAL record: {err}")))?;
             Ok((record_bytes, segment_rolled))
@@ -952,11 +979,12 @@ impl PersistentRaftWal {
         for segment in self.segments.iter_mut() {
             segment.sealed = segment.segment_id != active_id;
         }
-        self.active_segment = open_segment_for_append(&self.options.dir, active_id)?;
+        self.active_segment = Some(open_segment_for_append(&self.options.dir, active_id)?);
         self.expected_active_len = None;
         self.next_segment_id = active_id + 1;
         self.active_covered = self.covered_from_segments();
         self.release_segment_records();
+        self.active_segment = None;
         let observed_corrupt_tail = self.truncated_corrupt_tail || truncated_corrupt_tail;
         self.truncated_corrupt_tail = observed_corrupt_tail;
         Ok(WalRecoveryReport {
@@ -1233,10 +1261,11 @@ impl PersistentRaftWal {
         torn.extend_from_slice(&4096u32.to_le_bytes());
         torn.extend_from_slice(&0u32.to_le_bytes());
         torn.extend_from_slice(b"not a whole frame");
-        self.active_segment
+        let active_segment = self.open_active_segment()?;
+        active_segment
             .seek(SeekFrom::End(0))
-            .and_then(|_| self.active_segment.write_all(&torn))
-            .and_then(|_| self.active_segment.flush())
+            .and_then(|_| active_segment.write_all(&torn))
+            .and_then(|_| active_segment.flush())
             .map_err(|err| RaftError::Storage(format!("failed to corrupt WAL tail: {err}")))?;
         Ok(())
     }
@@ -1248,7 +1277,7 @@ impl PersistentRaftWal {
         // Appends have already written every frame. Sync the file before
         // moving on instead of recreating it from decoded records that are no
         // longer kept resident.
-        self.active_segment
+        self.open_active_segment()?
             .sync_data()
             .map_err(|err| wal_file_error("failed to fsync sealed WAL segment", &err))?;
         let segment_id = self.next_segment_id;
@@ -1262,7 +1291,7 @@ impl PersistentRaftWal {
             sealed: false,
         };
         write_wal_segment_file(&self.options.dir, &segment)?;
-        self.active_segment = open_segment_for_append(&self.options.dir, segment_id)?;
+        self.active_segment = None;
         self.expected_active_len = None;
         self.segments.push(segment);
         Ok(())
@@ -1451,9 +1480,9 @@ fn wal_segment_index(dir: &Path, segments: &[WalSegment]) -> Vec<WalSegmentIndex
 /// Turns a WAL file error into a `RaftError`, saying what descriptor
 /// exhaustion means to a store that hosts many groups.
 ///
-/// Every group holds its own WAL open, so a process pays about one file
-/// descriptor per group and meets `EMFILE` on an ordinary open once it passes
-/// `RLIMIT_NOFILE`. The OS message -- "Too many open files" -- is true and
+/// Every group holds its WAL directory lock open, and an active group also
+/// holds its segment, so a process meets `EMFILE` on an ordinary open once it
+/// passes `RLIMIT_NOFILE`. The OS message -- "Too many open files" -- is true and
 /// unhelpful: it names the symptom, on whichever group happened to be the one
 /// over the line, and says nothing about the group count being the cause.
 /// Measured before this existed: 300 groups under a 150-descriptor limit fail
