@@ -1788,22 +1788,9 @@ impl NodeCore {
                             .unwrap_or_else(|| "unknown".to_string());
                         blocker_log.record(format!("snapshot_trigger_timeout:{snapshot_id}"), false);
                     }
-                    let lagging_peers = cluster
-                        .nodes
-                        .iter()
-                        .filter(|(peer_id, node)| {
-                            Some(**peer_id) != cluster.leader_id
-                                && node.healthy
-                                && node.replica_role.can_serve_data()
-                                && node.match_index() < cluster.last_log_index
-                        })
-                        .map(|(peer_id, _)| *peer_id)
-                        .collect::<Vec<_>>();
-                    for peer_id in lagging_peers {
-                        if let Err(error) = cluster.catch_up_peer(peer_id) {
+                    cluster.catch_up_lagging_peers(|peer_id, error| {
                             blocker_log.record(format!("peer_catchup:{peer_id}:{error}"), false);
-                        }
-                    }
+                    });
                     if let Err(error) = cluster.broadcast_commit_index_to_old_paused_peers() {
                         blocker_log.record(format!("old_paused_commit_broadcast:{error}"), false);
                     }
