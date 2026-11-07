@@ -2949,26 +2949,22 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 ///
 /// # The next limit is file descriptors, not this runtime
 ///
-/// Every group holds its own WAL open, so a process pays **one file descriptor
-/// per group**, and the figure is exact rather than approximate: 16,388 held at
-/// the peak of a 16,384-group run, which is the groups plus the four a process
-/// starts with. Earlier readings of 3,076 at 3072 groups and 4,119 at 4096 said
-/// the same thing less precisely. A host wanting ten thousand groups needs
-/// `RLIMIT_NOFILE` above ten thousand, and the default on many systems is lower:
-/// 16,384 groups under a 10,240 limit fails, which is how that was checked
-/// rather than assumed.
+/// An idle group holds its WAL directory lock and no segment descriptor, so it
+/// costs **one file descriptor per group**. The active segment opens on the
+/// first read or write and stays open, making an active group cost two. Before
+/// the segment became lazy, even a newly created group cost two and a process
+/// with a 10,240 soft limit stopped near 5,119 groups. The same limit now holds
+/// roughly twice as many cold groups; a host expecting every group to write
+/// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
 /// Count it over the whole run and take the maximum. Groups are created one
 /// after another, so a single reading taken while that is still going is a lower
 /// bound and nothing more -- one sample 30 seconds into a 16,384-group run read
 /// 5,536 and looked like a refutation of this paragraph.
 ///
-/// The failure is reported, but not as a ceiling. Creating the group returns
-/// `Storage("failed to read WAL directory: Too many open files (os error
-/// 24)")` -- measured at 300 groups under a 150-descriptor limit - which
-/// names the OS condition and says nothing about how many groups are already
-/// holding a descriptor. Raise `RLIMIT_NOFILE` before raising the group
-/// count.
+/// Descriptor exhaustion is reported with the active-segment and directory-lock
+/// cost and names `RLIMIT_NOFILE`, so the group that crosses the limit does not
+/// look like an isolated storage failure.
 ///
 /// Undersizing does not fail loudly. The tickers fall behind, the groups are
 /// ticked more slowly than they were configured for, and because heartbeats,

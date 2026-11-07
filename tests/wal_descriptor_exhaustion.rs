@@ -4,9 +4,9 @@
 //! What a host is told when it runs out of file descriptors.
 //!
 //! Every raft group holds its own WAL open, so the first limit a multi-group
-//! store meets is `RLIMIT_NOFILE`, not anything in this crate: measured at one
-//! descriptor per group, 4,119 held for 4096 groups. The OS says "Too many
-//! open files" about whichever group happened to be over the line, which is a
+//! store meets is `RLIMIT_NOFILE`, not anything in this crate. An idle group
+//! holds its directory lock; an active one also holds its segment. The OS says
+//! "Too many open files" about whichever group happened to be over the line, which is a
 //! symptom and not a cause. This pins the sentence that supplies the cause.
 //!
 //! The descriptors are exhausted for real rather than simulated, by opening one
