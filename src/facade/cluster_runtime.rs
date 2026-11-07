@@ -31,6 +31,103 @@ impl From<ConfigError> for RaftError {
 const INLINE_QUORUM_CANDIDATES: usize = 16;
 const NODE_ID_CHUNK: usize = 16;
 
+/// A map that costs one pointer while empty and retains the ordinary map wire
+/// shape. Most clusters never enter snapshot installation, reorder buffering,
+/// or an election response round, so their transient maps should not occupy
+/// inline space for the lifetime of every hosted group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SparseMap<K, V> {
+    // The box is deliberate: Option<BTreeMap<_, _>> is still 24 bytes because
+    // the map has no spare niche, while an optional box is one pointer.
+    #[allow(clippy::box_collection)]
+    inner: Option<Box<BTreeMap<K, V>>>,
+}
+
+impl<K, V> Default for SparseMap<K, V> {
+    fn default() -> Self {
+        Self { inner: None }
+    }
+}
+
+impl<K: Ord, V> SparseMap<K, V> {
+    fn clear(&mut self) {
+        self.inner = None;
+    }
+
+    fn get(&self, key: &K) -> Option<&V> {
+        self.inner.as_deref()?.get(key)
+    }
+
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.inner.as_deref_mut()?.get_mut(key)
+    }
+
+    fn insert(&mut self, key: K, value: V) -> Option<V> {
+        self.inner
+            .get_or_insert_with(|| Box::new(BTreeMap::new()))
+            .insert(key, value)
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        let map = self.inner.as_deref_mut()?;
+        let removed = map.remove(key);
+        if map.is_empty() {
+            self.inner = None;
+        }
+        removed
+    }
+
+    fn entry(&mut self, key: K) -> std::collections::btree_map::Entry<'_, K, V> {
+        self.inner
+            .get_or_insert_with(|| Box::new(BTreeMap::new()))
+            .entry(key)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.inner.iter().flat_map(|map| map.iter())
+    }
+
+    fn values(&self) -> impl Iterator<Item = &V> {
+        self.inner.iter().flat_map(|map| map.values())
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.inner.iter_mut().flat_map(|map| map.values_mut())
+    }
+}
+
+impl<K, V> Serialize for SparseMap<K, V>
+where
+    K: Ord + Serialize,
+    V: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.inner.as_deref() {
+            Some(map) => map.serialize(serializer),
+            None => BTreeMap::<K, V>::new().serialize(serializer),
+        }
+    }
+}
+
+impl<'de, K, V> Deserialize<'de> for SparseMap<K, V>
+where
+    K: Ord + Deserialize<'de>,
+    V: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let map = BTreeMap::deserialize(deserializer)?;
+        Ok(Self {
+            inner: (!map.is_empty()).then(|| Box::new(map)),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Node {
     id: NodeId,
@@ -487,9 +584,9 @@ pub struct RaftCluster {
     nodes: BTreeMap<NodeId, Node>,
     peer_pipelines: BTreeMap<NodeId, ReplicationPipeline>,
     #[serde(default)]
-    snapshot_installers: BTreeMap<NodeId, SnapshotInstallState>,
+    snapshot_installers: SparseMap<NodeId, SnapshotInstallState>,
     #[serde(default)]
-    pending_snapshots: BTreeMap<NodeId, PendingSnapshotInstall>,
+    pending_snapshots: SparseMap<NodeId, PendingSnapshotInstall>,
     leader_id: Option<NodeId>,
     current_term: Term,
     commit_index: LogIndex,
@@ -539,8 +636,8 @@ pub struct RaftCluster {
     follower_lease_duration_ms: u64,
     follower_lease_epoch: u64,
     leader_lease_epoch: u64,
-    leader_lease_confirmations: BTreeMap<NodeId, LeaderLeaseConfirmation>,
-    leader_lease_confirmation_epochs: BTreeMap<NodeId, u64>,
+    leader_lease_confirmations: SparseMap<NodeId, LeaderLeaseConfirmation>,
+    leader_lease_confirmation_epochs: SparseMap<NodeId, u64>,
     #[serde(default)]
     /// **Not the capped reorder queue.** `ReplicationPipeline` keeps one too, and
     /// that one is gated by `enable_reorder_queue`, held to `reorder_window_size`
@@ -563,7 +660,7 @@ pub struct RaftCluster {
     /// honours the hint caches nothing at all. Growth needs a driver that keeps
     /// pipelining past a rejection, and a drain only clears the contiguous run --
     /// filling one hole left 63 of 64 cached. See `tests/reorder_queue_window.rs`.
-    reorder_queues: BTreeMap<NodeId, BTreeMap<LogIndex, ReorderedAppend>>,
+    reorder_queues: SparseMap<NodeId, BTreeMap<LogIndex, ReorderedAppend>>,
     ignore_witness: bool,
     count_witness_in_commit_quorum: bool,
     prohibits_election: bool,
@@ -579,8 +676,8 @@ pub struct RaftCluster {
     /// and two member vectors.
     snapshot_trigger: Option<Box<SnapshotTriggerState>>,
     duplicate_snapshot_trigger_requests: u64,
-    vote_responses: BTreeMap<NodeId, bool>,
-    pre_vote_responses: BTreeMap<NodeId, bool>,
+    vote_responses: SparseMap<NodeId, bool>,
+    pre_vote_responses: SparseMap<NodeId, bool>,
     /// The term the accumulated grants above were given for.
     ///
     /// A grant counts toward a quorum only in its own term. Eight paths used
@@ -696,8 +793,8 @@ impl RaftCluster {
             config,
             nodes,
             peer_pipelines,
-            snapshot_installers: BTreeMap::new(),
-            pending_snapshots: BTreeMap::new(),
+            snapshot_installers: SparseMap::default(),
+            pending_snapshots: SparseMap::default(),
             leader_id: None,
             current_term: 0,
             commit_index: 0,
@@ -717,9 +814,9 @@ impl RaftCluster {
             follower_lease_duration_ms: last_follower_lease_ms,
             follower_lease_epoch: 0,
             leader_lease_epoch: 0,
-            leader_lease_confirmations: BTreeMap::new(),
-            leader_lease_confirmation_epochs: BTreeMap::new(),
-            reorder_queues: BTreeMap::new(),
+            leader_lease_confirmations: SparseMap::default(),
+            leader_lease_confirmation_epochs: SparseMap::default(),
+            reorder_queues: SparseMap::default(),
             ignore_witness: false,
             count_witness_in_commit_quorum: false,
             prohibits_election: false,
@@ -728,8 +825,8 @@ impl RaftCluster {
             duplicate_leader_transfer_requests: 0,
             snapshot_trigger: None,
             duplicate_snapshot_trigger_requests: 0,
-            vote_responses: BTreeMap::new(),
-            pre_vote_responses: BTreeMap::new(),
+            vote_responses: SparseMap::default(),
+            pre_vote_responses: SparseMap::default(),
             election_responses_term: 0,
         })
     }
