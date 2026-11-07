@@ -913,15 +913,276 @@ pub(crate) fn fnv1a32(bytes: &[u8]) -> u32 {
 
 /// One record, framed: length, digest, then the encoded message.
 pub(crate) fn encode_framed(record: &WalRecord) -> Result<Vec<u8>, RaftError> {
-    let proto = WalRecordProto::from(record);
-    let body = prost::Message::encode_to_vec(&proto);
-    let length = u32::try_from(body.len())
+    let checksum_digest = checksum_as_u64(&record.checksum);
+    let body_len = wal_record_encoded_len(record, checksum_digest);
+    let length = u32::try_from(body_len)
         .map_err(|_| RaftError::Storage("WAL record exceeds a frame length".to_string()))?;
-    let mut out = Vec::with_capacity(FRAME_BYTES + body.len());
+    let mut out = Vec::with_capacity(FRAME_BYTES + body_len);
     out.extend_from_slice(&length.to_le_bytes());
-    out.extend_from_slice(&FrameDigest::Crc32c.of(&body).to_le_bytes());
-    out.extend_from_slice(&body);
+    out.extend_from_slice(&[0; 4]);
+    encode_wal_record(record, checksum_digest, &mut out);
+    let digest = FrameDigest::Crc32c.of(&out[FRAME_BYTES..]);
+    out[4..FRAME_BYTES].copy_from_slice(&digest.to_le_bytes());
     Ok(out)
+}
+
+fn wal_record_encoded_len(record: &WalRecord, checksum_digest: Option<u64>) -> usize {
+    nonzero_u64_len(1, record.group_id)
+        + nonzero_u64_len(2, record.node_id)
+        + message_len(3, hard_state_encoded_len(&record.hard_state))
+        + message_len(4, membership_encoded_len(&record.membership))
+        + record
+            .entries
+            .iter()
+            .map(|entry| message_len(5, log_entry_encoded_len(entry)))
+            .sum::<usize>()
+        + nonzero_bool_len(6, record.entries_are_delta)
+        + record.installed_snapshot.as_ref().map_or(0, |snapshot| {
+            message_len(7, snapshot_metadata_encoded_len(snapshot))
+        })
+        + message_len(8, fence_encoded_len(&record.apply_snapshot_fence))
+        + match checksum_digest {
+            Some(value) => prost::encoding::fixed64::encoded_len(10, &value),
+            None if !record.checksum.is_empty() => {
+                prost::encoding::string::encoded_len(9, &record.checksum)
+            }
+            None => 0,
+        }
+}
+
+fn encode_wal_record(record: &WalRecord, checksum_digest: Option<u64>, out: &mut Vec<u8>) {
+    encode_nonzero_u64(1, record.group_id, out);
+    encode_nonzero_u64(2, record.node_id, out);
+    encode_message(3, hard_state_encoded_len(&record.hard_state), out, |out| {
+        encode_hard_state(&record.hard_state, out)
+    });
+    encode_message(4, membership_encoded_len(&record.membership), out, |out| {
+        encode_membership(&record.membership, out)
+    });
+    for entry in &record.entries {
+        encode_message(5, log_entry_encoded_len(entry), out, |out| {
+            encode_log_entry(entry, out)
+        });
+    }
+    encode_nonzero_bool(6, record.entries_are_delta, out);
+    if let Some(snapshot) = &record.installed_snapshot {
+        encode_message(7, snapshot_metadata_encoded_len(snapshot), out, |out| {
+            encode_snapshot_metadata(snapshot, out)
+        });
+    }
+    encode_message(
+        8,
+        fence_encoded_len(&record.apply_snapshot_fence),
+        out,
+        |out| encode_fence(&record.apply_snapshot_fence, out),
+    );
+    match checksum_digest {
+        Some(value) => prost::encoding::fixed64::encode(10, &value, out),
+        None if !record.checksum.is_empty() => {
+            prost::encoding::string::encode(9, &record.checksum, out)
+        }
+        None => {}
+    }
+}
+
+fn hard_state_encoded_len(state: &HardState) -> usize {
+    nonzero_u64_len(1, state.current_term)
+        + state
+            .voted_for
+            .map_or(0, |value| prost::encoding::uint64::encoded_len(2, &value))
+        + state
+            .committed
+            .as_ref()
+            .map_or(0, |log_id| message_len(3, log_id_encoded_len(log_id)))
+}
+
+fn encode_hard_state(state: &HardState, out: &mut Vec<u8>) {
+    encode_nonzero_u64(1, state.current_term, out);
+    if let Some(value) = state.voted_for {
+        prost::encoding::uint64::encode(2, &value, out);
+    }
+    if let Some(log_id) = &state.committed {
+        encode_message(3, log_id_encoded_len(log_id), out, |out| {
+            encode_log_id(log_id, out)
+        });
+    }
+}
+
+fn membership_encoded_len(membership: &Membership) -> usize {
+    nonzero_u64_len(1, membership.group_id)
+        + prost::encoding::uint64::encoded_len_packed(2, &membership.voters)
+        + prost::encoding::uint64::encoded_len_packed(3, &membership.learners)
+        + prost::encoding::uint64::encoded_len_packed(4, &membership.witnesses)
+        + nonzero_u64_len(5, membership.epoch)
+}
+
+fn encode_membership(membership: &Membership, out: &mut Vec<u8>) {
+    encode_nonzero_u64(1, membership.group_id, out);
+    prost::encoding::uint64::encode_packed(2, &membership.voters, out);
+    prost::encoding::uint64::encode_packed(3, &membership.learners, out);
+    prost::encoding::uint64::encode_packed(4, &membership.witnesses, out);
+    encode_nonzero_u64(5, membership.epoch, out);
+}
+
+fn log_entry_encoded_len(entry: &LogEntry) -> usize {
+    message_len(1, log_id_encoded_len(&entry.log_id))
+        + bytes_len(2, &entry.payload)
+        + nonzero_bool_len(3, entry.is_command)
+}
+
+fn encode_log_entry(entry: &LogEntry, out: &mut Vec<u8>) {
+    encode_message(1, log_id_encoded_len(&entry.log_id), out, |out| {
+        encode_log_id(&entry.log_id, out)
+    });
+    encode_bytes(2, &entry.payload, out);
+    encode_nonzero_bool(3, entry.is_command, out);
+}
+
+fn snapshot_metadata_encoded_len(snapshot: &SnapshotMetadata) -> usize {
+    string_len(1, &snapshot.snapshot_id)
+        + message_len(2, log_id_encoded_len(&snapshot.last_log_id))
+        + prost::encoding::uint64::encoded_len_packed(3, &snapshot.membership)
+        + snapshot
+            .members
+            .iter()
+            .map(|peer| message_len(4, peer_encoded_len(peer)))
+            .sum::<usize>()
+        + nonzero_u64_len(5, snapshot.payload_bytes)
+}
+
+fn encode_snapshot_metadata(snapshot: &SnapshotMetadata, out: &mut Vec<u8>) {
+    encode_string(1, &snapshot.snapshot_id, out);
+    encode_message(2, log_id_encoded_len(&snapshot.last_log_id), out, |out| {
+        encode_log_id(&snapshot.last_log_id, out)
+    });
+    prost::encoding::uint64::encode_packed(3, &snapshot.membership, out);
+    for peer in &snapshot.members {
+        encode_message(4, peer_encoded_len(peer), out, |out| encode_peer(peer, out));
+    }
+    encode_nonzero_u64(5, snapshot.payload_bytes, out);
+}
+
+fn peer_encoded_len(peer: &Peer) -> usize {
+    nonzero_u64_len(1, peer.node_id)
+        + string_len(2, &peer.raft_addr)
+        + string_len(3, &peer.snapshot_addr)
+        + nonzero_i32_len(4, role_to_wire(peer.role))
+        + nonzero_bool_len(5, peer.auto_promote)
+}
+
+fn encode_peer(peer: &Peer, out: &mut Vec<u8>) {
+    encode_nonzero_u64(1, peer.node_id, out);
+    encode_string(2, &peer.raft_addr, out);
+    encode_string(3, &peer.snapshot_addr, out);
+    encode_nonzero_i32(4, role_to_wire(peer.role), out);
+    encode_nonzero_bool(5, peer.auto_promote, out);
+}
+
+fn fence_encoded_len(fence: &ApplySnapshotFence) -> usize {
+    nonzero_u64_len(1, fence.applied_index)
+        + nonzero_u64_len(2, fence.commit_index)
+        + nonzero_u64_len(3, fence.installed_snapshot_index)
+        + nonzero_u64_len(4, fence.first_retained_log_index)
+}
+
+fn encode_fence(fence: &ApplySnapshotFence, out: &mut Vec<u8>) {
+    encode_nonzero_u64(1, fence.applied_index, out);
+    encode_nonzero_u64(2, fence.commit_index, out);
+    encode_nonzero_u64(3, fence.installed_snapshot_index, out);
+    encode_nonzero_u64(4, fence.first_retained_log_index, out);
+}
+
+fn log_id_encoded_len(log_id: &LogId) -> usize {
+    nonzero_u64_len(1, log_id.term) + nonzero_u64_len(2, log_id.index)
+}
+
+fn encode_log_id(log_id: &LogId, out: &mut Vec<u8>) {
+    encode_nonzero_u64(1, log_id.term, out);
+    encode_nonzero_u64(2, log_id.index, out);
+}
+
+fn message_len(tag: u32, body_len: usize) -> usize {
+    prost::encoding::key_len(tag) + prost::encoding::encoded_len_varint(body_len as u64) + body_len
+}
+
+fn encode_message(
+    tag: u32,
+    body_len: usize,
+    out: &mut Vec<u8>,
+    encode_body: impl FnOnce(&mut Vec<u8>),
+) {
+    prost::encoding::encode_key(tag, prost::encoding::WireType::LengthDelimited, out);
+    prost::encoding::encode_varint(body_len as u64, out);
+    encode_body(out);
+}
+
+fn nonzero_u64_len(tag: u32, value: u64) -> usize {
+    if value == 0 {
+        0
+    } else {
+        prost::encoding::uint64::encoded_len(tag, &value)
+    }
+}
+
+fn encode_nonzero_u64(tag: u32, value: u64, out: &mut Vec<u8>) {
+    if value != 0 {
+        prost::encoding::uint64::encode(tag, &value, out);
+    }
+}
+
+fn nonzero_i32_len(tag: u32, value: i32) -> usize {
+    if value == 0 {
+        0
+    } else {
+        prost::encoding::int32::encoded_len(tag, &value)
+    }
+}
+
+fn encode_nonzero_i32(tag: u32, value: i32, out: &mut Vec<u8>) {
+    if value != 0 {
+        prost::encoding::int32::encode(tag, &value, out);
+    }
+}
+
+fn nonzero_bool_len(tag: u32, value: bool) -> usize {
+    if value {
+        prost::encoding::bool::encoded_len(tag, &value)
+    } else {
+        0
+    }
+}
+
+fn encode_nonzero_bool(tag: u32, value: bool, out: &mut Vec<u8>) {
+    if value {
+        prost::encoding::bool::encode(tag, &value, out);
+    }
+}
+
+fn string_len(tag: u32, value: &str) -> usize {
+    bytes_len(tag, value.as_bytes())
+}
+
+fn encode_string(tag: u32, value: &str, out: &mut Vec<u8>) {
+    encode_bytes(tag, value.as_bytes(), out);
+}
+
+fn bytes_len(tag: u32, value: &[u8]) -> usize {
+    if value.is_empty() {
+        0
+    } else {
+        prost::encoding::key_len(tag)
+            + prost::encoding::encoded_len_varint(value.len() as u64)
+            + value.len()
+    }
+}
+
+fn encode_bytes(tag: u32, value: &[u8], out: &mut Vec<u8>) {
+    if value.is_empty() {
+        return;
+    }
+    prost::encoding::encode_key(tag, prost::encoding::WireType::LengthDelimited, out);
+    prost::encoding::encode_varint(value.len() as u64, out);
+    out.extend_from_slice(value);
 }
 
 /// What a framed record decodes to, and how many bytes it consumed.
@@ -1059,6 +1320,51 @@ mod tests {
             read.installed_snapshot.as_ref().unwrap().members[1].role,
             ReplicaRole::Witness
         );
+    }
+
+    #[test]
+    fn direct_record_encoding_matches_the_protobuf_mirror() {
+        let mut wide = record(19, true);
+        wide.membership.learners = vec![4, 5];
+        wide.membership.witnesses = vec![6];
+        wide.installed_snapshot = Some(SnapshotMetadata {
+            snapshot_id: "snap-wide".to_string(),
+            last_log_id: LogId { term: 7, index: 11 },
+            membership: vec![1, 2, 3, 6],
+            members: vec![
+                Peer {
+                    node_id: 1,
+                    raft_addr: "a:1".to_string(),
+                    snapshot_addr: "a:2".to_string(),
+                    role: ReplicaRole::Voter,
+                    auto_promote: false,
+                },
+                Peer {
+                    node_id: 4,
+                    raft_addr: "b:1".to_string(),
+                    snapshot_addr: "b:2".to_string(),
+                    role: ReplicaRole::Learner,
+                    auto_promote: true,
+                },
+                Peer {
+                    node_id: 6,
+                    raft_addr: "c:1".to_string(),
+                    snapshot_addr: "c:2".to_string(),
+                    role: ReplicaRole::Witness,
+                    auto_promote: false,
+                },
+            ],
+            payload_bytes: 8_192,
+        });
+        wide.checksum = matrixraft_wal_checksum(&wide);
+
+        let mut unusual_checksum = record(0, false);
+        unusual_checksum.checksum = "keep-this-verbatim".to_string();
+        for value in [&wide, &unusual_checksum] {
+            let framed = encode_framed(value).expect("encodes");
+            let mirror = prost::Message::encode_to_vec(&WalRecordProto::from(value));
+            assert_eq!(&framed[FRAME_BYTES..], mirror.as_slice());
+        }
     }
 
     #[test]
