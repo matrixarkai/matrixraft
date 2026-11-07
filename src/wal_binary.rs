@@ -53,7 +53,7 @@ use crate::{
 //
 // | magic | stream | a bad frame means |
 // |---|---|---|
-// | `MRWC` | a WAL segment | stop reading here. The recovery reader truncates at that point |
+// | `MRWC` | a WAL segment | at the end of the input, a torn append: truncate. With bytes after it, an error -- see [`decode_framed`] |
 // | `MRCP` | a checkpoint | damage, always. The file is staged and renamed, so a rename is atomic and a half-written one is never under its final name |
 // | `MRSD` | a checkpoint descriptor | a hint that cannot be used: fall back to the checkpoint itself |
 // | `MRRP` | an RPC message | a corrupt or desynchronised stream: refuse and drop the connection |
@@ -62,36 +62,21 @@ use crate::{
 // worth keeping separate on purpose. A reader reaching here to make the
 // policies agree should know they were chosen to differ.
 //
-// ### The WAL row is coarser than it looks, and deliberately so
+// ### The WAL row splits on what follows the frame, not on the digest
 //
-// `decode_framed` returns `Ok(None)` for a short frame, a short body, a failed
-// digest and an undecodable payload alike. It has no notion of *where* in the
-// segment it is, so it cannot say "a torn tail here, damage there".
+// `decode_framed` used to return `Ok(None)` for a short frame, a short body, a
+// failed digest and an undecodable payload alike, so a complete-but-corrupt
+// record ended the read and the scan truncated there, discarding every record
+// after it. That is measured and fixed; [`decode_framed`] carries the table.
 //
-// That is not an oversight, and the obvious refinement does not work: to learn
-// whether valid records follow a bad one, a reader has to step over the bad one
-// by its **declared length** -- the single field a failed digest gives it no
-// reason to trust. Too large and it runs off the end exactly as a torn tail
-// does; too small and it resyncs onto a boundary inside a record. Position is
-// not knowable from a frame you have already failed to validate.
+// Two things that look like the discriminator are not. **The digest is not**: a
+// crash between a write and its fsync can leave a fully persisted length over a
+// partly written body, which is a torn append that fails its digest. **Nor is
+// stepping over the bad record**, which needs the declared length -- the one
+// field a failed digest gives no reason to trust.
 //
-// What the digest buys, then, is not a tail-versus-damage verdict. It is the
-// knowledge that the frame is invalid *at all* -- which a length-only frame
-// cannot provide, because a corrupted length field produces a frame that is
-// structurally plausible and simply wrong.
-//
-// ### An open consequence, not yet addressed
-//
-// Because a failed digest stops the read wherever it sits, a record whose bytes
-// are **all present** but whose digest fails is discarded along with everything
-// after it. Such a record was written completely, and therefore acknowledged, so
-// this is loss of acknowledged data rather than repair of a torn tail.
-//
-// Shortness is the acknowledgement test: a short record was never completed, so
-// truncating it is correct. A failed digest is not that test. A stricter reader
-// would refuse rather than truncate in that case. This is recorded here because
-// it is a property of the recovery policy rather than of the frame, and
-// changing it is a behaviour change that wants its own measurement.
+// What works is whether anything lies beyond the frame's declared end, which is
+// a fact about the file and not about the record.
 //
 // ### Byte order does not travel
 //
@@ -1194,6 +1179,54 @@ fn encode_bytes(tag: u32, value: &[u8], out: &mut Vec<u8>) {
 ///
 /// Takes the digest the segment's magic calls for, rather than assuming the
 /// current one. Every caller reads a segment file and therefore knows it.
+/// Reads one framed WAL record from the front of `bytes`.
+///
+/// `Ok(None)` means **stop here, and truncating here loses nothing that was
+/// acknowledged.** `Err` means the opposite: something is wrong that truncating
+/// would hide.
+///
+/// ## Why a bad record is not always the end
+///
+/// This returned `Ok(None)` for every failure alike, so a record whose bytes
+/// were all present but whose digest failed ended the read -- and the recovery
+/// scan truncated there, **discarding every record after it**. Measured on a
+/// five-record segment: flipping one byte of record three's payload read back
+/// two records, `Ok`, no error. Records four and five had been written
+/// completely and therefore acknowledged, so that is loss of acknowledged data
+/// wearing the shape of a torn tail.
+///
+/// ## What separates the two, and what does not
+///
+/// Not the digest. A crash between a write and its fsync can leave a frame
+/// whose length is fully persisted while its body is only partly written, which
+/// is a torn append that fails its digest -- so "the digest failed" does not
+/// mean "this was acknowledged".
+///
+/// Not position either, in the sense of stepping over the bad record: that
+/// needs its declared length, the one field a failed digest gives no reason to
+/// trust.
+///
+/// What does separate them is **whether anything lies beyond this frame's
+/// declared end**, which is a fact about the file rather than about the record:
+///
+/// | | |
+/// |---|---|
+/// | fewer bytes than a frame header | `Ok(None)` -- a torn append |
+/// | fewer bytes than the frame declares | `Ok(None)` -- a torn append |
+/// | bad digest, and the frame ends exactly at the end of the input | `Ok(None)` -- could be a torn append; truncating it loses only itself |
+/// | bad digest, and bytes follow it | **`Err`** -- those bytes cannot be reached, and discarding them is the loss this guards |
+/// | will not decode, same two cases | the same split |
+///
+/// The corrupted length is handled by that too: corrupted larger and the input
+/// runs out, which is already the torn case; corrupted smaller and bytes appear
+/// to follow, so this refuses -- the safe direction.
+///
+/// This is stricter than it was and deliberately so. `wal_runtime` says it for
+/// the writer lock: for a durability component, silent loss is the worst shape a
+/// bug can take, and that module already turned one silent loss into an error
+/// naming both lengths. A node that refuses to open a damaged WAL can be rebuilt
+/// from its peers; a node that opens one and silently drops acknowledged entries
+/// cannot be told from a healthy one.
 pub(crate) fn decode_framed(
     bytes: &[u8],
     digest_kind: FrameDigest,
@@ -1209,12 +1242,31 @@ pub(crate) fn decode_framed(
     if bytes.len() < end {
         return Ok(None);
     }
+    // Is this frame the last thing in the input? If so, a failure below could
+    // be a torn append and truncating costs only this record. If not, the
+    // bytes after it are unreachable and dropping them is the silent loss.
+    let is_last = end == bytes.len();
+    let trailing = bytes.len() - end;
     let body = &bytes[FRAME_BYTES..end];
     if digest_kind.of(body) != digest {
-        return Ok(None);
+        if is_last {
+            return Ok(None);
+        }
+        return Err(RaftError::Storage(format!(
+            "a WAL record of {length} bytes is complete but fails its frame digest, and {trailing} bytes follow it; refusing rather than discarding them"
+        )));
     }
-    let Ok(proto) = <WalRecordProto as prost::Message>::decode(body) else {
-        return Ok(None);
+    let proto = match <WalRecordProto as prost::Message>::decode(body) {
+        Ok(proto) => proto,
+        Err(err) if is_last => {
+            let _ = err;
+            return Ok(None);
+        }
+        Err(err) => {
+            return Err(RaftError::Storage(format!(
+                "a WAL record of {length} bytes passes its frame digest but will not decode ({err}), and {trailing} bytes follow it; refusing rather than discarding them"
+            )))
+        }
     };
     let record = WalRecord::try_from(proto)?;
     Ok(Some((record, end)))
