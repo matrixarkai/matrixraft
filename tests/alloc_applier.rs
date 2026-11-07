@@ -5,8 +5,9 @@
 //!
 //! The pool already bounds each delivery by `apply_max_batch_count`. Cloning
 //! that vector inside `GroupApplier` allocated a second vector and deep-cloned
-//! every entry payload. A one-task steady-state apply therefore allocated
-//! twice even when the task itself held no heap data.
+//! every entry payload. Moving it removed that copy but still dropped the
+//! delivery vector after every call. A consuming handler can now return the
+//! empty storage to the worker, making the warmed path allocation-free.
 //!
 //! One test, in a file of its own, because the counter is the process
 //! allocator.
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use matrixraft::{
-    Applier, ApplierOptions, ApplyHandler, ApplyTask, DriverGroupKey, LogEntry, LogId,
+    Applier, ApplierOptions, ApplyHandler, ApplyReport, ApplyTask, DriverGroupKey, LogEntry, LogId,
 };
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -44,8 +45,8 @@ struct Handler {
     payload_address: AtomicUsize,
 }
 
-impl ApplyHandler for Handler {
-    fn apply(&self, tasks: Vec<ApplyTask>) -> u64 {
+impl Handler {
+    fn record(&self, tasks: &[ApplyTask]) -> u64 {
         if let Some(payload) = tasks
             .first()
             .and_then(|task| task.entries.first())
@@ -57,6 +58,21 @@ impl ApplyHandler for Handler {
         self.handled
             .fetch_add(tasks.len() as u64, Ordering::Relaxed);
         0
+    }
+}
+
+impl ApplyHandler for Handler {
+    fn apply(&self, tasks: Vec<ApplyTask>) -> u64 {
+        self.record(&tasks)
+    }
+
+    fn apply_reporting_recycling(
+        &self,
+        mut tasks: Vec<ApplyTask>,
+    ) -> (ApplyReport, Vec<ApplyTask>) {
+        let report = ApplyReport::reached(self.record(&tasks));
+        tasks.clear();
+        (report, tasks)
     }
 }
 
@@ -139,8 +155,8 @@ fn a_bounded_apply_moves_one_owned_batch_without_cloning_it() {
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
     let per_apply = allocations as f64 / rounds as f64;
     println!("allocations per one-task apply: {per_apply:.4}");
-    assert!(
-        per_apply <= 1.05,
-        "a bounded apply should allocate only the pool delivery vector, got {per_apply:.4}"
+    assert_eq!(
+        allocations, 0,
+        "a bounded apply should reuse the pool delivery vector, got {per_apply:.4} allocations per apply"
     );
 }
