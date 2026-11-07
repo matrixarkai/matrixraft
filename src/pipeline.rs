@@ -864,20 +864,18 @@ impl ReplicationPipeline {
             return 0;
         }
         let timeout_us = self.limits.reorder_timeout_us;
-        let mut expired = Vec::new();
-        for (index, age_us) in self.reorder_queue.iter_mut() {
+        let mut dropped = 0_u64;
+        self.reorder_queue.retain(|_, age_us| {
             *age_us = age_us.saturating_add(elapsed_us);
-            if timeout_us > 0 && *age_us >= timeout_us {
-                expired.push(*index);
+            let keep = timeout_us == 0 || *age_us < timeout_us;
+            if !keep {
+                dropped = dropped.saturating_add(1);
             }
-        }
-        if expired.is_empty() {
+            keep
+        });
+        if dropped == 0 {
             return 0;
         }
-        for index in &expired {
-            self.reorder_queue.remove(index);
-        }
-        let dropped = expired.len() as u64;
         self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
         self.status.reorder_entry_timeouts =
             self.status.reorder_entry_timeouts.saturating_add(dropped);
