@@ -6546,6 +6546,7 @@ impl RaftCluster {
             .expect("snapshot metadata remains owned by the cluster")
             .snapshot_id
             .as_str();
+        let snapshot_id = Arc::<str>::from(snapshot_id);
         for (&peer_id, pipeline) in &mut self.peer_pipelines {
             if peer_id == leader_id {
                 continue;
@@ -6556,7 +6557,11 @@ impl RaftCluster {
                 && !status.snapshot_sending
                 && !status.snapshot_installing
             {
-                pipeline.begin_snapshot_send(snapshot_id, snapshot_index, 1)?;
+                pipeline.begin_snapshot_send_shared(
+                    Arc::clone(&snapshot_id),
+                    snapshot_index,
+                    1,
+                )?;
             }
         }
         Ok(())

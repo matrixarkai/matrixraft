@@ -673,6 +673,20 @@ fn replication_pipeline_tracks_snapshot_sender_and_receiver_state() {
 }
 
 #[test]
+fn active_snapshot_ids_keep_the_pipeline_wire_shape() {
+    let mut pipeline = ReplicationPipeline::new(2, 10, PipelineLimits::default());
+    pipeline
+        .begin_snapshot_send("snap-shared", 20, 2)
+        .expect("begin send");
+
+    let encoded = serde_json::to_value(&pipeline).expect("serialize pipeline");
+    assert_eq!(encoded["snapshot_transfer"]["snapshot_id"], "snap-shared");
+    let decoded: ReplicationPipeline =
+        serde_json::from_value(encoded).expect("deserialize pipeline");
+    assert_eq!(decoded, pipeline);
+}
+
+#[test]
 fn snapshot_finish_advances_or_retries() {
     let mut accepted = ReplicationPipeline::new(2, 10, PipelineLimits::default());
     accepted
