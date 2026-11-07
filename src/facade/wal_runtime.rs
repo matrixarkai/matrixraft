@@ -5,6 +5,7 @@
 // Split from src/lib.rs to keep the crate facade small and focused.
 
 const MAX_RETAINED_WAL_ENCODE_BYTES: usize = 1024 * 1024;
+const ACTIVE_SEGMENT_HOT_WINDOW: Duration = Duration::from_secs(1);
 
 std::thread_local! {
     static WAL_ENCODE_SCRATCH: std::cell::RefCell<Vec<u8>> = const {
@@ -292,9 +293,13 @@ pub struct PersistentRaftWal {
     /// An idle group still holds its directory lock, which is the descriptor
     /// that protects its writer ownership. Keeping the segment open as well
     /// doubled the descriptor cost before the group had written anything.
-    /// Once opened for real work it stays open, so steady-state appends do not
-    /// pay an open syscall per record.
+    /// A second write inside [`ACTIVE_SEGMENT_HOT_WINDOW`] marks the segment as
+    /// hot and keeps it open, so steady-state appends do not pay an open syscall
+    /// per record. A lone write closes it again, and the runtime releases a hot
+    /// handle after the window goes quiet.
     active_segment: Option<File>,
+    /// The end of the most recent write operation.
+    last_segment_use: Option<Instant>,
     /// The directory's writer lock, held for exactly as long as this handle.
     ///
     /// Never read. It exists so that closing it -- which happens when this
@@ -512,6 +517,7 @@ impl PersistentRaftWal {
             options,
             segments,
             active_segment: Some(active_segment),
+            last_segment_use: None,
             _directory_lock: directory_lock,
             next_segment_id,
             released_segment_count: 0,
@@ -562,6 +568,33 @@ impl PersistentRaftWal {
         self.active_segment
             .as_mut()
             .ok_or_else(|| RaftError::Storage("WAL active segment did not open".to_string()))
+    }
+
+    fn active_segment_was_recently_used(&self) -> bool {
+        self.last_segment_use
+            .is_some_and(|used| used.elapsed() < ACTIVE_SEGMENT_HOT_WINDOW)
+    }
+
+    fn finish_segment_operation(&mut self, keep_open: bool) {
+        self.last_segment_use = Some(Instant::now());
+        if !keep_open {
+            self.active_segment = None;
+        }
+    }
+
+    /// Releases a retained segment after its write stream has gone quiet.
+    ///
+    /// Returns whether a descriptor was released. The directory ownership lock
+    /// is unaffected, so another writer still cannot open this WAL.
+    pub fn release_idle_segment_descriptor(&mut self) -> bool {
+        let idle = self
+            .last_segment_use
+            .is_some_and(|used| used.elapsed() >= ACTIVE_SEGMENT_HOT_WINDOW);
+        if idle && self.active_segment.is_some() {
+            self.active_segment = None;
+            return true;
+        }
+        false
     }
 
     /// Advances coverage using the record just appended. The whole-log case
@@ -715,27 +748,37 @@ impl PersistentRaftWal {
         if records.is_empty() {
             return Ok(Vec::new());
         }
-        let mut reports = Vec::with_capacity(records.len());
-        for record in records {
-            let active_records = self
-                .segments
-                .last()
-                .map(|segment| segment.record_count as usize)
-                .unwrap_or_default();
-            let rolling_by_count = active_records >= self.options.max_records_per_segment;
-            let stored = self.delta_record(&record);
-            // Deferred deliberately: one fsync covers the whole batch, below.
-            reports.push(self.write_record(stored, active_records, rolling_by_count, false)?);
-        }
-        if self.options.fsync_on_append {
-            let (elapsed_ms, slow) = self.fsync_active_segment()?;
-            if let Some(last) = reports.last_mut() {
-                last.fsync_on_append = true;
-                last.fsync_elapsed_ms = elapsed_ms;
-                last.slow_fsync_observed = slow;
+        let keep_open = self.active_segment_was_recently_used();
+        let result = (|| {
+            let mut reports = Vec::with_capacity(records.len());
+            for record in records {
+                let active_records = self
+                    .segments
+                    .last()
+                    .map(|segment| segment.record_count as usize)
+                    .unwrap_or_default();
+                let rolling_by_count = active_records >= self.options.max_records_per_segment;
+                let stored = self.delta_record(&record);
+                // Deferred deliberately: one fsync covers the whole batch, below.
+                let report = self
+                    .write_record_core(stored, active_records, rolling_by_count, false, true)?
+                    .ok_or_else(|| {
+                        RaftError::Storage("WAL write report was not constructed".to_string())
+                    })?;
+                reports.push(report);
             }
-        }
-        Ok(reports)
+            if self.options.fsync_on_append {
+                let (elapsed_ms, slow) = self.fsync_active_segment()?;
+                if let Some(last) = reports.last_mut() {
+                    last.fsync_on_append = true;
+                    last.fsync_elapsed_ms = elapsed_ms;
+                    last.slow_fsync_observed = slow;
+                }
+            }
+            Ok(reports)
+        })();
+        self.finish_segment_operation(keep_open);
+        result
     }
 
     pub fn set_slow_fsync_threshold_ms(&mut self, threshold_ms: u64) {
@@ -800,14 +843,18 @@ impl PersistentRaftWal {
             .unwrap_or_default();
         let rolling_by_count = active_records >= self.options.max_records_per_segment;
         let record = build(self.active_covered)?;
-        self.write_record_core(
-            record,
-            active_records,
-            rolling_by_count,
-            self.options.fsync_on_append,
-            false,
-        )
-        .map(drop)
+        let keep_open = self.active_segment_was_recently_used();
+        let result = self
+            .write_record_core(
+                record,
+                active_records,
+                rolling_by_count,
+                self.options.fsync_on_append,
+                false,
+            )
+            .map(drop);
+        self.finish_segment_operation(keep_open);
+        result
     }
 
     pub fn append(&mut self, record: WalRecord) -> Result<String, RaftError> {
@@ -847,8 +894,16 @@ impl PersistentRaftWal {
         rolling_by_count: bool,
         fsync: bool,
     ) -> Result<WalWriteReport, RaftError> {
-        self.write_record_core(record, active_records, rolling_by_count, fsync, true)?
-            .ok_or_else(|| RaftError::Storage("WAL write report was not constructed".to_string()))
+        let keep_open = self.active_segment_was_recently_used();
+        let result = self
+            .write_record_core(record, active_records, rolling_by_count, fsync, true)
+            .and_then(|report| {
+                report.ok_or_else(|| {
+                    RaftError::Storage("WAL write report was not constructed".to_string())
+                })
+            });
+        self.finish_segment_operation(keep_open);
+        result
     }
 
     fn write_record_core(
@@ -980,6 +1035,7 @@ impl PersistentRaftWal {
             segment.sealed = segment.segment_id != active_id;
         }
         self.active_segment = Some(open_segment_for_append(&self.options.dir, active_id)?);
+        self.last_segment_use = None;
         self.expected_active_len = None;
         self.next_segment_id = active_id + 1;
         self.active_covered = self.covered_from_segments();
