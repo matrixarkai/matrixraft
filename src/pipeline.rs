@@ -4,6 +4,7 @@
 //! Replication pipeline evidence and BaselineRaft-style backpressure validation.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -235,6 +236,17 @@ pub struct SnapshotTransferState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ActiveSnapshotTransfer {
+    snapshot_id: Arc<str>,
+    snapshot_index: LogIndex,
+    total_chunks: u64,
+    acknowledged_chunks: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+    latest_receiving_elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApplyInflightTask {
     pub applied_index: LogIndex,
     pub batch_bytes: u64,
@@ -319,7 +331,7 @@ pub struct ReplicationPipeline {
     /// queue is bounded by `reorder_window_size`, so a full window costs twice
     /// what it did -- and only while it is full of out-of-order appends.
     reorder_queue: BTreeMap<LogIndex, u64>,
-    snapshot_transfer: Option<SnapshotTransferState>,
+    snapshot_transfer: Option<ActiveSnapshotTransfer>,
 }
 
 impl ReplicationPipeline {
@@ -901,6 +913,19 @@ impl ReplicationPipeline {
         snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<(), RaftError> {
+        self.begin_snapshot_send_shared(
+            Arc::<str>::from(snapshot_id.into()),
+            snapshot_index,
+            total_chunks,
+        )
+    }
+
+    pub(crate) fn begin_snapshot_send_shared(
+        &mut self,
+        snapshot_id: Arc<str>,
+        snapshot_index: LogIndex,
+        total_chunks: u64,
+    ) -> Result<(), RaftError> {
         if self.status.snapshot_sending || self.status.snapshot_installing {
             self.status.snapshot_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
@@ -911,8 +936,8 @@ impl ReplicationPipeline {
         self.status.snapshot_send_attempts += 1;
         self.status.snapshot_install_total_chunks = total_chunks;
         self.status.snapshot_install_progress_per_mille = 0;
-        self.snapshot_transfer = Some(SnapshotTransferState {
-            snapshot_id: snapshot_id.into(),
+        self.snapshot_transfer = Some(ActiveSnapshotTransfer {
+            snapshot_id,
             snapshot_index,
             total_chunks,
             acknowledged_chunks: 0,
@@ -1078,8 +1103,8 @@ impl ReplicationPipeline {
         self.status.snapshot_installing = true;
         self.status.snapshot_install_total_chunks = total_chunks;
         self.status.snapshot_install_progress_per_mille = 0;
-        self.snapshot_transfer = Some(SnapshotTransferState {
-            snapshot_id: snapshot_id.into(),
+        self.snapshot_transfer = Some(ActiveSnapshotTransfer {
+            snapshot_id: Arc::<str>::from(snapshot_id.into()),
             snapshot_index,
             total_chunks,
             acknowledged_chunks: 0,
