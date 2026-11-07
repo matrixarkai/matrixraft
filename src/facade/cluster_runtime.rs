@@ -1154,17 +1154,35 @@ impl RaftCluster {
             self.invalidate_leader_lease();
             return false;
         }
-        let acknowledgements = self
-            .nodes
-            .values()
-            .filter(|node| {
-                node.healthy
-                    && node.replica_role.participates_in_quorum()
-                    && !(self.ignore_witness && node.replica_role == ReplicaRole::Witness)
-            })
-            .map(|node| node.id)
-            .collect::<Vec<_>>();
-        self.renew_leader_lease_from_acknowledgements(acknowledgements)
+        if !self.begin_leader_lease_renewal() {
+            return false;
+        }
+        let mut after = std::ops::Bound::Unbounded;
+        loop {
+            let mut node_ids = [0; NODE_ID_CHUNK];
+            let mut node_count = 0;
+            for (&node_id, node) in self.nodes.range((after, std::ops::Bound::Unbounded)) {
+                if !node.healthy
+                    || !node.replica_role.participates_in_quorum()
+                    || (self.ignore_witness && node.replica_role == ReplicaRole::Witness)
+                {
+                    continue;
+                }
+                node_ids[node_count] = node_id;
+                node_count += 1;
+                if node_count == node_ids.len() {
+                    break;
+                }
+            }
+            if node_count == 0 {
+                break;
+            }
+            after = std::ops::Bound::Excluded(node_ids[node_count - 1]);
+            for &node_id in &node_ids[..node_count] {
+                self.record_leader_lease_confirmation_inner(node_id, false);
+            }
+        }
+        self.finish_leader_lease_renewal()
     }
 
     fn invalidate_leader_lease(&mut self) {
@@ -1355,19 +1373,6 @@ impl RaftCluster {
             self.config.leader_lease_ms,
             recompute_quorum,
         );
-    }
-
-    fn renew_leader_lease_from_acknowledgements<I>(&mut self, acknowledgements: I) -> bool
-    where
-        I: IntoIterator<Item = NodeId>,
-    {
-        if !self.begin_leader_lease_renewal() {
-            return false;
-        }
-        for node_id in acknowledgements {
-            self.record_leader_lease_confirmation_inner(node_id, false);
-        }
-        self.finish_leader_lease_renewal()
     }
 
     fn begin_leader_lease_renewal(&mut self) -> bool {
