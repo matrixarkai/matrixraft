@@ -5179,11 +5179,26 @@ impl RaftCluster {
         // borrow, then append those same entries to the lagging peer. This
         // avoids copying every payload and allocating a replacement `Arc` for
         // each retained entry.
-        let mut next_position = self
-            .nodes
-            .get(&leader_id)
-            .ok_or(RaftError::NodeNotFound(leader_id))?
-            .log_position_at_or_after(current_match.saturating_add(1));
+        let (mut next_position, missing_entry_count) = {
+            let leader = self
+                .nodes
+                .get(&leader_id)
+                .ok_or(RaftError::NodeNotFound(leader_id))?;
+            let position = leader.log_position_at_or_after(current_match.saturating_add(1));
+            let count = position
+                .map(|position| leader.log.len().saturating_sub(position))
+                .unwrap_or_default();
+            (position, count)
+        };
+        if missing_entry_count > 0 {
+            let peer = self
+                .nodes
+                .get_mut(&peer_id)
+                .ok_or(RaftError::NodeNotFound(peer_id))?;
+            if peer.replica_role != ReplicaRole::Witness {
+                peer.log.reserve_exact(missing_entry_count);
+            }
+        }
         while let Some(position) = next_position {
             let mut entries: [Option<Arc<LogEntry>>; NODE_ID_CHUNK] =
                 std::array::from_fn(|_| None);
