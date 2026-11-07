@@ -5070,6 +5070,53 @@ impl RaftCluster {
         self.catch_up_peer_with_reason(peer_id, "peer")
     }
 
+    /// Recovers every healthy data-bearing peer without allocating an ID list.
+    ///
+    /// Membership keys stay stable during catch-up, so each bounded stack chunk
+    /// can release the map borrow before the selected peers are mutated. Errors
+    /// are reported individually and do not prevent later peers from running.
+    pub(crate) fn catch_up_lagging_peers(
+        &mut self,
+        mut record_error: impl FnMut(NodeId, RaftError),
+    ) -> u64 {
+        let mut recovered = 0_u64;
+        let mut after = std::ops::Bound::Unbounded;
+        loop {
+            let mut peer_ids = [0; NODE_ID_CHUNK];
+            let mut peer_count = 0;
+            let mut last_visited = None;
+            for (&peer_id, node) in self
+                .nodes
+                .range((after, std::ops::Bound::Unbounded))
+            {
+                last_visited = Some(peer_id);
+                if Some(peer_id) == self.leader_id
+                    || !node.healthy
+                    || !node.replica_role.can_serve_data()
+                    || node.match_index() >= self.last_log_index
+                {
+                    continue;
+                }
+                peer_ids[peer_count] = peer_id;
+                peer_count += 1;
+                if peer_count == peer_ids.len() {
+                    break;
+                }
+            }
+            let Some(last_visited) = last_visited else {
+                break;
+            };
+            after = std::ops::Bound::Excluded(last_visited);
+            for &peer_id in &peer_ids[..peer_count] {
+                match self.catch_up_peer_with_reason(peer_id, "") {
+                    Ok(_) => recovered = recovered.saturating_add(1),
+                    Err(error) => record_error(peer_id, error),
+                }
+            }
+        }
+        recovered
+    }
+
     pub fn broadcast_commit_index_to_old_paused_peers(&mut self) -> Result<u64, RaftError> {
         let Some(leader_id) = self.leader_id else {
             return Ok(0);
@@ -5190,7 +5237,9 @@ impl RaftCluster {
                 .get_mut(&peer_id)
                 .ok_or(RaftError::NodeNotFound(peer_id))?;
             if peer.replica_role != ReplicaRole::Witness {
-                peer.log.reserve_exact(missing_entry_count);
+                // Catch-up often arrives one entry at a time. Geometric growth
+                // keeps that steady stream from reallocating on every visit.
+                peer.log.reserve(missing_entry_count);
             }
         }
         while let Some(position) = next_position {
@@ -5274,7 +5323,9 @@ impl RaftCluster {
                 .map(|pipeline| pipeline.status().learner_catchup_rounds)
                 .unwrap_or_default(),
             caught_up,
-            reason: if caught_up {
+            reason: if reason_prefix.is_empty() {
+                String::new()
+            } else if caught_up {
                 format!("{reason_prefix}_caught_up")
             } else {
                 format!("{reason_prefix}_still_lagging")
@@ -7396,5 +7447,56 @@ mod live_quorum_tests {
             !cluster_with(&roles, &[true, false, false], false).has_live_quorum(),
             "one healthy voter of three is not a quorum"
         );
+    }
+}
+
+#[cfg(test)]
+mod lagging_peer_catchup_tests {
+    use super::*;
+
+    fn peer(node_id: NodeId) -> Peer {
+        Peer {
+            node_id,
+            raft_addr: String::new(),
+            snapshot_addr: String::new(),
+            role: ReplicaRole::Voter,
+            auto_promote: false,
+        }
+    }
+
+    #[test]
+    fn automatic_catchup_visits_more_than_one_stack_chunk() {
+        let peers = (1..=67).map(peer).collect();
+        let mut cluster = RaftCluster::new(81, Config::default(), peers).expect("cluster");
+        cluster.start().expect("start");
+
+        for node_id in 2..=34 {
+            cluster
+                .set_node_healthy(node_id, false)
+                .expect("pause follower");
+        }
+        cluster
+            .propose(b"recover-many".to_vec())
+            .expect("append with a live quorum");
+        for node_id in 2..=34 {
+            cluster
+                .set_node_healthy(node_id, true)
+                .expect("resume follower");
+        }
+
+        let mut errors = Vec::new();
+        let recovered = cluster.catch_up_lagging_peers(|node_id, error| {
+            errors.push((node_id, error.to_string()));
+        });
+
+        assert!(errors.is_empty(), "unexpected catch-up errors: {errors:?}");
+        assert_eq!(recovered, 33);
+        for node_id in 2..=34 {
+            assert_eq!(
+                cluster.nodes[&node_id].match_index(),
+                cluster.last_log_index,
+                "node {node_id} was skipped"
+            );
+        }
     }
 }
