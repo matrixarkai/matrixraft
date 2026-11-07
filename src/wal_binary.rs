@@ -913,17 +913,24 @@ pub(crate) fn fnv1a32(bytes: &[u8]) -> u32 {
 
 /// One record, framed: length, digest, then the encoded message.
 pub(crate) fn encode_framed(record: &WalRecord) -> Result<Vec<u8>, RaftError> {
+    let mut out = Vec::new();
+    encode_framed_into(record, &mut out)?;
+    Ok(out)
+}
+
+pub(crate) fn encode_framed_into(record: &WalRecord, out: &mut Vec<u8>) -> Result<(), RaftError> {
     let checksum_digest = checksum_as_u64(&record.checksum);
     let body_len = wal_record_encoded_len(record, checksum_digest);
     let length = u32::try_from(body_len)
         .map_err(|_| RaftError::Storage("WAL record exceeds a frame length".to_string()))?;
-    let mut out = Vec::with_capacity(FRAME_BYTES + body_len);
+    out.clear();
+    out.reserve(FRAME_BYTES + body_len);
     out.extend_from_slice(&length.to_le_bytes());
     out.extend_from_slice(&[0; 4]);
-    encode_wal_record(record, checksum_digest, &mut out);
+    encode_wal_record(record, checksum_digest, out);
     let digest = FrameDigest::Crc32c.of(&out[FRAME_BYTES..]);
     out[4..FRAME_BYTES].copy_from_slice(&digest.to_le_bytes());
-    Ok(out)
+    Ok(())
 }
 
 fn wal_record_encoded_len(record: &WalRecord, checksum_digest: Option<u64>) -> usize {
@@ -1273,6 +1280,20 @@ mod tests {
                 assert_eq!(used, framed.len(), "the frame must report its own width");
             }
         }
+    }
+
+    #[test]
+    fn a_reused_frame_buffer_drops_the_previous_tail() {
+        let mut reused = Vec::new();
+        encode_framed_into(&record(3_000, true), &mut reused).expect("large frame encodes");
+        let retained_capacity = reused.capacity();
+
+        let small = record(9, false);
+        let expected = encode_framed(&small).expect("small frame encodes");
+        encode_framed_into(&small, &mut reused).expect("small frame reuses buffer");
+
+        assert_eq!(reused, expected);
+        assert_eq!(reused.capacity(), retained_capacity);
     }
 
     #[test]

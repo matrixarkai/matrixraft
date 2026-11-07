@@ -13,7 +13,8 @@
 //! the public write report, so skipping its checksum and format strings removes
 //! another 1,024 allocations: 605 total, or 9.453 per call. Reusing completed
 //! step reply channels removes another 190 allocations: 415 total, or 6.484 per
-//! call.
+//! call. Reusing the framed WAL encoding buffer removes another 64 allocations:
+//! 351 total, or 5.484 per call.
 
 use matrixraft::{Config, NodeOptions, NodeRuntime, Peer, ReplicaRole};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -102,7 +103,7 @@ fn lone_runtime_proposals_bound_heap_bookkeeping() {
     let per_proposal = allocations as f64 / ROUNDS as f64;
     println!("lone runtime proposal: {per_proposal:.3} allocations per call");
     assert!(
-        per_proposal < 7.0,
+        per_proposal < 6.0,
         "lone runtime proposals used {per_proposal:.3} allocations per call"
     );
 
