@@ -123,7 +123,8 @@ fn a_failed_rolling_append_is_reported_and_costs_nothing_already_written() {
     // The roll's open fails, so this append fails.
     let refused = wal.append(record(3));
     // What the WAL still holds, asked while the descriptors are still gone --
-    // `records()` answers from memory, so it needs none.
+    // `records()` reads the active segment through its existing descriptor, so
+    // it needs no new one.
     let during = wal.records().len();
 
     drop(held);
