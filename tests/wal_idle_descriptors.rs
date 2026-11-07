@@ -14,7 +14,7 @@ use matrixraft::{
     WalRecord,
 };
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const GROUPS: usize = 256;
 
@@ -95,8 +95,29 @@ fn idle_wals_hold_one_descriptor_and_open_the_segment_on_demand() {
     wals[0].append(record(1)).expect("first WAL append");
     assert_eq!(
         fd_count() - idle,
+        0,
+        "a lone append must close its segment again"
+    );
+
+    wals[0].append(record(1)).expect("second WAL append");
+    for _ in 0..100 {
+        wals[0].append(record(1)).expect("hot WAL append");
+    }
+    assert_eq!(
+        fd_count() - idle,
         1,
-        "the first append must open and retain exactly one active segment"
+        "a hot append sequence must retain exactly one segment descriptor"
+    );
+
+    std::thread::sleep(Duration::from_millis(1_100));
+    assert!(
+        wals[0].release_idle_segment_descriptor(),
+        "the hot descriptor must be releasable after its quiet window"
+    );
+    assert_eq!(
+        fd_count(),
+        idle,
+        "a live-but-idle WAL must return to its one lock descriptor"
     );
 
     drop(wals);
