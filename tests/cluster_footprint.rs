@@ -16,8 +16,12 @@ use matrixraft::{Config, Peer, RaftCluster, ReplicaRole};
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(
-        std::mem::size_of::<RaftCluster>() == 544,
-        "RaftCluster changed width. It was 536 bytes until the accumulated vote \
+        std::mem::size_of::<RaftCluster>() == 432,
+        "RaftCluster changed width. It was 544 bytes until seven transient maps \
+         moved behind a lazy allocation. An empty BTreeMap is 24 bytes while the \
+         lazy map is one 8-byte pointer, saving 112 inline bytes per group while \
+         preserving the map's serialized shape. Before that it was 536 bytes \
+         until the accumulated vote \
          grants gained the term they were given for, which is what stops a \
          candidate reaching a quorum in one term on grants given for an \
          earlier one -- eight paths cleared the accumulator and two did not, \
@@ -119,4 +123,24 @@ fn an_absent_transfer_comes_back_absent() {
         json,
         "a cluster with no transfer does not survive JSON unchanged"
     );
+}
+
+#[test]
+fn empty_transient_maps_keep_their_map_wire_shape() {
+    let json = serde_json::to_value(leader()).expect("serialize");
+    for field in [
+        "snapshot_installers",
+        "pending_snapshots",
+        "leader_lease_confirmations",
+        "leader_lease_confirmation_epochs",
+        "reorder_queues",
+        "vote_responses",
+        "pre_vote_responses",
+    ] {
+        assert_eq!(
+            json.get(field),
+            Some(&serde_json::json!({})),
+            "{field} must remain an empty map on the wire"
+        );
+    }
 }

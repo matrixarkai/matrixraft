@@ -2864,11 +2864,16 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// # How much memory a group costs
 ///
 /// About **21 KiB of resident memory per group**, and it is flat as the group
-/// count grows: 89 MiB for 4096 groups and 341 MiB for 16,384, both measured with
+/// count grows: 89 MiB for 4096 groups and 339 MiB for 16,384, both measured with
 /// the measuring binary's own resident size taken off. The same in debug and in
 /// release, within a kilobyte a group -- an allocation is the size it is
 /// whichever profile asked for it. A hundred thousand groups
 /// is a little over 2 GiB for the groups themselves.
+///
+/// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
+/// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
+/// the inline cluster state is 112 bytes narrower and the measured process is
+/// 2 MiB smaller at this count.
 ///
 /// Measure it with `examples/idle_tick_cost.rs` under `arm=live`, which runs one
 /// row in one process. Every other arm setting builds and drops other stores
