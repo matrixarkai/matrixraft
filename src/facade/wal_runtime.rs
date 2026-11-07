@@ -4,6 +4,14 @@
 // WAL persistence/runtime structs and segmented WAL helpers.
 // Split from src/lib.rs to keep the crate facade small and focused.
 
+const MAX_RETAINED_WAL_ENCODE_BYTES: usize = 1024 * 1024;
+
+std::thread_local! {
+    static WAL_ENCODE_SCRATCH: std::cell::RefCell<Vec<u8>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApplySnapshotFence {
     pub applied_index: LogIndex,
@@ -838,29 +846,32 @@ impl PersistentRaftWal {
                 )));
             }
         }
-        let encoded = encode_wal_record(&record)?;
-        // The frame carries its own length, so there is no delimiter to add.
-        // The JSON form needed a newline and counted it here.
-        let record_bytes = encoded.len() as u64;
+        let (record_bytes, segment_rolled) = with_encoded_wal_record(&record, |encoded| {
+            // The frame carries its own length, so there is no delimiter to add.
+            // The JSON form needed a newline and counted it here.
+            let record_bytes = encoded.len() as u64;
 
-        let mut segment_rolled = false;
-        // `active_records > 0` is what decides where a record larger than
-        // `max_segment_bytes` goes. Without it the WAL rolls a segment it has
-        // just created and is still empty, and the record lands in the second
-        // one -- measured as segments=2 against segments=1 for the same
-        // 13,825 bytes, so a wasted segment per oversized record. The whole
-        // suite stayed green without it, which is why `tests/segment_bound.rs`
-        // now pins it.
-        if rolling_by_count
-            || (active_records > 0 && active_len + record_bytes > self.options.max_segment_bytes)
-        {
-            self.roll_segment()?;
-            segment_rolled = true;
-        }
+            let mut segment_rolled = false;
+            // `active_records > 0` is what decides where a record larger than
+            // `max_segment_bytes` goes. Without it the WAL rolls a segment it has
+            // just created and is still empty, and the record lands in the second
+            // one -- measured as segments=2 against segments=1 for the same
+            // 13,825 bytes, so a wasted segment per oversized record. The whole
+            // suite stayed green without it, which is why `tests/segment_bound.rs`
+            // now pins it.
+            if rolling_by_count
+                || (active_records > 0
+                    && active_len + record_bytes > self.options.max_segment_bytes)
+            {
+                self.roll_segment()?;
+                segment_rolled = true;
+            }
 
-        self.active_segment
-            .write_all(&encoded)
-            .map_err(|err| RaftError::Storage(format!("failed to append WAL record: {err}")))?;
+            self.active_segment
+                .write_all(encoded)
+                .map_err(|err| RaftError::Storage(format!("failed to append WAL record: {err}")))?;
+            Ok((record_bytes, segment_rolled))
+        })?;
         // After a roll `active_len` describes the PREVIOUS segment, so the
         // expectation is only computable when this append stayed put. A roll
         // reassigns `active_segment` and clears it, and the next append adopts
@@ -1268,8 +1279,19 @@ fn whole_record(record: &WalRecord) -> WalRecord {
     whole
 }
 
-fn encode_wal_record(record: &WalRecord) -> Result<Vec<u8>, RaftError> {
-    crate::wal_binary::encode_framed(record)
+fn with_encoded_wal_record<T>(
+    record: &WalRecord,
+    use_encoded: impl FnOnce(&[u8]) -> Result<T, RaftError>,
+) -> Result<T, RaftError> {
+    WAL_ENCODE_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        crate::wal_binary::encode_framed_into(record, &mut scratch)?;
+        let result = use_encoded(&scratch);
+        if scratch.capacity() > MAX_RETAINED_WAL_ENCODE_BYTES {
+            *scratch = Vec::new();
+        }
+        result
+    })
 }
 
 /// Every whole record a segment file holds, without repairing it.
