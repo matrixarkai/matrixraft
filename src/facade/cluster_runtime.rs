@@ -5174,28 +5174,52 @@ impl RaftCluster {
         }
         let current_match = peer.match_index();
 
-        // Copy only the tail the peer is missing rather than the whole leader
-        // log, which this runs over once per lagging peer per tick.
-        let leader = self
+        // Entries are immutable and already shared by every caught-up node.
+        // Clone bounded runs of handles on the stack, release the leader
+        // borrow, then append those same entries to the lagging peer. This
+        // avoids copying every payload and allocating a replacement `Arc` for
+        // each retained entry.
+        let mut next_position = self
             .nodes
             .get(&leader_id)
-            .ok_or(RaftError::NodeNotFound(leader_id))?;
-        let missing_tail: Vec<LogEntry> = leader
-            .log_position_at_or_after(current_match.saturating_add(1))
-            .map(|position| leader.log_entries_from(position))
-            .unwrap_or_default();
-
+            .ok_or(RaftError::NodeNotFound(leader_id))?
+            .log_position_at_or_after(current_match.saturating_add(1));
+        while let Some(position) = next_position {
+            let mut entries: [Option<Arc<LogEntry>>; NODE_ID_CHUNK] =
+                std::array::from_fn(|_| None);
+            let mut entry_count = 0;
+            {
+                let leader = self
+                    .nodes
+                    .get(&leader_id)
+                    .ok_or(RaftError::NodeNotFound(leader_id))?;
+                for entry in leader.log[position..].iter().take(entries.len()) {
+                    entries[entry_count] = Some(Arc::clone(entry));
+                    entry_count += 1;
+                }
+                let following_position = position.saturating_add(entry_count);
+                next_position = (following_position < leader.log.len()).then_some(following_position);
+            }
+            if entry_count == 0 {
+                break;
+            }
+            let peer = self
+                .nodes
+                .get_mut(&peer_id)
+                .ok_or(RaftError::NodeNotFound(peer_id))?;
+            for entry in &mut entries[..entry_count] {
+                let entry = entry.take().expect("filled catch-up entry");
+                if peer.replica_role == ReplicaRole::Witness {
+                    peer.append_witness_entry(&entry, false);
+                } else {
+                    peer.append_entry(entry);
+                }
+            }
+        }
         let peer = self
             .nodes
             .get_mut(&peer_id)
             .ok_or(RaftError::NodeNotFound(peer_id))?;
-        for entry in missing_tail {
-            if peer.replica_role == ReplicaRole::Witness {
-                peer.append_witness_entry(&entry, false);
-            } else {
-                peer.append_entry(Arc::new(entry));
-            }
-        }
         peer.advance_commit(leader_commit_index.min(peer.match_index()));
         let learner_match_index_after = peer.match_index();
 
