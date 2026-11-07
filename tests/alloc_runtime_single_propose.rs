@@ -9,7 +9,9 @@
 //! until a second one is present removes exactly 64 allocations: 1,885 total,
 //! or 29.453 per call. Encoding the owned WAL record directly into its framed
 //! buffer removes the protobuf mirror's membership, entry, payload, and body
-//! allocations: 1,629 total, or 25.453 per call.
+//! allocations: 1,629 total, or 25.453 per call. The runtime does not consume
+//! the public write report, so skipping its checksum and format strings removes
+//! another 1,024 allocations: 605 total, or 9.453 per call.
 
 use matrixraft::{Config, NodeOptions, NodeRuntime, Peer, ReplicaRole};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -98,7 +100,7 @@ fn lone_runtime_proposals_bound_heap_bookkeeping() {
     let per_proposal = allocations as f64 / ROUNDS as f64;
     println!("lone runtime proposal: {per_proposal:.3} allocations per call");
     assert!(
-        per_proposal < 26.0,
+        per_proposal < 10.0,
         "lone runtime proposals used {per_proposal:.3} allocations per call"
     );
 

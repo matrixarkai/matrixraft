@@ -1456,9 +1456,9 @@ fn persist_after_promise(
     let Some(open_wal) = wal.as_mut() else {
         return Ok(());
     };
-    let appended =
-        open_wal.append_built(|coverage| cluster.wal_record_for_coverage(node_id, coverage));
-    after_durable_write(cluster, node_id, appended).map(|_| ())
+    let appended = open_wal
+        .append_built_without_report(|coverage| cluster.wal_record_for_coverage(node_id, coverage));
+    after_durable_write(cluster, node_id, appended)
 }
 
 fn runtime_step_message(
@@ -1483,7 +1483,9 @@ fn runtime_step_message(
                 let appended = wal
                     .as_mut()
                     .expect("checked just above")
-                    .append_built(|coverage| cluster.wal_record_for_coverage(node_id, coverage));
+                    .append_built_without_report(|coverage| {
+                        cluster.wal_record_for_coverage(node_id, coverage)
+                    });
                 after_durable_write(cluster, node_id, appended)?;
             }
             Ok(StepResult::Proposed(log_id))
@@ -2041,11 +2043,9 @@ impl NodeCore {
                     // persist.
                     let persisted: Result<(), RaftError> = if any_applied {
                         match wal.as_mut() {
-                            Some(wal) => wal
-                                .append_built(|coverage| {
+                            Some(wal) => wal.append_built_without_report(|coverage| {
                                     cluster.wal_record_for_coverage(node_id, coverage)
-                                })
-                                .map(|_| ()),
+                                }),
                             None => Ok(()),
                         }
                     } else {
@@ -2247,7 +2247,7 @@ impl NodeCore {
                     || step_installed_a_snapshot(snapshot_completes_install, &result)
                 {
                     if let Some(open_wal) = wal.as_mut() {
-                        let appended = open_wal.append_built(|coverage| {
+                        let appended = open_wal.append_built_without_report(|coverage| {
                             cluster.wal_record_for_coverage(node_id, coverage)
                         });
                         if let Err(error) = after_durable_write(cluster, node_id, appended) {
@@ -2353,11 +2353,9 @@ impl NodeCore {
                     || local_term_and_vote(cluster, node_id) != term_and_vote_before
                 {
                     match wal.as_mut() {
-                        Some(wal) => wal
-                            .append_built(|coverage| {
+                        Some(wal) => wal.append_built_without_report(|coverage| {
                                 cluster.wal_record_for_coverage(node_id, coverage)
-                            })
-                            .map(|_| ()),
+                            }),
                         None => Ok(()),
                     }
                 } else {
