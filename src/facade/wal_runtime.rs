@@ -742,6 +742,34 @@ impl PersistentRaftWal {
         )
     }
 
+    /// Appends a record without constructing the caller-facing write report.
+    ///
+    /// The node runtime needs only success or failure before acknowledging a
+    /// durable operation. Building the full report there would allocate its
+    /// checksum and checksum-format strings only to drop them immediately.
+    pub(crate) fn append_built_without_report<F>(&mut self, mut build: F) -> Result<(), RaftError>
+    where
+        F: FnMut(
+            Option<(LogIndex, LogIndex, Term)>,
+        ) -> Result<WalRecord, RaftError>,
+    {
+        let active_records = self
+            .segments
+            .last()
+            .map(|segment| segment.records.len())
+            .unwrap_or_default();
+        let rolling_by_count = active_records >= self.options.max_records_per_segment;
+        let record = build(self.active_covered)?;
+        self.write_record_core(
+            record,
+            active_records,
+            rolling_by_count,
+            self.options.fsync_on_append,
+            false,
+        )
+        .map(drop)
+    }
+
     pub fn append(&mut self, record: WalRecord) -> Result<String, RaftError> {
         Ok(self.append_with_report(record)?.checksum)
     }
@@ -779,6 +807,18 @@ impl PersistentRaftWal {
         rolling_by_count: bool,
         fsync: bool,
     ) -> Result<WalWriteReport, RaftError> {
+        self.write_record_core(record, active_records, rolling_by_count, fsync, true)?
+            .ok_or_else(|| RaftError::Storage("WAL write report was not constructed".to_string()))
+    }
+
+    fn write_record_core(
+        &mut self,
+        record: WalRecord,
+        active_records: usize,
+        rolling_by_count: bool,
+        fsync: bool,
+        include_report: bool,
+    ) -> Result<Option<WalWriteReport>, RaftError> {
         let hard_state_persisted = matrixraft_validate_hard_state_persistence(&record).is_ok();
         let active_len = self
             .active_segment
@@ -837,7 +877,7 @@ impl PersistentRaftWal {
             fsync_elapsed_ms = observed.0;
             slow_fsync_observed = observed.1;
         }
-        let checksum = record.checksum.clone();
+        let checksum = include_report.then(|| record.checksum.clone());
         let record_index = wal_record_index(&record);
         let segment = self
             .segments
@@ -851,7 +891,7 @@ impl PersistentRaftWal {
         segment.record_count = segment.records.len() as u64;
         let segment_id = segment.segment_id;
         self.advance_active_covered();
-        Ok(WalWriteReport {
+        Ok(checksum.map(|checksum| WalWriteReport {
             segment_id,
             log_index: record_index,
             checksum,
@@ -864,7 +904,7 @@ impl PersistentRaftWal {
             segment_rolled,
             hard_state_persisted,
             retained_range: wal_retained_range(&self.segments),
-        })
+        }))
     }
 
     pub fn recover(&mut self) -> Result<WalRecoveryReport, RaftError> {
