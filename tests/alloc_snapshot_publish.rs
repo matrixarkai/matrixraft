@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
-//! Publishing a completed snapshot does not allocate a waiting-peer list.
+//! Publishing a completed snapshot moves its metadata into the leader.
 //!
 //! Each started transfer owns its snapshot id, so one string allocation per
-//! waiting follower is intentional. Selecting those followers should not also
-//! materialize every peer id before the transfers begin.
+//! waiting follower is intentional. The completed trigger already owns the
+//! metadata installed on the leader, so publication should neither clone its
+//! id and member vectors nor materialize every waiting peer id.
 //!
-//! Measured before and after direct pipeline iteration:
+//! Measured before and after moving the completed metadata through publication:
 //!
 //! | voters | before | after |
 //! |---|---:|---:|
-//! | 3 | 9 allocations / 480 B | 8 / 448 B |
-//! | 33 | 42 allocations / 5368 B | 38 / 4888 B |
+//! | 3 | 8 allocations / 448 B | 2 / 8 B |
+//! | 33 | 38 allocations / 4888 B | 32 / 128 B |
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -123,11 +124,11 @@ fn completed_snapshot_publication_avoids_peer_list_scratch() {
         measured.push((voters, allocations, bytes));
     }
     for (voters, allocations, bytes) in measured {
-        let expected_allocations = voters as usize + 5;
-        let expected_bytes = if voters == 3 { 448 } else { 4_888 };
+        let expected_allocations = voters.saturating_sub(1) as usize;
+        let expected_bytes = if voters == 3 { 8 } else { 128 };
         assert_eq!(
             allocations, expected_allocations,
-            "a {voters}-voter publication should retain only owned snapshot state, got {allocations} allocations and {bytes} bytes"
+            "a {voters}-voter publication should allocate only one owned snapshot id per waiting follower, got {allocations} allocations and {bytes} bytes"
         );
         assert_eq!(
             bytes, expected_bytes,
