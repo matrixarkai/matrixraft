@@ -2202,12 +2202,8 @@ impl RaftCluster {
         self.last_log_index = log_id.index;
         let entry = Arc::new(entry);
 
-        let node_ids: Vec<_> = self.nodes.keys().copied().collect();
-        for node_id in node_ids {
-            let Some(node) = self.nodes.get_mut(&node_id) else {
-                continue;
-            };
-            if node_id == leader_id {
+        for node in self.nodes.values_mut() {
+            if node.id == leader_id {
                 node.append_entry(Arc::clone(&entry));
                 continue;
             }
