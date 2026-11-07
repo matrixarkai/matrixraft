@@ -185,6 +185,16 @@ pub trait ApplyHandler: Send + Sync {
     fn apply_reporting(&self, tasks: Vec<ApplyTask>) -> ApplyReport {
         ApplyReport::reached(self.apply(tasks))
     }
+
+    /// Applies a batch and returns storage the applier worker may reuse.
+    ///
+    /// The default preserves the owned-vector contract: a host may retain the
+    /// batch, so no storage comes back. A host that consumes tasks during the
+    /// call can clear the vector and return it, removing the allocation from
+    /// every later delivery on that worker.
+    fn apply_reporting_recycling(&self, tasks: Vec<ApplyTask>) -> (ApplyReport, Vec<ApplyTask>) {
+        (self.apply_reporting(tasks), Vec::new())
+    }
 }
 
 /// Where a group has got to.
@@ -241,11 +251,17 @@ struct GroupApplier {
 impl GroupApplier {
     /// Applies one already-bounded batch and returns whether it stalled.
     fn apply_batch(&self, tasks: Vec<ApplyTask>) -> bool {
+        self.apply_batch_recycling(tasks).0
+    }
+
+    /// Applies one batch and carries any reusable delivery storage back out.
+    fn apply_batch_recycling(&self, tasks: Vec<ApplyTask>) -> (bool, Vec<ApplyTask>) {
         let count = tasks.len() as u64;
         // Computed before ownership moves to the handler. The task vector and
         // every entry payload now travel there without being cloned.
         let ceiling = matrixraft_apply_batch_ceiling(&tasks);
-        let report = self.handler.apply_reporting(tasks);
+        let (report, mut reusable) = self.handler.apply_reporting_recycling(tasks);
+        reusable.clear();
         let reported = report.applied_index();
         let reached = reported.min(ceiling);
 
@@ -276,10 +292,10 @@ impl GroupApplier {
             // now and should find that out from `wait_for_applied` rather than
             // by sitting out its timeout.
             self.state.advanced.notify_all();
-            return true;
+            return (true, reusable);
         }
         self.state.advanced.notify_all();
-        false
+        (false, reusable)
     }
 }
 
@@ -332,6 +348,30 @@ impl DriverMailHandler<ApplyTask> for GroupApplier {
                 return;
             }
         }
+    }
+
+    fn handle_mail_recycling(&self, tasks: Vec<ApplyTask>) -> Vec<ApplyTask> {
+        if self
+            .state
+            .applied
+            .lock()
+            .expect("applied mutex poisoned")
+            .stall
+            .is_some()
+            || tasks.is_empty()
+        {
+            return tasks;
+        }
+
+        if tasks.len() <= self.batch_limit.max(1) {
+            return self.apply_batch_recycling(tasks).1;
+        }
+
+        // Only a pool whose poll bound differs from this group's bound reaches
+        // this fallback. Preserve the existing bounded split and ownership
+        // behavior for that custom construction.
+        self.handle_mail(tasks);
+        Vec::new()
     }
 }
 
