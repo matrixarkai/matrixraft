@@ -11,7 +11,7 @@
 //!
 //! | before | after |
 //! |---:|---:|
-//! | 71 allocations / 135640 B | 6 allocations / 984 B |
+//! | 71 allocations / 135640 B | 3 allocations / 288 B |
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -89,11 +89,11 @@ fn lagging_follower_catchup_does_not_copy_payloads() {
     let bytes = BYTES.load(Ordering::Relaxed);
     println!("32-entry catch-up: {allocations} allocations and {bytes} bytes");
     assert!(
-        allocations <= 6,
-        "catch-up should allocate only follower-log growth and its report, got {allocations} allocations"
+        allocations <= 3,
+        "catch-up should allocate its follower log once and retain its report, got {allocations} allocations"
     );
     assert!(
-        bytes <= 2_048,
+        bytes <= 400,
         "catch-up copied retained payloads or kept oversized scratch: {bytes} bytes"
     );
 }
