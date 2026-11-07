@@ -110,8 +110,9 @@ pub struct WalSegment {
     pub last_index: LogIndex,
     /// The records held in memory for this segment.
     ///
-    /// A sealed segment releases these once it is on disk, so this is empty for
-    /// every segment but the active one. Read them back with
+    /// A persistent segment releases these once it is on disk, so this is empty
+    /// outside the bounded read and rewrite operations that need decoded
+    /// records. Read them back with
     /// `PersistentRaftWal::records`, which loads what it needs from the segment
     /// files. Use `record_count` rather than `records.len()` for how many a
     /// segment holds -- they differ exactly when the records have been released.
