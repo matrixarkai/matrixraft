@@ -6449,26 +6449,18 @@ impl RaftCluster {
             }
         }
         let snapshot_id = meta.snapshot_id;
-        let waiting_peers = self
-            .peer_pipelines
-            .iter()
-            .filter_map(|(peer_id, pipeline)| {
-                if *peer_id == leader_id {
-                    return None;
-                }
-                let status = pipeline.status();
-                (status.required_snapshot_index > 0
-                    && status.required_snapshot_index <= snapshot_index
-                    && !status.snapshot_sending
-                    && !status.snapshot_installing)
-                    .then_some(*peer_id)
-            })
-            .collect::<Vec<_>>();
-        for peer_id in waiting_peers {
-            self.peer_pipelines
-                .get_mut(&peer_id)
-                .ok_or(RaftError::NodeNotFound(peer_id))?
-                .begin_snapshot_send(snapshot_id.clone(), snapshot_index, 1)?;
+        for (&peer_id, pipeline) in &mut self.peer_pipelines {
+            if peer_id == leader_id {
+                continue;
+            }
+            let status = pipeline.status();
+            if status.required_snapshot_index > 0
+                && status.required_snapshot_index <= snapshot_index
+                && !status.snapshot_sending
+                && !status.snapshot_installing
+            {
+                pipeline.begin_snapshot_send(snapshot_id.clone(), snapshot_index, 1)?;
+            }
         }
         Ok(())
     }
