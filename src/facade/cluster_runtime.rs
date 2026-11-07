@@ -5079,50 +5079,68 @@ impl RaftCluster {
         let Some(leader_id) = self.leader_id else {
             return Ok(0);
         };
-        let peer_ids = self
-            .peer_pipelines
-            .keys()
-            .copied()
-            .filter(|peer_id| *peer_id != leader_id)
-            .filter(|peer_id| {
-                self.nodes
-                    .get(peer_id)
+        let mut sent = 0_u64;
+        let mut after = std::ops::Bound::Unbounded;
+        loop {
+            let mut peer_ids = [0; NODE_ID_CHUNK];
+            let mut peer_count = 0;
+            for (&peer_id, _) in self
+                .peer_pipelines
+                .range((after, std::ops::Bound::Unbounded))
+            {
+                if peer_id == leader_id {
+                    continue;
+                }
+                peer_ids[peer_count] = peer_id;
+                peer_count += 1;
+                if peer_count == peer_ids.len() {
+                    break;
+                }
+            }
+            if peer_count == 0 {
+                break;
+            }
+            after = std::ops::Bound::Excluded(peer_ids[peer_count - 1]);
+            for &peer_id in &peer_ids[..peer_count] {
+                if !self
+                    .nodes
+                    .get(&peer_id)
                     .map(|node| node.healthy)
                     .unwrap_or(false)
-            })
-            .collect::<Vec<_>>();
-        let mut sent = 0_u64;
-        for peer_id in peer_ids {
-            let should_send = self
-                .peer_pipelines
-                .get_mut(&peer_id)
-                .map(|pipeline| {
-                    let status = pipeline.status();
-                    !status.snapshot_sending
-                        && !status.snapshot_installing
-                        && pipeline.take_empty_append_due_to_old_pause()
-                })
-                .unwrap_or(false);
-            if !should_send {
-                continue;
+                {
+                    continue;
+                }
+                let should_send = self
+                    .peer_pipelines
+                    .get_mut(&peer_id)
+                    .map(|pipeline| {
+                        let status = pipeline.status();
+                        !status.snapshot_sending
+                            && !status.snapshot_installing
+                            && pipeline.take_empty_append_due_to_old_pause()
+                    })
+                    .unwrap_or(false);
+                if !should_send {
+                    continue;
+                }
+                let peer_match_index = self
+                    .nodes
+                    .get(&peer_id)
+                    .map(Node::match_index)
+                    .unwrap_or_default();
+                let request = AppendEntriesRequest {
+                    group_id: self.group_id,
+                    term: self.current_term,
+                    leader_id,
+                    prev_log_id: None,
+                    entries: Vec::new(),
+                    leader_commit: self.commit_index.min(peer_match_index),
+                    lease_epoch: self.leader_lease_epoch,
+                };
+                let response = self.append_entries_to(peer_id, request)?;
+                self.handle_append_entries_response(leader_id, peer_id, response)?;
+                sent = sent.saturating_add(1);
             }
-            let peer_match_index = self
-                .nodes
-                .get(&peer_id)
-                .map(Node::match_index)
-                .unwrap_or_default();
-            let request = AppendEntriesRequest {
-                group_id: self.group_id,
-                term: self.current_term,
-                leader_id,
-                prev_log_id: None,
-                entries: Vec::new(),
-                leader_commit: self.commit_index.min(peer_match_index),
-                lease_epoch: self.leader_lease_epoch,
-            };
-            let response = self.append_entries_to(peer_id, request)?;
-            self.handle_append_entries_response(leader_id, peer_id, response)?;
-            sent = sent.saturating_add(1);
         }
         Ok(sent)
     }
