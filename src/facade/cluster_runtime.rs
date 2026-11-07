@@ -4358,39 +4358,33 @@ impl RaftCluster {
     }
 
     pub fn read_quorum_report(&self) -> ReadQuorumReport {
-        let membership = self.membership();
-        let live_voters = membership
-            .voters
-            .iter()
-            .copied()
-            .filter(|node_id| {
-                self.nodes
-                    .get(node_id)
-                    .map(|node| node.healthy)
-                    .unwrap_or(false)
-            })
-            .collect::<Vec<_>>();
-        let live_witnesses = if self.ignore_witness {
-            Vec::new()
+        let (voter_count, witness_count) = self.nodes.values().fold(
+            (0_usize, 0_usize),
+            |(voters, witnesses), node| match node.replica_role {
+                ReplicaRole::Voter => (voters + 1, witnesses),
+                ReplicaRole::Witness => (voters, witnesses + 1),
+                ReplicaRole::Learner => (voters, witnesses),
+            },
+        );
+        let mut live_voters = Vec::with_capacity(voter_count);
+        let mut live_witnesses = Vec::with_capacity(if self.ignore_witness {
+            0
         } else {
-            membership
-                .witnesses
-                .iter()
-                .copied()
-                .filter(|node_id| {
-                    self.nodes
-                        .get(node_id)
-                        .map(|node| node.healthy)
-                        .unwrap_or(false)
-                })
-                .collect::<Vec<_>>()
-        };
-        let acknowledgements = live_voters
-            .iter()
-            .chain(live_witnesses.iter())
-            .copied()
-            .collect::<Vec<_>>();
-        let required = membership.quorum_size_with_witness_policy(self.ignore_witness) as u64;
+            witness_count
+        });
+        for node in self.nodes.values().filter(|node| node.healthy) {
+            match node.replica_role {
+                ReplicaRole::Voter => live_voters.push(node.id),
+                ReplicaRole::Witness if !self.ignore_witness => live_witnesses.push(node.id),
+                ReplicaRole::Learner | ReplicaRole::Witness => {}
+            }
+        }
+        let mut acknowledgements =
+            Vec::with_capacity(live_voters.len() + live_witnesses.len());
+        acknowledgements.extend_from_slice(&live_voters);
+        acknowledgements.extend_from_slice(&live_witnesses);
+        let required =
+            matrixraft_quorum_size(voter_count, witness_count, self.ignore_witness) as u64;
         ReadQuorumReport {
             required,
             live_voters,
