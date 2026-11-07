@@ -29,6 +29,47 @@ pub struct NodeRuntimeStatus {
     pub fatal_blocker_report: FatalBlockerReport,
 }
 
+struct RuntimeReplyPool<T> {
+    idle: Mutex<Vec<(mpsc::Sender<T>, mpsc::Receiver<T>)>>,
+}
+
+impl<T> RuntimeReplyPool<T> {
+    fn new() -> Self {
+        Self {
+            idle: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take(&self) -> (mpsc::Sender<T>, mpsc::Receiver<T>) {
+        self.idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
+            .unwrap_or_else(mpsc::channel)
+    }
+
+    fn put(&self, sender: mpsc::Sender<T>, receiver: mpsc::Receiver<T>) {
+        self.idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((sender, receiver));
+    }
+}
+
+impl<T> std::fmt::Debug for RuntimeReplyPool<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let idle = self
+            .idle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        formatter
+            .debug_struct("RuntimeReplyPool")
+            .field("idle", &idle)
+            .finish()
+    }
+}
+
 enum NodeRuntimeOp {
     Start(mpsc::Sender<Result<(), RaftError>>),
     Stop(mpsc::Sender<Result<(), RaftError>>),
@@ -86,6 +127,7 @@ pub struct NodeRuntime {
     worker: Option<thread::JoinHandle<()>>,
     /// Where the group is hosted, when it is not on a thread of its own.
     shared: Option<(Arc<SharedGroupRuntime>, DriverGroupKey)>,
+    step_replies: RuntimeReplyPool<Result<StepResult, RaftError>>,
     restart_count: u64,
     state: NodeRuntimeState,
 }
@@ -108,6 +150,7 @@ impl NodeRuntime {
             }),
             worker: Some(worker),
             shared: None,
+            step_replies: RuntimeReplyPool::new(),
             restart_count: 0,
             state: NodeRuntimeState::Created,
         })
@@ -143,6 +186,7 @@ impl NodeRuntime {
             }),
             worker: None,
             shared: Some((runtime, key)),
+            step_replies: RuntimeReplyPool::new(),
             restart_count: 0,
             state: NodeRuntimeState::Created,
         })
@@ -354,13 +398,21 @@ impl NodeRuntime {
     }
 
     pub fn step(&self, message: Message) -> Result<StepResult, RaftError> {
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.sender()?
-            .send(NodeRuntimeOp::Step(message, reply_tx))
-            .map_err(|err| {
-                RaftError::Transport(format!("failed to send step to raft node: {err}"))
-            })?;
-        recv_runtime_reply(reply_rx)?
+        let sender = self.sender()?;
+        let (reply_tx, reply_rx) = self.step_replies.take();
+        if let Err(error) = sender.send(NodeRuntimeOp::Step(message, reply_tx.clone())) {
+            let transport = RaftError::Transport(format!(
+                "failed to send step to raft node: {error}"
+            ));
+            drop(error);
+            self.step_replies.put(reply_tx, reply_rx);
+            return Err(transport);
+        }
+        let result = recv_runtime_reply_ref(&reply_rx);
+        if result.is_ok() {
+            self.step_replies.put(reply_tx, reply_rx);
+        }
+        result?
     }
 
     pub fn step_batch(
@@ -3489,6 +3541,10 @@ fn respond_runtime_error(command: NodeRuntimeOp, error: RaftError) -> bool {
 }
 
 fn recv_runtime_reply<T>(reply_rx: mpsc::Receiver<T>) -> Result<T, RaftError> {
+    recv_runtime_reply_ref(&reply_rx)
+}
+
+fn recv_runtime_reply_ref<T>(reply_rx: &mpsc::Receiver<T>) -> Result<T, RaftError> {
     reply_rx
         .recv_timeout(Duration::from_secs(5))
         .map_err(|err| RaftError::Transport(format!("raft node runtime did not reply: {err}")))
