@@ -36,7 +36,6 @@ struct MailChannelInner<Mail> {
     max_depth: usize,
     rejected_send_count: u64,
     channels: [VecDeque<Mail>; 3],
-    buffered: [VecDeque<Mail>; 3],
 }
 
 impl<Mail> MailChannelInner<Mail> {
@@ -48,7 +47,6 @@ impl<Mail> MailChannelInner<Mail> {
             max_depth: 0,
             rejected_send_count: 0,
             channels: std::array::from_fn(|_| VecDeque::new()),
-            buffered: std::array::from_fn(|_| VecDeque::new()),
         }
     }
 }
@@ -214,14 +212,24 @@ impl<Mail> MailChannel<Mail> {
         selector: &ChannelSelector<Mail>,
         out: &mut Vec<Mail>,
     ) -> Result<(), RaftError> {
-        self.consume_checked(selector)?;
         let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
-        // Reserved once from what is staged. Extending from three deques in turn
+        let num_mails = inner.size as i64;
+        let diff = num_mails - inner.previous_channel_mail_count;
+        inner.previous_channel_mail_count = num_mails;
+        inner.selector_total_mail_count = selector.add_total_mail_count_checked(diff)?;
+        inner.size = 0;
+
+        // Keep accounting and draining under the same channel lock. A sender
+        // releases this lock before firing the selector, so this preserves the
+        // channel-to-selector lock order while making overlapping fetches
+        // serialize naturally. No second set of priority queues is needed to
+        // stage mail between two channel-lock acquisitions.
+        //
+        // Reserved once from what is queued. Extending from three deques in turn
         // reallocated once per non-empty priority, and the count is known before
         // anything is moved.
-        let staged: usize = inner.buffered.iter().map(VecDeque::len).sum();
-        out.reserve(staged);
-        for channel in &mut inner.buffered {
+        out.reserve(num_mails as usize);
+        for channel in &mut inner.channels {
             out.extend(channel.drain(..));
         }
         Ok(())
@@ -264,39 +272,6 @@ impl<Mail> MailChannel<Mail> {
             max_depth: inner.max_depth,
             rejected_send_count: inner.rejected_send_count,
         })
-    }
-
-    fn consume_checked(&self, selector: &ChannelSelector<Mail>) -> Result<(), RaftError> {
-        let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
-        let num_mails = inner.size as i64;
-        let diff = num_mails - inner.previous_channel_mail_count;
-        inner.previous_channel_mail_count = num_mails;
-        inner.selector_total_mail_count = selector.add_total_mail_count_checked(diff)?;
-        inner.size = 0;
-
-        // Appended, not assigned. `fetch` is consume-then-drain under two
-        // separate lock holds, and a channel can be selected again in between
-        // when a sender fires it, so two workers can be inside `fetch` for the
-        // same channel at once. Assigning here made the second consume discard
-        // whatever the first had staged and not yet drained -- mail accepted by
-        // `send` and then silently dropped.
-        //
-        // Drained in place rather than swapped out. Swapping three fresh deques
-        // in left the channel at zero capacity, so the next send had to grow the
-        // buffer again -- every cycle, for every group on every worker. Draining
-        // moves exactly the same mail and keeps the allocation the channel had
-        // already earned: a cycle of 64 mails cost 6 allocations and now costs 1,
-        // and the one left is the vector `fetch` returns.
-        //
-        // The two fields are borrowed separately on purpose; they are disjoint,
-        // which is what lets this take both at once.
-        let MailChannelInner {
-            channels, buffered, ..
-        } = &mut *inner;
-        for (buffered, channel) in buffered.iter_mut().zip(channels.iter_mut()) {
-            buffered.extend(channel.drain(..));
-        }
-        Ok(())
     }
 
     /// Whether this channel is at its depth.

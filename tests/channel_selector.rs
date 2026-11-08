@@ -211,12 +211,10 @@ fn a_channels_depth_is_its_own_queue_not_the_selectors_total() {
 
 #[test]
 fn concurrent_fetches_on_one_channel_lose_no_mail() {
-    // `fetch` is consume-then-drain under two separate lock holds, and a sender
-    // firing the channel in between can hand it to a second worker, so two
-    // fetches for the same channel can overlap. While `consume` assigned to
-    // `buffered` rather than appending, the second one discarded whatever the
-    // first had staged and not yet drained: mail that `send` had accepted,
-    // gone, with no error anywhere.
+    // A sender can fire the channel again while a worker is fetching it, so
+    // several workers may try to fetch the same channel concurrently. Fetch
+    // serializes accounting and draining under the channel lock; this stress
+    // run proves that accepted mail is neither lost nor returned twice.
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
