@@ -3428,6 +3428,18 @@ fn matrixraft_multi_raft_server_hosts_groups_and_routes_messages() {
     assert!(server.runtime_wiring(811, 1).is_none());
     assert_eq!(server.runtime_wiring_count(), 1);
 
+    server
+        .register_node(removed)
+        .expect("register removed node");
+    assert!(server.has_node(811, 1));
+    assert!(server.runtime_wiring(811, 1).is_none());
+    assert_eq!(server.runtime_wiring_count(), 1);
+    drop(
+        server
+            .unregister_node(811, 1)
+            .expect("remove registered node"),
+    );
+
     server.stop_all().expect("stop all");
     server.shutdown_all().expect("shutdown all");
 
