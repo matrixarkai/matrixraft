@@ -1731,6 +1731,29 @@ mod wal_resident_record_tests {
         drop(reopened);
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn idle_wal_keeps_one_segment_slot_on_open_and_reopen() {
+        let dir = test_dir();
+        let options = PersistentRaftWalOptions {
+            dir: dir.clone(),
+            max_records_per_segment: 1_000,
+            max_segment_bytes: 64 * 1024 * 1024,
+            min_keep_segments: 2,
+            fsync_on_append: false,
+        };
+
+        let wal = PersistentRaftWal::open(options.clone()).expect("open fresh WAL");
+        assert_eq!(wal.segments.len(), 1);
+        assert_eq!(wal.segments.capacity(), 1);
+        drop(wal);
+
+        let reopened = PersistentRaftWal::open(options).expect("reopen idle WAL");
+        assert_eq!(reopened.segments.len(), 1);
+        assert_eq!(reopened.segments.capacity(), 1);
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// The newline-delimited reader, kept for segments written before the frame.
@@ -1872,7 +1895,11 @@ fn read_wal_segments_from_dir(dir: &Path) -> Result<(Vec<WalSegment>, bool), Raf
         .collect::<Vec<_>>();
     files.sort_by_key(|(segment_id, _)| *segment_id);
 
-    let mut segments = Vec::new();
+    // A fresh or one-segment WAL is the common idle-group shape. Starting from
+    // an empty vector makes the first push reserve four 64-byte segment slots,
+    // so every such group retains three unused slots. Size this directory's
+    // index from what the scan found, keeping one slot for the fresh-WAL push.
+    let mut segments = Vec::with_capacity(files.len().max(1));
     let mut truncated_corrupt_tail = false;
     let last_file_index = files.len().saturating_sub(1);
     for (file_position, (segment_id, path)) in files.into_iter().enumerate() {
