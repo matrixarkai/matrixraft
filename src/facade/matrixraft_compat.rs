@@ -18173,7 +18173,9 @@ pub struct MatrixRaftMultiRaftServer {
     /// Started on the first group when the context asks for it, so that a
     /// server which never creates a group never starts threads either.
     shared: Option<Arc<SharedGroupRuntime>>,
-    nodes: BTreeMap<MatrixRaftRouteKey, MatrixRaftNode>,
+    /// Route lookups remain ordered and logarithmic without retaining tree
+    /// node slack around the server's live group handles.
+    nodes: CompactMap<MatrixRaftRouteKey, MatrixRaftNode>,
     snapshot_routes: BTreeMap<MatrixRaftRouteKey, MatrixRaftSnapshotDesc>,
     runtime_wiring_count: usize,
     replica_factory: Option<Arc<dyn MatrixRaftReplicaFactory + Send + Sync>>,
@@ -18224,7 +18226,7 @@ impl MatrixRaftMultiRaftServer {
         Self {
             context,
             shared: None,
-            nodes: BTreeMap::new(),
+            nodes: CompactMap::default(),
             snapshot_routes: BTreeMap::new(),
             runtime_wiring_count: 0,
             replica_factory: None,

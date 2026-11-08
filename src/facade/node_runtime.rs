@@ -3282,23 +3282,31 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// saving is another 72,112 bytes in total or about 141 bytes per group including
 /// allocator overhead.
 ///
-/// The native measurement with all sixteen changes is 43 MiB at
-/// whole-MiB resolution for 8,192 live groups, or **5 KiB per group**; the
+/// The multi-group server's live route index was then the largest remaining
+/// tree allocation in the profile. Storing the same ordered keys and node
+/// handles in the compact directory moves two 512-group peaks to 2,427,584 and
+/// 2,427,648 bytes. Compared with the lower preceding peak, the conservative
+/// saving is another 91,400 bytes in total or about 179 bytes per group including
+/// allocator overhead.
+///
+/// The native measurement with all seventeen changes is 41 MiB at
+/// whole-MiB resolution for 8,192 live groups, or **4 KiB per group**; the
 /// allocation profiles above resolve reductions that RSS rounding does not.
-/// That is down from 44 MiB before compacting the consensus node directory,
-/// 45 MiB before compacting the compatibility peer directory, 46 MiB before
-/// compacting the pipeline directory, 47 MiB before sharing the lifecycle
-/// replies, 48 MiB before removing the extra ownership tree, 49 MiB before
-/// co-locating runtime wiring, 54 MiB after compacting WAL segment storage,
-/// 56 MiB before that, 66 MiB after compacting the lifecycle replies, 68 MiB
-/// after tightening the queue, 70 MiB after boxing peer values, 74 MiB and
-/// 9 KiB after boxing node values, 94 MiB and 11 KiB after boxing pipeline
-/// values, 126 MiB and 15 KiB after first bounding the queues, and 171 MiB and
-/// 21 KiB before any of them, under the same options. The original 21 KiB cost
-/// was flat as the group count grew: 89 MiB for 4096 groups and 339 MiB for
-/// 16,384, both with the measuring binary's own resident size taken off. The
-/// same in debug and in release, within a kilobyte a group -- an allocation is
-/// the size it is whichever profile asked for it.
+/// That is down from 43 MiB before compacting the server route directory,
+/// 44 MiB before compacting the consensus node directory, 45 MiB before
+/// compacting the compatibility peer directory, 46 MiB before compacting the
+/// pipeline directory, 47 MiB before sharing the lifecycle replies, 48 MiB
+/// before removing the extra ownership tree, 49 MiB before co-locating runtime
+/// wiring, 54 MiB after compacting WAL segment storage, 56 MiB before that,
+/// 66 MiB after compacting the lifecycle replies, 68 MiB after tightening the
+/// queue, 70 MiB after boxing peer values, 74 MiB and 9 KiB after boxing node
+/// values, 94 MiB and 11 KiB after boxing pipeline values, 126 MiB and 15 KiB
+/// after first bounding the queues, and 171 MiB and 21 KiB before any of them,
+/// under the same options. The original 21 KiB cost was flat as the group count
+/// grew: 89 MiB for 4096 groups and 339 MiB for 16,384, both with the measuring
+/// binary's own resident size taken off. The same in debug and in release,
+/// within a kilobyte a group -- an allocation is the size it is whichever
+/// profile asked for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -3389,9 +3397,9 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release and the sixteen memory changes: 8,192 live groups
-/// under that unchanged 10,240 limit all started, retained 43 MiB, and delivered
-/// 100.0% of their ticks at a one-second interval. Before idle release, starting
+/// Measured after idle release and the seventeen memory changes: 8,192 live groups
+/// under that unchanged 10,240 limit all started, retained 41 MiB, and delivered
+/// 99.9% of their ticks at a one-second interval. Before idle release, starting
 /// those groups opened a segment for each one and crossed the limit before the
 /// store was live. Before the memory changes, the same run retained 171 MiB;
 /// bounding the queue brought it to 126 MiB, boxing the pipeline values to 94
