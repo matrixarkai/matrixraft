@@ -4,6 +4,8 @@
 // stoppable node runtime worker and command loop.
 // Split from src/lib.rs to keep the crate facade small and focused.
 
+const RUNTIME_COMMAND_QUEUE_DEPTH: usize = 4;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeRuntimeState {
@@ -136,7 +138,7 @@ impl NodeRuntime {
     pub fn create(options: NodeOptions) -> Result<Self, RaftError> {
         let node_id = options.node_id;
         let group_id = options.group_id;
-        let (command_tx, command_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::sync_channel(RUNTIME_COMMAND_QUEUE_DEPTH);
         let worker = thread::Builder::new()
             .name(format!("rustraft-node-{group_id}-{node_id}"))
             .spawn(move || raft_node_runtime_loop(options, command_rx))
@@ -171,7 +173,7 @@ impl NodeRuntime {
         let group_id = options.group_id;
         let tick_interval_ms = options.config.heartbeat_interval_ms.max(1);
         let key = DriverGroupKey::new(group_id, node_id);
-        let (command_tx, command_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::sync_channel(RUNTIME_COMMAND_QUEUE_DEPTH);
         // The error is reported rather than answered into the channel: no
         // command can have been sent yet, because this is what hands the
         // sender out.
@@ -2866,12 +2868,25 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 ///
 /// # How much memory a group costs
 ///
-/// About **21 KiB of resident memory per group**, and it is flat as the group
-/// count grows: 89 MiB for 4096 groups and 339 MiB for 16,384, both measured with
-/// the measuring binary's own resident size taken off. The same in debug and in
-/// release, within a kilobyte a group -- an allocation is the size it is
-/// whichever profile asked for it. A hundred thousand groups
-/// is a little over 2 GiB for the groups themselves.
+/// A live group's command channel used to retain an empty 32-command block
+/// after its first command. `start_all` necessarily sent that first command to
+/// every group, so the block cost about 6 KiB per group for the rest of the
+/// process lifetime. The runtime now admits four waiting commands and applies
+/// backpressure to additional callers until a worker takes it. A 512-group
+/// allocation profile fell from 11.66 MiB to 8.96 MiB at steady state, a 5.16
+/// KiB saving per group. The queue still lets `start_all` put one command on
+/// every group before it waits for replies, and the shared runtime posts the
+/// same worker wake after each admitted command. Four waiting operations also
+/// leave enough work visible for automatic proposal coalescing: the concurrent
+/// proposal contract still folds 200 callers into fewer than 100 fsyncs.
+///
+/// The native measurement moved with it: 8,192 live groups retained 126 MiB,
+/// or **15 KiB per group**, down from 171 MiB and 21 KiB per group under the
+/// same options. Before that change the 21 KiB cost was flat as the group count
+/// grew: 89 MiB for 4096 groups and 339 MiB for 16,384, both with the measuring
+/// binary's own resident size taken off. The same in debug and in release,
+/// within a kilobyte a group -- an allocation is the size it is whichever
+/// profile asked for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -2962,10 +2977,12 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release: 8,192 live groups under that unchanged 10,240
-/// limit all started, retained 171 MiB, and delivered 99.6% of their ticks at a
-/// one-second interval. Before release, starting those groups opened a segment
-/// for each one and crossed the limit before the store was live.
+/// Measured after idle release and the bounded command queue: 8,192 live groups
+/// under that unchanged 10,240 limit all started, retained 126 MiB, and
+/// delivered 101.8% of their ticks at a one-second interval. Before idle
+/// release, starting those groups opened a segment for each one and crossed the
+/// limit before the store was live. Before the bounded queue, the same run
+/// retained 171 MiB.
 ///
 /// Count it over the whole run and take the maximum. Groups are created one
 /// after another, so a single reading taken while that is still going is a lower
@@ -3200,7 +3217,7 @@ impl SharedGroupRuntime {
 /// the sixteen call sites means a command path added later cannot forget to.
 #[derive(Clone)]
 struct CommandSender {
-    tx: mpsc::Sender<NodeRuntimeOp>,
+    tx: mpsc::SyncSender<NodeRuntimeOp>,
     shared: Option<(Arc<SharedGroupRuntime>, DriverGroupKey)>,
 }
 
@@ -3213,7 +3230,7 @@ impl std::fmt::Debug for CommandSender {
 }
 
 impl CommandSender {
-    // Deliberately the same signature as `mpsc::Sender::send`, which is the
+    // Deliberately the same signature as `mpsc::SyncSender::send`, which is the
     // whole point: it is what lets the sixteen call sites stay untouched.
     // `SendError` hands the undelivered command back, so it is large by
     // design, and std is not linted for the same shape only because it is
@@ -3559,5 +3576,57 @@ fn recv_runtime_reply_ref<T>(reply_rx: &mpsc::Receiver<T>) -> Result<T, RaftErro
     reply_rx
         .recv_timeout(Duration::from_secs(5))
         .map_err(|err| RaftError::Transport(format!("raft node runtime did not reply: {err}")))
+}
+
+#[cfg(test)]
+mod runtime_command_queue_tests {
+    use super::*;
+
+    #[test]
+    fn a_command_past_the_bound_waits_until_one_is_taken() {
+        let (command_tx, command_rx) = mpsc::sync_channel(RUNTIME_COMMAND_QUEUE_DEPTH);
+        let mut held_replies = Vec::new();
+        for _ in 0..RUNTIME_COMMAND_QUEUE_DEPTH {
+            let (reply, reply_rx) = mpsc::channel();
+            held_replies.push(reply_rx);
+            command_tx
+                .send(NodeRuntimeOp::Start(reply))
+                .expect("fill the command queue to its bound");
+        }
+
+        let (second_admitted, second_admitted_rx) = mpsc::channel();
+        let second_sender = command_tx.clone();
+        let sender = thread::spawn(move || {
+            let (second_reply, _second_reply_rx) = mpsc::channel();
+            let sent = second_sender.send(NodeRuntimeOp::Stop(second_reply));
+            let _ = second_admitted.send(sent.is_ok());
+        });
+
+        assert!(
+            matches!(
+                second_admitted_rx.recv_timeout(Duration::from_millis(50)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "the command queue admitted an operation past its bound"
+        );
+        assert!(
+            matches!(command_rx.recv(), Ok(NodeRuntimeOp::Start(_))),
+            "a queued operation changed"
+        );
+        assert!(
+            second_admitted_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the second sender to resume"),
+            "the waiting operation was not admitted after capacity became available"
+        );
+        for _ in 1..RUNTIME_COMMAND_QUEUE_DEPTH {
+            assert!(
+                matches!(command_rx.recv(), Ok(NodeRuntimeOp::Start(_))),
+                "a queued operation changed"
+            );
+        }
+        assert!(matches!(command_rx.recv(), Ok(NodeRuntimeOp::Stop(_))));
+        sender.join().expect("second sender");
+    }
 }
 
