@@ -209,39 +209,45 @@ enum NodeRuntimeOp {
 }
 
 struct RuntimeCommandQueue {
-    slots: [Option<NodeRuntimeOp>; RUNTIME_COMMAND_QUEUE_DEPTH],
-    head: usize,
-    len: usize,
+    /// The common case: one command waiting while its group is scheduled.
+    first: Option<NodeRuntimeOp>,
+    /// The queue is bounded at two. Keep the second slot out of every idle
+    /// group and allocate it only when two senders actually overlap.
+    overflow: Option<Box<NodeRuntimeOp>>,
     sender_count: usize,
     receiver_alive: bool,
 }
 
 impl RuntimeCommandQueue {
     fn new() -> Self {
+        debug_assert_eq!(RUNTIME_COMMAND_QUEUE_DEPTH, 2);
         Self {
-            slots: std::array::from_fn(|_| None),
-            head: 0,
-            len: 0,
+            first: None,
+            overflow: None,
             sender_count: 1,
             receiver_alive: true,
         }
     }
 
+    fn len(&self) -> usize {
+        usize::from(self.first.is_some()) + usize::from(self.overflow.is_some())
+    }
+
     fn push(&mut self, command: NodeRuntimeOp) {
-        debug_assert!(self.len < RUNTIME_COMMAND_QUEUE_DEPTH);
-        let tail = (self.head + self.len) % RUNTIME_COMMAND_QUEUE_DEPTH;
-        self.slots[tail] = Some(command);
-        self.len += 1;
+        debug_assert!(self.len() < RUNTIME_COMMAND_QUEUE_DEPTH);
+        if self.first.is_none() {
+            debug_assert!(self.overflow.is_none());
+            self.first = Some(command);
+        } else {
+            debug_assert!(self.overflow.is_none());
+            self.overflow = Some(Box::new(command));
+        }
     }
 
     fn pop(&mut self) -> Option<NodeRuntimeOp> {
-        if self.len == 0 {
-            return None;
-        }
-        let command = self.slots[self.head].take();
-        self.head = (self.head + 1) % RUNTIME_COMMAND_QUEUE_DEPTH;
-        self.len -= 1;
-        command
+        let command = self.first.take()?;
+        self.first = self.overflow.take().map(|next| *next);
+        Some(command)
     }
 }
 
@@ -298,7 +304,7 @@ impl RuntimeCommandSender {
                     command.take().expect("undelivered runtime command"),
                 ));
             }
-            if state.len < RUNTIME_COMMAND_QUEUE_DEPTH {
+            if state.len() < RUNTIME_COMMAND_QUEUE_DEPTH {
                 state.push(command.take().expect("runtime command admitted once"));
                 drop(state);
                 self.channel.changed.notify_all();
@@ -400,9 +406,8 @@ impl Drop for RuntimeCommandReceiver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.receiver_alive = false;
-        state.slots.iter_mut().for_each(|slot| *slot = None);
-        state.head = 0;
-        state.len = 0;
+        state.first = None;
+        state.overflow = None;
         drop(state);
         self.channel.changed.notify_all();
     }
@@ -4003,11 +4008,11 @@ mod runtime_command_queue_tests {
             "cold runtime state widened NodeCore"
         );
         assert!(
-            std::mem::size_of::<RuntimeCommandQueue>() <= 416,
+            std::mem::size_of::<RuntimeCommandQueue>() <= 224,
             "the fixed command queue widened"
         );
         assert!(
-            std::mem::size_of::<RuntimeCommandChannel>() <= 432,
+            std::mem::size_of::<RuntimeCommandChannel>() <= 240,
             "the command channel widened"
         );
         assert!(std::mem::size_of::<RuntimeCommandSender>() <= 8);
