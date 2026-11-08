@@ -315,23 +315,205 @@ struct QueuedAppend {
     bytes: u64,
 }
 
+/// A deque that costs one pointer until it first carries work.
+///
+/// Once allocated, `clear` keeps the deque and its buffer so a leader reset
+/// does not turn steady replication into repeated allocation. The custom serde
+/// implementation preserves the ordinary array shape.
+#[derive(Debug, Clone)]
+struct SparseDeque<T> {
+    #[allow(clippy::box_collection)]
+    inner: Option<Box<VecDeque<T>>>,
+}
+
+impl<T: PartialEq> PartialEq for SparseDeque<T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.inner.as_deref(), other.inner.as_deref()) {
+            (Some(left), Some(right)) => left == right,
+            (Some(queue), None) | (None, Some(queue)) => queue.is_empty(),
+            (None, None) => true,
+        }
+    }
+}
+
+impl<T: Eq> Eq for SparseDeque<T> {}
+
+impl<T> Default for SparseDeque<T> {
+    fn default() -> Self {
+        Self { inner: None }
+    }
+}
+
+impl<T> SparseDeque<T> {
+    fn clear(&mut self) {
+        if let Some(queue) = self.inner.as_deref_mut() {
+            queue.clear();
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.as_deref().is_none_or(VecDeque::is_empty)
+    }
+
+    fn len(&self) -> usize {
+        self.inner.as_deref().map_or(0, VecDeque::len)
+    }
+
+    fn front(&self) -> Option<&T> {
+        self.inner.as_deref()?.front()
+    }
+
+    fn push_back(&mut self, value: T) {
+        self.inner
+            .get_or_insert_with(|| Box::new(VecDeque::new()))
+            .push_back(value);
+    }
+
+    fn pop_front(&mut self) -> Option<T> {
+        self.inner.as_deref_mut()?.pop_front()
+    }
+}
+
+impl<T: Serialize> Serialize for SparseDeque<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.inner.as_deref() {
+            Some(queue) => queue.serialize(serializer),
+            None => VecDeque::<T>::new().serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for SparseDeque<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let queue = VecDeque::deserialize(deserializer)?;
+        Ok(Self {
+            inner: (!queue.is_empty()).then(|| Box::new(queue)),
+        })
+    }
+}
+
+/// A map with an ordinary map wire shape and no allocation while empty.
+#[derive(Debug, Clone)]
+struct SparseBTreeMap<K, V> {
+    #[allow(clippy::box_collection)]
+    inner: Option<Box<BTreeMap<K, V>>>,
+}
+
+impl<K: Ord, V: PartialEq> PartialEq for SparseBTreeMap<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.inner.as_deref(), other.inner.as_deref()) {
+            (Some(left), Some(right)) => left == right,
+            (Some(map), None) | (None, Some(map)) => map.is_empty(),
+            (None, None) => true,
+        }
+    }
+}
+
+impl<K: Ord, V: Eq> Eq for SparseBTreeMap<K, V> {}
+
+impl<K, V> Default for SparseBTreeMap<K, V> {
+    fn default() -> Self {
+        Self { inner: None }
+    }
+}
+
+impl<K: Ord, V> SparseBTreeMap<K, V> {
+    fn clear(&mut self) {
+        self.inner = None;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.as_deref().is_none_or(BTreeMap::is_empty)
+    }
+
+    fn len(&self) -> usize {
+        self.inner.as_deref().map_or(0, BTreeMap::len)
+    }
+
+    fn insert(&mut self, key: K, value: V) -> Option<V> {
+        self.inner
+            .get_or_insert_with(|| Box::new(BTreeMap::new()))
+            .insert(key, value)
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        let map = self.inner.as_deref_mut()?;
+        let removed = map.remove(key);
+        if map.is_empty() {
+            self.inner = None;
+        }
+        removed
+    }
+
+    fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        let Some(map) = self.inner.as_deref_mut() else {
+            return;
+        };
+        map.retain(|key, value| keep(key, value));
+        if map.is_empty() {
+            self.inner = None;
+        }
+    }
+}
+
+impl<K, V> Serialize for SparseBTreeMap<K, V>
+where
+    K: Ord + Serialize,
+    V: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.inner.as_deref() {
+            Some(map) => map.serialize(serializer),
+            None => BTreeMap::<K, V>::new().serialize(serializer),
+        }
+    }
+}
+
+impl<'de, K, V> Deserialize<'de> for SparseBTreeMap<K, V>
+where
+    K: Ord + Deserialize<'de>,
+    V: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let map = BTreeMap::deserialize(deserializer)?;
+        Ok(Self {
+            inner: (!map.is_empty()).then(|| Box::new(map)),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplicationPipeline {
     peer_id: NodeId,
     limits: PipelineLimits,
     status: PeerProgress,
-    append_queue: VecDeque<QueuedAppend>,
+    append_queue: SparseDeque<QueuedAppend>,
     append_queue_bytes: u64,
-    inflight: VecDeque<InflightAppend>,
-    apply_inflight: VecDeque<ApplyInflightTask>,
+    inflight: SparseDeque<InflightAppend>,
+    apply_inflight: SparseDeque<ApplyInflightTask>,
     /// Index -> how long it has waited, in microseconds.
     ///
     /// It was a `BTreeSet<LogIndex>`, which is why `reorder_timeout_us` had
     /// nothing to be compared against. The age is 8 bytes an entry and the
     /// queue is bounded by `reorder_window_size`, so a full window costs twice
     /// what it did -- and only while it is full of out-of-order appends.
-    reorder_queue: BTreeMap<LogIndex, u64>,
-    snapshot_transfer: Option<ActiveSnapshotTransfer>,
+    reorder_queue: SparseBTreeMap<LogIndex, u64>,
+    snapshot_transfer: Option<Box<ActiveSnapshotTransfer>>,
 }
 
 impl ReplicationPipeline {
@@ -340,11 +522,11 @@ impl ReplicationPipeline {
             peer_id,
             limits,
             status: PeerProgress::new(peer_id, next_index, limits),
-            append_queue: VecDeque::new(),
+            append_queue: SparseDeque::default(),
             append_queue_bytes: 0,
-            inflight: VecDeque::new(),
-            apply_inflight: VecDeque::new(),
-            reorder_queue: BTreeMap::new(),
+            inflight: SparseDeque::default(),
+            apply_inflight: SparseDeque::default(),
+            reorder_queue: SparseBTreeMap::default(),
             snapshot_transfer: None,
         }
     }
@@ -936,7 +1118,7 @@ impl ReplicationPipeline {
         self.status.snapshot_send_attempts += 1;
         self.status.snapshot_install_total_chunks = total_chunks;
         self.status.snapshot_install_progress_per_mille = 0;
-        self.snapshot_transfer = Some(ActiveSnapshotTransfer {
+        self.snapshot_transfer = Some(Box::new(ActiveSnapshotTransfer {
             snapshot_id,
             snapshot_index,
             total_chunks,
@@ -944,7 +1126,7 @@ impl ReplicationPipeline {
             bytes_sent: 0,
             bytes_received: 0,
             latest_receiving_elapsed_ms: 0,
-        });
+        }));
         Ok(())
     }
 
@@ -1103,7 +1285,7 @@ impl ReplicationPipeline {
         self.status.snapshot_installing = true;
         self.status.snapshot_install_total_chunks = total_chunks;
         self.status.snapshot_install_progress_per_mille = 0;
-        self.snapshot_transfer = Some(ActiveSnapshotTransfer {
+        self.snapshot_transfer = Some(Box::new(ActiveSnapshotTransfer {
             snapshot_id: Arc::<str>::from(snapshot_id.into()),
             snapshot_index,
             total_chunks,
@@ -1111,7 +1293,7 @@ impl ReplicationPipeline {
             bytes_sent: 0,
             bytes_received: 0,
             latest_receiving_elapsed_ms: 0,
-        });
+        }));
         Ok(())
     }
 

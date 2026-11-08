@@ -9,7 +9,7 @@
 //! that goes stale. `examples/tick_working_set.rs` is where the consequence is
 //! measured; this is the part that can be asserted.
 
-use matrixraft::{Config, Peer, RaftCluster, ReplicaRole};
+use matrixraft::{Config, Peer, RaftCluster, ReplicaRole, ReplicationPipeline};
 
 /// Checked at compile time, so it cannot be skipped by a filter and costs
 /// nothing to run. Only on 64-bit targets: the figure is pointer-width.
@@ -48,6 +48,17 @@ const _: () = {
          were 64 and 112 bytes inline. Every group pays this, and a shard walks \
          all of it between one visit to a group and the next, so a change here is \
          worth noticing. Move the number and say what needs the space."
+    );
+};
+
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(
+        std::mem::size_of::<ReplicationPipeline>() == 560,
+        "ReplicationPipeline changed width. It was 704 bytes until its three \
+         empty queue headers, reorder map, and inactive snapshot transfer \
+         moved behind transparent lazy storage. The serialized arrays, map, \
+         and null remain unchanged."
     );
 };
 
@@ -160,6 +171,14 @@ fn boxed_pipeline_values_keep_their_map_wire_shape() {
     assert!(
         pipeline.get("status").is_some(),
         "the pipeline state was wrapped or omitted on the wire"
+    );
+    assert_eq!(pipeline.get("append_queue"), Some(&serde_json::json!([])));
+    assert_eq!(pipeline.get("inflight"), Some(&serde_json::json!([])));
+    assert_eq!(pipeline.get("apply_inflight"), Some(&serde_json::json!([])));
+    assert_eq!(pipeline.get("reorder_queue"), Some(&serde_json::json!({})));
+    assert_eq!(
+        pipeline.get("snapshot_transfer"),
+        Some(&serde_json::Value::Null)
     );
 }
 

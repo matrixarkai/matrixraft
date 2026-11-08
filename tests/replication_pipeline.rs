@@ -687,6 +687,44 @@ fn active_snapshot_ids_keep_the_pipeline_wire_shape() {
 }
 
 #[test]
+fn populated_and_cleared_pipeline_storage_round_trips_logically() {
+    let mut pipeline = ReplicationPipeline::new(2, 1, small_limits());
+    let queued = entry(1, &[7]);
+    pipeline.queue_append(&queued).expect("queue an append");
+    assert_eq!(pipeline.flush_append_batch(1, 1).len(), 1);
+    pipeline
+        .begin_apply_task(1, 1)
+        .expect("queue an apply task");
+    pipeline
+        .receive_out_of_order(&entry(3, &[9]))
+        .expect("queue a reordered append");
+
+    let encoded = serde_json::to_value(&pipeline).expect("serialize populated pipeline");
+    assert!(encoded["inflight"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(encoded["apply_inflight"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(encoded["reorder_queue"]
+        .as_object()
+        .is_some_and(|items| !items.is_empty()));
+    let decoded: ReplicationPipeline =
+        serde_json::from_value(encoded).expect("deserialize populated pipeline");
+    assert_eq!(decoded, pipeline);
+
+    pipeline.reset_for_leader_transition(0, 2, ProgressState::Probe);
+    let encoded = serde_json::to_value(&pipeline).expect("serialize cleared pipeline");
+    assert_eq!(encoded["append_queue"], serde_json::json!([]));
+    assert_eq!(encoded["inflight"], serde_json::json!([]));
+    assert_eq!(encoded["apply_inflight"], serde_json::json!([]));
+    assert_eq!(encoded["reorder_queue"], serde_json::json!({}));
+    let decoded: ReplicationPipeline =
+        serde_json::from_value(encoded).expect("deserialize cleared pipeline");
+    assert_eq!(decoded, pipeline);
+}
+
+#[test]
 fn snapshot_finish_advances_or_retries() {
     let mut accepted = ReplicationPipeline::new(2, 10, PipelineLimits::default());
     accepted
