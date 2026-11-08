@@ -443,6 +443,40 @@ fn a_shared_runtime_holds_its_groups_and_lets_them_go() {
 }
 
 #[test]
+fn duplicate_hosting_leaves_the_runtime_count_and_original_group_intact() {
+    let runtime = Arc::new(
+        SharedGroupRuntime::start(DriverOptions {
+            worker_num: 2,
+            tick_interval_ms: 5,
+            ..DriverOptions::default()
+        })
+        .expect("shared runtime"),
+    );
+    let root = probe_root("duplicate");
+    let first_wal = root.join("first/wal");
+    let first_snapshot = root.join("first/snapshot");
+    let second_wal = root.join("second/wal");
+    let second_snapshot = root.join("second/snapshot");
+    for dir in [&first_wal, &first_snapshot, &second_wal, &second_snapshot] {
+        std::fs::create_dir_all(dir).expect("runtime directory");
+    }
+
+    let mut first = options(7, 5, &first_wal, &first_snapshot)
+        .create_node_on(0, Arc::clone(&runtime))
+        .expect("first hosted node");
+    assert_eq!(runtime.group_count(), 1);
+
+    let duplicate =
+        options(7, 5, &second_wal, &second_snapshot).create_node_on(0, Arc::clone(&runtime));
+    assert!(duplicate.is_err(), "a duplicate route was hosted twice");
+    assert_eq!(runtime.group_count(), 1);
+
+    first.shutdown().expect("release original node");
+    assert_eq!(runtime.group_count(), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_command_is_answered_without_waiting_for_the_next_tick() {
     // This exists because a mutant that dropped the wake-up from the send
     // path survived every other test in this file. Nothing broke: the ticker
