@@ -3206,18 +3206,25 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// moves from 3.12 MiB to 3.04 MiB, another 171 bytes per group including
 /// allocator overhead.
 ///
-/// The native measurement moved with all ten changes: 8,192 live groups retain
-/// 48 MiB, or **5 KiB per group**, down from 49 MiB before co-locating runtime
-/// wiring, 54 MiB after compacting WAL segment storage, 56 MiB before that, 66
-/// MiB after compacting the lifecycle replies, 68 MiB after tightening the
-/// queue, 70 MiB after boxing peer values, 74 MiB and 9 KiB after boxing node
-/// values, 94 MiB and 11 KiB after boxing pipeline values, 126 MiB and 15 KiB
-/// after first bounding the queues, and 171 MiB and 21 KiB before any of them,
-/// under the same options. The original 21 KiB cost was flat as the group count
-/// grew: 89 MiB for 4096 groups and 339 MiB for 16,384, both with the measuring
-/// binary's own resident size taken off. The same in debug and in release,
-/// within a kilobyte a group -- an allocation is the size it is whichever
-/// profile asked for it.
+/// The shared runtime also retained every pooled group in its own tree, even
+/// though the worker pool and ticker already own the group and independently
+/// reject duplicate routes. Making those registrations authoritative and
+/// retaining only an exact count removes the extra tree. The 512-group peak
+/// moves from 3.04 MiB to 3.01 MiB, another 46 bytes per group including
+/// allocator overhead.
+///
+/// The native measurement moved with all eleven changes: 8,192 live groups
+/// retain 47 MiB, or **5 KiB per group**, down from 48 MiB before removing the
+/// extra ownership tree, 49 MiB before co-locating runtime wiring, 54 MiB after
+/// compacting WAL segment storage, 56 MiB before that, 66 MiB after compacting
+/// the lifecycle replies, 68 MiB after tightening the queue, 70 MiB after
+/// boxing peer values, 74 MiB and 9 KiB after boxing node values, 94 MiB and 11
+/// KiB after boxing pipeline values, 126 MiB and 15 KiB after first bounding
+/// the queues, and 171 MiB and 21 KiB before any of them, under the same
+/// options. The original 21 KiB cost was flat as the group count grew: 89 MiB
+/// for 4096 groups and 339 MiB for 16,384, both with the measuring binary's own
+/// resident size taken off. The same in debug and in release, within a kilobyte
+/// a group -- an allocation is the size it is whichever profile asked for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -3308,8 +3315,8 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release and the ten memory changes: 8,192 live groups
-/// under that unchanged 10,240 limit all started, retained 48 MiB, and delivered
+/// Measured after idle release and the eleven memory changes: 8,192 live groups
+/// under that unchanged 10,240 limit all started, retained 47 MiB, and delivered
 /// 99.9% of their ticks at a one-second interval. Before idle release, starting
 /// those groups opened a segment for each one and crossed the limit before the
 /// store was live. Before the memory changes, the same run retained 171 MiB;
@@ -3344,7 +3351,7 @@ pub struct SharedGroupRuntime {
     /// `max_messages_each_poll`, which bounds one group's turn on a worker.
     max_each_visit: usize,
     counters: Arc<TickCounters>,
-    groups: Mutex<BTreeMap<DriverGroupKey, Arc<PooledGroup>>>,
+    hosted_groups: std::sync::atomic::AtomicUsize,
 }
 
 impl std::fmt::Debug for SharedGroupRuntime {
@@ -3378,7 +3385,7 @@ impl SharedGroupRuntime {
             pool: Arc::new(DriverWorkerPool::start(options)?),
             max_each_visit: options.max_messages_each_poll.max(1),
             counters: Arc::new(TickCounters::default()),
-            groups: Mutex::new(BTreeMap::new()),
+            hosted_groups: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -3399,10 +3406,7 @@ impl SharedGroupRuntime {
 
     /// How many groups this runtime hosts.
     pub fn group_count(&self) -> usize {
-        self.groups
-            .lock()
-            .map(|groups| groups.len())
-            .unwrap_or(0)
+        self.hosted_groups.load(Ordering::Relaxed)
     }
 
     /// How the runtime's ticks have been served, and what it holds.
@@ -3487,21 +3491,11 @@ impl SharedGroupRuntime {
         key: DriverGroupKey,
         core: NodeCore,
         tick_interval_ms: u64,
-    ) -> Result<Arc<PooledGroup>, RaftError> {
+    ) -> Result<(), RaftError> {
         let group = Arc::new(PooledGroup {
             core: Mutex::new(core),
             ticks_due: AtomicU64::new(0),
         });
-        {
-            let mut groups = self.groups.lock().expect("hosted groups mutex poisoned");
-            if groups.contains_key(&key) {
-                return Err(RaftError::InvalidRequest(format!(
-                    "shared runtime already hosts group {} node {}",
-                    key.group_id, key.node_id
-                )));
-            }
-            groups.insert(key, Arc::clone(&group));
-        }
         // The worker first. Registering the ticker first would let a tick
         // arrive for a group the pool does not yet know, and the wake would
         // be dropped.
@@ -3514,7 +3508,7 @@ impl SharedGroupRuntime {
                 max_each_visit: self.max_each_visit,
             }),
         )?;
-        self.ticker_for(key).register_group_every(
+        if let Err(error) = self.ticker_for(key).register_group_every(
             key,
             Arc::new(PooledGroupTicker {
                 group: Arc::clone(&group),
@@ -3523,15 +3517,18 @@ impl SharedGroupRuntime {
                 key,
             }),
             tick_interval_ms,
-        )?;
-        Ok(group)
+        ) {
+            self.pool.cancel_group(key);
+            return Err(error);
+        }
+        self.hosted_groups.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     fn release(&self, key: DriverGroupKey) {
         self.ticker_for(key).cancel_group(key);
-        self.pool.cancel_group(key);
-        if let Ok(mut groups) = self.groups.lock() {
-            groups.remove(&key);
+        if self.pool.cancel_group(key) {
+            self.hosted_groups.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
