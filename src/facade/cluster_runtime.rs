@@ -128,6 +128,139 @@ where
     }
 }
 
+/// A vector that keeps the ordinary sequence wire shape while empty state costs
+/// one pointer. Runtime histories are usually never populated, so retaining a
+/// three-word `Vec` in every group is avoidable steady-state width.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SparseVec<T> {
+    #[allow(clippy::box_collection)]
+    inner: Option<Box<Vec<T>>>,
+}
+
+impl<T> Default for SparseVec<T> {
+    fn default() -> Self {
+        Self { inner: None }
+    }
+}
+
+impl<T> SparseVec<T> {
+    fn push(&mut self, value: T) {
+        self.inner
+            .get_or_insert_with(|| Box::new(Vec::new()))
+            .push(value);
+    }
+
+    fn push_bounded(&mut self, value: T, limit: usize) {
+        let retained = self.inner.get_or_insert_with(|| Box::new(Vec::new()));
+        if retained.len() >= limit {
+            retained.remove(0);
+        }
+        retained.push(value);
+    }
+
+    fn last_mut(&mut self) -> Option<&mut T> {
+        self.inner.as_deref_mut()?.last_mut()
+    }
+
+    fn as_slice(&self) -> &[T] {
+        self.inner.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+impl<T> std::ops::Deref for SparseVec<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<T: Serialize> Serialize for SparseVec<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for SparseVec<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = Vec::deserialize(deserializer)?;
+        Ok(Self {
+            inner: (!values.is_empty()).then(|| Box::new(values)),
+        })
+    }
+}
+
+/// The set counterpart to [`SparseVec`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SparseSet<T> {
+    #[allow(clippy::box_collection)]
+    inner: Option<Box<BTreeSet<T>>>,
+}
+
+impl<T> Default for SparseSet<T> {
+    fn default() -> Self {
+        Self { inner: None }
+    }
+}
+
+impl<T: Ord> SparseSet<T> {
+    fn insert(&mut self, value: T) -> bool {
+        self.inner
+            .get_or_insert_with(|| Box::new(BTreeSet::new()))
+            .insert(value)
+    }
+
+    fn retain(&mut self, keep: impl FnMut(&T) -> bool) {
+        let Some(values) = self.inner.as_deref_mut() else {
+            return;
+        };
+        values.retain(keep);
+        if values.is_empty() {
+            self.inner = None;
+        }
+    }
+
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
+        self.inner.iter().flat_map(|values| values.iter())
+    }
+}
+
+impl<T> Serialize for SparseSet<T>
+where
+    T: Ord + Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.inner.as_deref() {
+            Some(values) => values.serialize(serializer),
+            None => BTreeSet::<T>::new().serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for SparseSet<T>
+where
+    T: Ord + Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values = BTreeSet::deserialize(deserializer)?;
+        Ok(Self {
+            inner: (!values.is_empty()).then(|| Box::new(values)),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Node {
     id: NodeId,
@@ -604,7 +737,7 @@ pub struct RaftCluster {
     last_index_before_current_term: LogIndex,
     pending_membership_change_index: Option<LogIndex>,
     #[serde(default)]
-    membership_change_indexes: BTreeSet<LogIndex>,
+    membership_change_indexes: SparseSet<LogIndex>,
     #[serde(default)]
     saving_membership_change_index: Option<LogIndex>,
     #[serde(default)]
@@ -815,7 +948,7 @@ impl RaftCluster {
             last_log_index: 0,
             last_index_before_current_term: 0,
             pending_membership_change_index: None,
-            membership_change_indexes: BTreeSet::new(),
+            membership_change_indexes: SparseSet::default(),
             saving_membership_change_index: None,
             stabled_membership_change_index: 0,
             running: false,
