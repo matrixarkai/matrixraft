@@ -3697,7 +3697,10 @@ impl MatrixRaftOptions {
 #[derive(Debug)]
 pub struct MatrixRaftNode {
     runtime: NodeRuntime,
-    peers: BTreeMap<NodeId, Box<Peer>>,
+    /// Keep the compatibility address directory ordered without reserving a
+    /// tree leaf for the common one-peer group. Consensus owns its membership
+    /// independently; this directory supplies facade address and role lookups.
+    peers: CompactMap<NodeId, Box<Peer>>,
     runtime_wiring: Option<Box<MatrixRaftRuntimeWiring>>,
     start_index: LogIndex,
     recover_fsm_from_snapshot: bool,
@@ -3724,13 +3727,11 @@ impl MatrixRaftNode {
         start_index: LogIndex,
         runtime: Option<Arc<SharedGroupRuntime>>,
     ) -> Result<Self, RaftError> {
-        let mut peers: BTreeMap<_, _> = options
-            .peers
-            .iter()
-            .cloned()
-            .map(|peer| (peer.node_id, Box::new(peer)))
-            .collect();
-        peers.entry(options.node_id).or_insert_with(|| Box::new(Peer {
+        let mut peers = CompactMap::default();
+        for peer in options.peers.iter().cloned() {
+            peers.insert(peer.node_id, Box::new(peer));
+        }
+        peers.get_or_insert_with(options.node_id, || Box::new(Peer {
             node_id: options.node_id,
             raft_addr: options.raft_addr.clone(),
             snapshot_addr: options.snapshot_addr.clone(),
