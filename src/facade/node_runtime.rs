@@ -4,7 +4,9 @@
 // stoppable node runtime worker and command loop.
 // Split from src/lib.rs to keep the crate facade small and focused.
 
-const RUNTIME_COMMAND_QUEUE_DEPTH: usize = 4;
+// Two waiting operations preserve proposal coalescing without retaining spare
+// slots for an idle group.
+const RUNTIME_COMMAND_QUEUE_DEPTH: usize = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2871,14 +2873,12 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// A live group's command channel used to retain an empty 32-command block
 /// after its first command. `start_all` necessarily sent that first command to
 /// every group, so the block cost about 6 KiB per group for the rest of the
-/// process lifetime. The runtime now admits four waiting commands and applies
-/// backpressure to additional callers until a worker takes it. A 512-group
-/// allocation profile fell from 11.66 MiB to 8.96 MiB at steady state, a 5.16
-/// KiB saving per group. The queue still lets `start_all` put one command on
-/// every group before it waits for replies, and the shared runtime posts the
-/// same worker wake after each admitted command. Four waiting operations also
-/// leave enough work visible for automatic proposal coalescing: the concurrent
-/// proposal contract still folds 200 callers into fewer than 100 fsyncs.
+/// process lifetime. The runtime first admitted four waiting commands and
+/// applied backpressure to additional callers until a worker took one. A
+/// 512-group allocation profile fell from 11.66 MiB to 8.96 MiB at steady
+/// state, a 5.16 KiB saving per group. The queue still lets `start_all` put one
+/// command on every group before it waits for replies, and the shared runtime
+/// posts the same worker wake after each admitted command.
 ///
 /// The next largest allocation was the `BTreeMap` leaf holding replication
 /// pipelines inline. A leaf reserves several value slots even when the group
@@ -2895,15 +2895,20 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// its values moves the peak from 5.18 MiB to 4.90 MiB, another 569 bytes per
 /// group, without changing membership or address behavior.
 ///
-/// The native measurement moved with all four changes: 8,192 live groups
-/// retain 70 MiB, or **8 KiB per group**, down from 74 MiB and 9 KiB after
-/// boxing node values, 94 MiB and 11 KiB after boxing pipeline values, 126 MiB
-/// and 15 KiB after bounding the queues, and 171 MiB and 21 KiB before any of
-/// them, under the same options. The original 21 KiB cost was flat as the group
-/// count grew: 89 MiB for 4096 groups and 339 MiB for 16,384, both with the
-/// measuring binary's own resident size taken off. The same in debug and in
-/// release, within a kilobyte a group -- an allocation is the size it is
-/// whichever profile asked for it.
+/// Two waiting operations are also enough for automatic proposal coalescing:
+/// the concurrent proposal contract still folds 200 callers into fewer than
+/// 100 fsyncs. Tightening the bound from four to two moves the current
+/// 512-group peak from 4.90 MiB to 4.72 MiB, another 367 bytes per group.
+///
+/// The native measurement moved with all five changes: 8,192 live groups
+/// retain 68 MiB, or **8 KiB per group**, down from 70 MiB after boxing peer
+/// values, 74 MiB and 9 KiB after boxing node values, 94 MiB and 11 KiB after
+/// boxing pipeline values, 126 MiB and 15 KiB after first bounding the queues,
+/// and 171 MiB and 21 KiB before any of them, under the same options. The
+/// original 21 KiB cost was flat as the group count grew: 89 MiB for 4096
+/// groups and 339 MiB for 16,384, both with the measuring binary's own resident
+/// size taken off. The same in debug and in release, within a kilobyte a group
+/// -- an allocation is the size it is whichever profile asked for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -2995,10 +3000,10 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
 /// Measured after idle release, bounded command queues and boxed map values:
-/// 8,192 live groups under that unchanged 10,240 limit all started, retained 70
-/// MiB, and delivered 99.8% of their ticks at a one-second interval. Before
+/// 8,192 live groups under that unchanged 10,240 limit all started, retained 68
+/// MiB, and delivered 100.5% of their ticks at a one-second interval. Before
 /// idle release, starting those groups opened a segment for each one and crossed
-/// the limit before the store was live. Before the four memory changes, the same
+/// the limit before the store was live. Before the five memory changes, the same
 /// run retained 171 MiB; bounding the queue brought it to 126 MiB, boxing the
 /// pipeline values to 94 MiB, and boxing the node values to 74 MiB.
 ///
