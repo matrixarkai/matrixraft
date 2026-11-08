@@ -22,6 +22,23 @@ pub struct WalChecksumFormat {
     pub covered_fields: Vec<String>,
 }
 
+const WAL_CHECKSUM_ALGORITHM: &str = "fnv1a64-rustraft-v2";
+const WAL_CHECKSUM_ENCODING: &str = "lower_hex_16";
+const WAL_CHECKSUM_COVERED_FIELDS: [&str; 12] = [
+    "group_id",
+    "node_id",
+    "hard_state.current_term",
+    "hard_state.voted_for",
+    "hard_state.committed",
+    "entries.log_id",
+    "entries.payload_len",
+    "entries_are_delta",
+    "installed_snapshot.last_log_id",
+    "apply_snapshot_fence",
+    "membership",
+    "entries.payload",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LogRetainedRange {
     pub first_log_index: LogIndex,
@@ -312,23 +329,24 @@ fn wal_checksum(record: &WalRecord, cover_membership: bool, cover_payloads: bool
 
 pub fn matrixraft_wal_checksum_format() -> WalChecksumFormat {
     WalChecksumFormat {
-        algorithm: "fnv1a64-rustraft-v2".to_string(),
-        encoding: "lower_hex_16".to_string(),
-        covered_fields: vec![
-            "group_id".to_string(),
-            "node_id".to_string(),
-            "hard_state.current_term".to_string(),
-            "hard_state.voted_for".to_string(),
-            "hard_state.committed".to_string(),
-            "entries.log_id".to_string(),
-            "entries.payload_len".to_string(),
-            "entries_are_delta".to_string(),
-            "installed_snapshot.last_log_id".to_string(),
-            "apply_snapshot_fence".to_string(),
-            "membership".to_string(),
-            "entries.payload".to_string(),
-        ],
+        algorithm: WAL_CHECKSUM_ALGORITHM.to_string(),
+        encoding: WAL_CHECKSUM_ENCODING.to_string(),
+        covered_fields: WAL_CHECKSUM_COVERED_FIELDS
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect(),
     }
+}
+
+pub(crate) fn matrixraft_wal_checksum_format_is_current(format: &WalChecksumFormat) -> bool {
+    format.algorithm == WAL_CHECKSUM_ALGORITHM
+        && format.encoding == WAL_CHECKSUM_ENCODING
+        && format.covered_fields.len() == WAL_CHECKSUM_COVERED_FIELDS.len()
+        && format
+            .covered_fields
+            .iter()
+            .map(String::as_str)
+            .eq(WAL_CHECKSUM_COVERED_FIELDS)
 }
 
 pub fn matrixraft_wal_checksum_valid(record: &WalRecord) -> bool {

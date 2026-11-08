@@ -2175,11 +2175,9 @@ fn node_runtime_recovers_committed_index_from_persistent_wal() {
     assert_eq!(recovery.removed_records, 0);
     let recovered_status = recovered.status().expect("recovered status");
     assert_eq!(
-        recovered_status
-            .wal_recovery_report
-            .expect("status includes recovery report")
-            .surviving_records,
-        2
+        recovered_status.wal_recovery_report.as_ref(),
+        Some(&recovery),
+        "the dedicated and aggregate status paths must reconstruct the same report"
     );
     assert_eq!(
         recovered_status

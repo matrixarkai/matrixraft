@@ -74,6 +74,67 @@ impl<T> std::fmt::Debug for RuntimeReplyPool<T> {
     }
 }
 
+/// The checksum description is identical for every ordinary WAL. Keep that
+/// common case as a marker and retain an owned value only for an unknown
+/// format, so thousands of idle groups do not each hold the same strings.
+#[derive(Debug)]
+enum StoredWalChecksumFormat {
+    Current,
+    Other(Box<WalChecksumFormat>),
+}
+
+/// Sparse storage for the startup report retained by a live runtime.
+///
+/// The public report stays unchanged. Its recovered record and retained range
+/// are usually absent, but their inline options account for most of its width.
+/// Expand those fields only when a caller asks for the report.
+#[derive(Debug)]
+struct StoredWalRecoveryReport {
+    recovered: Option<Box<WalRecord>>,
+    truncated_corrupt_tail: bool,
+    surviving_records: usize,
+    removed_records: usize,
+    segments_scanned: u64,
+    checksum_format: Option<StoredWalChecksumFormat>,
+    retained_range: Option<Box<LogRetainedRange>>,
+}
+
+impl StoredWalRecoveryReport {
+    fn from_report(report: WalRecoveryReport) -> Self {
+        let checksum_format = report.checksum_format.map(|format| {
+            if wal::matrixraft_wal_checksum_format_is_current(&format) {
+                StoredWalChecksumFormat::Current
+            } else {
+                StoredWalChecksumFormat::Other(Box::new(format))
+            }
+        });
+        Self {
+            recovered: report.recovered.map(Box::new),
+            truncated_corrupt_tail: report.truncated_corrupt_tail,
+            surviving_records: report.surviving_records,
+            removed_records: report.removed_records,
+            segments_scanned: report.segments_scanned,
+            checksum_format,
+            retained_range: report.retained_range.map(Box::new),
+        }
+    }
+
+    fn to_report(&self) -> WalRecoveryReport {
+        WalRecoveryReport {
+            recovered: self.recovered.as_deref().cloned(),
+            truncated_corrupt_tail: self.truncated_corrupt_tail,
+            surviving_records: self.surviving_records,
+            removed_records: self.removed_records,
+            segments_scanned: self.segments_scanned,
+            checksum_format: self.checksum_format.as_ref().map(|format| match format {
+                StoredWalChecksumFormat::Current => matrixraft_wal_checksum_format(),
+                StoredWalChecksumFormat::Other(format) => format.as_ref().clone(),
+            }),
+            retained_range: self.retained_range.as_deref().cloned(),
+        }
+    }
+}
+
 enum NodeRuntimeOp {
     Start(mpsc::SyncSender<Result<(), RaftError>>),
     Stop(mpsc::SyncSender<Result<(), RaftError>>),
@@ -1625,7 +1686,7 @@ struct NodeCore {
     group_id: GroupId,
     cluster: RaftCluster,
     wal: Option<PersistentRaftWal>,
-    last_wal_recovery_report: Option<WalRecoveryReport>,
+    last_wal_recovery_report: StoredWalRecoveryReport,
     state: NodeRuntimeState,
     heartbeat_interval_ms: u64,
     election_timeout_ms: u64,
@@ -1653,8 +1714,10 @@ struct NodeCore {
     blocker_log: RuntimeBlockerLog,
     membership_executor: MembershipExecutor,
     /// A command drained by proposal coalescing that turned out not to be a
-    /// proposal; processed first next time round, untouched.
-    carried_command: Option<NodeRuntimeOp>,
+    /// proposal; processed first next time round, untouched. It is absent
+    /// outside that brief handoff, so keep the large command out of every idle
+    /// core.
+    carried_command: Option<Box<NodeRuntimeOp>>,
     /// The group's mailbox.
     ///
     /// The core owns it rather than the thread, which is what lets a pool
@@ -1726,7 +1789,7 @@ impl NodeCore {
             if let Some(record) = report.recovered.clone() {
                 let _ = cluster.restore_wal_record(record);
             }
-            (Some(wal), Some(report))
+            (Some(wal), StoredWalRecoveryReport::from_report(report))
         }
         Err(error) => {
             return Err((error, command_rx));
@@ -1752,7 +1815,7 @@ impl NodeCore {
     let membership_executor = MembershipExecutor::new();
     // A command drained by proposal coalescing that turned out not to be a
     // proposal; processed first on the next iteration, untouched.
-    let carried_command: Option<NodeRuntimeOp> = None;
+    let carried_command: Option<Box<NodeRuntimeOp>> = None;
     // When the next tick is due. The loop waits for what is left of the
     // interval rather than starting a fresh one per receive, so arriving
     // commands cannot hold the tick off indefinitely.
@@ -1987,7 +2050,7 @@ impl NodeCore {
     /// order, behind commands that arrived after it.
     fn next_command(&mut self) -> Option<NodeRuntimeOp> {
         match self.carried_command.take() {
-            Some(command) => Some(command),
+            Some(command) => Some(*command),
             None => self.command_rx.try_recv().ok(),
         }
     }
@@ -2046,7 +2109,7 @@ impl NodeCore {
                         Some((next, next_reply))
                     }
                     Ok(other) => {
-                        *carried_command = Some(other);
+                        *carried_command = Some(Box::new(other));
                         None
                     }
                     Err(_) => None,
@@ -2091,7 +2154,7 @@ impl NodeCore {
                                 outcomes.push(outcome);
                             }
                             Ok(other) => {
-                                *carried_command = Some(other);
+                                *carried_command = Some(Box::new(other));
                                 break;
                             }
                             Err(_) => break,
@@ -2185,7 +2248,7 @@ impl NodeCore {
                     worker_running: *state != NodeRuntimeState::Shutdown,
                     cluster_status: cluster.cluster_status_report().ok(),
                     wal_lifecycle_status: wal.as_ref().map(PersistentRaftWal::status),
-                    wal_recovery_report: last_wal_recovery_report.clone(),
+                    wal_recovery_report: Some(last_wal_recovery_report.to_report()),
                     snapshot_trigger_status: cluster.snapshot_trigger_status(),
                     timer_status: RuntimeTimerStatus {
                         heartbeat_interval_ms,
@@ -2225,7 +2288,7 @@ impl NodeCore {
                 let _ = reply.send(result);
             }
             NodeRuntimeOp::WalRecoveryReport(reply) => {
-                let _ = reply.send(Ok(last_wal_recovery_report.clone()));
+                let _ = reply.send(Ok(Some(last_wal_recovery_report.to_report())));
             }
             NodeRuntimeOp::Step(message, reply) => {
                 let operation_name = runtime_step_operation_name(&message);
@@ -2906,16 +2969,23 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// contract without that block: the 512-group peak moves from 4.71 MiB to 4.20
 /// MiB, another 1.03 KiB per group.
 ///
-/// The native measurement moved with all six changes: 8,192 live groups retain
-/// 66 MiB, or **8 KiB per group**, down from 68 MiB after tightening the queue,
-/// 70 MiB after boxing peer values, 74 MiB and 9 KiB after boxing node values,
-/// 94 MiB and 11 KiB after boxing pipeline values, 126 MiB and 15 KiB after
-/// first bounding the queues, and 171 MiB and 21 KiB before any of them, under
-/// the same options. The original 21 KiB cost was flat as the group count grew:
-/// 89 MiB for 4096 groups and 339 MiB for 16,384, both with the measuring
-/// binary's own resident size taken off. The same in debug and in release,
-/// within a kilobyte a group -- an allocation is the size it is whichever
-/// profile asked for it.
+/// Two cold fields then dominated `NodeCore`: the 488-byte startup recovery
+/// report, including an identical owned checksum description, and the 192-byte
+/// command carried only when proposal coalescing drains a non-proposal. Sparse
+/// recovery storage and a boxed carry-over command narrow the hosted-group
+/// allocation from 1,624 to 1,016 bytes. The 512-group peak moves from 4.20 MiB
+/// to 3.56 MiB, a 1.28 KiB saving per group including the checksum strings.
+///
+/// The native measurement moved with all seven changes: 8,192 live groups
+/// retain 56 MiB, or **6 KiB per group**, down from 66 MiB after compacting the
+/// lifecycle replies, 68 MiB after tightening the queue, 70 MiB after boxing
+/// peer values, 74 MiB and 9 KiB after boxing node values, 94 MiB and 11 KiB
+/// after boxing pipeline values, 126 MiB and 15 KiB after first bounding the
+/// queues, and 171 MiB and 21 KiB before any of them, under the same options.
+/// The original 21 KiB cost was flat as the group count grew: 89 MiB for 4096
+/// groups and 339 MiB for 16,384, both with the measuring binary's own resident
+/// size taken off. The same in debug and in release, within a kilobyte a group
+/// -- an allocation is the size it is whichever profile asked for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -3006,13 +3076,13 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release, bounded command queues and boxed map values:
-/// 8,192 live groups under that unchanged 10,240 limit all started, retained 66
-/// MiB, and delivered 100.1% of their ticks at a one-second interval. Before
-/// idle release, starting those groups opened a segment for each one and crossed
-/// the limit before the store was live. Before the six memory changes, the same
-/// run retained 171 MiB; bounding the queue brought it to 126 MiB, boxing the
-/// pipeline values to 94 MiB, and boxing the node values to 74 MiB.
+/// Measured after idle release and the seven memory changes: 8,192 live groups
+/// under that unchanged 10,240 limit all started, retained 56 MiB, and delivered
+/// 100.4% of their ticks at a one-second interval. Before idle release, starting
+/// those groups opened a segment for each one and crossed the limit before the
+/// store was live. Before the memory changes, the same run retained 171 MiB;
+/// bounding the queue brought it to 126 MiB, boxing the pipeline values to 94
+/// MiB, and boxing the node values to 74 MiB.
 ///
 /// Count it over the whole run and take the maximum. Groups are created one
 /// after another, so a single reading taken while that is still going is a lower
@@ -3294,7 +3364,7 @@ fn raft_node_runtime_loop(options: NodeOptions, command_rx: mpsc::Receiver<NodeR
     let mut next_tick = Instant::now() + core.heartbeat_interval;
     loop {
         let command = if let Some(command) = core.carried_command.take() {
-            command
+            *command
         } else {
             // An elapsed deadline counts as a tick even when commands are
             // queued. Waiting on the channel here instead would let a steady
@@ -3611,6 +3681,46 @@ fn recv_runtime_reply_ref<T>(reply_rx: &mpsc::Receiver<T>) -> Result<T, RaftErro
 #[cfg(test)]
 mod runtime_command_queue_tests {
     use super::*;
+
+    #[cfg(target_pointer_width = "64")]
+    const _: () = {
+        assert!(
+            std::mem::size_of::<NodeCore>() <= 1024,
+            "cold runtime state widened NodeCore past one KiB"
+        );
+    };
+
+    #[test]
+    fn stored_recovery_report_preserves_the_public_report() {
+        let formats = [
+            None,
+            Some(matrixraft_wal_checksum_format()),
+            Some(WalChecksumFormat {
+                algorithm: "custom".to_string(),
+                encoding: "bytes".to_string(),
+                covered_fields: vec!["term".to_string()],
+            }),
+        ];
+        for checksum_format in formats {
+            let report = WalRecoveryReport {
+                recovered: None,
+                truncated_corrupt_tail: true,
+                surviving_records: 17,
+                removed_records: 3,
+                segments_scanned: 4,
+                checksum_format,
+                retained_range: Some(LogRetainedRange {
+                    first_log_index: 11,
+                    last_log_index: 29,
+                    first_segment_id: 2,
+                    last_segment_id: 5,
+                    record_count: 19,
+                }),
+            };
+            let stored = StoredWalRecoveryReport::from_report(report.clone());
+            assert_eq!(stored.to_report(), report);
+        }
+    }
 
     #[test]
     fn a_command_past_the_bound_waits_until_one_is_taken() {
