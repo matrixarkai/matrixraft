@@ -165,6 +165,10 @@ impl<K: Ord, V> CompactMap<K, V> {
             .map(|index| &self.entries[index].1)
     }
 
+    fn contains_key(&self, key: &K) -> bool {
+        self.position(key).is_ok()
+    }
+
     fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.position(key)
             .ok()
@@ -202,6 +206,14 @@ impl<K: Ord, V> CompactMap<K, V> {
         self.entries.iter().map(|(key, value)| (key, value))
     }
 
+    fn keys(&self) -> impl Iterator<Item = &K> {
+        self.entries.iter().map(|(key, _)| key)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &V> {
+        self.entries.iter().map(|(_, value)| value)
+    }
+
     fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
         self.entries
             .iter_mut()
@@ -233,6 +245,18 @@ impl<K: Ord, V> CompactMap<K, V> {
 
     fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
         self.entries.iter_mut().map(|(_, value)| value)
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl<K: Ord, V> std::ops::Index<&K> for CompactMap<K, V> {
+    type Output = V;
+
+    fn index(&self, key: &K) -> &Self::Output {
+        self.get(key).expect("compact map key is absent")
     }
 }
 
@@ -857,12 +881,11 @@ impl ApplyEligibility {
 pub struct RaftCluster {
     pub group_id: GroupId,
     pub config: Config,
-    /// `Node` is large enough that an inline tree leaf reserves about 2 KiB per
-    /// group for slots a small group never fills. Box the values so the tree
-    /// retains one pointer per reserved slot while node state stays
-    /// independently owned. The box is transparent to serde and leaves
-    /// ordering intact.
-    nodes: BTreeMap<NodeId, Box<Node>>,
+    /// Keep each large node independently owned while the directory retains
+    /// exactly one key and pointer per member. Small groups otherwise reserve
+    /// most of a tree leaf around their one node. Both layers are transparent
+    /// to serde and preserve key ordering.
+    nodes: CompactMap<NodeId, Box<Node>>,
     /// Box the large values so the compact directory stores one key and pointer
     /// per peer. Keeping a pipeline inline in a tree leaf retained about 7 KiB
     /// of unused capacity per group; boxing removed that, and replacing the
@@ -1028,7 +1051,7 @@ impl RaftCluster {
             ));
         }
 
-        let mut nodes = BTreeMap::new();
+        let mut nodes = CompactMap::default();
         for peer in peers {
             if nodes
                 .insert(
@@ -5282,24 +5305,23 @@ impl RaftCluster {
         }
 
         for peer in snapshot_members {
-            self.nodes
-                .entry(peer.node_id)
-                .and_modify(|node| {
-                    node.replica_role = peer.role;
-                    node.auto_promote =
-                        peer.role == ReplicaRole::Learner && peer.auto_promote;
-                    if node.replica_role == ReplicaRole::Learner {
-                        node.raft_role = StateRole::Learner;
-                    }
-                })
-                .or_insert_with(|| {
-                    Box::new(Node::new(peer.node_id, peer.role, peer.auto_promote))
-                });
+            if let Some(node) = self.nodes.get_mut(&peer.node_id) {
+                node.replica_role = peer.role;
+                node.auto_promote = peer.role == ReplicaRole::Learner && peer.auto_promote;
+                if node.replica_role == ReplicaRole::Learner {
+                    node.raft_role = StateRole::Learner;
+                }
+            } else {
+                self.nodes.insert(
+                    peer.node_id,
+                    Box::new(Node::new(peer.node_id, peer.role, peer.auto_promote)),
+                );
+            }
         }
         for node_id in retained {
-            self.nodes
-                .entry(node_id)
-                .or_insert_with(|| Box::new(Node::new(node_id, ReplicaRole::Voter, false)));
+            self.nodes.get_or_insert_with(node_id, || {
+                Box::new(Node::new(node_id, ReplicaRole::Voter, false))
+            });
         }
 
         self.reset_leader_lease_epoch();
@@ -7396,7 +7418,7 @@ impl RaftCluster {
 
     fn refresh_replication_pipelines(&mut self) {
         let limits = self.config.pipeline_limits();
-        for (node_id, node) in &self.nodes {
+        for (node_id, node) in self.nodes.iter() {
             self.peer_pipelines.get_or_insert_with(*node_id, || {
                 Box::new(ReplicationPipeline::new(
                     *node_id,
@@ -7542,6 +7564,14 @@ mod compact_map_tests {
         assert_eq!(map.get(&2), Some(&21));
         assert_eq!(*map.get_or_insert_with(3, || 99), 30);
         *map.get_or_insert_with(4, || 40) = 41;
+        assert_eq!(map.len(), 4);
+        assert!(map.contains_key(&4));
+        assert_eq!(map[&3], 30);
+        assert_eq!(map.keys().copied().collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        assert_eq!(
+            map.values().copied().collect::<Vec<_>>(),
+            vec![10, 21, 30, 41]
+        );
 
         *map.get_mut(&3).expect("third entry") = 31;
         let ranged: Vec<_> = map
