@@ -183,6 +183,219 @@ enum NodeRuntimeOp {
     Shutdown(mpsc::SyncSender<Result<(), RaftError>>),
 }
 
+struct RuntimeCommandQueue {
+    slots: [Option<NodeRuntimeOp>; RUNTIME_COMMAND_QUEUE_DEPTH],
+    head: usize,
+    len: usize,
+    sender_count: usize,
+    receiver_alive: bool,
+}
+
+impl RuntimeCommandQueue {
+    fn new() -> Self {
+        Self {
+            slots: std::array::from_fn(|_| None),
+            head: 0,
+            len: 0,
+            sender_count: 1,
+            receiver_alive: true,
+        }
+    }
+
+    fn push(&mut self, command: NodeRuntimeOp) {
+        debug_assert!(self.len < RUNTIME_COMMAND_QUEUE_DEPTH);
+        let tail = (self.head + self.len) % RUNTIME_COMMAND_QUEUE_DEPTH;
+        self.slots[tail] = Some(command);
+        self.len += 1;
+    }
+
+    fn pop(&mut self) -> Option<NodeRuntimeOp> {
+        if self.len == 0 {
+            return None;
+        }
+        let command = self.slots[self.head].take();
+        self.head = (self.head + 1) % RUNTIME_COMMAND_QUEUE_DEPTH;
+        self.len -= 1;
+        command
+    }
+}
+
+struct RuntimeCommandChannel {
+    state: Mutex<RuntimeCommandQueue>,
+    changed: std::sync::Condvar,
+}
+
+struct RuntimeCommandSender {
+    channel: Arc<RuntimeCommandChannel>,
+}
+
+impl Clone for RuntimeCommandSender {
+    fn clone(&self) -> Self {
+        self.channel
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sender_count += 1;
+        Self {
+            channel: Arc::clone(&self.channel),
+        }
+    }
+}
+
+impl Drop for RuntimeCommandSender {
+    fn drop(&mut self) {
+        let mut state = self
+            .channel
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.sender_count = state.sender_count.saturating_sub(1);
+        let disconnected = state.sender_count == 0;
+        drop(state);
+        if disconnected {
+            self.channel.changed.notify_all();
+        }
+    }
+}
+
+impl RuntimeCommandSender {
+    #[allow(clippy::result_large_err)]
+    fn send(&self, command: NodeRuntimeOp) -> Result<(), mpsc::SendError<NodeRuntimeOp>> {
+        let mut command = Some(command);
+        let mut state = self
+            .channel
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if !state.receiver_alive {
+                return Err(mpsc::SendError(
+                    command.take().expect("undelivered runtime command"),
+                ));
+            }
+            if state.len < RUNTIME_COMMAND_QUEUE_DEPTH {
+                state.push(command.take().expect("runtime command admitted once"));
+                drop(state);
+                self.channel.changed.notify_all();
+                return Ok(());
+            }
+            state = self
+                .channel
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+struct RuntimeCommandReceiver {
+    channel: Arc<RuntimeCommandChannel>,
+}
+
+impl RuntimeCommandReceiver {
+    fn try_recv(&self) -> Result<NodeRuntimeOp, mpsc::TryRecvError> {
+        let mut state = self
+            .channel
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(command) = state.pop() {
+            drop(state);
+            self.channel.changed.notify_all();
+            return Ok(command);
+        }
+        if state.sender_count == 0 {
+            Err(mpsc::TryRecvError::Disconnected)
+        } else {
+            Err(mpsc::TryRecvError::Empty)
+        }
+    }
+
+    fn recv(&self) -> Result<NodeRuntimeOp, mpsc::RecvError> {
+        let mut state = self
+            .channel
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if let Some(command) = state.pop() {
+                drop(state);
+                self.channel.changed.notify_all();
+                return Ok(command);
+            }
+            if state.sender_count == 0 {
+                return Err(mpsc::RecvError);
+            }
+            state = self
+                .channel
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<NodeRuntimeOp, mpsc::RecvTimeoutError> {
+        let started = Instant::now();
+        let mut state = self
+            .channel
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if let Some(command) = state.pop() {
+                drop(state);
+                self.channel.changed.notify_all();
+                return Ok(command);
+            }
+            if state.sender_count == 0 {
+                return Err(mpsc::RecvTimeoutError::Disconnected);
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(mpsc::RecvTimeoutError::Timeout);
+            }
+            let (next, _) = self
+                .channel
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = next;
+        }
+    }
+}
+
+impl Drop for RuntimeCommandReceiver {
+    fn drop(&mut self) {
+        let mut state = self
+            .channel
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.receiver_alive = false;
+        state.slots.iter_mut().for_each(|slot| *slot = None);
+        state.head = 0;
+        state.len = 0;
+        drop(state);
+        self.channel.changed.notify_all();
+    }
+}
+
+fn runtime_command_channel() -> (RuntimeCommandSender, RuntimeCommandReceiver) {
+    let channel = Arc::new(RuntimeCommandChannel {
+        state: Mutex::new(RuntimeCommandQueue::new()),
+        changed: std::sync::Condvar::new(),
+    });
+    (
+        RuntimeCommandSender {
+            channel: Arc::clone(&channel),
+        },
+        RuntimeCommandReceiver { channel },
+    )
+}
+
 #[derive(Debug)]
 pub struct NodeRuntime {
     node_id: NodeId,
@@ -201,7 +414,7 @@ impl NodeRuntime {
     pub fn create(options: NodeOptions) -> Result<Self, RaftError> {
         let node_id = options.node_id;
         let group_id = options.group_id;
-        let (command_tx, command_rx) = mpsc::sync_channel(RUNTIME_COMMAND_QUEUE_DEPTH);
+        let (command_tx, command_rx) = runtime_command_channel();
         let worker = thread::Builder::new()
             .name(format!("rustraft-node-{group_id}-{node_id}"))
             .spawn(move || raft_node_runtime_loop(options, command_rx))
@@ -236,7 +449,7 @@ impl NodeRuntime {
         let group_id = options.group_id;
         let tick_interval_ms = options.config.heartbeat_interval_ms.max(1);
         let key = DriverGroupKey::new(group_id, node_id);
-        let (command_tx, command_rx) = mpsc::sync_channel(RUNTIME_COMMAND_QUEUE_DEPTH);
+        let (command_tx, command_rx) = runtime_command_channel();
         // The error is reported rather than answered into the channel: no
         // command can have been sent yet, because this is what hands the
         // sender out.
@@ -1722,7 +1935,7 @@ struct NodeCore {
     ///
     /// The core owns it rather than the thread, which is what lets a pool
     /// worker drain the group without one.
-    command_rx: mpsc::Receiver<NodeRuntimeOp>,
+    command_rx: RuntimeCommandReceiver,
 }
 
 impl NodeCore {
@@ -1740,8 +1953,8 @@ impl NodeCore {
     #[allow(clippy::result_large_err)]
     fn new(
         options: NodeOptions,
-        command_rx: mpsc::Receiver<NodeRuntimeOp>,
-    ) -> Result<Self, (RaftError, mpsc::Receiver<NodeRuntimeOp>)> {
+        command_rx: RuntimeCommandReceiver,
+    ) -> Result<Self, (RaftError, RuntimeCommandReceiver)> {
     let node_id = options.node_id;
     let group_id = options.group_id;
     let mut peers = options.peers.clone();
@@ -2621,7 +2834,7 @@ impl NodeCore {
 ///
 /// Dropping the receiver instead would make a node that failed to open its
 /// WAL indistinguishable from one that merely went quiet.
-fn drain_with_error(command_rx: &mpsc::Receiver<NodeRuntimeOp>, error: &RaftError) {
+fn drain_with_error(command_rx: &RuntimeCommandReceiver, error: &RaftError) {
     while let Ok(command) = command_rx.recv() {
         if respond_runtime_error(command, error.clone()) {
             break;
@@ -2981,17 +3194,23 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// 3.56 MiB to 3.45 MiB, another 212 bytes per group including allocator
 /// overhead.
 ///
-/// The native measurement moved with all eight changes: 8,192 live groups
-/// retain 54 MiB, or **6 KiB per group**, down from 56 MiB after compacting WAL
-/// segment storage, 66 MiB after compacting the lifecycle replies, 68 MiB after
-/// tightening the queue, 70 MiB after boxing peer values, 74 MiB and 9 KiB
-/// after boxing node values, 94 MiB and 11 KiB after boxing pipeline values,
-/// 126 MiB and 15 KiB after first bounding the queues, and 171 MiB and 21 KiB
-/// before any of them, under the same options. The original 21 KiB cost was
-/// flat as the group count grew: 89 MiB for 4096 groups and 339 MiB for 16,384,
-/// both with the measuring binary's own resident size taken off. The same in
-/// debug and in release, within a kilobyte a group -- an allocation is the size
-/// it is whichever profile asked for it.
+/// The standard bounded channel retained a 640-byte control allocation and a
+/// 400-byte slot allocation for each group. A fixed two-slot queue behind one
+/// lock and condition variable retains one 448-byte allocation and keeps the
+/// same blocking and disconnect behavior. The 512-group peak moves from 3.45
+/// MiB to 3.12 MiB, another 678 bytes per group including allocator overhead.
+///
+/// The native measurement moved with all nine changes: 8,192 live groups
+/// retain 49 MiB, or **5 KiB per group**, down from 54 MiB after compacting WAL
+/// segment storage, 56 MiB before that, 66 MiB after compacting the lifecycle
+/// replies, 68 MiB after tightening the queue, 70 MiB after boxing peer values,
+/// 74 MiB and 9 KiB after boxing node values, 94 MiB and 11 KiB after boxing
+/// pipeline values, 126 MiB and 15 KiB after first bounding the queues, and 171
+/// MiB and 21 KiB before any of them, under the same options. The original 21
+/// KiB cost was flat as the group count grew: 89 MiB for 4096 groups and 339 MiB
+/// for 16,384, both with the measuring binary's own resident size taken off.
+/// The same in debug and in release, within a kilobyte a group -- an allocation
+/// is the size it is whichever profile asked for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -3082,9 +3301,9 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release and the eight memory changes: 8,192 live groups
-/// under that unchanged 10,240 limit all started, retained 54 MiB, and delivered
-/// 101.3% of their ticks at a one-second interval. Before idle release, starting
+/// Measured after idle release and the nine memory changes: 8,192 live groups
+/// under that unchanged 10,240 limit all started, retained 49 MiB, and delivered
+/// 100.0% of their ticks at a one-second interval. Before idle release, starting
 /// those groups opened a segment for each one and crossed the limit before the
 /// store was live. Before the memory changes, the same run retained 171 MiB;
 /// bounding the queue brought it to 126 MiB, boxing the pipeline values to 94
@@ -3323,7 +3542,7 @@ impl SharedGroupRuntime {
 /// the sixteen call sites means a command path added later cannot forget to.
 #[derive(Clone)]
 struct CommandSender {
-    tx: mpsc::SyncSender<NodeRuntimeOp>,
+    tx: RuntimeCommandSender,
     shared: Option<(Arc<SharedGroupRuntime>, DriverGroupKey)>,
 }
 
@@ -3356,7 +3575,7 @@ impl CommandSender {
 ///
 /// See [`NodeCore`] for what this costs at scale. The scheduling lives here
 /// rather than in the core so that something else can schedule it instead.
-fn raft_node_runtime_loop(options: NodeOptions, command_rx: mpsc::Receiver<NodeRuntimeOp>) {
+fn raft_node_runtime_loop(options: NodeOptions, command_rx: RuntimeCommandReceiver) {
     let mut core = match NodeCore::new(options, command_rx) {
         Ok(core) => core,
         Err((error, command_rx)) => {
@@ -3694,6 +3913,16 @@ mod runtime_command_queue_tests {
             std::mem::size_of::<NodeCore>() <= 1024,
             "cold runtime state widened NodeCore past one KiB"
         );
+        assert!(
+            std::mem::size_of::<RuntimeCommandQueue>() <= 416,
+            "the fixed command queue widened"
+        );
+        assert!(
+            std::mem::size_of::<RuntimeCommandChannel>() <= 432,
+            "the command channel widened"
+        );
+        assert!(std::mem::size_of::<RuntimeCommandSender>() <= 8);
+        assert!(std::mem::size_of::<RuntimeCommandReceiver>() <= 8);
     };
 
     #[test]
@@ -3730,7 +3959,7 @@ mod runtime_command_queue_tests {
 
     #[test]
     fn a_command_past_the_bound_waits_until_one_is_taken() {
-        let (command_tx, command_rx) = mpsc::sync_channel(RUNTIME_COMMAND_QUEUE_DEPTH);
+        let (command_tx, command_rx) = runtime_command_channel();
         let mut held_replies = Vec::new();
         for _ in 0..RUNTIME_COMMAND_QUEUE_DEPTH {
             let (reply, reply_rx) = mpsc::sync_channel(1);
@@ -3773,6 +4002,46 @@ mod runtime_command_queue_tests {
         }
         assert!(matches!(command_rx.recv(), Ok(NodeRuntimeOp::Stop(_))));
         sender.join().expect("second sender");
+    }
+
+    #[test]
+    fn command_waits_distinguish_timeout_from_disconnect() {
+        let (command_tx, command_rx) = runtime_command_channel();
+        assert!(matches!(
+            command_rx.recv_timeout(Duration::from_millis(1)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(command_tx);
+        assert!(matches!(
+            command_rx.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn dropping_the_receiver_returns_a_blocked_command() {
+        let (command_tx, command_rx) = runtime_command_channel();
+        let mut held_replies = Vec::new();
+        for _ in 0..RUNTIME_COMMAND_QUEUE_DEPTH {
+            let (reply, reply_rx) = mpsc::sync_channel(1);
+            held_replies.push(reply_rx);
+            command_tx
+                .send(NodeRuntimeOp::Start(reply))
+                .expect("fill the command queue to its bound");
+        }
+
+        let blocked_sender = command_tx.clone();
+        let blocked = thread::spawn(move || {
+            let (reply, _reply_rx) = mpsc::sync_channel(1);
+            matches!(
+                blocked_sender.send(NodeRuntimeOp::Stop(reply)),
+                Err(mpsc::SendError(NodeRuntimeOp::Stop(_)))
+            )
+        });
+        thread::sleep(Duration::from_millis(20));
+        drop(command_rx);
+
+        assert!(blocked.join().expect("blocked sender"));
     }
 }
 
