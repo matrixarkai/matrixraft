@@ -21,7 +21,8 @@
 //!
 //! ```bash
 //! cargo run --release --example driver_scaling            # 1024 groups
-//! cargo run --release --example driver_scaling -- 4096 8  # groups, workers
+//! cargo run --release --example driver_scaling -- 4096 8 descending
+//! # arguments: groups, workers, registration order (ascending or descending)
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -80,6 +81,17 @@ fn main() {
         .nth(2)
         .and_then(|a| a.parse().ok())
         .unwrap_or(4);
+    let order = std::env::args()
+        .nth(3)
+        .unwrap_or_else(|| "ascending".to_string());
+    assert!(
+        matches!(order.as_str(), "ascending" | "descending"),
+        "registration order must be ascending or descending"
+    );
+    let mut group_ids: Vec<_> = (1..=groups).collect();
+    if order == "descending" {
+        group_ids.reverse();
+    }
 
     if rss_bytes().is_none() || thread_count().is_none() {
         println!("/proc/self/status unavailable: this probe needs Linux");
@@ -102,7 +114,9 @@ fn main() {
     let threads_idle = thread_count().expect("Threads");
 
     let started = Instant::now();
-    let handles: Vec<Arc<Group>> = (1..=groups)
+    let handles: Vec<Arc<Group>> = group_ids
+        .iter()
+        .copied()
         .map(|group_id| {
             let group = Arc::new(Group::default());
             let key = DriverGroupKey::new(group_id, 1);
@@ -158,7 +172,8 @@ fn main() {
     let rss_delta = rss_after.saturating_sub(rss_before);
     let group_threads = threads_after.saturating_sub(threads_idle);
     println!(
-        "groups={groups:<6} workers={worker_num}  rss_delta={:.1} MiB  per_group={:.0} B  \
+        "groups={groups:<6} workers={worker_num} order={order:<10}  \
+         rss_delta={:.1} MiB  per_group={:.0} B  \
          threads={threads_after} (driver+pool={}, per_group={group_threads})  \
          register={elapsed:?} ({:?}/group)",
         rss_delta as f64 / 1048576.0,

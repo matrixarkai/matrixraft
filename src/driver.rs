@@ -28,8 +28,8 @@ use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use crate::{
-    ChannelSelector, ChannelSelectorPolicy, GroupId, MailChannel, MailPriority, NodeId, RaftError,
-    MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
+    ChannelSelector, ChannelSelectorPolicy, CompactMap, GroupId, MailChannel, MailPriority, NodeId,
+    RaftError, MATRIXRAFT_CHANNEL_SELECTOR_MAX_TIMEOUT_MS,
 };
 
 /// The clock the ticker advances, in milliseconds per step.
@@ -848,7 +848,9 @@ struct PoolInner<Mail> {
     mail_size: Option<DriverMailSize<Mail>>,
     slots: Vec<WorkerSlot<Mail>>,
     groups: Mutex<BTreeMap<DriverGroupKey, PoolGroup<Mail>>>,
-    handlers: Mutex<BTreeMap<NodeId, Arc<dyn DriverMailHandler<Mail>>>>,
+    /// Channel ids only increase, so registration appends while lookups remain
+    /// ordered and logarithmic without retaining tree slots per handler.
+    handlers: Mutex<CompactMap<NodeId, Arc<dyn DriverMailHandler<Mail>>>>,
     next_slot: AtomicU64,
     exit: AtomicBool,
     batches_handled: AtomicU64,
@@ -947,7 +949,7 @@ impl<Mail: Send + 'static> DriverWorkerPool<Mail> {
                 })
                 .collect(),
             groups: Mutex::new(BTreeMap::new()),
-            handlers: Mutex::new(BTreeMap::new()),
+            handlers: Mutex::new(CompactMap::default()),
             next_slot: AtomicU64::new(1),
             exit: AtomicBool::new(false),
             batches_handled: AtomicU64::new(0),

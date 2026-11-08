@@ -3289,10 +3289,21 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// saving is another 91,400 bytes in total or about 179 bytes per group including
 /// allocator overhead.
 ///
-/// The native measurement with all seventeen changes is 41 MiB at
+/// The worker pool's handler directory is keyed by channel ids allocated in
+/// increasing order, so the compact directory appends on registration without
+/// making arbitrary group-id order expensive. Two controlled 512-group pairs
+/// under the same RAM-backed temporary root move from 2,460,336 to 2,446,984
+/// bytes and from 2,460,000 to 2,442,264 bytes. Comparing the least favorable
+/// endpoints still saves 13,016 bytes in total, about 25 bytes per group
+/// including allocator overhead. At 32,768 groups the dedicated driver probe
+/// retains 533-535 bytes per group instead of 560-563, while three descending
+/// registration runs finish in 27-40ms and deliver mail to every group.
+///
+/// The native measurement with all eighteen changes is 41 MiB at
 /// whole-MiB resolution for 8,192 live groups, or **4 KiB per group**; the
 /// allocation profiles above resolve reductions that RSS rounding does not.
-/// That is down from 43 MiB before compacting the server route directory,
+/// The handler-directory reduction is below that whole-MiB resolution. The
+/// process is down from 43 MiB before compacting the server route directory,
 /// 44 MiB before compacting the consensus node directory, 45 MiB before
 /// compacting the compatibility peer directory, 46 MiB before compacting the
 /// pipeline directory, 47 MiB before sharing the lifecycle replies, 48 MiB
@@ -3397,7 +3408,7 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release and the seventeen memory changes: 8,192 live groups
+/// Measured after idle release and the eighteen memory changes: 8,192 live groups
 /// under that unchanged 10,240 limit all started, retained 41 MiB, and delivered
 /// 99.9% of their ticks at a one-second interval. Before idle release, starting
 /// those groups opened a segment for each one and crossed the limit before the
