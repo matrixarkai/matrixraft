@@ -3697,7 +3697,7 @@ impl MatrixRaftOptions {
 #[derive(Debug)]
 pub struct MatrixRaftNode {
     runtime: NodeRuntime,
-    peers: BTreeMap<NodeId, Peer>,
+    peers: BTreeMap<NodeId, Box<Peer>>,
     start_index: LogIndex,
     recover_fsm_from_snapshot: bool,
     callback_scheduler: std::rc::Rc<std::cell::RefCell<MatrixRaftCallbackScheduler>>,
@@ -3727,15 +3727,15 @@ impl MatrixRaftNode {
             .peers
             .iter()
             .cloned()
-            .map(|peer| (peer.node_id, peer))
+            .map(|peer| (peer.node_id, Box::new(peer)))
             .collect();
-        peers.entry(options.node_id).or_insert_with(|| Peer {
+        peers.entry(options.node_id).or_insert_with(|| Box::new(Peer {
             node_id: options.node_id,
             raft_addr: options.raft_addr.clone(),
             snapshot_addr: options.snapshot_addr.clone(),
             role: options.role,
             auto_promote: false,
-        });
+        }));
         let runtime = match runtime {
             Some(shared) => NodeRuntime::create_on(options, shared)?,
             None => NodeRuntime::create(options)?,
@@ -3924,7 +3924,7 @@ impl MatrixRaftNode {
         let peer = self.peer_from_node_id(node_id, ReplicaRole::Voter, false);
         let report = self.execute_membership(MembershipOperation::AddNode(peer.clone()))?;
         if report.success {
-            self.peers.insert(peer.node_id, peer);
+            self.peers.insert(peer.node_id, Box::new(peer));
         }
         Ok(report)
     }
@@ -3958,7 +3958,7 @@ impl MatrixRaftNode {
         let peer = self.peer_from_node_id(node_id, ReplicaRole::Learner, auto_promote);
         let report = self.execute_membership(MembershipOperation::AddLearner(peer.clone()))?;
         if report.success {
-            self.peers.insert(peer.node_id, peer);
+            self.peers.insert(peer.node_id, Box::new(peer));
         }
         Ok(report)
     }
@@ -3992,7 +3992,7 @@ impl MatrixRaftNode {
         let peer = self.peer_from_node_id(node_id, ReplicaRole::Witness, false);
         let report = self.execute_membership(MembershipOperation::AddWitness(peer.clone()))?;
         if report.success {
-            self.peers.insert(peer.node_id, peer);
+            self.peers.insert(peer.node_id, Box::new(peer));
         }
         Ok(report)
     }
@@ -4126,7 +4126,10 @@ impl MatrixRaftNode {
         &mut self,
         node_id: NodeId,
     ) -> Result<MatrixRaftRemoveReport, RaftError> {
-        let removed_node = self.peers.get(&node_id).map(MatrixRaftNodeId::from);
+        let removed_node = self
+            .peers
+            .get(&node_id)
+            .map(|peer| MatrixRaftNodeId::from(peer.as_ref()));
         let report = self.execute_membership(MembershipOperation::Remove(node_id))?;
         let removed_conf_state = if report.before.voters.contains(&node_id) {
             Some(MatrixRaftConfState::Voter)
@@ -4353,7 +4356,10 @@ impl MatrixRaftNode {
         &self,
         transferee: NodeId,
     ) -> Result<MatrixRaftTransferLeaderReport, RaftError> {
-        let transferee_node = self.peers.get(&transferee).map(MatrixRaftNodeId::from);
+        let transferee_node = self
+            .peers
+            .get(&transferee)
+            .map(|peer| MatrixRaftNodeId::from(peer.as_ref()));
         if let Some(peer) = self.peers.get(&transferee) {
             if !peer.role.can_be_leader() {
                 return Err(RaftError::InvalidRequest(format!(
@@ -4434,7 +4440,11 @@ impl MatrixRaftNode {
         transferee: Option<NodeId>,
     ) -> Result<MatrixRaftStepDownReport, RaftError> {
         let selected = self.runtime.step_down(transferee)?;
-        let transferee_node = selected.and_then(|node_id| self.peers.get(&node_id).map(MatrixRaftNodeId::from));
+        let transferee_node = selected.and_then(|node_id| {
+            self.peers
+                .get(&node_id)
+                .map(|peer| MatrixRaftNodeId::from(peer.as_ref()))
+        });
         Ok(MatrixRaftStepDownReport {
             requested_transferee_id: transferee,
             transferee_id: selected,
@@ -4651,7 +4661,7 @@ impl MatrixRaftNode {
     pub fn resolve_address(&self, peer_id: NodeId) -> Result<MatrixRaftNodeId, RaftError> {
         self.peers
             .get(&peer_id)
-            .map(MatrixRaftNodeId::from)
+            .map(|peer| MatrixRaftNodeId::from(peer.as_ref()))
             .ok_or(RaftError::NodeNotFound(peer_id))
     }
 
@@ -4693,11 +4703,11 @@ impl MatrixRaftNode {
             .peers
             .get_mut(&node_id)
             .ok_or(RaftError::NodeNotFound(node_id))?;
-        let previous = MatrixRaftNodeId::from(&*peer);
+        let previous = MatrixRaftNodeId::from(peer.as_ref());
         let changed = peer.raft_addr != raft_addr || peer.snapshot_addr != snapshot_addr;
         peer.raft_addr = raft_addr;
         peer.snapshot_addr = snapshot_addr;
-        let current = MatrixRaftNodeId::from(&*peer);
+        let current = MatrixRaftNodeId::from(peer.as_ref());
         Ok(MatrixRaftAddressUpdate {
             node_id,
             previous,
@@ -4755,7 +4765,7 @@ impl MatrixRaftNode {
     pub fn get_node_id(&self) -> MatrixRaftNodeId {
         self.peers
             .get(&self.runtime.node_id())
-            .map(MatrixRaftNodeId::from)
+            .map(|peer| MatrixRaftNodeId::from(peer.as_ref()))
             .unwrap_or(MatrixRaftNodeId {
                 peer_id: self.runtime.node_id(),
                 raft_addr: String::new(),
@@ -4900,16 +4910,16 @@ impl MatrixRaftNode {
             | MembershipOperation::AddVoter(mut peer) => {
                 peer.role = ReplicaRole::Voter;
                 peer.auto_promote = false;
-                self.peers.insert(peer.node_id, peer);
+                self.peers.insert(peer.node_id, Box::new(peer));
             }
             MembershipOperation::AddLearner(mut peer) => {
                 peer.role = ReplicaRole::Learner;
-                self.peers.insert(peer.node_id, peer);
+                self.peers.insert(peer.node_id, Box::new(peer));
             }
             MembershipOperation::AddWitness(mut peer) => {
                 peer.role = ReplicaRole::Witness;
                 peer.auto_promote = false;
-                self.peers.insert(peer.node_id, peer);
+                self.peers.insert(peer.node_id, Box::new(peer));
             }
             MembershipOperation::Promote(node_id) => {
                 if let Some(peer) = self.peers.get_mut(&node_id) {
