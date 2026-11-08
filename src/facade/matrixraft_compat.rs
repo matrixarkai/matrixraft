@@ -3764,49 +3764,42 @@ impl MatrixRaftNode {
         self.runtime.restart()
     }
 
-    /// `stop`, split the same way as `start_in_flight`.
-    fn stop_in_flight(
+    fn stop_in_batch(
         &mut self,
-    ) -> Result<mpsc::Receiver<Result<(), RaftError>>, RaftError> {
-        self.runtime.stop_in_flight()
-    }
-
-    fn finish_stop(
-        &mut self,
-        reply_rx: mpsc::Receiver<Result<(), RaftError>>,
+        index: usize,
+        sender: LifecycleBatchSender,
     ) -> Result<(), RaftError> {
-        self.runtime.finish_stop(reply_rx)
+        self.runtime.stop_in_batch(index, sender)
     }
 
-    /// `shutdown`, split the same way as `start_in_flight`.
-    fn shutdown_in_flight(
+    fn finish_stop_result(&mut self, result: LifecycleResult) -> Result<(), RaftError> {
+        self.runtime.finish_stop_result(result)
+    }
+
+    fn shutdown_in_batch(
         &mut self,
-    ) -> Result<Option<mpsc::Receiver<Result<(), RaftError>>>, RaftError> {
-        self.runtime.shutdown_in_flight()
+        index: usize,
+        sender: LifecycleBatchSender,
+    ) -> Result<bool, RaftError> {
+        self.runtime.shutdown_in_batch(index, sender)
     }
 
-    fn finish_shutdown(
-        &mut self,
-        reply_rx: mpsc::Receiver<Result<(), RaftError>>,
-    ) -> Result<(), RaftError> {
-        self.runtime.finish_shutdown(reply_rx)
+    fn finish_shutdown_result(&mut self, result: LifecycleResult) -> Result<(), RaftError> {
+        self.runtime.finish_shutdown_result(result)
     }
 
-    /// `start`, split so a caller with many nodes can send them all before
-    /// waiting on any. See `NodeRuntime::start_in_flight`.
-    fn start_in_flight(
+    fn start_in_batch(
         &mut self,
         start_index: LogIndex,
-    ) -> Result<mpsc::Receiver<Result<(), RaftError>>, RaftError> {
+        index: usize,
+        sender: LifecycleBatchSender,
+    ) -> Result<(), RaftError> {
         self.start_index = start_index;
-        self.runtime.start_in_flight()
+        self.runtime.start_in_batch(index, sender)
     }
 
-    fn finish_start(
-        &mut self,
-        reply_rx: mpsc::Receiver<Result<(), RaftError>>,
-    ) -> Result<(), RaftError> {
-        self.runtime.finish_start(reply_rx)
+    fn finish_start_result(&mut self, result: LifecycleResult) -> Result<(), RaftError> {
+        self.runtime.finish_start_result(result)
     }
 
     pub fn stop(&mut self) -> Result<(), RaftError> {
@@ -18209,13 +18202,20 @@ impl Drop for MatrixRaftMultiRaftServer {
         // Without this, each `NodeRuntime`'s own `Drop` shuts its group down in
         // turn, waiting for every reply before sending the next -- about 110us a
         // group, 1.83s for 16,384. Sending them in batches here first leaves
-        // those drops with nothing to do, because `shutdown_in_flight` skips a
-        // group that has already shut down.
+        // those drops with nothing to do, because the batch path marks each
+        // completed group shut down before the per-node drops run.
         //
         // Best effort: a `Drop` has nobody to return an error to, and the
         // per-node drops still run afterwards either way.
         let _ = self.shutdown_all();
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BulkLifecycleAction {
+    Start(LogIndex),
+    Stop,
+    Shutdown,
 }
 
 impl MatrixRaftMultiRaftServer {
@@ -27088,39 +27088,91 @@ impl MatrixRaftMultiRaftServer {
     /// one-at-a-time version in which groups are left started: every group is
     /// sent its command, where before the ones after the failure were not. Both
     /// leave a partly started server; this one leaves more of it started.
+    fn execute_bulk_lifecycle_batch(
+        &mut self,
+        batch: &[MatrixRaftRouteKey],
+        action: BulkLifecycleAction,
+    ) -> Option<RaftError> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(batch.len());
+        let mut in_flight = Vec::with_capacity(batch.len());
+        let mut first_error = None;
+
+        for key in batch {
+            let Some(node) = self.nodes.get_mut(key) else {
+                continue;
+            };
+            let index = in_flight.len();
+            let sent = match action {
+                BulkLifecycleAction::Start(start_index) => node
+                    .start_in_batch(start_index, index, reply_tx.clone())
+                    .map(|()| true),
+                BulkLifecycleAction::Stop => node
+                    .stop_in_batch(index, reply_tx.clone())
+                    .map(|()| true),
+                BulkLifecycleAction::Shutdown => {
+                    node.shutdown_in_batch(index, reply_tx.clone())
+                }
+            };
+            match sent {
+                Ok(true) => in_flight.push(*key),
+                Ok(false) => {}
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        drop(reply_tx);
+
+        for _ in 0..in_flight.len() {
+            let (index, result) = match recv_runtime_reply_ref(&reply_rx) {
+                Ok(reply) => reply,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    break;
+                }
+            };
+            let Some(key) = in_flight.get(index).copied() else {
+                if first_error.is_none() {
+                    first_error = Some(RaftError::Transport(
+                        "raft node runtime returned an unknown lifecycle reply".to_string(),
+                    ));
+                }
+                continue;
+            };
+            let Some(node) = self.nodes.get_mut(&key) else {
+                continue;
+            };
+            let finished = match action {
+                BulkLifecycleAction::Start(_) => node.finish_start_result(result),
+                BulkLifecycleAction::Stop => node.finish_stop_result(result),
+                BulkLifecycleAction::Shutdown => node.finish_shutdown_result(result),
+            };
+            if let Err(error) = finished {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        first_error
+    }
+
     pub fn start_all(&mut self, start_index: LogIndex) -> Result<(), RaftError> {
-        // In batches, not all at once. The one-slot reply channels keep the
-        // result storage small, while a batch of this size already has sixty
-        // times more work outstanding than there are workers to take it.
+        // In batches, not all at once. One bounded channel carries the indexed
+        // replies for the whole batch, while a batch of this size already has
+        // sixty times more work outstanding than there are workers to take it.
         const START_BATCH: usize = 1024;
         let keys: Vec<MatrixRaftRouteKey> = self.nodes.keys().copied().collect();
         let mut first_error = None;
         for batch in keys.chunks(START_BATCH) {
-            let mut in_flight = Vec::with_capacity(batch.len());
-            for key in batch {
-                let Some(node) = self.nodes.get_mut(key) else {
-                    continue;
-                };
-                match node.start_in_flight(start_index) {
-                    Ok(reply_rx) => in_flight.push((*key, reply_rx)),
-                    Err(error) => {
-                        if first_error.is_none() {
-                            first_error = Some(error);
-                        }
-                    }
-                }
-            }
-            // Keyed rather than zipped against a second iteration: the pairing
-            // is then the key itself and does not rest on two walks of the map
-            // producing the same order.
-            for (key, reply_rx) in in_flight {
-                let Some(node) = self.nodes.get_mut(&key) else {
-                    continue;
-                };
-                if let Err(error) = node.finish_start(reply_rx) {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
+            if let Some(error) =
+                self.execute_bulk_lifecycle_batch(batch, BulkLifecycleAction::Start(start_index))
+            {
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
             }
         }
@@ -27294,28 +27346,11 @@ impl MatrixRaftMultiRaftServer {
         let keys: Vec<MatrixRaftRouteKey> = self.nodes.keys().copied().collect();
         let mut first_error = None;
         for batch in keys.chunks(STOP_BATCH) {
-            let mut in_flight = Vec::with_capacity(batch.len());
-            for key in batch {
-                let Some(node) = self.nodes.get_mut(key) else {
-                    continue;
-                };
-                match node.stop_in_flight() {
-                    Ok(reply_rx) => in_flight.push((*key, reply_rx)),
-                    Err(error) => {
-                        if first_error.is_none() {
-                            first_error = Some(error);
-                        }
-                    }
-                }
-            }
-            for (key, reply_rx) in in_flight {
-                let Some(node) = self.nodes.get_mut(&key) else {
-                    continue;
-                };
-                if let Err(error) = node.finish_stop(reply_rx) {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
+            if let Some(error) =
+                self.execute_bulk_lifecycle_batch(batch, BulkLifecycleAction::Stop)
+            {
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
             }
         }
@@ -27522,29 +27557,11 @@ impl MatrixRaftMultiRaftServer {
         let keys: Vec<MatrixRaftRouteKey> = self.nodes.keys().copied().collect();
         let mut first_error = None;
         for batch in keys.chunks(SHUTDOWN_BATCH) {
-            let mut in_flight = Vec::with_capacity(batch.len());
-            for key in batch {
-                let Some(node) = self.nodes.get_mut(key) else {
-                    continue;
-                };
-                match node.shutdown_in_flight() {
-                    Ok(Some(reply_rx)) => in_flight.push((*key, reply_rx)),
-                    Ok(None) => {}
-                    Err(error) => {
-                        if first_error.is_none() {
-                            first_error = Some(error);
-                        }
-                    }
-                }
-            }
-            for (key, reply_rx) in in_flight {
-                let Some(node) = self.nodes.get_mut(&key) else {
-                    continue;
-                };
-                if let Err(error) = node.finish_shutdown(reply_rx) {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
+            if let Some(error) =
+                self.execute_bulk_lifecycle_batch(batch, BulkLifecycleAction::Shutdown)
+            {
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
             }
         }

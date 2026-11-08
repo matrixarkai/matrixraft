@@ -135,9 +135,34 @@ impl StoredWalRecoveryReport {
     }
 }
 
+type LifecycleResult = Result<(), RaftError>;
+type LifecycleBatchMessage = (usize, LifecycleResult);
+type LifecycleBatchSender = mpsc::SyncSender<LifecycleBatchMessage>;
+
+enum LifecycleReply {
+    Single(mpsc::SyncSender<LifecycleResult>),
+    Batch {
+        index: usize,
+        sender: LifecycleBatchSender,
+    },
+}
+
+impl LifecycleReply {
+    fn send(self, result: LifecycleResult) {
+        match self {
+            Self::Single(sender) => {
+                let _ = sender.send(result);
+            }
+            Self::Batch { index, sender } => {
+                let _ = sender.send((index, result));
+            }
+        }
+    }
+}
+
 enum NodeRuntimeOp {
-    Start(mpsc::SyncSender<Result<(), RaftError>>),
-    Stop(mpsc::SyncSender<Result<(), RaftError>>),
+    Start(LifecycleReply),
+    Stop(LifecycleReply),
     Status(mpsc::Sender<Result<NodeRuntimeStatus, RaftError>>),
     TransferLeaderOutcome(
         NodeId,
@@ -180,7 +205,7 @@ enum NodeRuntimeOp {
     PeerPipelineStatuses(mpsc::Sender<Result<Vec<PeerProgress>, RaftError>>),
     IsBusy(mpsc::Sender<Result<bool, RaftError>>),
     LeaderTransferState(mpsc::Sender<Result<Option<LeaderTransferState>, RaftError>>),
-    Shutdown(mpsc::SyncSender<Result<(), RaftError>>),
+    Shutdown(LifecycleReply),
 }
 
 struct RuntimeCommandQueue {
@@ -471,48 +496,38 @@ impl NodeRuntime {
     }
 
     pub fn start(&mut self) -> Result<(), RaftError> {
-        self.send_unit(NodeRuntimeOp::Start)?;
+        self.send_unit(|reply| NodeRuntimeOp::Start(LifecycleReply::Single(reply)))?;
         self.state = NodeRuntimeState::Running;
         Ok(())
     }
 
-    /// Sends `Start` and hands back the channel its reply will arrive on,
-    /// without waiting for it.
-    ///
-    /// For `start_all`. Waiting for each reply before sending the next costs
-    /// about 100us a group, flat across sizes -- 1.69s for 16,384 groups -- and
-    /// almost all of it is spent waiting while the pool's workers have nothing
-    /// to do. Sending every command first lets them take the starts in
-    /// parallel.
-    ///
-    /// The state move is deliberately not done here. It belongs with a reply
-    /// that said `Ok`, which is what `finish_start` is for; doing it on the send
-    /// would mark a group running that might fail to start.
-    fn start_in_flight(&mut self) -> Result<mpsc::Receiver<Result<(), RaftError>>, RaftError> {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    /// Sends one member of a bulk start without allocating a reply channel for
+    /// the group. The indexed result returns through the batch's shared channel.
+    fn start_in_batch(
+        &mut self,
+        index: usize,
+        sender: LifecycleBatchSender,
+    ) -> Result<(), RaftError> {
         self.sender()?
-            .send(NodeRuntimeOp::Start(reply_tx))
+            .send(NodeRuntimeOp::Start(LifecycleReply::Batch {
+                index,
+                sender,
+            }))
             .map_err(|err| {
                 RaftError::Transport(format!(
                     "failed to send lifecycle command to raft node: {err}"
                 ))
-            })?;
-        Ok(reply_rx)
+            })
     }
 
-    /// Finishes a start begun by `start_in_flight`, with the same result and
-    /// the same state move `start` would have made.
-    fn finish_start(
-        &mut self,
-        reply_rx: mpsc::Receiver<Result<(), RaftError>>,
-    ) -> Result<(), RaftError> {
-        recv_runtime_reply(reply_rx)??;
+    fn finish_start_result(&mut self, result: LifecycleResult) -> Result<(), RaftError> {
+        result?;
         self.state = NodeRuntimeState::Running;
         Ok(())
     }
 
     pub fn stop(&mut self) -> Result<(), RaftError> {
-        self.send_unit(NodeRuntimeOp::Stop)?;
+        self.send_unit(|reply| NodeRuntimeOp::Stop(LifecycleReply::Single(reply)))?;
         self.state = NodeRuntimeState::Stopped;
         Ok(())
     }
@@ -545,28 +560,26 @@ impl NodeRuntime {
         }
     }
 
-    /// Sends `Stop` and hands back the channel its reply will arrive on, without
-    /// waiting for it. The third of these, for the same reason as the other two:
-    /// `stop_all` cost 349ms on 4096 groups, about 85us each, nearly all of it
-    /// waiting.
-    fn stop_in_flight(&mut self) -> Result<mpsc::Receiver<Result<(), RaftError>>, RaftError> {
-        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    /// Sends one member of a bulk stop through the batch reply channel.
+    fn stop_in_batch(
+        &mut self,
+        index: usize,
+        sender: LifecycleBatchSender,
+    ) -> Result<(), RaftError> {
         self.sender()?
-            .send(NodeRuntimeOp::Stop(reply_tx))
+            .send(NodeRuntimeOp::Stop(LifecycleReply::Batch {
+                index,
+                sender,
+            }))
             .map_err(|err| {
                 RaftError::Transport(format!(
                     "failed to send lifecycle command to raft node: {err}"
                 ))
-            })?;
-        Ok(reply_rx)
+            })
     }
 
-    /// Finishes a stop begun by `stop_in_flight`.
-    fn finish_stop(
-        &mut self,
-        reply_rx: mpsc::Receiver<Result<(), RaftError>>,
-    ) -> Result<(), RaftError> {
-        recv_runtime_reply(reply_rx)??;
+    fn finish_stop_result(&mut self, result: LifecycleResult) -> Result<(), RaftError> {
+        result?;
         self.state = NodeRuntimeState::Stopped;
         Ok(())
     }
@@ -591,7 +604,7 @@ impl NodeRuntime {
         })?;
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         sender
-            .send(NodeRuntimeOp::Shutdown(reply_tx))
+            .send(NodeRuntimeOp::Shutdown(LifecycleReply::Single(reply_tx)))
             .map_err(|err| RaftError::Transport(format!("failed to shutdown raft node: {err}")))?;
         Ok(Some(reply_rx))
     }
@@ -602,7 +615,30 @@ impl NodeRuntime {
         &mut self,
         reply_rx: mpsc::Receiver<Result<(), RaftError>>,
     ) -> Result<(), RaftError> {
-        let result = recv_runtime_reply(reply_rx)?;
+        self.finish_shutdown_result(recv_runtime_reply(reply_rx)?)
+    }
+
+    fn shutdown_in_batch(
+        &mut self,
+        index: usize,
+        sender: LifecycleBatchSender,
+    ) -> Result<bool, RaftError> {
+        if self.state == NodeRuntimeState::Shutdown {
+            return Ok(false);
+        }
+        let command = self.command_tx.take().ok_or_else(|| {
+            RaftError::InvalidRequest("raft node runtime channel is closed".to_string())
+        })?;
+        command
+            .send(NodeRuntimeOp::Shutdown(LifecycleReply::Batch {
+                index,
+                sender,
+            }))
+            .map_err(|err| RaftError::Transport(format!("failed to shutdown raft node: {err}")))?;
+        Ok(true)
+    }
+
+    fn finish_shutdown_result(&mut self, result: LifecycleResult) -> Result<(), RaftError> {
         if let Some(worker) = self.worker.take() {
             worker.join().map_err(|_| {
                 RaftError::Transport("raft node worker panicked during shutdown".to_string())
@@ -2433,7 +2469,7 @@ impl NodeCore {
                     *state = NodeRuntimeState::Running;
                     *election_elapsed_ms = 0;
                 }
-                let _ = reply.send(record_runtime_result(
+                reply.send(record_runtime_result(
                     "start",
                     result,
                     blocker_log,
@@ -2445,7 +2481,7 @@ impl NodeCore {
                 if result.is_ok() {
                     *state = NodeRuntimeState::Stopped;
                 }
-                let _ = reply.send(record_runtime_result(
+                reply.send(record_runtime_result(
                     "stop",
                     result,
                     blocker_log,
@@ -2817,7 +2853,7 @@ impl NodeCore {
             }
             NodeRuntimeOp::Shutdown(reply) => {
                 let result = cluster.stop();
-                let _ = reply.send(record_runtime_result(
+                reply.send(record_runtime_result(
                     "shutdown",
                     result,
                     blocker_log,
@@ -3219,20 +3255,27 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// 976 to 912 bytes. The 512-group peak moves from 3.01 MiB to 2.98 MiB,
 /// another 64 bytes per group including allocator overhead.
 ///
-/// The native measurement with all twelve changes remains 47 MiB at whole-MiB
-/// resolution for 8,192 live groups, or **5 KiB per group**; the allocation
-/// profile above resolves the half-MiB reduction that RSS rounding does not.
-/// That is down from 48 MiB before removing the extra ownership tree, 49 MiB
-/// before co-locating runtime wiring, 54 MiB after compacting WAL segment
-/// storage, 56 MiB before that, 66 MiB after compacting the lifecycle replies,
-/// 68 MiB after tightening the queue, 70 MiB after boxing peer values, 74 MiB
-/// and 9 KiB after boxing node values, 94 MiB and 11 KiB after boxing pipeline
-/// values, 126 MiB and 15 KiB after first bounding the queues, and 171 MiB and
-/// 21 KiB before any of them, under the same options. The original 21 KiB cost
-/// was flat as the group count grew: 89 MiB for 4096 groups and 339 MiB for
-/// 16,384, both with the measuring binary's own resident size taken off. The
-/// same in debug and in release, within a kilobyte a group -- an allocation is
-/// the size it is whichever profile asked for it.
+/// Bulk start, stop, and shutdown still allocated one reply channel per group.
+/// Indexed results now share one bounded channel per 1,024-group batch while
+/// preserving out-of-order completion and per-group state updates. The same
+/// 512-group profile moves from 2.98 MiB to 2.62 MiB, another 383,072 bytes in
+/// total or about 748 bytes per group including allocator overhead.
+///
+/// The native measurement with all thirteen changes is 46 MiB at
+/// whole-MiB resolution for 8,192 live groups, or **5 KiB per group**; the
+/// allocation profiles above resolve reductions that RSS rounding does not.
+/// That is down from 47 MiB before sharing the lifecycle replies, 48 MiB before
+/// removing the extra ownership tree, 49 MiB before co-locating runtime wiring,
+/// 54 MiB after compacting WAL segment storage, 56 MiB before that, 66 MiB after
+/// compacting the lifecycle replies, 68 MiB after tightening the queue, 70 MiB
+/// after boxing peer values, 74 MiB and 9 KiB after boxing node values, 94 MiB
+/// and 11 KiB after boxing pipeline values, 126 MiB and 15 KiB after first
+/// bounding the queues, and 171 MiB and 21 KiB before any of them, under the
+/// same options. The original 21 KiB cost was flat as the group count grew: 89
+/// MiB for 4096 groups and 339 MiB for 16,384, both with the measuring binary's
+/// own resident size taken off. The same in debug and in release, within a
+/// kilobyte a group -- an allocation is the size it is whichever profile asked
+/// for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -3323,9 +3366,9 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release and the twelve memory changes: 8,192 live groups
-/// under that unchanged 10,240 limit all started, retained 47 MiB, and delivered
-/// 99.9% of their ticks at a one-second interval. Before idle release, starting
+/// Measured after idle release and the thirteen memory changes: 8,192 live groups
+/// under that unchanged 10,240 limit all started, retained 46 MiB, and delivered
+/// 99.8% of their ticks at a one-second interval. Before idle release, starting
 /// those groups opened a segment for each one and crossed the limit before the
 /// store was live. Before the memory changes, the same run retained 171 MiB;
 /// bounding the queue brought it to 126 MiB, boxing the pipeline values to 94
@@ -3827,7 +3870,7 @@ fn raft_peer_runtime_states(
 fn respond_runtime_error(command: NodeRuntimeOp, error: RaftError) -> bool {
     match command {
         NodeRuntimeOp::Start(reply) | NodeRuntimeOp::Stop(reply) => {
-            let _ = reply.send(Err(error));
+            reply.send(Err(error));
             false
         }
         NodeRuntimeOp::WalLifecycleStatus(reply) => {
@@ -3847,7 +3890,7 @@ fn respond_runtime_error(command: NodeRuntimeOp, error: RaftError) -> bool {
             false
         }
         NodeRuntimeOp::Shutdown(reply) => {
-            let _ = reply.send(Err(error));
+            reply.send(Err(error));
             true
         }
         NodeRuntimeOp::Status(reply) => {
@@ -3959,6 +4002,29 @@ mod runtime_command_queue_tests {
     }
 
     #[test]
+    fn lifecycle_batch_replies_keep_their_indexes_when_out_of_order() {
+        let (sender, receiver) = mpsc::sync_channel(2);
+        LifecycleReply::Batch {
+            index: 9,
+            sender: sender.clone(),
+        }
+        .send(Ok(()));
+        LifecycleReply::Batch { index: 2, sender }.send(Err(RaftError::InvalidRequest(
+            "second lifecycle result".to_string(),
+        )));
+
+        let (first_index, first_result) = receiver.recv().expect("first batch reply");
+        let (second_index, second_result) = receiver.recv().expect("second batch reply");
+        assert_eq!(first_index, 9);
+        assert!(first_result.is_ok());
+        assert_eq!(second_index, 2);
+        assert!(matches!(
+            second_result,
+            Err(RaftError::InvalidRequest(message)) if message == "second lifecycle result"
+        ));
+    }
+
+    #[test]
     fn stored_recovery_report_preserves_the_public_report() {
         let formats = [
             None,
@@ -3998,7 +4064,7 @@ mod runtime_command_queue_tests {
             let (reply, reply_rx) = mpsc::sync_channel(1);
             held_replies.push(reply_rx);
             command_tx
-                .send(NodeRuntimeOp::Start(reply))
+                .send(NodeRuntimeOp::Start(LifecycleReply::Single(reply)))
                 .expect("fill the command queue to its bound");
         }
 
@@ -4006,7 +4072,9 @@ mod runtime_command_queue_tests {
         let second_sender = command_tx.clone();
         let sender = thread::spawn(move || {
             let (second_reply, _second_reply_rx) = mpsc::sync_channel(1);
-            let sent = second_sender.send(NodeRuntimeOp::Stop(second_reply));
+            let sent = second_sender.send(NodeRuntimeOp::Stop(LifecycleReply::Single(
+                second_reply,
+            )));
             let _ = second_admitted.send(sent.is_ok());
         });
 
@@ -4059,7 +4127,7 @@ mod runtime_command_queue_tests {
             let (reply, reply_rx) = mpsc::sync_channel(1);
             held_replies.push(reply_rx);
             command_tx
-                .send(NodeRuntimeOp::Start(reply))
+                .send(NodeRuntimeOp::Start(LifecycleReply::Single(reply)))
                 .expect("fill the command queue to its bound");
         }
 
@@ -4067,7 +4135,7 @@ mod runtime_command_queue_tests {
         let blocked = thread::spawn(move || {
             let (reply, _reply_rx) = mpsc::sync_channel(1);
             matches!(
-                blocked_sender.send(NodeRuntimeOp::Stop(reply)),
+                blocked_sender.send(NodeRuntimeOp::Stop(LifecycleReply::Single(reply))),
                 Err(mpsc::SendError(NodeRuntimeOp::Stop(_)))
             )
         });
