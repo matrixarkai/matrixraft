@@ -128,6 +128,149 @@ where
     }
 }
 
+/// A sorted map for small, always-populated directories.
+///
+/// Replication groups normally have only a handful of peers. A tree node
+/// reserves room for several entries even when a group has one, while this
+/// representation retains exactly one key and value per peer. Point access
+/// remains logarithmic and iteration remains ordered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompactMap<K, V> {
+    entries: Vec<(K, V)>,
+}
+
+impl<K, V> Default for CompactMap<K, V> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<K: Ord, V> CompactMap<K, V> {
+    fn from_sorted_iter(iter: impl IntoIterator<Item = (K, V)>) -> Self {
+        let entries: Vec<_> = iter.into_iter().collect();
+        debug_assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        Self { entries }
+    }
+
+    fn position(&self, key: &K) -> Result<usize, usize> {
+        self.entries
+            .binary_search_by(|(candidate, _)| candidate.cmp(key))
+    }
+
+    fn get(&self, key: &K) -> Option<&V> {
+        self.position(key)
+            .ok()
+            .map(|index| &self.entries[index].1)
+    }
+
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.position(key)
+            .ok()
+            .map(|index| &mut self.entries[index].1)
+    }
+
+    fn insert(&mut self, key: K, value: V) -> Option<V> {
+        match self.position(&key) {
+            Ok(index) => Some(std::mem::replace(&mut self.entries[index].1, value)),
+            Err(index) => {
+                self.entries.insert(index, (key, value));
+                None
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        self.position(key)
+            .ok()
+            .map(|index| self.entries.remove(index).1)
+    }
+
+    fn get_or_insert_with(&mut self, key: K, create: impl FnOnce() -> V) -> &mut V {
+        let index = match self.position(&key) {
+            Ok(index) => index,
+            Err(index) => {
+                self.entries.insert(index, (key, create()));
+                index
+            }
+        };
+        &mut self.entries[index].1
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.entries.iter().map(|(key, value)| (key, value))
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.entries
+            .iter_mut()
+            .map(|(key, value)| (&*key, value))
+    }
+
+    fn range(
+        &self,
+        bounds: (std::ops::Bound<K>, std::ops::Bound<K>),
+    ) -> impl Iterator<Item = (&K, &V)> {
+        let start = match &bounds.0 {
+            std::ops::Bound::Included(start) =>
+                self.entries.partition_point(|(key, _)| key < start),
+            std::ops::Bound::Excluded(start) =>
+                self.entries.partition_point(|(key, _)| key <= start),
+            std::ops::Bound::Unbounded => 0,
+        };
+        let end = match &bounds.1 {
+            std::ops::Bound::Included(end) =>
+                self.entries.partition_point(|(key, _)| key <= end),
+            std::ops::Bound::Excluded(end) =>
+                self.entries.partition_point(|(key, _)| key < end),
+            std::ops::Bound::Unbounded => self.entries.len(),
+        };
+        self.entries[start.min(end)..end]
+            .iter()
+            .map(|(key, value)| (key, value))
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.entries.iter_mut().map(|(_, value)| value)
+    }
+}
+
+impl<K, V> Serialize for CompactMap<K, V>
+where
+    K: Serialize,
+    V: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(self.entries.len()))?;
+        for (key, value) in &self.entries {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de, K, V> Deserialize<'de> for CompactMap<K, V>
+where
+    K: Ord + Deserialize<'de>,
+    V: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let map = BTreeMap::deserialize(deserializer)?;
+        Ok(Self {
+            entries: map.into_iter().collect(),
+        })
+    }
+}
+
 /// A vector that keeps the ordinary sequence wire shape while empty state costs
 /// one pointer. Runtime histories are usually never populated, so retaining a
 /// three-word `Vec` in every group is avoidable steady-state width.
@@ -720,11 +863,12 @@ pub struct RaftCluster {
     /// independently owned. The box is transparent to serde and leaves
     /// ordering intact.
     nodes: BTreeMap<NodeId, Box<Node>>,
-    /// Box the large values, not the map. A tree leaf reserves room for several
-    /// values even when a solo-voter group stores only one pipeline. Keeping a
-    /// pipeline inline therefore retained about 7 KiB of unused leaf capacity
-    /// per group. The box is transparent to serde and leaves ordering intact.
-    peer_pipelines: BTreeMap<NodeId, Box<ReplicationPipeline>>,
+    /// Box the large values so the compact directory stores one key and pointer
+    /// per peer. Keeping a pipeline inline in a tree leaf retained about 7 KiB
+    /// of unused capacity per group; boxing removed that, and replacing the
+    /// remaining one-entry tree with a sorted vector removes its reserved slots.
+    /// Both layers are transparent to serde and preserve key ordering.
+    peer_pipelines: CompactMap<NodeId, Box<ReplicationPipeline>>,
     #[serde(default)]
     snapshot_installers: SparseMap<NodeId, SnapshotInstallState>,
     #[serde(default)]
@@ -905,10 +1049,7 @@ impl RaftCluster {
             ));
         }
 
-        let peer_pipelines = nodes
-            .keys()
-            .copied()
-            .map(|node_id| {
+        let peer_pipelines = CompactMap::from_sorted_iter(nodes.keys().copied().map(|node_id| {
                 (
                     node_id,
                     Box::new(ReplicationPipeline::new(
@@ -917,8 +1058,7 @@ impl RaftCluster {
                         config.pipeline_limits(),
                     )),
                 )
-            })
-            .collect();
+            }));
 
         let last_follower_lease_ms = if config.enable_lease_read && config.assume_lease_when_start {
             if config.last_follower_lease_ms == 0 {
@@ -6796,7 +6936,8 @@ impl RaftCluster {
             .snapshot_id
             .as_str();
         let snapshot_id = Arc::<str>::from(snapshot_id);
-        for (&peer_id, pipeline) in &mut self.peer_pipelines {
+        for (peer_id, pipeline) in self.peer_pipelines.iter_mut() {
+            let peer_id = *peer_id;
             if peer_id == leader_id {
                 continue;
             }
@@ -7236,7 +7377,7 @@ impl RaftCluster {
             }
             after = std::ops::Bound::Excluded(node_ids[node_count - 1]);
             for &node_id in &node_ids[..node_count] {
-                let pipeline = self.peer_pipelines.entry(node_id).or_insert_with(|| {
+                let pipeline = self.peer_pipelines.get_or_insert_with(node_id, || {
                     Box::new(ReplicationPipeline::new(node_id, next_index, limits))
                 });
                 let is_leader = node_id == leader_id;
@@ -7256,7 +7397,7 @@ impl RaftCluster {
     fn refresh_replication_pipelines(&mut self) {
         let limits = self.config.pipeline_limits();
         for (node_id, node) in &self.nodes {
-            self.peer_pipelines.entry(*node_id).or_insert_with(|| {
+            self.peer_pipelines.get_or_insert_with(*node_id, || {
                 Box::new(ReplicationPipeline::new(
                     *node_id,
                     node.match_index().saturating_add(1),
@@ -7385,6 +7526,40 @@ impl Consensus for RaftCluster {
 
     fn complete_snapshot_trigger(&mut self, snapshot_id: &str) -> Result<(), RaftError> {
         RaftCluster::complete_snapshot_trigger(self, snapshot_id)
+    }
+}
+
+#[cfg(test)]
+mod compact_map_tests {
+    use super::*;
+
+    #[test]
+    fn compact_map_keeps_ordered_map_behavior_and_wire_shape() {
+        let mut map = CompactMap::from_sorted_iter([(1_u64, 10_u64)]);
+        assert_eq!(map.insert(3, 30), None);
+        assert_eq!(map.insert(2, 20), None);
+        assert_eq!(map.insert(2, 21), Some(20));
+        assert_eq!(map.get(&2), Some(&21));
+
+        *map.get_mut(&3).expect("third entry") = 31;
+        let ranged: Vec<_> = map
+            .range((
+                std::ops::Bound::Excluded(1),
+                std::ops::Bound::Included(3),
+            ))
+            .map(|(key, value)| (*key, *value))
+            .collect();
+        assert_eq!(ranged, vec![(2, 21), (3, 31)]);
+
+        let encoded = serde_json::to_string(&map).expect("serialize compact map");
+        assert_eq!(encoded, r#"{"1":10,"2":21,"3":31}"#);
+        let decoded: CompactMap<u64, u64> =
+            serde_json::from_str(&encoded).expect("deserialize compact map");
+        assert_eq!(decoded, map);
+        assert_eq!(decoded.iter().map(|(key, _)| *key).collect::<Vec<_>>(), vec![1, 2, 3]);
+
+        assert_eq!(map.remove(&2), Some(21));
+        assert_eq!(map.iter().map(|(key, _)| *key).collect::<Vec<_>>(), vec![1, 3]);
     }
 }
 
