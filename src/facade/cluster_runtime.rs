@@ -7540,6 +7540,8 @@ mod compact_map_tests {
         assert_eq!(map.insert(2, 20), None);
         assert_eq!(map.insert(2, 21), Some(20));
         assert_eq!(map.get(&2), Some(&21));
+        assert_eq!(*map.get_or_insert_with(3, || 99), 30);
+        *map.get_or_insert_with(4, || 40) = 41;
 
         *map.get_mut(&3).expect("third entry") = 31;
         let ranged: Vec<_> = map
@@ -7552,14 +7554,20 @@ mod compact_map_tests {
         assert_eq!(ranged, vec![(2, 21), (3, 31)]);
 
         let encoded = serde_json::to_string(&map).expect("serialize compact map");
-        assert_eq!(encoded, r#"{"1":10,"2":21,"3":31}"#);
+        assert_eq!(encoded, r#"{"1":10,"2":21,"3":31,"4":41}"#);
         let decoded: CompactMap<u64, u64> =
             serde_json::from_str(&encoded).expect("deserialize compact map");
         assert_eq!(decoded, map);
-        assert_eq!(decoded.iter().map(|(key, _)| *key).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(
+            decoded.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
 
         assert_eq!(map.remove(&2), Some(21));
-        assert_eq!(map.iter().map(|(key, _)| *key).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(
+            map.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            vec![1, 3, 4]
+        );
     }
 }
 
