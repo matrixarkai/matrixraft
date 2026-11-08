@@ -3698,6 +3698,7 @@ impl MatrixRaftOptions {
 pub struct MatrixRaftNode {
     runtime: NodeRuntime,
     peers: BTreeMap<NodeId, Box<Peer>>,
+    runtime_wiring: Option<Box<MatrixRaftRuntimeWiring>>,
     start_index: LogIndex,
     recover_fsm_from_snapshot: bool,
     callback_scheduler: std::rc::Rc<std::cell::RefCell<MatrixRaftCallbackScheduler>>,
@@ -3743,6 +3744,7 @@ impl MatrixRaftNode {
         Ok(Self {
             runtime,
             peers,
+            runtime_wiring: None,
             start_index,
             recover_fsm_from_snapshot: false,
             callback_scheduler: std::rc::Rc::new(std::cell::RefCell::new(
@@ -18179,7 +18181,7 @@ pub struct MatrixRaftMultiRaftServer {
     shared: Option<Arc<SharedGroupRuntime>>,
     nodes: BTreeMap<MatrixRaftRouteKey, MatrixRaftNode>,
     snapshot_routes: BTreeMap<MatrixRaftRouteKey, MatrixRaftSnapshotDesc>,
-    runtime_wiring: BTreeMap<MatrixRaftRouteKey, MatrixRaftRuntimeWiring>,
+    runtime_wiring_count: usize,
     replica_factory: Option<Arc<dyn MatrixRaftReplicaFactory + Send + Sync>>,
     on_demand_created: u64,
     on_demand_refused: u64,
@@ -18194,7 +18196,7 @@ impl std::fmt::Debug for MatrixRaftMultiRaftServer {
             .field("shared", &self.shared.is_some())
             .field("nodes", &self.nodes)
             .field("snapshot_routes", &self.snapshot_routes)
-            .field("runtime_wiring", &self.runtime_wiring)
+            .field("runtime_wiring_count", &self.runtime_wiring_count)
             .field("replica_factory", &self.replica_factory.is_some())
             .field("on_demand_created", &self.on_demand_created)
             .field("on_demand_refused", &self.on_demand_refused)
@@ -18223,7 +18225,7 @@ impl MatrixRaftMultiRaftServer {
             shared: None,
             nodes: BTreeMap::new(),
             snapshot_routes: BTreeMap::new(),
-            runtime_wiring: BTreeMap::new(),
+            runtime_wiring_count: 0,
             replica_factory: None,
             on_demand_created: 0,
             on_demand_refused: 0,
@@ -18349,7 +18351,7 @@ impl MatrixRaftMultiRaftServer {
         self.shared.as_ref().map(|runtime| runtime.ticks_enabled())
     }
 
-    pub fn register_node(&mut self, node: MatrixRaftNode) -> Result<(), RaftError> {
+    pub fn register_node(&mut self, mut node: MatrixRaftNode) -> Result<(), RaftError> {
         let key = MatrixRaftRouteKey::new(node.group_id(), node.node_id());
         if self.nodes.contains_key(&key) {
             return Err(RaftError::InvalidRequest(format!(
@@ -18357,6 +18359,7 @@ impl MatrixRaftMultiRaftServer {
                 key.node_id, key.group_id
             )));
         }
+        node.runtime_wiring = None;
         self.nodes.insert(key, node);
         Ok(())
     }
@@ -18445,8 +18448,9 @@ impl MatrixRaftMultiRaftServer {
                     Ok(()) => MatrixRaftCreateNodeResult::ok(
                         key,
                         start_index,
-                        self.runtime_wiring
+                        self.nodes
                             .get(&key)
+                            .and_then(|node| node.runtime_wiring.as_deref())
                             .expect("created node runtime wiring")
                             .clone(),
                     ),
@@ -18513,12 +18517,13 @@ impl MatrixRaftMultiRaftServer {
             bound_creator_index,
             creator,
         )?;
-        let node = match self.shared_runtime()? {
+        let mut node = match self.shared_runtime()? {
             Some(runtime) => options.create_node_on(start_index, runtime)?,
             None => options.create_node(start_index)?,
         };
+        node.runtime_wiring = Some(Box::new(wiring));
         self.nodes.insert(key, node);
-        self.runtime_wiring.insert(key, wiring);
+        self.runtime_wiring_count += 1;
         Ok(())
     }
 
@@ -18529,8 +18534,12 @@ impl MatrixRaftMultiRaftServer {
     ) -> Result<MatrixRaftNode, RaftError> {
         let key = MatrixRaftRouteKey::new(group_id, node_id);
         self.snapshot_routes.remove(&key);
-        self.runtime_wiring.remove(&key);
-        self.nodes.remove(&key).ok_or(RaftError::NodeNotFound(node_id))
+        let mut node = self.nodes.remove(&key).ok_or(RaftError::NodeNotFound(node_id))?;
+        self.runtime_wiring_count = self
+            .runtime_wiring_count
+            .saturating_sub(usize::from(node.runtime_wiring.is_some()));
+        node.runtime_wiring = None;
+        Ok(node)
     }
 
     pub fn unregister_group(
@@ -18541,11 +18550,14 @@ impl MatrixRaftMultiRaftServer {
         let mut removed = Vec::with_capacity(keys.len());
         for key in keys {
             self.snapshot_routes.remove(&key);
-            self.runtime_wiring.remove(&key);
-            let node = self
+            let mut node = self
                 .nodes
                 .remove(&key)
                 .ok_or(RaftError::NodeNotFound(key.node_id))?;
+            self.runtime_wiring_count = self
+                .runtime_wiring_count
+                .saturating_sub(usize::from(node.runtime_wiring.is_some()));
+            node.runtime_wiring = None;
             removed.push(node);
         }
         Ok(removed)
@@ -18589,11 +18601,14 @@ impl MatrixRaftMultiRaftServer {
             let mut removed = Vec::with_capacity(group.node_count);
             for key in group.route_keys {
                 self.snapshot_routes.remove(&key);
-                self.runtime_wiring.remove(&key);
-                let node = self
+                let mut node = self
                     .nodes
                     .remove(&key)
                     .ok_or(RaftError::NodeNotFound(key.node_id))?;
+                self.runtime_wiring_count = self
+                    .runtime_wiring_count
+                    .saturating_sub(usize::from(node.runtime_wiring.is_some()));
+                node.runtime_wiring = None;
                 removed.push(node);
             }
             removed_groups.push((group.group_id, removed));
@@ -18629,8 +18644,11 @@ impl MatrixRaftMultiRaftServer {
     ) -> MatrixRaftUnregisterGroupResult {
         for key in &plan.route_keys {
             self.snapshot_routes.remove(key);
-            self.runtime_wiring.remove(key);
-            self.nodes.remove(key);
+            if let Some(node) = self.nodes.remove(key) {
+                self.runtime_wiring_count = self
+                    .runtime_wiring_count
+                    .saturating_sub(usize::from(node.runtime_wiring.is_some()));
+            }
         }
         MatrixRaftUnregisterGroupResult::ok(plan)
     }
@@ -18799,12 +18817,13 @@ impl MatrixRaftMultiRaftServer {
         group_id: GroupId,
         node_id: NodeId,
     ) -> Option<&MatrixRaftRuntimeWiring> {
-        self.runtime_wiring
+        self.nodes
             .get(&MatrixRaftRouteKey::new(group_id, node_id))
+            .and_then(|node| node.runtime_wiring.as_deref())
     }
 
     pub fn runtime_wiring_count(&self) -> usize {
-        self.runtime_wiring.len()
+        self.runtime_wiring_count
     }
 
     fn group_route_keys(
@@ -18874,7 +18893,11 @@ impl MatrixRaftMultiRaftServer {
         let node_ids = route_keys.iter().map(|key| key.node_id).collect::<Vec<_>>();
         let runtime_wiring_count = route_keys
             .iter()
-            .filter(|key| self.runtime_wiring.contains_key(key))
+            .filter(|key| {
+                self.nodes
+                    .get(key)
+                    .is_some_and(|node| node.runtime_wiring.is_some())
+            })
             .count();
         let snapshot_route_count = route_keys
             .iter()
@@ -19478,7 +19501,11 @@ impl MatrixRaftMultiRaftServer {
         let node_ids = route_keys.iter().map(|key| key.node_id).collect::<Vec<_>>();
         let runtime_wiring_count = route_keys
             .iter()
-            .filter(|key| self.runtime_wiring.contains_key(key))
+            .filter(|key| {
+                self.nodes
+                    .get(key)
+                    .is_some_and(|node| node.runtime_wiring.is_some())
+            })
             .count();
         let snapshot_route_count = route_keys
             .iter()

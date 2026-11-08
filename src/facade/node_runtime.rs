@@ -3200,17 +3200,24 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// same blocking and disconnect behavior. The 512-group peak moves from 3.45
 /// MiB to 3.12 MiB, another 678 bytes per group including allocator overhead.
 ///
-/// The native measurement moved with all nine changes: 8,192 live groups
-/// retain 49 MiB, or **5 KiB per group**, down from 54 MiB after compacting WAL
-/// segment storage, 56 MiB before that, 66 MiB after compacting the lifecycle
-/// replies, 68 MiB after tightening the queue, 70 MiB after boxing peer values,
-/// 74 MiB and 9 KiB after boxing node values, 94 MiB and 11 KiB after boxing
-/// pipeline values, 126 MiB and 15 KiB after first bounding the queues, and 171
-/// MiB and 21 KiB before any of them, under the same options. The original 21
-/// KiB cost was flat as the group count grew: 89 MiB for 4096 groups and 339 MiB
-/// for 16,384, both with the measuring binary's own resident size taken off.
-/// The same in debug and in release, within a kilobyte a group -- an allocation
-/// is the size it is whichever profile asked for it.
+/// The multi-group server then held every route key in a second tree just to
+/// find its runtime wiring. Keeping the optional wiring beside the node and
+/// boxing its large payload removes that duplicate index. The 512-group peak
+/// moves from 3.12 MiB to 3.04 MiB, another 171 bytes per group including
+/// allocator overhead.
+///
+/// The native measurement moved with all ten changes: 8,192 live groups retain
+/// 48 MiB, or **5 KiB per group**, down from 49 MiB before co-locating runtime
+/// wiring, 54 MiB after compacting WAL segment storage, 56 MiB before that, 66
+/// MiB after compacting the lifecycle replies, 68 MiB after tightening the
+/// queue, 70 MiB after boxing peer values, 74 MiB and 9 KiB after boxing node
+/// values, 94 MiB and 11 KiB after boxing pipeline values, 126 MiB and 15 KiB
+/// after first bounding the queues, and 171 MiB and 21 KiB before any of them,
+/// under the same options. The original 21 KiB cost was flat as the group count
+/// grew: 89 MiB for 4096 groups and 339 MiB for 16,384, both with the measuring
+/// binary's own resident size taken off. The same in debug and in release,
+/// within a kilobyte a group -- an allocation is the size it is whichever
+/// profile asked for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -3301,9 +3308,9 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release and the nine memory changes: 8,192 live groups
-/// under that unchanged 10,240 limit all started, retained 49 MiB, and delivered
-/// 100.0% of their ticks at a one-second interval. Before idle release, starting
+/// Measured after idle release and the ten memory changes: 8,192 live groups
+/// under that unchanged 10,240 limit all started, retained 48 MiB, and delivered
+/// 99.9% of their ticks at a one-second interval. Before idle release, starting
 /// those groups opened a segment for each one and crossed the limit before the
 /// store was live. Before the memory changes, the same run retained 171 MiB;
 /// bounding the queue brought it to 126 MiB, boxing the pipeline values to 94
