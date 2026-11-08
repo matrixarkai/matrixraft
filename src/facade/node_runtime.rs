@@ -75,8 +75,8 @@ impl<T> std::fmt::Debug for RuntimeReplyPool<T> {
 }
 
 enum NodeRuntimeOp {
-    Start(mpsc::Sender<Result<(), RaftError>>),
-    Stop(mpsc::Sender<Result<(), RaftError>>),
+    Start(mpsc::SyncSender<Result<(), RaftError>>),
+    Stop(mpsc::SyncSender<Result<(), RaftError>>),
     Status(mpsc::Sender<Result<NodeRuntimeStatus, RaftError>>),
     TransferLeaderOutcome(
         NodeId,
@@ -119,7 +119,7 @@ enum NodeRuntimeOp {
     PeerPipelineStatuses(mpsc::Sender<Result<Vec<PeerProgress>, RaftError>>),
     IsBusy(mpsc::Sender<Result<bool, RaftError>>),
     LeaderTransferState(mpsc::Sender<Result<Option<LeaderTransferState>, RaftError>>),
-    Shutdown(mpsc::Sender<Result<(), RaftError>>),
+    Shutdown(mpsc::SyncSender<Result<(), RaftError>>),
 }
 
 #[derive(Debug)]
@@ -215,7 +215,7 @@ impl NodeRuntime {
     /// that said `Ok`, which is what `finish_start` is for; doing it on the send
     /// would mark a group running that might fail to start.
     fn start_in_flight(&mut self) -> Result<mpsc::Receiver<Result<(), RaftError>>, RaftError> {
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.sender()?
             .send(NodeRuntimeOp::Start(reply_tx))
             .map_err(|err| {
@@ -276,7 +276,7 @@ impl NodeRuntime {
     /// `stop_all` cost 349ms on 4096 groups, about 85us each, nearly all of it
     /// waiting.
     fn stop_in_flight(&mut self) -> Result<mpsc::Receiver<Result<(), RaftError>>, RaftError> {
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.sender()?
             .send(NodeRuntimeOp::Stop(reply_tx))
             .map_err(|err| {
@@ -315,7 +315,7 @@ impl NodeRuntime {
         let sender = self.command_tx.take().ok_or_else(|| {
             RaftError::InvalidRequest("raft node runtime channel is closed".to_string())
         })?;
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         sender
             .send(NodeRuntimeOp::Shutdown(reply_tx))
             .map_err(|err| RaftError::Transport(format!("failed to shutdown raft node: {err}")))?;
@@ -1248,9 +1248,9 @@ impl NodeRuntime {
 
     fn send_unit(
         &self,
-        command: fn(mpsc::Sender<Result<(), RaftError>>) -> NodeRuntimeOp,
+        command: fn(mpsc::SyncSender<Result<(), RaftError>>) -> NodeRuntimeOp,
     ) -> Result<(), RaftError> {
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.sender()?.send(command(reply_tx)).map_err(|err| {
             RaftError::Transport(format!(
                 "failed to send lifecycle command to raft node: {err}"
@@ -2900,15 +2900,22 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// 100 fsyncs. Tightening the bound from four to two moves the current
 /// 512-group peak from 4.90 MiB to 4.72 MiB, another 367 bytes per group.
 ///
-/// The native measurement moved with all five changes: 8,192 live groups
-/// retain 68 MiB, or **8 KiB per group**, down from 70 MiB after boxing peer
-/// values, 74 MiB and 9 KiB after boxing node values, 94 MiB and 11 KiB after
-/// boxing pipeline values, 126 MiB and 15 KiB after first bounding the queues,
-/// and 171 MiB and 21 KiB before any of them, under the same options. The
-/// original 21 KiB cost was flat as the group count grew: 89 MiB for 4096
-/// groups and 339 MiB for 16,384, both with the measuring binary's own resident
-/// size taken off. The same in debug and in release, within a kilobyte a group
-/// -- an allocation is the size it is whichever profile asked for it.
+/// Batched lifecycle operations used one unbounded reply channel per group.
+/// Sending its single result allocated a 32-message block that stayed live
+/// until the batch was joined. A one-slot channel has the same one-result
+/// contract without that block: the 512-group peak moves from 4.71 MiB to 4.20
+/// MiB, another 1.03 KiB per group.
+///
+/// The native measurement moved with all six changes: 8,192 live groups retain
+/// 66 MiB, or **8 KiB per group**, down from 68 MiB after tightening the queue,
+/// 70 MiB after boxing peer values, 74 MiB and 9 KiB after boxing node values,
+/// 94 MiB and 11 KiB after boxing pipeline values, 126 MiB and 15 KiB after
+/// first bounding the queues, and 171 MiB and 21 KiB before any of them, under
+/// the same options. The original 21 KiB cost was flat as the group count grew:
+/// 89 MiB for 4096 groups and 339 MiB for 16,384, both with the measuring
+/// binary's own resident size taken off. The same in debug and in release,
+/// within a kilobyte a group -- an allocation is the size it is whichever
+/// profile asked for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -3000,10 +3007,10 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
 /// Measured after idle release, bounded command queues and boxed map values:
-/// 8,192 live groups under that unchanged 10,240 limit all started, retained 68
-/// MiB, and delivered 100.5% of their ticks at a one-second interval. Before
+/// 8,192 live groups under that unchanged 10,240 limit all started, retained 66
+/// MiB, and delivered 100.1% of their ticks at a one-second interval. Before
 /// idle release, starting those groups opened a segment for each one and crossed
-/// the limit before the store was live. Before the five memory changes, the same
+/// the limit before the store was live. Before the six memory changes, the same
 /// run retained 171 MiB; bounding the queue brought it to 126 MiB, boxing the
 /// pipeline values to 94 MiB, and boxing the node values to 74 MiB.
 ///
@@ -3610,7 +3617,7 @@ mod runtime_command_queue_tests {
         let (command_tx, command_rx) = mpsc::sync_channel(RUNTIME_COMMAND_QUEUE_DEPTH);
         let mut held_replies = Vec::new();
         for _ in 0..RUNTIME_COMMAND_QUEUE_DEPTH {
-            let (reply, reply_rx) = mpsc::channel();
+            let (reply, reply_rx) = mpsc::sync_channel(1);
             held_replies.push(reply_rx);
             command_tx
                 .send(NodeRuntimeOp::Start(reply))
@@ -3620,7 +3627,7 @@ mod runtime_command_queue_tests {
         let (second_admitted, second_admitted_rx) = mpsc::channel();
         let second_sender = command_tx.clone();
         let sender = thread::spawn(move || {
-            let (second_reply, _second_reply_rx) = mpsc::channel();
+            let (second_reply, _second_reply_rx) = mpsc::sync_channel(1);
             let sent = second_sender.send(NodeRuntimeOp::Stop(second_reply));
             let _ = second_admitted.send(sent.is_ok());
         });
