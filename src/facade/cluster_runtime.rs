@@ -582,7 +582,11 @@ pub struct RaftCluster {
     pub group_id: GroupId,
     pub config: Config,
     nodes: BTreeMap<NodeId, Node>,
-    peer_pipelines: BTreeMap<NodeId, ReplicationPipeline>,
+    /// Box the large values, not the map. A tree leaf reserves room for several
+    /// values even when a solo-voter group stores only one pipeline. Keeping a
+    /// pipeline inline therefore retained about 7 KiB of unused leaf capacity
+    /// per group. The box is transparent to serde and leaves ordering intact.
+    peer_pipelines: BTreeMap<NodeId, Box<ReplicationPipeline>>,
     #[serde(default)]
     snapshot_installers: SparseMap<NodeId, SnapshotInstallState>,
     #[serde(default)]
@@ -769,7 +773,11 @@ impl RaftCluster {
             .map(|node_id| {
                 (
                     node_id,
-                    ReplicationPipeline::new(node_id, 1, config.pipeline_limits()),
+                    Box::new(ReplicationPipeline::new(
+                        node_id,
+                        1,
+                        config.pipeline_limits(),
+                    )),
                 )
             })
             .collect();
@@ -4814,7 +4822,11 @@ impl RaftCluster {
         );
         self.peer_pipelines.insert(
             peer_id,
-            ReplicationPipeline::new(peer_id, self.last_log_index + 1, limits),
+            Box::new(ReplicationPipeline::new(
+                peer_id,
+                self.last_log_index + 1,
+                limits,
+            )),
         );
         self.reset_leader_lease_epoch();
         self.refresh_replication_pipelines();
@@ -6670,7 +6682,7 @@ impl RaftCluster {
     ) -> Result<PeerProgress, RaftError> {
         self.peer_pipelines
             .get(&peer_id)
-            .map(ReplicationPipeline::status)
+            .map(|pipeline| pipeline.status())
             .ok_or(RaftError::NodeNotFound(peer_id))
     }
 
@@ -7085,7 +7097,7 @@ impl RaftCluster {
             after = std::ops::Bound::Excluded(node_ids[node_count - 1]);
             for &node_id in &node_ids[..node_count] {
                 let pipeline = self.peer_pipelines.entry(node_id).or_insert_with(|| {
-                    ReplicationPipeline::new(node_id, next_index, limits)
+                    Box::new(ReplicationPipeline::new(node_id, next_index, limits))
                 });
                 let is_leader = node_id == leader_id;
                 pipeline.reset_for_leader_transition(
@@ -7105,7 +7117,11 @@ impl RaftCluster {
         let limits = self.config.pipeline_limits();
         for (node_id, node) in &self.nodes {
             self.peer_pipelines.entry(*node_id).or_insert_with(|| {
-                ReplicationPipeline::new(*node_id, node.match_index().saturating_add(1), limits)
+                Box::new(ReplicationPipeline::new(
+                    *node_id,
+                    node.match_index().saturating_add(1),
+                    limits,
+                ))
             });
         }
         if let Some(leader_id) = self.leader_id {

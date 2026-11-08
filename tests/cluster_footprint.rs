@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
-//! How wide a `RaftCluster` is, and that boxing two of its fields did not change
-//! what it serialises to.
+//! How wide a `RaftCluster` is, and that moving its large values behind boxes
+//! did not change what it serialises to.
 //!
 //! The width is the thing a shard walks past on its way to the next group it
 //! ticks, so it is worth a number that fails when it moves rather than a comment
@@ -143,4 +143,19 @@ fn empty_transient_maps_keep_their_map_wire_shape() {
             "{field} must remain an empty map on the wire"
         );
     }
+}
+
+#[test]
+fn boxed_pipeline_values_keep_their_map_wire_shape() {
+    let json = serde_json::to_value(leader()).expect("serialize");
+    let pipeline = &json["peer_pipelines"]["1"];
+    assert_eq!(
+        pipeline.get("peer_id"),
+        Some(&serde_json::json!(1)),
+        "a boxed pipeline must remain the map value itself on the wire"
+    );
+    assert!(
+        pipeline.get("status").is_some(),
+        "the pipeline state was wrapped or omitted on the wire"
+    );
 }
