@@ -159,3 +159,18 @@ fn boxed_pipeline_values_keep_their_map_wire_shape() {
         "the pipeline state was wrapped or omitted on the wire"
     );
 }
+
+#[test]
+fn boxed_node_values_keep_their_map_wire_shape() {
+    let json = serde_json::to_value(leader()).expect("serialize");
+    let node = &json["nodes"]["1"];
+    assert_eq!(
+        node.get("id"),
+        Some(&serde_json::json!(1)),
+        "a boxed node must remain the map value itself on the wire"
+    );
+    assert!(
+        node.get("hard_state").is_some(),
+        "the node state was wrapped or omitted on the wire"
+    );
+}

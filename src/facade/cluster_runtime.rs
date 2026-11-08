@@ -581,7 +581,12 @@ impl ApplyEligibility {
 pub struct RaftCluster {
     pub group_id: GroupId,
     pub config: Config,
-    nodes: BTreeMap<NodeId, Node>,
+    /// `Node` is large enough that an inline tree leaf reserves about 2 KiB per
+    /// group for slots a small group never fills. Box the values so the tree
+    /// retains one pointer per reserved slot while node state stays
+    /// independently owned. The box is transparent to serde and leaves
+    /// ordering intact.
+    nodes: BTreeMap<NodeId, Box<Node>>,
     /// Box the large values, not the map. A tree leaf reserves room for several
     /// values even when a solo-voter group stores only one pipeline. Keeping a
     /// pipeline inline therefore retained about 7 KiB of unused leaf capacity
@@ -751,7 +756,7 @@ impl RaftCluster {
             if nodes
                 .insert(
                     peer.node_id,
-                    Node::new(peer.node_id, peer.role, peer.auto_promote),
+                    Box::new(Node::new(peer.node_id, peer.role, peer.auto_promote)),
                 )
                 .is_some()
             {
@@ -1122,7 +1127,7 @@ impl RaftCluster {
                 let peer_match_index = self
                     .nodes
                     .get(&peer_id)
-                    .map(Node::match_index)
+                    .map(|node| node.match_index())
                     .unwrap_or_default();
                 let request = AppendEntriesRequest {
                     group_id: self.group_id,
@@ -4818,7 +4823,7 @@ impl RaftCluster {
         self.clear_reorder_queue_for(peer_id);
         self.nodes.insert(
             peer_id,
-            Node::new(peer_id, peer.role, peer.auto_promote),
+            Box::new(Node::new(peer_id, peer.role, peer.auto_promote)),
         );
         self.peer_pipelines.insert(
             peer_id,
@@ -5014,12 +5019,14 @@ impl RaftCluster {
                         node.raft_role = StateRole::Learner;
                     }
                 })
-                .or_insert_with(|| Node::new(peer.node_id, peer.role, peer.auto_promote));
+                .or_insert_with(|| {
+                    Box::new(Node::new(peer.node_id, peer.role, peer.auto_promote))
+                });
         }
         for node_id in retained {
             self.nodes
                 .entry(node_id)
-                .or_insert_with(|| Node::new(node_id, ReplicaRole::Voter, false));
+                .or_insert_with(|| Box::new(Node::new(node_id, ReplicaRole::Voter, false)));
         }
 
         self.reset_leader_lease_epoch();
@@ -5277,7 +5284,7 @@ impl RaftCluster {
                 let peer_match_index = self
                     .nodes
                     .get(&peer_id)
-                    .map(Node::match_index)
+                    .map(|node| node.match_index())
                     .unwrap_or_default();
                 let request = AppendEntriesRequest {
                     group_id: self.group_id,
@@ -7028,7 +7035,7 @@ impl RaftCluster {
         self.last_log_index = self
             .nodes
             .values()
-            .map(Node::match_index)
+            .map(|node| node.match_index())
             .max()
             .unwrap_or_default();
     }
