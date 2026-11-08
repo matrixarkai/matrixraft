@@ -665,8 +665,9 @@ fn a_busy_group_is_handed_to_a_worker_rather_than_blocking_its_ticker() {
 #[test]
 fn start_all_starts_every_group_past_a_batch_boundary() {
     // `start_all` sends every group's Start before waiting for any reply, in
-    // batches of 1024 rather than all at once -- one reply channel per group is
-    // about 1.25 KiB while held, which is 20 MiB at sixteen thousand groups.
+    // batches of 1024 rather than all at once. The batch shares one bounded
+    // reply channel; each result carries an index so completion order cannot
+    // pair a result with the wrong group.
     //
     // A batch boundary is somewhere to drop the tail, so this crosses two of
     // them: 2049 groups is three batches and the last one holds a single group.
