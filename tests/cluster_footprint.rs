@@ -16,8 +16,11 @@ use matrixraft::{Config, Peer, RaftCluster, ReplicaRole};
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(
-        std::mem::size_of::<RaftCluster>() == 432,
-        "RaftCluster changed width. It was 544 bytes until seven transient maps \
+        std::mem::size_of::<RaftCluster>() == 416,
+        "RaftCluster changed width. It was 432 bytes until the usually empty \
+         membership-index set moved behind a lazy allocation, saving 16 inline \
+         bytes per group while preserving the set's serialized shape. It was \
+         544 bytes until seven transient maps \
          moved behind a lazy allocation. An empty BTreeMap is 24 bytes while the \
          lazy map is one 8-byte pointer, saving 112 inline bytes per group while \
          preserving the map's serialized shape. Before that it was 536 bytes \

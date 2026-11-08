@@ -2485,8 +2485,8 @@ impl NodeCore {
                     ),
                     fatal_blocker_report: matrixraft_fatal_blocker_report_with_totals(
                         "raft_node_runtime",
-                        blocker_log.blockers.clone(),
-                        blocker_log.fatal_blockers.clone(),
+                        blocker_log.blockers.as_slice().to_vec(),
+                        blocker_log.fatal_blockers.as_slice().to_vec(),
                         blocker_log.blockers_seen,
                         blocker_log.fatal_blockers_seen,
                     ),
@@ -3213,18 +3213,26 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// moves from 3.04 MiB to 3.01 MiB, another 46 bytes per group including
 /// allocator overhead.
 ///
-/// The native measurement moved with all eleven changes: 8,192 live groups
-/// retain 47 MiB, or **5 KiB per group**, down from 48 MiB before removing the
-/// extra ownership tree, 49 MiB before co-locating runtime wiring, 54 MiB after
-/// compacting WAL segment storage, 56 MiB before that, 66 MiB after compacting
-/// the lifecycle replies, 68 MiB after tightening the queue, 70 MiB after
-/// boxing peer values, 74 MiB and 9 KiB after boxing node values, 94 MiB and 11
-/// KiB after boxing pipeline values, 126 MiB and 15 KiB after first bounding
-/// the queues, and 171 MiB and 21 KiB before any of them, under the same
-/// options. The original 21 KiB cost was flat as the group count grew: 89 MiB
-/// for 4096 groups and 339 MiB for 16,384, both with the measuring binary's own
-/// resident size taken off. The same in debug and in release, within a kilobyte
-/// a group -- an allocation is the size it is whichever profile asked for it.
+/// Three runtime histories and the membership-index set were still ordinary
+/// empty collections in every group. Keeping their public sequence and set
+/// shapes while allocating storage only on first use narrows `NodeCore` from
+/// 976 to 912 bytes. The 512-group peak moves from 3.01 MiB to 2.98 MiB,
+/// another 64 bytes per group including allocator overhead.
+///
+/// The native measurement with all twelve changes remains 47 MiB at whole-MiB
+/// resolution for 8,192 live groups, or **5 KiB per group**; the allocation
+/// profile above resolves the half-MiB reduction that RSS rounding does not.
+/// That is down from 48 MiB before removing the extra ownership tree, 49 MiB
+/// before co-locating runtime wiring, 54 MiB after compacting WAL segment
+/// storage, 56 MiB before that, 66 MiB after compacting the lifecycle replies,
+/// 68 MiB after tightening the queue, 70 MiB after boxing peer values, 74 MiB
+/// and 9 KiB after boxing node values, 94 MiB and 11 KiB after boxing pipeline
+/// values, 126 MiB and 15 KiB after first bounding the queues, and 171 MiB and
+/// 21 KiB before any of them, under the same options. The original 21 KiB cost
+/// was flat as the group count grew: 89 MiB for 4096 groups and 339 MiB for
+/// 16,384, both with the measuring binary's own resident size taken off. The
+/// same in debug and in release, within a kilobyte a group -- an allocation is
+/// the size it is whichever profile asked for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -3315,7 +3323,7 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release and the eleven memory changes: 8,192 live groups
+/// Measured after idle release and the twelve memory changes: 8,192 live groups
 /// under that unchanged 10,240 limit all started, retained 47 MiB, and delivered
 /// 99.9% of their ticks at a one-second interval. Before idle release, starting
 /// those groups opened a segment for each one and crossed the limit before the
@@ -3733,8 +3741,8 @@ fn error_is_unrecoverable(error: &RaftError) -> bool {
 /// what was wrong first.
 #[derive(Debug, Default)]
 struct RuntimeBlockerLog {
-    blockers: Vec<String>,
-    fatal_blockers: Vec<String>,
+    blockers: SparseVec<String>,
+    fatal_blockers: SparseVec<String>,
     blockers_seen: u64,
     fatal_blockers_seen: u64,
 }
@@ -3751,19 +3759,11 @@ impl RuntimeBlockerLog {
         self.blockers_seen = self.blockers_seen.saturating_add(1);
         if fatal {
             self.fatal_blockers_seen = self.fatal_blockers_seen.saturating_add(1);
-            Self::push_bounded(&mut self.fatal_blockers, blocker.clone());
+            self.fatal_blockers
+                .push_bounded(blocker.clone(), MATRIXRAFT_RETAINED_BLOCKER_LIMIT);
         }
-        Self::push_bounded(&mut self.blockers, blocker);
-    }
-
-    fn push_bounded(retained: &mut Vec<String>, blocker: String) {
-        if retained.len() >= MATRIXRAFT_RETAINED_BLOCKER_LIMIT {
-            // One at a time, because exactly one is about to go in. `remove(0)`
-            // is a move of at most 128 pointers and happens only once the
-            // window is full.
-            retained.remove(0);
-        }
-        retained.push(blocker);
+        self.blockers
+            .push_bounded(blocker, MATRIXRAFT_RETAINED_BLOCKER_LIMIT);
     }
 }
 
@@ -3914,8 +3914,8 @@ mod runtime_command_queue_tests {
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
-            std::mem::size_of::<NodeCore>() <= 1024,
-            "cold runtime state widened NodeCore past one KiB"
+            std::mem::size_of::<NodeCore>() <= 912,
+            "cold runtime state widened NodeCore"
         );
         assert!(
             std::mem::size_of::<RuntimeCommandQueue>() <= 416,
@@ -3927,7 +3927,36 @@ mod runtime_command_queue_tests {
         );
         assert!(std::mem::size_of::<RuntimeCommandSender>() <= 8);
         assert!(std::mem::size_of::<RuntimeCommandReceiver>() <= 8);
+        assert!(std::mem::size_of::<SparseVec<u64>>() <= 8);
+        assert!(std::mem::size_of::<SparseSet<u64>>() <= 8);
     };
+
+    #[test]
+    fn sparse_collections_keep_sequence_and_set_wire_shapes() {
+        let empty_values = SparseVec::<u64>::default();
+        assert_eq!(
+            serde_json::to_value(&empty_values).expect("empty sequence"),
+            serde_json::json!([])
+        );
+        let values: SparseVec<u64> =
+            serde_json::from_value(serde_json::json!([3, 1])).expect("sequence");
+        assert_eq!(values.as_slice(), &[3, 1]);
+
+        let mut indexes = SparseSet::<u64>::default();
+        assert_eq!(
+            serde_json::to_value(&indexes).expect("empty set"),
+            serde_json::json!([])
+        );
+        indexes.insert(3);
+        indexes.insert(1);
+        assert_eq!(
+            serde_json::to_value(&indexes).expect("populated set"),
+            serde_json::json!([1, 3])
+        );
+        let round_trip: SparseSet<u64> =
+            serde_json::from_value(serde_json::json!([1, 3])).expect("set");
+        assert_eq!(round_trip.iter().copied().collect::<Vec<_>>(), vec![1, 3]);
+    }
 
     #[test]
     fn stored_recovery_report_preserves_the_public_report() {

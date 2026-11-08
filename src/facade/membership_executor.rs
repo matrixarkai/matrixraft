@@ -39,7 +39,7 @@ pub struct MembershipExecutionReport {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MembershipExecutor {
-    reports: Vec<MembershipExecutionReport>,
+    reports: SparseVec<MembershipExecutionReport>,
 }
 
 impl MembershipExecutor {
@@ -250,7 +250,7 @@ impl MembershipExecutor {
     }
 
     pub fn reports(&self) -> &[MembershipExecutionReport] {
-        &self.reports
+        self.reports.as_slice()
     }
 }
 

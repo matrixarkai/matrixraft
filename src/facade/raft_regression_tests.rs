@@ -2191,8 +2191,8 @@ mod retained_blocker_window_tests {
         }
         let report = matrixraft_fatal_blocker_report_with_totals(
             "test",
-            log.blockers.clone(),
-            log.fatal_blockers.clone(),
+            log.blockers.as_slice().to_vec(),
+            log.fatal_blockers.as_slice().to_vec(),
             log.blockers_seen,
             log.fatal_blockers_seen,
         );
