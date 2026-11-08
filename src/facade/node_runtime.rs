@@ -2880,13 +2880,20 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// leave enough work visible for automatic proposal coalescing: the concurrent
 /// proposal contract still folds 200 callers into fewer than 100 fsyncs.
 ///
-/// The native measurement moved with it: 8,192 live groups retained 126 MiB,
-/// or **15 KiB per group**, down from 171 MiB and 21 KiB per group under the
-/// same options. Before that change the 21 KiB cost was flat as the group count
-/// grew: 89 MiB for 4096 groups and 339 MiB for 16,384, both with the measuring
-/// binary's own resident size taken off. The same in debug and in release,
-/// within a kilobyte a group -- an allocation is the size it is whichever
-/// profile asked for it.
+/// The next largest allocation was the `BTreeMap` leaf holding replication
+/// pipelines inline. A leaf reserves several value slots even when the group
+/// has one peer, and `ReplicationPipeline` is deliberately rich state. Boxing
+/// only the map values keeps its ordering and wire shape while the same
+/// 512-group Massif run falls from a 9.74 MiB peak to 6.28 MiB, another 6.9 KiB
+/// per group.
+///
+/// The native measurement moved with both changes: 8,192 live groups retain
+/// 94 MiB, or **11 KiB per group**, down from 126 MiB and 15 KiB after bounding
+/// the queues, and from 171 MiB and 21 KiB before either change, under the same
+/// options. The original 21 KiB cost was flat as the group count grew: 89 MiB
+/// for 4096 groups and 339 MiB for 16,384, both with the measuring binary's own
+/// resident size taken off. The same in debug and in release, within a kilobyte
+/// a group -- an allocation is the size it is whichever profile asked for it.
 ///
 /// The 16,384-group row was 341 MiB before seven transient maps moved to lazy
 /// storage. Their empty representation fell from 24 bytes to 8 bytes each, so
@@ -2977,12 +2984,13 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release and the bounded command queue: 8,192 live groups
-/// under that unchanged 10,240 limit all started, retained 126 MiB, and
-/// delivered 101.8% of their ticks at a one-second interval. Before idle
-/// release, starting those groups opened a segment for each one and crossed the
-/// limit before the store was live. Before the bounded queue, the same run
-/// retained 171 MiB.
+/// Measured after idle release, bounded command queues and boxed pipeline map
+/// values: 8,192 live groups under that unchanged 10,240 limit all started,
+/// retained 94 MiB, and delivered 100.0% of their ticks at a one-second
+/// interval. Before idle release, starting those groups opened a segment for
+/// each one and crossed the limit before the store was live. Before the two
+/// memory changes, the same run retained 171 MiB; bounding the queue alone
+/// brought it to 126 MiB.
 ///
 /// Count it over the whole run and take the maximum. Groups are created one
 /// after another, so a single reading taken while that is still going is a lower
