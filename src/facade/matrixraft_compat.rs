@@ -27062,11 +27062,9 @@ impl MatrixRaftMultiRaftServer {
     /// sent its command, where before the ones after the failure were not. Both
     /// leave a partly started server; this one leaves more of it started.
     pub fn start_all(&mut self, start_index: LogIndex) -> Result<(), RaftError> {
-        // In batches, not all at once. One reply channel per group costs about
-        // 1.25 KiB while it is held -- 20 MiB at 16,384 groups, measured as a
-        // 342 to 362 MiB rise -- and a batch of this size already has sixty
-        // times more work outstanding than there are workers to take it, so
-        // holding every channel at once buys nothing for the memory.
+        // In batches, not all at once. The one-slot reply channels keep the
+        // result storage small, while a batch of this size already has sixty
+        // times more work outstanding than there are workers to take it.
         const START_BATCH: usize = 1024;
         let keys: Vec<MatrixRaftRouteKey> = self.nodes.keys().copied().collect();
         let mut first_error = None;
