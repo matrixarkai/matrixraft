@@ -160,10 +160,6 @@ struct CompactPeerProgress {
     next_retry_after_ms: u64,
     inflight_entries: u64,
     inflight_bytes: u64,
-    append_queue_depth: u64,
-    apply_inflight_tasks: u64,
-    apply_queue_depth: u64,
-    reorder_queue_depth: u64,
     snapshot_sending: bool,
     snapshot_installing: bool,
     snapshot_installed_index: u64,
@@ -193,10 +189,6 @@ impl CompactPeerProgress {
             next_retry_after_ms: 0,
             inflight_entries: 0,
             inflight_bytes: 0,
-            append_queue_depth: 0,
-            apply_inflight_tasks: 0,
-            apply_queue_depth: 0,
-            reorder_queue_depth: 0,
             snapshot_sending: false,
             snapshot_installing: false,
             snapshot_installed_index: 0,
@@ -275,10 +267,6 @@ impl CompactPeerProgress {
             next_retry_after_ms: progress.next_retry_after_ms,
             inflight_entries: progress.inflight_entries,
             inflight_bytes: progress.inflight_bytes,
-            append_queue_depth: progress.append_queue_depth,
-            apply_inflight_tasks: progress.apply_inflight_tasks,
-            apply_queue_depth: progress.apply_queue_depth,
-            reorder_queue_depth: progress.reorder_queue_depth,
             snapshot_sending: progress.snapshot_sending,
             snapshot_installing: progress.snapshot_installing,
             snapshot_installed_index: progress.snapshot_installed_index,
@@ -296,7 +284,14 @@ impl CompactPeerProgress {
         }
     }
 
-    fn to_public(&self, peer_id: NodeId, limits: PipelineLimits) -> PeerProgress {
+    fn to_public(
+        &self,
+        peer_id: NodeId,
+        limits: PipelineLimits,
+        append_queue_depth: u64,
+        apply_inflight_tasks: u64,
+        reorder_queue_depth: u64,
+    ) -> PeerProgress {
         let telemetry = self.telemetry.as_deref().cloned().unwrap_or_default();
         PeerProgress {
             peer_id,
@@ -316,19 +311,19 @@ impl CompactPeerProgress {
             next_retry_after_ms: self.next_retry_after_ms,
             inflight_entries: self.inflight_entries,
             inflight_bytes: self.inflight_bytes,
-            append_queue_depth: self.append_queue_depth,
+            append_queue_depth,
             append_queue_limit: limits.max_inflights_replicate,
             append_queue_max_depth: telemetry.append_queue_max_depth,
             inflight_bytes_limit: limits.max_memory_replicate_log_bytes,
-            apply_inflight_tasks: self.apply_inflight_tasks,
+            apply_inflight_tasks,
             apply_inflight_limit: limits.max_inflights_apply_task,
-            apply_queue_depth: self.apply_queue_depth,
+            apply_queue_depth: apply_inflight_tasks,
             apply_queue_max_depth: telemetry.apply_queue_max_depth,
             apply_batch_bytes_limit: limits.max_apply_batch_bytes,
             apply_backpressure_rejections: telemetry.apply_backpressure_rejections,
             memory_backpressure_rejections: telemetry.memory_backpressure_rejections,
             oversized_log_rejections: telemetry.oversized_log_rejections,
-            reorder_queue_depth: self.reorder_queue_depth,
+            reorder_queue_depth,
             out_of_order_append_rejections: telemetry.out_of_order_append_rejections,
             reorder_entries_rejected: telemetry.reorder_entries_rejected,
             reorder_entries_converged: telemetry.reorder_entries_converged,
@@ -1054,7 +1049,13 @@ impl ReplicationPipeline {
     }
 
     pub fn status(&self) -> PeerProgress {
-        self.status.to_public(self.peer_id, self.limits)
+        self.status.to_public(
+            self.peer_id,
+            self.limits,
+            self.append_queue.len() as u64,
+            self.apply_inflight.len() as u64,
+            self.reorder_queue.len() as u64,
+        )
     }
 
     fn snapshot_transfer_view(&self) -> Option<ActiveSnapshotTransferView> {
@@ -1146,8 +1147,7 @@ impl ReplicationPipeline {
             bytes,
         });
         self.append_queue_bytes = self.append_queue_bytes.saturating_add(bytes);
-        self.status.append_queue_depth = self.append_queue.len() as u64;
-        let depth = self.status.append_queue_depth;
+        let depth = self.append_queue.len() as u64;
         let telemetry = self.status.telemetry_mut();
         telemetry.append_queue_max_depth = telemetry.append_queue_max_depth.max(depth);
         Ok(())
@@ -1266,7 +1266,6 @@ impl ReplicationPipeline {
                 break;
             }
         }
-        self.status.append_queue_depth = self.append_queue.len() as u64;
         moved
     }
 
@@ -1448,7 +1447,7 @@ impl ReplicationPipeline {
                 "apply batch exceeds max apply batch bytes".to_string(),
             ));
         }
-        if self.status.apply_inflight_tasks >= self.limits.max_inflights_apply_task {
+        if self.apply_inflight.len() as u64 >= self.limits.max_inflights_apply_task {
             self.status.telemetry_mut().apply_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "apply inflight task limit reached".to_string(),
@@ -1458,9 +1457,7 @@ impl ReplicationPipeline {
             applied_index,
             batch_bytes,
         });
-        self.status.apply_inflight_tasks = self.apply_inflight.len() as u64;
-        self.status.apply_queue_depth = self.status.apply_inflight_tasks;
-        let depth = self.status.apply_queue_depth;
+        let depth = self.apply_inflight.len() as u64;
         let telemetry = self.status.telemetry_mut();
         telemetry.apply_queue_max_depth = telemetry.apply_queue_max_depth.max(depth);
         Ok(())
@@ -1477,8 +1474,6 @@ impl ReplicationPipeline {
             let _ = self.apply_inflight.pop_front();
             completed += 1;
         }
-        self.status.apply_inflight_tasks = self.apply_inflight.len() as u64;
-        self.status.apply_queue_depth = self.status.apply_inflight_tasks;
         completed
     }
 
@@ -1536,7 +1531,6 @@ impl ReplicationPipeline {
         // a later sweep that otherwise needs no heap work.
         let _ = self.status.telemetry_mut();
         self.reorder_queue.insert(entry.log_id.index, 0);
-        self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
         Ok(())
     }
 
@@ -1579,7 +1573,6 @@ impl ReplicationPipeline {
         if dropped == 0 {
             return 0;
         }
-        self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
         let telemetry = self.status.telemetry_mut();
         telemetry.reorder_entry_timeouts = telemetry.reorder_entry_timeouts.saturating_add(dropped);
         telemetry.reorder_dropped_packages =
@@ -1591,7 +1584,6 @@ impl ReplicationPipeline {
         let dropped = self.reorder_queue.len() as u64;
         if dropped > 0 {
             self.reorder_queue.clear();
-            self.status.reorder_queue_depth = 0;
             let telemetry = self.status.telemetry_mut();
             telemetry.reorder_entry_timeouts += dropped;
             telemetry.reorder_dropped_packages += dropped;
@@ -1933,8 +1925,6 @@ impl ReplicationPipeline {
 
     fn reset_apply_inflight_window(&mut self) {
         self.apply_inflight.clear();
-        self.status.apply_inflight_tasks = 0;
-        self.status.apply_queue_depth = 0;
     }
 
     fn drain_reorder_queue(&mut self) {
@@ -1950,7 +1940,6 @@ impl ReplicationPipeline {
                 .reorder_entries_converged
                 .saturating_add(converged);
         }
-        self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
     }
 
     fn finish_snapshot_install(&mut self) -> Result<(), RaftError> {
