@@ -54,8 +54,11 @@ const _: () = {
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(
-        std::mem::size_of::<ReplicationPipeline>() == 560,
-        "ReplicationPipeline changed width. It was 704 bytes until its three \
+        std::mem::size_of::<ReplicationPipeline>() == 280,
+        "ReplicationPipeline changed width. It was 560 bytes until zero-valued \
+         operational counters moved behind one lazy telemetry pointer, saving \
+         280 bytes per peer without changing the public status or wire shape. \
+         Before that it was 704 bytes until its three \
          empty queue headers, reorder map, and inactive snapshot transfer \
          moved behind transparent lazy storage. The serialized arrays, map, \
          and null remain unchanged."
