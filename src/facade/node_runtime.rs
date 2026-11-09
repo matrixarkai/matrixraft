@@ -4264,8 +4264,12 @@ mod runtime_command_queue_tests {
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
-            std::mem::size_of::<NodeCore>() <= 840,
+            std::mem::size_of::<NodeCore>() <= 776,
             "cold runtime state widened NodeCore"
+        );
+        assert!(
+            std::mem::size_of::<PersistentRaftWal>() <= 176,
+            "cold WAL state widened"
         );
         assert!(std::mem::size_of::<StoredWalRecoveryReport>() <= 32);
         assert!(std::mem::size_of::<RuntimeBlockerLog>() <= 8);

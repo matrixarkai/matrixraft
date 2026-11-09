@@ -284,6 +284,38 @@ impl PersistentRaftWalOptions {
     }
 }
 
+const DEFAULT_SLOW_FSYNC_THRESHOLD_MS: u64 = 10;
+
+#[derive(Debug)]
+struct WalActivityState {
+    released_segment_count: u64,
+    slow_fsync_threshold_ms: u64,
+    slow_fsync_count: u64,
+    consecutive_slow_fsync_count: u64,
+    max_fsync_elapsed_ms: u64,
+    compacted_after_slow_fsync_count: u64,
+    inject_next_fsync_delay_ms: Option<u64>,
+    fsync_count: u64,
+}
+
+impl Default for WalActivityState {
+    fn default() -> Self {
+        Self {
+            released_segment_count: 0,
+            slow_fsync_threshold_ms: DEFAULT_SLOW_FSYNC_THRESHOLD_MS,
+            slow_fsync_count: 0,
+            consecutive_slow_fsync_count: 0,
+            max_fsync_elapsed_ms: 0,
+            compacted_after_slow_fsync_count: 0,
+            inject_next_fsync_delay_ms: None,
+            fsync_count: 0,
+        }
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<WalActivityState>() <= 72);
+
 #[derive(Debug)]
 pub struct PersistentRaftWal {
     options: PersistentRaftWalOptions,
@@ -308,17 +340,12 @@ pub struct PersistentRaftWal {
     /// that, and so does every restart path.
     _directory_lock: File,
     next_segment_id: u64,
-    released_segment_count: u64,
     truncated_corrupt_tail: bool,
-    slow_fsync_threshold_ms: u64,
-    slow_fsync_count: u64,
-    consecutive_slow_fsync_count: u64,
-    max_fsync_elapsed_ms: u64,
-    compacted_after_slow_fsync_count: u64,
-    inject_next_fsync_delay_ms: Option<u64>,
-    /// Every fsync, not only the slow ones. An append is dominated by its
-    /// fsync, so this is what says whether a batch actually amortised one.
-    fsync_count: u64,
+    /// Counters and test controls do not cost every untouched group their full
+    /// width. `None` represents the documented defaults and zero activity,
+    /// trimming 64 bytes from each idle WAL while keeping the active shape
+    /// behind one pointer.
+    activity: Option<Box<WalActivityState>>,
     /// How long this writer believes the active segment is, or `None` when it
     /// has not written to this segment yet.
     ///
@@ -520,15 +547,8 @@ impl PersistentRaftWal {
             last_segment_use: None,
             _directory_lock: directory_lock,
             next_segment_id,
-            released_segment_count: 0,
             truncated_corrupt_tail,
-            slow_fsync_threshold_ms: 10,
-            slow_fsync_count: 0,
-            consecutive_slow_fsync_count: 0,
-            max_fsync_elapsed_ms: 0,
-            compacted_after_slow_fsync_count: 0,
-            inject_next_fsync_delay_ms: None,
-            fsync_count: 0,
+            activity: None,
             expected_active_len: None,
             active_covered: None,
         };
@@ -698,31 +718,49 @@ impl PersistentRaftWal {
         Some((first.log_id.index, last.log_id.index, last.log_id.term))
     }
 
+    fn activity_mut(&mut self) -> &mut WalActivityState {
+        self.activity
+            .get_or_insert_with(|| Box::new(WalActivityState::default()))
+    }
+
+    fn slow_fsync_threshold_ms(&self) -> u64 {
+        self.activity.as_ref().map_or(
+            DEFAULT_SLOW_FSYNC_THRESHOLD_MS,
+            |state| state.slow_fsync_threshold_ms,
+        )
+    }
+
     /// Fsyncs the active segment and records what it cost.
     fn fsync_active_segment(&mut self) -> Result<(u64, bool), RaftError> {
         let started = Instant::now();
-        if let Some(delay_ms) = self.inject_next_fsync_delay_ms.take() {
+        let injected_delay_ms = self
+            .activity
+            .as_mut()
+            .and_then(|state| state.inject_next_fsync_delay_ms.take());
+        if let Some(delay_ms) = injected_delay_ms {
             thread::sleep(Duration::from_millis(delay_ms));
         }
         self.open_active_segment()?
             .sync_data()
             .map_err(|err| RaftError::Storage(format!("failed to fsync WAL record: {err}")))?;
-        self.fsync_count += 1;
         let elapsed_ms: u64 = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-        self.max_fsync_elapsed_ms = self.max_fsync_elapsed_ms.max(elapsed_ms);
-        let slow = self.slow_fsync_threshold_ms > 0 && elapsed_ms >= self.slow_fsync_threshold_ms;
+        let state = self.activity_mut();
+        state.fsync_count += 1;
+        state.max_fsync_elapsed_ms = state.max_fsync_elapsed_ms.max(elapsed_ms);
+        let slow = state.slow_fsync_threshold_ms > 0
+            && elapsed_ms >= state.slow_fsync_threshold_ms;
         if slow {
-            self.slow_fsync_count += 1;
-            self.consecutive_slow_fsync_count += 1;
+            state.slow_fsync_count += 1;
+            state.consecutive_slow_fsync_count += 1;
         } else {
-            self.consecutive_slow_fsync_count = 0;
+            state.consecutive_slow_fsync_count = 0;
         }
         Ok((elapsed_ms, slow))
     }
 
     /// How many times this WAL has fsynced.
     pub fn fsync_count(&self) -> u64 {
-        self.fsync_count
+        self.activity.as_ref().map_or(0, |state| state.fsync_count)
     }
 
     /// Appends several records and fsyncs once for all of them.
@@ -782,11 +820,13 @@ impl PersistentRaftWal {
     }
 
     pub fn set_slow_fsync_threshold_ms(&mut self, threshold_ms: u64) {
-        self.slow_fsync_threshold_ms = threshold_ms;
+        if threshold_ms != DEFAULT_SLOW_FSYNC_THRESHOLD_MS || self.activity.is_some() {
+            self.activity_mut().slow_fsync_threshold_ms = threshold_ms;
+        }
     }
 
     pub fn inject_next_fsync_delay_for_test(&mut self, delay_ms: u64) {
-        self.inject_next_fsync_delay_ms = Some(delay_ms);
+        self.activity_mut().inject_next_fsync_delay_ms = Some(delay_ms);
     }
 
     /// What the active segment already describes, for a caller that wants to
@@ -996,7 +1036,7 @@ impl PersistentRaftWal {
             bytes_written: record_bytes,
             fsync_on_append: fsync,
             fsync_elapsed_ms,
-            slow_fsync_threshold_ms: self.slow_fsync_threshold_ms,
+            slow_fsync_threshold_ms: self.slow_fsync_threshold_ms(),
             slow_fsync_observed,
             segment_rolled,
             hard_state_persisted,
@@ -1092,9 +1132,11 @@ impl PersistentRaftWal {
         if !removable_ids.is_empty() {
             self.segments
                 .retain(|segment| !removable_ids.contains(&segment.segment_id));
-            self.released_segment_count += removable_ids.len() as u64;
-            if self.slow_fsync_count > 0 {
-                self.compacted_after_slow_fsync_count += removable_ids.len() as u64;
+            let removed = removable_ids.len() as u64;
+            let activity = self.activity_mut();
+            activity.released_segment_count += removed;
+            if activity.slow_fsync_count > 0 {
+                activity.compacted_after_slow_fsync_count += removed;
             }
         }
         Ok(removable_ids.len() as u64)
@@ -1238,14 +1280,32 @@ impl PersistentRaftWal {
                 .last()
                 .map(|segment| segment.last_index)
                 .unwrap_or(0),
-            released_segment_count: self.released_segment_count,
-            slow_fsync_backpressure_observed: self.slow_fsync_count > 0,
-            fsync_count: self.fsync_count,
-            slow_fsync_threshold_ms: self.slow_fsync_threshold_ms,
-            slow_fsync_count: self.slow_fsync_count,
-            consecutive_slow_fsync_count: self.consecutive_slow_fsync_count,
-            max_fsync_elapsed_ms: self.max_fsync_elapsed_ms,
-            compacted_after_slow_fsync_count: self.compacted_after_slow_fsync_count,
+            released_segment_count: self
+                .activity
+                .as_ref()
+                .map_or(0, |state| state.released_segment_count),
+            slow_fsync_backpressure_observed: self
+                .activity
+                .as_ref()
+                .is_some_and(|state| state.slow_fsync_count > 0),
+            fsync_count: self.activity.as_ref().map_or(0, |state| state.fsync_count),
+            slow_fsync_threshold_ms: self.slow_fsync_threshold_ms(),
+            slow_fsync_count: self
+                .activity
+                .as_ref()
+                .map_or(0, |state| state.slow_fsync_count),
+            consecutive_slow_fsync_count: self
+                .activity
+                .as_ref()
+                .map_or(0, |state| state.consecutive_slow_fsync_count),
+            max_fsync_elapsed_ms: self
+                .activity
+                .as_ref()
+                .map_or(0, |state| state.max_fsync_elapsed_ms),
+            compacted_after_slow_fsync_count: self
+                .activity
+                .as_ref()
+                .map_or(0, |state| state.compacted_after_slow_fsync_count),
         }
     }
 
@@ -1752,6 +1812,40 @@ mod wal_resident_record_tests {
         assert_eq!(reopened.segments.len(), 1);
         assert_eq!(reopened.segments.capacity(), 1);
         drop(reopened);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn idle_wal_materializes_activity_only_when_a_default_changes() {
+        let dir = test_dir();
+        let mut wal = PersistentRaftWal::open(PersistentRaftWalOptions {
+            dir: dir.clone(),
+            max_records_per_segment: 1_000,
+            max_segment_bytes: 64 * 1024 * 1024,
+            min_keep_segments: 2,
+            fsync_on_append: false,
+        })
+        .expect("open fresh WAL");
+
+        assert!(wal.activity.is_none());
+        let status = wal.status();
+        assert_eq!(status.fsync_count, 0);
+        assert_eq!(status.slow_fsync_threshold_ms, 10);
+        assert_eq!(status.released_segment_count, 0);
+
+        wal.set_slow_fsync_threshold_ms(10);
+        assert!(wal.activity.is_none());
+
+        wal.set_slow_fsync_threshold_ms(25);
+        assert_eq!(
+            wal.activity
+                .as_ref()
+                .map(|activity| activity.slow_fsync_threshold_ms),
+            Some(25)
+        );
+        assert_eq!(wal.status().slow_fsync_threshold_ms, 25);
+
+        drop(wal);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
