@@ -4145,8 +4145,8 @@ fn raft_peer_runtime_states(
     let leader_commit_index = cluster.commit_index;
     cluster
         .nodes
-        .values()
-        .map(|node| {
+        .iter()
+        .map(|(node_id, node)| {
             let mut blockers = Vec::new();
             if !node.healthy {
                 blockers.push("peer_unhealthy".to_string());
@@ -4155,7 +4155,7 @@ fn raft_peer_runtime_states(
                 blockers.push("peer_lagging".to_string());
             }
             PeerRuntimeState {
-                node_id: node.id,
+                node_id: *node_id,
                 role: node.raft_role,
                 replica_role: node.replica_role,
                 healthy: node.healthy,
@@ -4166,7 +4166,7 @@ fn raft_peer_runtime_states(
                 pre_vote_sent,
                 transfer_leader_target: cluster
                     .active_leader_transfer()
-                    .map(|transfer| transfer.transferee_id == node.id)
+                    .map(|transfer| transfer.transferee_id == *node_id)
                     .unwrap_or(false),
                 blockers,
             }
