@@ -35,7 +35,10 @@ struct MailChannelInner<Mail> {
     selector_total_mail_count: i64,
     max_depth: usize,
     rejected_send_count: u64,
-    channels: [VecDeque<Mail>; 3],
+    // Boxing keeps inactive priority lanes to one pointer instead of a full
+    // VecDeque header; an active lane stays allocated across drains.
+    #[allow(clippy::box_collection)]
+    channels: [Option<Box<VecDeque<Mail>>>; 3],
 }
 
 impl<Mail> MailChannelInner<Mail> {
@@ -46,8 +49,12 @@ impl<Mail> MailChannelInner<Mail> {
             selector_total_mail_count: 0,
             max_depth: 0,
             rejected_send_count: 0,
-            channels: std::array::from_fn(|_| VecDeque::new()),
+            channels: std::array::from_fn(|_| None),
         }
+    }
+
+    fn channel_mut(&mut self, priority: MailPriority) -> &mut VecDeque<Mail> {
+        self.channels[priority_index(priority)].get_or_insert_with(|| Box::new(VecDeque::new()))
     }
 }
 
@@ -96,7 +103,7 @@ impl<Mail> MailChannel<Mail> {
             inner.rejected_send_count = inner.rejected_send_count.saturating_add(1);
             return Ok(Err(mail));
         }
-        inner.channels[priority_index(priority)].push_back(mail);
+        inner.channel_mut(priority).push_back(mail);
         inner.size += 1;
         inner.max_depth = inner.max_depth.max(inner.size);
         Ok(Ok(()))
@@ -116,7 +123,9 @@ impl<Mail> MailChannel<Mail> {
         if !self.admit(&mut inner, mails.len()) {
             return Ok(Err(mails));
         }
-        inner.channels[priority_index(priority)].extend(mails);
+        if !mails.is_empty() {
+            inner.channel_mut(priority).extend(mails);
+        }
         Ok(Ok(()))
     }
 
@@ -147,7 +156,9 @@ impl<Mail> MailChannel<Mail> {
         if !self.admit(&mut inner, count) {
             return Ok(Err(count));
         }
-        inner.channels[priority_index(priority)].extend(mails);
+        if count > 0 {
+            inner.channel_mut(priority).extend(mails);
+        }
         Ok(Ok(()))
     }
 
@@ -174,7 +185,7 @@ impl<Mail> MailChannel<Mail> {
 
     pub fn send_checked(&self, priority: MailPriority, mail: Mail) -> Result<(), RaftError> {
         let mut inner = self.inner.lock().map_err(mail_channel_poisoned)?;
-        inner.channels[priority_index(priority)].push_back(mail);
+        inner.channel_mut(priority).push_back(mail);
         inner.size += 1;
         inner.max_depth = inner.max_depth.max(inner.size);
         Ok(())
@@ -225,11 +236,10 @@ impl<Mail> MailChannel<Mail> {
         // serialize naturally. No second set of priority queues is needed to
         // stage mail between two channel-lock acquisitions.
         //
-        // Reserved once from what is queued. Extending from three deques in turn
-        // reallocated once per non-empty priority, and the count is known before
-        // anything is moved.
+        // Reserving from the queued count avoids reallocating the output once per
+        // non-empty priority before anything is moved.
         out.reserve(num_mails as usize);
-        for channel in &mut inner.channels {
+        for channel in inner.channels.iter_mut().flatten() {
             out.extend(channel.drain(..));
         }
         Ok(())
@@ -631,5 +641,60 @@ fn priority_index(priority: MailPriority) -> usize {
         MailPriority::Urgent => 0,
         MailPriority::Normal => 1,
         MailPriority::Slowly => 2,
+    }
+}
+
+#[cfg(test)]
+mod mail_channel_storage_tests {
+    use super::*;
+
+    #[cfg(target_pointer_width = "64")]
+    const _: () = {
+        assert!(std::mem::size_of::<MailChannelInner<u64>>() <= 64);
+    };
+
+    #[test]
+    fn priority_queues_are_lazy_and_stay_warm_after_drain() {
+        let selector = ChannelSelector::new();
+        let channel = MailChannel::new(7, 8);
+        assert!(channel
+            .inner
+            .lock()
+            .unwrap()
+            .channels
+            .iter()
+            .all(Option::is_none));
+
+        selector.send_to_channel(Arc::clone(&channel), MailPriority::Slowly, 3);
+        selector.send_to_channel(Arc::clone(&channel), MailPriority::Urgent, 1);
+        selector.send_to_channel(Arc::clone(&channel), MailPriority::Normal, 2);
+        let selected = selector.select(ChannelSelectorPolicy::default(), &[]);
+        assert_eq!(selected.channels.len(), 1);
+
+        let mut drained = Vec::new();
+        selected.channels[0].fetch_into(&selector, &mut drained);
+        assert_eq!(drained, vec![1, 2, 3]);
+        let inner = channel.inner.lock().unwrap();
+        assert!(inner
+            .channels
+            .iter()
+            .all(|channel| channel.as_ref().is_some_and(|queue| queue.is_empty())));
+        assert_eq!(inner.size, 0);
+        assert_eq!(inner.max_depth, 3);
+        drop(inner);
+
+        selector.send_to_channel(Arc::clone(&channel), MailPriority::Normal, 4);
+        let selected = selector.select(ChannelSelectorPolicy::default(), &[]);
+        let mut drained_again = Vec::new();
+        selected.channels[0].fetch_into(&selector, &mut drained_again);
+        assert_eq!(drained_again, vec![4]);
+        assert!(channel
+            .inner
+            .lock()
+            .unwrap()
+            .channels
+            .iter()
+            .flatten()
+            .all(|queue| queue.is_empty()));
     }
 }
