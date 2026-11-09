@@ -74,63 +74,64 @@ impl<T> std::fmt::Debug for RuntimeReplyPool<T> {
     }
 }
 
-/// The checksum description is identical for every ordinary WAL. Keep that
-/// common case as a marker and retain an owned value only for an unknown
-/// format, so thousands of idle groups do not each hold the same strings.
 #[derive(Debug)]
-enum StoredWalChecksumFormat {
-    Current,
-    Other(Box<WalChecksumFormat>),
-}
-
-/// Sparse storage for the startup report retained by a live runtime.
-///
-/// The public report stays unchanged. Its recovered record and retained range
-/// are usually absent, but their inline options account for most of its width.
-/// Expand those fields only when a caller asks for the report.
-#[derive(Debug)]
-struct StoredWalRecoveryReport {
-    recovered: Option<Box<WalRecord>>,
-    truncated_corrupt_tail: bool,
-    surviving_records: usize,
-    removed_records: usize,
-    segments_scanned: u64,
-    checksum_format: Option<StoredWalChecksumFormat>,
-    retained_range: Option<Box<LogRetainedRange>>,
+enum StoredWalRecoveryReport {
+    /// The ordinary new-WAL report. Its log range and record count are zero;
+    /// only segment metadata varies.
+    Clean {
+        segments_scanned: u64,
+        first_segment_id: u64,
+        last_segment_id: u64,
+    },
+    Detailed(Box<WalRecoveryReport>),
 }
 
 impl StoredWalRecoveryReport {
     fn from_report(report: WalRecoveryReport) -> Self {
-        let checksum_format = report.checksum_format.map(|format| {
-            if wal::matrixraft_wal_checksum_format_is_current(&format) {
-                StoredWalChecksumFormat::Current
-            } else {
-                StoredWalChecksumFormat::Other(Box::new(format))
-            }
+        let clean_range = report.retained_range.as_ref().filter(|range| {
+            range.first_log_index == 0 && range.last_log_index == 0 && range.record_count == 0
         });
-        Self {
-            recovered: report.recovered.map(Box::new),
-            truncated_corrupt_tail: report.truncated_corrupt_tail,
-            surviving_records: report.surviving_records,
-            removed_records: report.removed_records,
-            segments_scanned: report.segments_scanned,
-            checksum_format,
-            retained_range: report.retained_range.map(Box::new),
+        if let Some(range) = clean_range.filter(|_| {
+            report.recovered.is_none()
+                && !report.truncated_corrupt_tail
+                && report.surviving_records == 0
+                && report.removed_records == 0
+                && report
+                    .checksum_format
+                    .as_ref()
+                    .is_some_and(wal::matrixraft_wal_checksum_format_is_current)
+        }) {
+            return Self::Clean {
+                segments_scanned: report.segments_scanned,
+                first_segment_id: range.first_segment_id,
+                last_segment_id: range.last_segment_id,
+            };
         }
+        Self::Detailed(Box::new(report))
     }
 
     fn to_report(&self) -> WalRecoveryReport {
-        WalRecoveryReport {
-            recovered: self.recovered.as_deref().cloned(),
-            truncated_corrupt_tail: self.truncated_corrupt_tail,
-            surviving_records: self.surviving_records,
-            removed_records: self.removed_records,
-            segments_scanned: self.segments_scanned,
-            checksum_format: self.checksum_format.as_ref().map(|format| match format {
-                StoredWalChecksumFormat::Current => matrixraft_wal_checksum_format(),
-                StoredWalChecksumFormat::Other(format) => format.as_ref().clone(),
-            }),
-            retained_range: self.retained_range.as_deref().cloned(),
+        match self {
+            Self::Clean {
+                segments_scanned,
+                first_segment_id,
+                last_segment_id,
+            } => WalRecoveryReport {
+                recovered: None,
+                truncated_corrupt_tail: false,
+                surviving_records: 0,
+                removed_records: 0,
+                segments_scanned: *segments_scanned,
+                checksum_format: Some(matrixraft_wal_checksum_format()),
+                retained_range: Some(LogRetainedRange {
+                    first_log_index: 0,
+                    last_log_index: 0,
+                    first_segment_id: *first_segment_id,
+                    last_segment_id: *last_segment_id,
+                    record_count: 0,
+                }),
+            },
+            Self::Detailed(report) => report.as_ref().clone(),
         }
     }
 }
@@ -1945,7 +1946,6 @@ struct NodeCore {
     heartbeat_interval_ms: u64,
     election_timeout_ms: u64,
     leader_lease_timeout_ms: u64,
-    heartbeat_interval: Duration,
     heartbeat_ticks: u64,
     election_ticks: u64,
     election_elapsed_ms: u64,
@@ -2056,7 +2056,6 @@ impl NodeCore {
         .election_timeout_ms
         .max(heartbeat_interval_ms);
     let leader_lease_timeout_ms = options.config.leader_lease_ms.max(1);
-    let heartbeat_interval = Duration::from_millis(heartbeat_interval_ms);
     let heartbeat_ticks = 0;
     let election_ticks = 0;
     let election_elapsed_ms: u64 = 0;
@@ -2083,7 +2082,6 @@ impl NodeCore {
             heartbeat_interval_ms,
             election_timeout_ms,
             leader_lease_timeout_ms,
-            heartbeat_interval,
             heartbeat_ticks,
             election_ticks,
             election_elapsed_ms,
@@ -2526,10 +2524,10 @@ impl NodeCore {
                     ),
                     fatal_blocker_report: matrixraft_fatal_blocker_report_with_totals(
                         "raft_node_runtime",
-                        blocker_log.blockers.as_slice().to_vec(),
-                        blocker_log.fatal_blockers.as_slice().to_vec(),
-                        blocker_log.blockers_seen,
-                        blocker_log.fatal_blockers_seen,
+                        blocker_log.blockers().to_vec(),
+                        blocker_log.fatal_blockers().to_vec(),
+                        blocker_log.blockers_seen(),
+                        blocker_log.fatal_blockers_seen(),
                     ),
                 };
                 let _ = reply.send(Ok(status));
@@ -3688,7 +3686,8 @@ fn raft_node_runtime_loop(options: NodeOptions, command_rx: RuntimeCommandReceiv
     // When the next tick is due. The loop waits for what is left of the
     // interval rather than starting a fresh one per receive, so arriving
     // commands cannot hold the tick off indefinitely.
-    let mut next_tick = Instant::now() + core.heartbeat_interval;
+    let heartbeat_interval = Duration::from_millis(core.heartbeat_interval_ms);
+    let mut next_tick = Instant::now() + heartbeat_interval;
     loop {
         let command = if let Some(command) = core.carried_command.take() {
             *command
@@ -3711,7 +3710,7 @@ fn raft_node_runtime_loop(options: NodeOptions, command_rx: RuntimeCommandReceiv
                     // Set from now rather than by adding an interval, so a
                     // loop that fell behind ticks once and resynchronises
                     // instead of firing a burst of catch-up heartbeats.
-                    next_tick = Instant::now() + core.heartbeat_interval;
+                    next_tick = Instant::now() + heartbeat_interval;
                     core.tick();
                     continue;
                 }
@@ -3831,6 +3830,11 @@ fn error_is_unrecoverable(error: &RaftError) -> bool {
 /// what was wrong first.
 #[derive(Debug, Default)]
 struct RuntimeBlockerLog {
+    state: Option<Box<RuntimeBlockerLogState>>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeBlockerLogState {
     blockers: SparseVec<String>,
     fatal_blockers: SparseVec<String>,
     blockers_seen: u64,
@@ -3846,14 +3850,41 @@ const MATRIXRAFT_RETAINED_BLOCKER_LIMIT: usize = 128;
 
 impl RuntimeBlockerLog {
     fn record(&mut self, blocker: String, fatal: bool) {
-        self.blockers_seen = self.blockers_seen.saturating_add(1);
+        let state = self
+            .state
+            .get_or_insert_with(|| Box::new(RuntimeBlockerLogState::default()));
+        state.blockers_seen = state.blockers_seen.saturating_add(1);
         if fatal {
-            self.fatal_blockers_seen = self.fatal_blockers_seen.saturating_add(1);
-            self.fatal_blockers
+            state.fatal_blockers_seen = state.fatal_blockers_seen.saturating_add(1);
+            state
+                .fatal_blockers
                 .push_bounded(blocker.clone(), MATRIXRAFT_RETAINED_BLOCKER_LIMIT);
         }
-        self.blockers
+        state
+            .blockers
             .push_bounded(blocker, MATRIXRAFT_RETAINED_BLOCKER_LIMIT);
+    }
+
+    fn blockers(&self) -> &[String] {
+        self.state
+            .as_ref()
+            .map_or(&[], |state| state.blockers.as_slice())
+    }
+
+    fn fatal_blockers(&self) -> &[String] {
+        self.state
+            .as_ref()
+            .map_or(&[], |state| state.fatal_blockers.as_slice())
+    }
+
+    fn blockers_seen(&self) -> u64 {
+        self.state.as_ref().map_or(0, |state| state.blockers_seen)
+    }
+
+    fn fatal_blockers_seen(&self) -> u64 {
+        self.state
+            .as_ref()
+            .map_or(0, |state| state.fatal_blockers_seen)
     }
 }
 
@@ -4004,9 +4035,11 @@ mod runtime_command_queue_tests {
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
-            std::mem::size_of::<NodeCore>() <= 912,
+            std::mem::size_of::<NodeCore>() <= 840,
             "cold runtime state widened NodeCore"
         );
+        assert!(std::mem::size_of::<StoredWalRecoveryReport>() <= 32);
+        assert!(std::mem::size_of::<RuntimeBlockerLog>() <= 8);
         assert!(
             std::mem::size_of::<RuntimeCommandQueue>() <= 224,
             "the fixed command queue widened"
@@ -4073,6 +4106,25 @@ mod runtime_command_queue_tests {
 
     #[test]
     fn stored_recovery_report_preserves_the_public_report() {
+        let clean_report = WalRecoveryReport {
+            recovered: None,
+            truncated_corrupt_tail: false,
+            surviving_records: 0,
+            removed_records: 0,
+            segments_scanned: 3,
+            checksum_format: Some(matrixraft_wal_checksum_format()),
+            retained_range: Some(LogRetainedRange {
+                first_log_index: 0,
+                last_log_index: 0,
+                first_segment_id: 7,
+                last_segment_id: 9,
+                record_count: 0,
+            }),
+        };
+        let stored = StoredWalRecoveryReport::from_report(clean_report.clone());
+        assert!(matches!(stored, StoredWalRecoveryReport::Clean { .. }));
+        assert_eq!(stored.to_report(), clean_report);
+
         let formats = [
             None,
             Some(matrixraft_wal_checksum_format()),

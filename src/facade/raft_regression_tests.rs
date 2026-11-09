@@ -2055,17 +2055,17 @@ mod fatal_error_classification_tests {
             record_runtime_result("propose", Err(RaftError::NotLeader(1)), &mut log, true);
         assert!(result.is_err(), "the error still reaches the caller");
         assert_eq!(
-            log.blockers.len(),
+            log.blockers().len(),
             1,
             "nothing is hidden: it is still a blocker"
         );
-        assert_eq!(log.blockers_seen, 1, "and it is counted");
+        assert_eq!(log.blockers_seen(), 1, "and it is counted");
         assert!(
-            log.fatal_blockers.is_empty(),
+            log.fatal_blockers().is_empty(),
             "a write sent to a follower is not a fatal event: {:?}",
-            log.fatal_blockers
+            log.fatal_blockers()
         );
-        assert_eq!(log.fatal_blockers_seen, 0);
+        assert_eq!(log.fatal_blockers_seen(), 0);
     }
 
     #[test]
@@ -2080,13 +2080,13 @@ mod fatal_error_classification_tests {
             true,
         );
         assert!(result.is_err());
-        assert_eq!(log.blockers.len(), 1);
+        assert_eq!(log.blockers().len(), 1);
         assert_eq!(
-            log.fatal_blockers.len(),
+            log.fatal_blockers().len(),
             1,
             "a failed durable write is the one thing this severity is for"
         );
-        assert_eq!(log.fatal_blockers_seen, 1);
+        assert_eq!(log.fatal_blockers_seen(), 1);
     }
 
     #[test]
@@ -2102,11 +2102,11 @@ mod fatal_error_classification_tests {
             false,
         );
         assert!(result.is_err());
-        assert_eq!(log.blockers.len(), 1);
+        assert_eq!(log.blockers().len(), 1);
         assert!(
-            log.fatal_blockers.is_empty(),
+            log.fatal_blockers().is_empty(),
             "the operation gate still decides first: {:?}",
-            log.fatal_blockers
+            log.fatal_blockers()
         );
     }
 }
@@ -2135,12 +2135,12 @@ mod retained_blocker_window_tests {
         }
 
         assert_eq!(
-            log.blockers.len(),
+            log.blockers().len(),
             MATRIXRAFT_RETAINED_BLOCKER_LIMIT,
             "the window is what bounds the memory"
         );
         assert_eq!(
-            log.blockers_seen, recorded as u64,
+            log.blockers_seen(), recorded as u64,
             "and the total is what keeps the volume readable: {recorded} happened"
         );
     }
@@ -2155,12 +2155,12 @@ mod retained_blocker_window_tests {
         }
         let last = MATRIXRAFT_RETAINED_BLOCKER_LIMIT + 9;
         assert_eq!(
-            log.blockers.last().map(String::as_str),
+            log.blockers().last().map(String::as_str),
             Some(format!("refusal:{last}").as_str()),
             "the newest has to be there"
         );
         assert!(
-            !log.blockers.iter().any(|blocker| blocker == "refusal:0"),
+            !log.blockers().iter().any(|blocker| blocker == "refusal:0"),
             "and the oldest has to have gone"
         );
     }
@@ -2174,10 +2174,13 @@ mod retained_blocker_window_tests {
         for index in 0..recorded {
             log.record(format!("storage:{index}"), true);
         }
-        assert_eq!(log.fatal_blockers.len(), MATRIXRAFT_RETAINED_BLOCKER_LIMIT);
-        assert_eq!(log.fatal_blockers_seen, recorded as u64);
         assert_eq!(
-            log.blockers_seen, recorded as u64,
+            log.fatal_blockers().len(),
+            MATRIXRAFT_RETAINED_BLOCKER_LIMIT
+        );
+        assert_eq!(log.fatal_blockers_seen(), recorded as u64);
+        assert_eq!(
+            log.blockers_seen(), recorded as u64,
             "a fatal blocker is an ordinary one too, so both totals move"
         );
     }
@@ -2191,10 +2194,10 @@ mod retained_blocker_window_tests {
         }
         let report = matrixraft_fatal_blocker_report_with_totals(
             "test",
-            log.blockers.as_slice().to_vec(),
-            log.fatal_blockers.as_slice().to_vec(),
-            log.blockers_seen,
-            log.fatal_blockers_seen,
+            log.blockers().to_vec(),
+            log.fatal_blockers().to_vec(),
+            log.blockers_seen(),
+            log.fatal_blockers_seen(),
         );
         assert_eq!(report.blocker_count, MATRIXRAFT_RETAINED_BLOCKER_LIMIT as u64);
         assert_eq!(report.blockers_seen, recorded as u64);
