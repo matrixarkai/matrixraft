@@ -54,8 +54,12 @@ const _: () = {
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(
-        std::mem::size_of::<ReplicationPipeline>() == 240,
-        "ReplicationPipeline changed width. It was 248 bytes until retry backoff \
+        std::mem::size_of::<ReplicationPipeline>() == 192,
+        "ReplicationPipeline changed width. It was 240 bytes until immutable \
+         pipeline limits moved behind an optional shared handle, saving 48 bytes \
+         per peer. Default limits use static storage with no allocation, while \
+         custom limits share one allocation across a group's peers. The limits \
+         object on the wire is unchanged. It was 248 bytes until retry backoff \
          became a derived value of the retry count, saving 8 bytes per peer \
          without changing the public status or wire shape. It was 280 bytes until append, \
          apply and reorder depths were derived from their queues, removing \
@@ -179,6 +183,10 @@ fn boxed_pipeline_values_keep_their_map_wire_shape() {
     assert!(
         pipeline.get("status").is_some(),
         "the pipeline state was wrapped or omitted on the wire"
+    );
+    assert_eq!(
+        pipeline["limits"]["max_inflights_replicate"],
+        serde_json::json!(256)
     );
     assert_eq!(pipeline.get("append_queue"), Some(&serde_json::json!([])));
     assert_eq!(pipeline.get("inflight"), Some(&serde_json::json!([])));
