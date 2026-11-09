@@ -447,7 +447,11 @@ struct Node {
     // that the admission checks on the propose path do not sum the log.
     #[serde(default)]
     retained_log_bytes: u64,
-    installed_snapshot: Option<SnapshotMetadata>,
+    /// Snapshot metadata is absent until this replica installs or publishes a
+    /// snapshot. Keep the cold 96-byte value behind one pointer so a fresh
+    /// replica does not retain its full width.
+    #[serde(default, with = "installed_snapshot_metadata")]
+    installed_snapshot: Option<Box<SnapshotTriggerState>>,
     commit_index: LogIndex,
     applied_index: LogIndex,
     safety_applied_index: LogIndex,
@@ -458,6 +462,12 @@ struct Node {
     auto_promote: bool,
     auto_promote_state: LearnerAutoPromoteState,
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(std::mem::size_of::<SnapshotMetadata>() <= 96);
+    assert!(std::mem::size_of::<Node>() <= 160);
+};
 
 impl Node {
     fn new(id: NodeId, replica_role: ReplicaRole, auto_promote: bool) -> Self {
@@ -721,7 +731,7 @@ impl Node {
     fn install_snapshot(&mut self, snapshot: RaftSnapshot) {
         let snapshot_index = snapshot.meta.last_log_id.index;
         let snapshot_log_id = snapshot.meta.last_log_id.clone();
-        self.installed_snapshot = Some(snapshot.meta);
+        self.installed_snapshot = Some(stored_snapshot_metadata(snapshot.meta));
         self.discard_log_through(snapshot_index);
         if self.replica_role == ReplicaRole::Witness {
             self.witness_ack_index = self.witness_ack_index.max(snapshot_index);
@@ -761,6 +771,51 @@ pub struct SnapshotTriggerState {
     pub elapsed_ticks: u64,
     pub timeout_ticks: u64,
     pub timed_out: bool,
+}
+
+impl std::ops::Deref for SnapshotTriggerState {
+    type Target = SnapshotMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.meta
+    }
+}
+
+fn stored_snapshot_metadata(meta: SnapshotMetadata) -> Box<SnapshotTriggerState> {
+    Box::new(SnapshotTriggerState {
+        meta,
+        elapsed_ticks: 0,
+        timeout_ticks: 0,
+        timed_out: false,
+    })
+}
+
+mod installed_snapshot_metadata {
+    use super::{stored_snapshot_metadata, SnapshotMetadata, SnapshotTriggerState};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(
+        value: &Option<Box<SnapshotTriggerState>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value
+            .as_ref()
+            .map(|snapshot| &snapshot.meta)
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<Box<SnapshotTriggerState>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<SnapshotMetadata>::deserialize(deserializer)
+            .map(|snapshot| snapshot.map(stored_snapshot_metadata))
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -3954,7 +4009,10 @@ impl RaftCluster {
             .nodes
             .get(&node_id)
             .ok_or(RaftError::NodeNotFound(node_id))?;
-        let installed_snapshot = node.installed_snapshot.clone();
+        let installed_snapshot = node
+            .installed_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.meta.clone());
         let snapshot_index = installed_snapshot
             .as_ref()
             .map(|snapshot| snapshot.last_log_id.index)
@@ -4034,7 +4092,10 @@ impl RaftCluster {
 
     /// Everything in a WAL record except the entries and the checksum.
     fn wal_record_shell(&self, node_id: NodeId, node: &Node) -> WalRecord {
-        let installed_snapshot = node.installed_snapshot.clone();
+        let installed_snapshot = node
+            .installed_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.meta.clone());
         let snapshot_index = installed_snapshot
             .as_ref()
             .map(|snapshot| snapshot.last_log_id.index)
@@ -4112,7 +4173,7 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(record.node_id))?;
         node.hard_state = record.hard_state;
         node.set_log(record.entries);
-        node.installed_snapshot = record.installed_snapshot;
+        node.installed_snapshot = record.installed_snapshot.map(stored_snapshot_metadata);
         node.commit_index = record.apply_snapshot_fence.commit_index;
         node.applied_index = record.apply_snapshot_fence.applied_index;
         node.safety_applied_index = record.apply_snapshot_fence.applied_index;
@@ -6917,26 +6978,25 @@ impl RaftCluster {
         if trigger.meta.snapshot_id != snapshot_id {
             return Ok(());
         }
-        let meta = self
+        let trigger = self
             .snapshot_trigger
             .take()
-            .expect("the matching snapshot trigger was just observed")
-            .meta;
+            .expect("the matching snapshot trigger was just observed");
         if success {
-            self.publish_ready_snapshot_to_waiting_peers(meta)?;
+            self.publish_ready_snapshot_to_waiting_peers(trigger)?;
         }
         Ok(())
     }
 
     fn publish_ready_snapshot_to_waiting_peers(
         &mut self,
-        meta: SnapshotMetadata,
+        trigger: Box<SnapshotTriggerState>,
     ) -> Result<(), RaftError> {
         let Some(leader_id) = self.leader_id else {
             return Ok(());
         };
-        let snapshot_index = meta.last_log_id.index;
-        let mut meta = Some(meta);
+        let snapshot_index = trigger.meta.last_log_id.index;
+        let mut trigger = Some(trigger);
         if let Some(leader) = self.nodes.get_mut(&leader_id) {
             let current_snapshot_index = leader
                 .installed_snapshot
@@ -6944,15 +7004,27 @@ impl RaftCluster {
                 .map(|snapshot| snapshot.last_log_id.index)
                 .unwrap_or_default();
             if snapshot_index >= current_snapshot_index {
-                leader.installed_snapshot = meta.take();
+                let mut installed = trigger
+                    .take()
+                    .expect("the completed trigger remains available");
+                installed.elapsed_ticks = 0;
+                installed.timeout_ticks = 0;
+                installed.timed_out = false;
+                leader.installed_snapshot = Some(installed);
             }
         }
-        let snapshot_id = meta
+        let snapshot_id = trigger
             .as_ref()
+            .map(|trigger| &trigger.meta)
             .or_else(|| {
                 self.nodes
                     .get(&leader_id)
-                    .and_then(|leader| leader.installed_snapshot.as_ref())
+                    .and_then(|leader| {
+                        leader
+                            .installed_snapshot
+                            .as_ref()
+                            .map(|snapshot| &snapshot.meta)
+                    })
             })
             .expect("snapshot metadata remains owned by the cluster")
             .snapshot_id
@@ -7065,7 +7137,12 @@ impl RaftCluster {
         let leader_snapshot = self
             .nodes
             .get(&leader_id)
-            .and_then(|leader| leader.installed_snapshot.clone());
+            .and_then(|leader| {
+                leader
+                    .installed_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.meta.clone())
+            });
         let required_snapshot_index = self
             .peer_pipelines
             .get(&peer_id)
@@ -7561,6 +7638,41 @@ impl Consensus for RaftCluster {
 
     fn complete_snapshot_trigger(&mut self, snapshot_id: &str) -> Result<(), RaftError> {
         RaftCluster::complete_snapshot_trigger(self, snapshot_id)
+    }
+}
+
+#[cfg(test)]
+mod node_snapshot_storage_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_metadata_stays_absent_until_install_and_keeps_its_wire_shape() {
+        let mut node = Node::new(1, ReplicaRole::Voter, false);
+        assert!(node.installed_snapshot.is_none());
+
+        let metadata = SnapshotMetadata {
+            snapshot_id: "snapshot-7".to_string(),
+            last_log_id: LogId { term: 3, index: 7 },
+            membership: vec![1, 2, 3],
+            members: Vec::new(),
+            payload_bytes: 4_096,
+        };
+        node.installed_snapshot = Some(stored_snapshot_metadata(metadata.clone()));
+
+        let encoded = serde_json::to_value(&node).expect("serialize node");
+        assert_eq!(
+            encoded.get("installed_snapshot"),
+            Some(&serde_json::to_value(&metadata).expect("serialize metadata"))
+        );
+
+        let decoded: Node = serde_json::from_value(encoded).expect("deserialize node");
+        assert_eq!(
+            decoded
+                .installed_snapshot
+                .as_ref()
+                .map(|snapshot| &snapshot.meta),
+            Some(&metadata)
+        );
     }
 }
 
