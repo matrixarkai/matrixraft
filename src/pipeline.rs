@@ -156,7 +156,6 @@ struct CompactPeerProgress {
     match_index: u64,
     next_index: u64,
     retry_attempts: u64,
-    backoff_ms: u64,
     next_retry_after_ms: u64,
     inflight_entries: u64,
     inflight_bytes: u64,
@@ -185,7 +184,6 @@ impl CompactPeerProgress {
             match_index: next_index.saturating_sub(1),
             next_index,
             retry_attempts: 0,
-            backoff_ms: 0,
             next_retry_after_ms: 0,
             inflight_entries: 0,
             inflight_bytes: 0,
@@ -263,7 +261,6 @@ impl CompactPeerProgress {
             match_index: progress.match_index,
             next_index: progress.next_index,
             retry_attempts: progress.retry_attempts,
-            backoff_ms: progress.backoff_ms,
             next_retry_after_ms: progress.next_retry_after_ms,
             inflight_entries: progress.inflight_entries,
             inflight_bytes: progress.inflight_bytes,
@@ -307,7 +304,7 @@ impl CompactPeerProgress {
             append_accepted: telemetry.append_accepted,
             append_rejected: telemetry.append_rejected,
             retry_attempts: self.retry_attempts,
-            backoff_ms: self.backoff_ms,
+            backoff_ms: next_backoff_ms(self.retry_attempts),
             next_retry_after_ms: self.next_retry_after_ms,
             inflight_entries: self.inflight_entries,
             inflight_bytes: self.inflight_bytes,
@@ -1322,7 +1319,6 @@ impl ReplicationPipeline {
             }
             self.drain_reorder_queue();
             self.status.retry_attempts = 0;
-            self.status.backoff_ms = 0;
             self.status.next_retry_after_ms = 0;
             if let Some(required_index) = response.require_snapshot {
                 self.maybe_require_snapshot(required_index);
@@ -1347,8 +1343,7 @@ impl ReplicationPipeline {
             }
             self.status.telemetry_mut().append_rejected += 1;
             self.status.retry_attempts += 1;
-            self.status.backoff_ms = next_backoff_ms(self.status.retry_attempts);
-            self.status.next_retry_after_ms = self.status.backoff_ms;
+            self.status.next_retry_after_ms = next_backoff_ms(self.status.retry_attempts);
             let was_replicating = self.status.progress_state == ProgressState::Replicate;
             if self.status.progress_state == ProgressState::Replicate {
                 self.status.progress_state = ProgressState::Probe;

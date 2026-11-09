@@ -214,6 +214,14 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
         .is_err());
     assert_eq!(pipeline.status().retry_attempts, 1);
     assert!(pipeline.status().backoff_ms > 0);
+    let encoded = serde_json::to_value(&pipeline).expect("serialize retry state");
+    assert_eq!(
+        encoded["status"]["backoff_ms"],
+        pipeline.status().backoff_ms
+    );
+    let decoded: ReplicationPipeline =
+        serde_json::from_value(encoded).expect("deserialize retry state");
+    assert_eq!(decoded, pipeline);
     assert_eq!(pipeline.status().inflight_entries, 0);
     assert_eq!(pipeline.status().inflight_bytes, 0);
     assert!(!pipeline.record_retry_backoff_tick(1));
