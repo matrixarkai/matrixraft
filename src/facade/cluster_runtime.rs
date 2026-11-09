@@ -454,7 +454,9 @@ struct Node {
     commit_index: LogIndex,
     applied_index: LogIndex,
     safety_applied_index: LogIndex,
-    rejected_apply_index: Option<LogIndex>,
+    // A rejection asks for the next log position, so zero is never a value.
+    // Keep the optional recovery floor in one word through the nonzero niche.
+    rejected_apply_index: Option<std::num::NonZeroU64>,
     witness_ack_index: LogIndex,
     healthy: bool,
     liveness_elapsed_ms: u64,
@@ -465,7 +467,7 @@ struct Node {
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(std::mem::size_of::<SnapshotMetadata>() <= 96);
-    assert!(std::mem::size_of::<Node>() <= 152);
+    assert!(std::mem::size_of::<Node>() <= 144);
 };
 
 impl Node {
@@ -726,6 +728,11 @@ impl Node {
         });
     }
 
+    fn rejected_apply_index(&self) -> Option<LogIndex> {
+        self.rejected_apply_index
+            .map(std::num::NonZeroU64::get)
+    }
+
     fn install_snapshot(&mut self, snapshot: RaftSnapshot) {
         let snapshot_index = snapshot.meta.last_log_id.index;
         let snapshot_log_id = snapshot.meta.last_log_id.clone();
@@ -737,7 +744,7 @@ impl Node {
         self.commit_index = self.commit_index.max(snapshot_index);
         if self
             .rejected_apply_index
-            .is_some_and(|required| required <= snapshot_index)
+            .is_some_and(|required| required.get() <= snapshot_index)
         {
             self.rejected_apply_index = None;
         }
@@ -2278,7 +2285,7 @@ impl RaftCluster {
             .nodes
             .get(&node_id)
             .ok_or(RaftError::NodeNotFound(node_id))?
-            .rejected_apply_index)
+            .rejected_apply_index())
     }
 
     pub fn safety_applied_index(
@@ -2562,7 +2569,8 @@ impl RaftCluster {
             }
             node.safety_applied_index = applied_index;
             if apply_task_rejected {
-                node.rejected_apply_index = Some(node.safety_applied_index.saturating_add(1));
+                node.rejected_apply_index =
+                    std::num::NonZeroU64::new(node.safety_applied_index.saturating_add(1));
             }
             apply_task_rejected && node.raft_role == StateRole::Leader
         };
@@ -4323,7 +4331,7 @@ impl RaftCluster {
                 .nodes
                 .get(&target)
                 .ok_or(RaftError::NodeNotFound(target))?;
-            let require_snapshot = node.rejected_apply_index;
+            let require_snapshot = node.rejected_apply_index();
             return Ok(AppendEntriesResponse {
                 term: node.hard_state.current_term.max(self.current_term),
                 success: false,
@@ -4341,7 +4349,7 @@ impl RaftCluster {
                 .nodes
                 .get(&target)
                 .ok_or(RaftError::NodeNotFound(target))?;
-            let require_snapshot = node.rejected_apply_index;
+            let require_snapshot = node.rejected_apply_index();
             return Ok(AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
@@ -4395,7 +4403,7 @@ impl RaftCluster {
             .get_mut(&target)
             .ok_or(RaftError::NodeNotFound(target))?;
         if request.term < node.hard_state.current_term {
-            let require_snapshot = node.rejected_apply_index;
+            let require_snapshot = node.rejected_apply_index();
             return Ok(AppendEntriesResponse {
                 term: node.hard_state.current_term,
                 success: false,
@@ -4422,7 +4430,7 @@ impl RaftCluster {
             .map(|pipeline| pipeline.status().snapshot_installing)
             .unwrap_or(false)
         {
-            let require_snapshot = node.rejected_apply_index;
+            let require_snapshot = node.rejected_apply_index();
             return Ok(AppendEntriesResponse {
                 term: node.hard_state.current_term,
                 success: true,
@@ -4439,7 +4447,7 @@ impl RaftCluster {
             let match_index = node.match_index();
             node.advance_commit(request.leader_commit.min(match_index));
             let term = node.hard_state.current_term;
-            let require_snapshot = node.rejected_apply_index;
+            let require_snapshot = node.rejected_apply_index();
             self.refresh_cluster_indexes();
             return Ok(AppendEntriesResponse {
                 term,
@@ -4454,7 +4462,7 @@ impl RaftCluster {
             });
         }
         if request_prev_index < node.commit_index {
-            let require_snapshot = node.rejected_apply_index;
+            let require_snapshot = node.rejected_apply_index();
             return Ok(AppendEntriesResponse {
                 term: node.hard_state.current_term,
                 success: true,
@@ -4472,7 +4480,7 @@ impl RaftCluster {
                 let match_index = node.match_index();
                 if match_index < prev.index {
                     let term = node.hard_state.current_term;
-                    let require_snapshot = node.rejected_apply_index;
+                    let require_snapshot = node.rejected_apply_index();
                     if !request.entries.is_empty() {
                         self.cache_reordered_append(
                             target,
@@ -4496,7 +4504,7 @@ impl RaftCluster {
                     Some(local_term) if local_term == prev.term => {}
                     Some(_) => {
                         let rejection_hint = node.conflict_next_index(prev.index);
-                        let require_snapshot = node.rejected_apply_index;
+                        let require_snapshot = node.rejected_apply_index();
                         return Ok(AppendEntriesResponse {
                             term: node.hard_state.current_term,
                             success: false,
@@ -4517,6 +4525,7 @@ impl RaftCluster {
                             .unwrap_or_default();
                         let require_snapshot = node
                             .rejected_apply_index
+                            .map(std::num::NonZeroU64::get)
                             .or((snapshot_index > 0 && prev.index < snapshot_index)
                                 .then_some(snapshot_index));
                         return Ok(AppendEntriesResponse {
@@ -4538,7 +4547,7 @@ impl RaftCluster {
             let expected_index = request_prev_index + offset as u64 + 1;
             if entry.log_id.index != expected_index {
                 let match_index = node.match_index();
-                let require_snapshot = node.rejected_apply_index;
+                let require_snapshot = node.rejected_apply_index();
                 return Ok(AppendEntriesResponse {
                     term: node.hard_state.current_term,
                     success: false,
@@ -4588,7 +4597,7 @@ impl RaftCluster {
                     {
                         if appended_entries_count == 0 {
                             let match_index = node.match_index();
-                            let require_snapshot = node.rejected_apply_index;
+                            let require_snapshot = node.rejected_apply_index();
                             return Ok(AppendEntriesResponse {
                                 term: node.hard_state.current_term,
                                 success: false,
@@ -4630,7 +4639,7 @@ impl RaftCluster {
         node.advance_commit(request.leader_commit.min(match_index));
         let node_commit_index = node.commit_index;
         let term = node.hard_state.current_term;
-        let require_snapshot = node.rejected_apply_index;
+        let require_snapshot = node.rejected_apply_index();
         self.last_index_before_current_term = last_index_before_current_term;
         self.pending_membership_change_index = pending_membership_change_index;
         if let Some(last_retained) = last_retained_after_truncation {
@@ -6088,6 +6097,7 @@ impl RaftCluster {
         let snapshot_index = snapshot.meta.last_log_id.index;
         match node.rejected_apply_index {
             Some(required_index) => {
+                let required_index = required_index.get();
                 if snapshot_index < required_index {
                     return Err(RaftError::InvalidRequest(format!(
                         "snapshot index {snapshot_index} is below rejected apply index {required_index}"
@@ -6672,7 +6682,7 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(target))?;
         let snapshot_index = request.chunk.meta.last_log_id.index;
         let stale = match node.rejected_apply_index {
-            Some(required_index) => snapshot_index < required_index,
+            Some(required_index) => snapshot_index < required_index.get(),
             None => snapshot_index <= node.commit_index,
         };
         if !stale {
@@ -7722,7 +7732,7 @@ mod node_snapshot_storage_tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn node_identity_uses_the_directory_slot() {
-        assert_eq!(std::mem::size_of::<Node>(), 152);
+        assert_eq!(std::mem::size_of::<Node>(), 144);
 
         let cluster = RaftCluster::new(
             5,
@@ -7749,6 +7759,21 @@ mod node_snapshot_storage_tests {
         assert!(error
             .to_string()
             .contains("node id 8 does not match directory key 7"));
+    }
+
+    #[test]
+    fn rejected_apply_index_keeps_its_wire_shape() {
+        let mut node = Node::new(ReplicaRole::Voter, false);
+        node.rejected_apply_index = std::num::NonZeroU64::new(9);
+
+        let mut encoded = serde_json::to_value(&node).expect("serialize node");
+        assert_eq!(encoded["rejected_apply_index"], serde_json::json!(9));
+
+        let decoded: Node = serde_json::from_value(encoded.clone()).expect("deserialize node");
+        assert_eq!(decoded.rejected_apply_index(), Some(9));
+
+        encoded["rejected_apply_index"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<Node>(encoded).is_err());
     }
 
     #[test]
