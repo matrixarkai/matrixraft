@@ -2161,6 +2161,26 @@ fn apply_unpersisted_proposal(
 /// Holding it in a struct does not by itself change any of that -- the loop
 /// below still drives it exactly as before. What it changes is that the loop
 /// is no longer the only thing that *could*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum RuntimeTickReason {
+    RuntimeCreated,
+    HeartbeatTick,
+    SnapshotDueTick,
+    ElectionTick,
+}
+
+impl RuntimeTickReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::RuntimeCreated => "runtime_created",
+            Self::HeartbeatTick => "heartbeat_tick",
+            Self::SnapshotDueTick => "snapshot_due_tick",
+            Self::ElectionTick => "election_tick",
+        }
+    }
+}
+
 struct NodeCore {
     node_id: NodeId,
     cluster: RaftCluster,
@@ -2177,15 +2197,10 @@ struct NodeCore {
     pre_vote_executions: u64,
     campaign_executions: u64,
     leader_transfer_executions: u64,
-    /// Why the last tick happened, as one of a handful of literals.
-    ///
-    /// `&'static str` rather than `String` because it is only ever assigned a
-    /// literal, and it is assigned on every tick of every group: as a `String`
-    /// that was a heap allocation per tick, 819,200 a second at 8192 groups on a
-    /// 10ms interval, to store a word the binary already contains. The one place
-    /// that needs an owned copy is `RuntimeTimerStatus`, which is built when
-    /// somebody asks for status rather than on a tick.
-    last_tick_reason: &'static str,
+    /// Why the last tick happened. The one-byte enum keeps the fixed set of
+    /// values compact; status converts it to the existing public string only
+    /// when somebody asks for a report.
+    last_tick_reason: RuntimeTickReason,
     blocker_log: RuntimeBlockerLog,
     membership_executor: MembershipExecutor,
     /// A command drained by proposal coalescing that turned out not to be a
@@ -2278,7 +2293,7 @@ impl NodeCore {
     let pre_vote_executions = 0;
     let campaign_executions = 0;
     let leader_transfer_executions = 0_u64;
-    let last_tick_reason = "runtime_created";
+    let last_tick_reason = RuntimeTickReason::RuntimeCreated;
     let blocker_log = RuntimeBlockerLog::default();
     let membership_executor = MembershipExecutor::new();
     // A command drained by proposal coalescing that turned out not to be a
@@ -2375,7 +2390,7 @@ impl NodeCore {
                     if !cluster.leader_lease_valid && cluster.step_down_leader_if_lost_quorum() {
                         blocker_log.record("lost_quorum_step_down".to_string(), false);
                     }
-                    *last_tick_reason = "heartbeat_tick";
+                    *last_tick_reason = RuntimeTickReason::HeartbeatTick;
                     // The default policy for the decision
                     // `snapshot_threshold_entries` was declared for. A host
                     // wanting a different one reads `snapshot_due()` itself
@@ -2384,7 +2399,9 @@ impl NodeCore {
                     // report consults first.
                     if cluster.snapshot_is_due() {
                         match cluster.trigger_snapshot() {
-                            Ok(_) => *last_tick_reason = "snapshot_due_tick",
+                            Ok(_) => {
+                                *last_tick_reason = RuntimeTickReason::SnapshotDueTick;
+                            }
                             Err(error) => blocker_log.record(format!("snapshot_due:{error}"), false),
                         }
                     }
@@ -2432,7 +2449,7 @@ impl NodeCore {
                     if *election_elapsed_ms >= *effective_election_timeout_ms {
                         *election_ticks += 1;
                         *election_elapsed_ms = 0;
-                        *last_tick_reason = "election_tick";
+                        *last_tick_reason = RuntimeTickReason::ElectionTick;
                         let local_replica_role =
                             cluster.nodes.get(&node_id).map(|node| node.replica_role);
                         let lease_expired = !cluster.is_follower_lease_valid();
@@ -2722,7 +2739,7 @@ impl NodeCore {
                         pre_vote_executions: *pre_vote_executions,
                         campaign_executions: *campaign_executions,
                         leader_transfer_executions: *leader_transfer_executions,
-                        last_tick_reason: last_tick_reason.to_string(),
+                        last_tick_reason: (*last_tick_reason).as_str().to_string(),
                     },
                     peer_runtime: raft_peer_runtime_states(
                         cluster,
@@ -3516,7 +3533,12 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// that config directly narrows `NodeCore` from 768 to 744 bytes, saving
 /// another 192 KiB across 8,192 hosted groups.
 ///
-/// The native measurement with all nineteen changes is 41 MiB at
+/// The last-tick reason is one of four fixed values. Storing that state as a
+/// one-byte enum instead of a 16-byte string slice narrows `NodeCore` from 744
+/// to 728 bytes, saving another 128 KiB across 8,192 hosted groups while status
+/// keeps the same strings.
+///
+/// The native measurement with all twenty changes is 41 MiB at
 /// whole-MiB resolution for 8,192 live groups, or **4 KiB per group**; the
 /// allocation profiles above resolve reductions that RSS rounding does not.
 /// The handler-directory reduction is below that whole-MiB resolution. The
@@ -4249,7 +4271,7 @@ mod runtime_command_queue_tests {
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
-            std::mem::size_of::<NodeCore>() <= 744,
+            std::mem::size_of::<NodeCore>() <= 728,
             "cold runtime state widened NodeCore"
         );
         assert!(
@@ -4279,6 +4301,19 @@ mod runtime_command_queue_tests {
         assert!(std::mem::size_of::<SparseVec<u64>>() <= 8);
         assert!(std::mem::size_of::<SparseSet<u64>>() <= 8);
     };
+
+    #[test]
+    fn compact_tick_reason_preserves_status_strings() {
+        let cases = [
+            (RuntimeTickReason::RuntimeCreated, "runtime_created"),
+            (RuntimeTickReason::HeartbeatTick, "heartbeat_tick"),
+            (RuntimeTickReason::SnapshotDueTick, "snapshot_due_tick"),
+            (RuntimeTickReason::ElectionTick, "election_tick"),
+        ];
+        for (reason, expected) in cases {
+            assert_eq!(reason.as_str(), expected);
+        }
+    }
 
     #[test]
     fn compact_runtime_messages_preserve_public_messages() {
