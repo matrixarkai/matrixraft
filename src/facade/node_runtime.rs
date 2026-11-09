@@ -2167,9 +2167,6 @@ struct NodeCore {
     wal: Option<PersistentRaftWal>,
     last_wal_recovery_report: StoredWalRecoveryReport,
     state: NodeRuntimeState,
-    heartbeat_interval_ms: u64,
-    election_timeout_ms: u64,
-    leader_lease_timeout_ms: u64,
     heartbeat_ticks: u64,
     election_ticks: u64,
     election_elapsed_ms: u64,
@@ -2274,12 +2271,6 @@ impl NodeCore {
         }
     };
     let state = NodeRuntimeState::Created;
-    let heartbeat_interval_ms = options.config.heartbeat_interval_ms.max(1);
-    let election_timeout_ms = options
-        .config
-        .election_timeout_ms
-        .max(heartbeat_interval_ms);
-    let leader_lease_timeout_ms = options.config.leader_lease_ms.max(1);
     let heartbeat_ticks = 0;
     let election_ticks = 0;
     let election_elapsed_ms: u64 = 0;
@@ -2302,9 +2293,6 @@ impl NodeCore {
             wal,
             last_wal_recovery_report,
             state,
-            heartbeat_interval_ms,
-            election_timeout_ms,
-            leader_lease_timeout_ms,
             heartbeat_ticks,
             election_ticks,
             election_elapsed_ms,
@@ -2330,8 +2318,6 @@ impl NodeCore {
             node_id,
             cluster,
             state,
-            heartbeat_interval_ms,
-            election_timeout_ms,
             heartbeat_ticks,
             election_ticks,
             election_elapsed_ms,
@@ -2345,8 +2331,8 @@ impl NodeCore {
             ..
         } = self;
         let node_id = *node_id;
-        let heartbeat_interval_ms = *heartbeat_interval_ms;
-        let election_timeout_ms = *election_timeout_ms;
+        let heartbeat_interval_ms = cluster.config.heartbeat_interval_ms;
+        let election_timeout_ms = cluster.config.election_timeout_ms;
         if let Some(wal) = wal.as_mut() {
             wal.release_idle_segment_descriptor();
         }
@@ -2543,9 +2529,6 @@ impl NodeCore {
             wal,
             last_wal_recovery_report,
             state,
-            heartbeat_interval_ms,
-            election_timeout_ms,
-            leader_lease_timeout_ms,
             heartbeat_ticks,
             election_ticks,
             election_elapsed_ms,
@@ -2562,9 +2545,9 @@ impl NodeCore {
         } = self;
         let node_id = *node_id;
         let group_id = cluster.group_id;
-        let heartbeat_interval_ms = *heartbeat_interval_ms;
-        let election_timeout_ms = *election_timeout_ms;
-        let leader_lease_timeout_ms = *leader_lease_timeout_ms;
+        let heartbeat_interval_ms = cluster.config.heartbeat_interval_ms;
+        let election_timeout_ms = cluster.config.election_timeout_ms;
+        let leader_lease_timeout_ms = cluster.config.leader_lease_ms;
         // Auto group commit. A durable proposal is its fsync and very little
         // else, so a node answering concurrent proposers one at a time is
         // capped at a few hundred per second whatever else it does. While one
@@ -3528,7 +3511,12 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// retains 533-535 bytes per group instead of 560-563, while three descending
 /// registration runs finish in 27-40ms and deliver mail to every group.
 ///
-/// The native measurement with all eighteen changes is 41 MiB at
+/// The runtime core also retained heartbeat, election, and lease durations
+/// beside the same validated values in its resident cluster config. Reading
+/// that config directly narrows `NodeCore` from 768 to 744 bytes, saving
+/// another 192 KiB across 8,192 hosted groups.
+///
+/// The native measurement with all nineteen changes is 41 MiB at
 /// whole-MiB resolution for 8,192 live groups, or **4 KiB per group**; the
 /// allocation profiles above resolve reductions that RSS rounding does not.
 /// The handler-directory reduction is below that whole-MiB resolution. The
@@ -3912,7 +3900,7 @@ fn raft_node_runtime_loop(options: NodeOptions, command_rx: RuntimeCommandReceiv
     // When the next tick is due. The loop waits for what is left of the
     // interval rather than starting a fresh one per receive, so arriving
     // commands cannot hold the tick off indefinitely.
-    let heartbeat_interval = Duration::from_millis(core.heartbeat_interval_ms);
+    let heartbeat_interval = Duration::from_millis(core.cluster.config.heartbeat_interval_ms);
     let mut next_tick = Instant::now() + heartbeat_interval;
     loop {
         let command = if let Some(command) = core.carried_command.take() {
@@ -4261,7 +4249,7 @@ mod runtime_command_queue_tests {
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
-            std::mem::size_of::<NodeCore>() <= 768,
+            std::mem::size_of::<NodeCore>() <= 744,
             "cold runtime state widened NodeCore"
         );
         assert!(
