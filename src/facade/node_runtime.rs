@@ -2163,7 +2163,6 @@ fn apply_unpersisted_proposal(
 /// is no longer the only thing that *could*.
 struct NodeCore {
     node_id: NodeId,
-    group_id: GroupId,
     cluster: RaftCluster,
     wal: Option<PersistentRaftWal>,
     last_wal_recovery_report: StoredWalRecoveryReport,
@@ -2299,7 +2298,6 @@ impl NodeCore {
     // commands cannot hold the tick off indefinitely.
         Ok(Self {
             node_id,
-            group_id,
             cluster,
             wal,
             last_wal_recovery_report,
@@ -2541,7 +2539,6 @@ impl NodeCore {
     fn handle(&mut self, command: NodeRuntimeOp) -> ControlFlow<()> {
         let Self {
             node_id,
-            group_id,
             cluster,
             wal,
             last_wal_recovery_report,
@@ -2564,7 +2561,7 @@ impl NodeCore {
             ..
         } = self;
         let node_id = *node_id;
-        let group_id = *group_id;
+        let group_id = cluster.group_id;
         let heartbeat_interval_ms = *heartbeat_interval_ms;
         let election_timeout_ms = *election_timeout_ms;
         let leader_lease_timeout_ms = *leader_lease_timeout_ms;
@@ -4264,7 +4261,7 @@ mod runtime_command_queue_tests {
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
-            std::mem::size_of::<NodeCore>() <= 776,
+            std::mem::size_of::<NodeCore>() <= 768,
             "cold runtime state widened NodeCore"
         );
         assert!(
