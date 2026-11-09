@@ -111,6 +111,263 @@ pub struct PeerProgress {
     pub witness_quorum_reached: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PeerTelemetry {
+    append_requests: u64,
+    append_batches: u64,
+    max_append_batch_entries: u64,
+    max_append_batch_bytes: u64,
+    append_accepted: u64,
+    append_rejected: u64,
+    append_queue_max_depth: u64,
+    apply_queue_max_depth: u64,
+    apply_backpressure_rejections: u64,
+    memory_backpressure_rejections: u64,
+    oversized_log_rejections: u64,
+    out_of_order_append_rejections: u64,
+    reorder_entries_rejected: u64,
+    reorder_entries_converged: u64,
+    reorder_entry_timeouts: u64,
+    reorder_dropped_packages: u64,
+    stale_term_rejections: u64,
+    packet_loss_events: u64,
+    network_error_probe_transitions: u64,
+    snapshot_send_attempts: u64,
+    snapshot_backpressure_rejections: u64,
+    snapshot_rate_limit_rejections: u64,
+    snapshot_install_rolled_back: u64,
+    snapshot_chunk_retry_count: u64,
+    snapshot_send_timeouts: u64,
+    snapshot_during_membership_change: bool,
+    snapshot_rejoin_after_compacted_log: bool,
+    transfer_leader_target: bool,
+    transfer_leader_timeouts: u64,
+    pre_vote_rejections: u64,
+    election_rejections: u64,
+    offline_timeout_rejections: u64,
+    learner_catchup_rounds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompactPeerProgress {
+    progress_state: ProgressState,
+    paused: bool,
+    old_paused: bool,
+    match_index: u64,
+    next_index: u64,
+    retry_attempts: u64,
+    backoff_ms: u64,
+    next_retry_after_ms: u64,
+    inflight_entries: u64,
+    inflight_bytes: u64,
+    append_queue_depth: u64,
+    apply_inflight_tasks: u64,
+    apply_queue_depth: u64,
+    reorder_queue_depth: u64,
+    snapshot_sending: bool,
+    snapshot_installing: bool,
+    snapshot_installed_index: u64,
+    snapshot_install_total_chunks: u64,
+    snapshot_install_progress_per_mille: u64,
+    required_snapshot_index: LogIndex,
+    acked_snapshot_index: LogIndex,
+    offline_timeout_reached: bool,
+    follower_lag: LogIndex,
+    learner_caught_up: bool,
+    witness_quorum_required: u64,
+    witness_quorum_acked: u64,
+    witness_quorum_reached: bool,
+    telemetry: Option<Box<PeerTelemetry>>,
+}
+
+impl CompactPeerProgress {
+    fn new(next_index: LogIndex) -> Self {
+        Self {
+            progress_state: ProgressState::Probe,
+            paused: false,
+            old_paused: false,
+            match_index: next_index.saturating_sub(1),
+            next_index,
+            retry_attempts: 0,
+            backoff_ms: 0,
+            next_retry_after_ms: 0,
+            inflight_entries: 0,
+            inflight_bytes: 0,
+            append_queue_depth: 0,
+            apply_inflight_tasks: 0,
+            apply_queue_depth: 0,
+            reorder_queue_depth: 0,
+            snapshot_sending: false,
+            snapshot_installing: false,
+            snapshot_installed_index: 0,
+            snapshot_install_total_chunks: 0,
+            snapshot_install_progress_per_mille: 0,
+            required_snapshot_index: 0,
+            acked_snapshot_index: 0,
+            offline_timeout_reached: false,
+            follower_lag: 0,
+            learner_caught_up: false,
+            witness_quorum_required: 0,
+            witness_quorum_acked: 0,
+            witness_quorum_reached: false,
+            telemetry: None,
+        }
+    }
+
+    fn telemetry_mut(&mut self) -> &mut PeerTelemetry {
+        self.telemetry
+            .get_or_insert_with(|| Box::new(PeerTelemetry::default()))
+    }
+
+    fn reset(&mut self, next_index: LogIndex) {
+        let telemetry = self.telemetry.take();
+        *self = Self::new(next_index);
+        if let Some(mut telemetry) = telemetry {
+            *telemetry = PeerTelemetry::default();
+            self.telemetry = Some(telemetry);
+        }
+    }
+
+    fn from_public(progress: PeerProgress) -> Self {
+        let telemetry = PeerTelemetry {
+            append_requests: progress.append_requests,
+            append_batches: progress.append_batches,
+            max_append_batch_entries: progress.max_append_batch_entries,
+            max_append_batch_bytes: progress.max_append_batch_bytes,
+            append_accepted: progress.append_accepted,
+            append_rejected: progress.append_rejected,
+            append_queue_max_depth: progress.append_queue_max_depth,
+            apply_queue_max_depth: progress.apply_queue_max_depth,
+            apply_backpressure_rejections: progress.apply_backpressure_rejections,
+            memory_backpressure_rejections: progress.memory_backpressure_rejections,
+            oversized_log_rejections: progress.oversized_log_rejections,
+            out_of_order_append_rejections: progress.out_of_order_append_rejections,
+            reorder_entries_rejected: progress.reorder_entries_rejected,
+            reorder_entries_converged: progress.reorder_entries_converged,
+            reorder_entry_timeouts: progress.reorder_entry_timeouts,
+            reorder_dropped_packages: progress.reorder_dropped_packages,
+            stale_term_rejections: progress.stale_term_rejections,
+            packet_loss_events: progress.packet_loss_events,
+            network_error_probe_transitions: progress.network_error_probe_transitions,
+            snapshot_send_attempts: progress.snapshot_send_attempts,
+            snapshot_backpressure_rejections: progress.snapshot_backpressure_rejections,
+            snapshot_rate_limit_rejections: progress.snapshot_rate_limit_rejections,
+            snapshot_install_rolled_back: progress.snapshot_install_rolled_back,
+            snapshot_chunk_retry_count: progress.snapshot_chunk_retry_count,
+            snapshot_send_timeouts: progress.snapshot_send_timeouts,
+            snapshot_during_membership_change: progress.snapshot_during_membership_change,
+            snapshot_rejoin_after_compacted_log: progress.snapshot_rejoin_after_compacted_log,
+            transfer_leader_target: progress.transfer_leader_target,
+            transfer_leader_timeouts: progress.transfer_leader_timeouts,
+            pre_vote_rejections: progress.pre_vote_rejections,
+            election_rejections: progress.election_rejections,
+            offline_timeout_rejections: progress.offline_timeout_rejections,
+            learner_catchup_rounds: progress.learner_catchup_rounds,
+        };
+        Self {
+            progress_state: progress.progress_state,
+            paused: progress.paused,
+            old_paused: progress.old_paused,
+            match_index: progress.match_index,
+            next_index: progress.next_index,
+            retry_attempts: progress.retry_attempts,
+            backoff_ms: progress.backoff_ms,
+            next_retry_after_ms: progress.next_retry_after_ms,
+            inflight_entries: progress.inflight_entries,
+            inflight_bytes: progress.inflight_bytes,
+            append_queue_depth: progress.append_queue_depth,
+            apply_inflight_tasks: progress.apply_inflight_tasks,
+            apply_queue_depth: progress.apply_queue_depth,
+            reorder_queue_depth: progress.reorder_queue_depth,
+            snapshot_sending: progress.snapshot_sending,
+            snapshot_installing: progress.snapshot_installing,
+            snapshot_installed_index: progress.snapshot_installed_index,
+            snapshot_install_total_chunks: progress.snapshot_install_total_chunks,
+            snapshot_install_progress_per_mille: progress.snapshot_install_progress_per_mille,
+            required_snapshot_index: progress.required_snapshot_index,
+            acked_snapshot_index: progress.acked_snapshot_index,
+            offline_timeout_reached: progress.offline_timeout_reached,
+            follower_lag: progress.follower_lag,
+            learner_caught_up: progress.learner_caught_up,
+            witness_quorum_required: progress.witness_quorum_required,
+            witness_quorum_acked: progress.witness_quorum_acked,
+            witness_quorum_reached: progress.witness_quorum_reached,
+            telemetry: (telemetry != PeerTelemetry::default()).then(|| Box::new(telemetry)),
+        }
+    }
+
+    fn to_public(&self, peer_id: NodeId, limits: PipelineLimits) -> PeerProgress {
+        let telemetry = self.telemetry.as_deref().cloned().unwrap_or_default();
+        PeerProgress {
+            peer_id,
+            progress_state: self.progress_state,
+            paused: self.paused,
+            old_paused: self.old_paused,
+            match_index: self.match_index,
+            next_index: self.next_index,
+            append_requests: telemetry.append_requests,
+            append_batches: telemetry.append_batches,
+            max_append_batch_entries: telemetry.max_append_batch_entries,
+            max_append_batch_bytes: telemetry.max_append_batch_bytes,
+            append_accepted: telemetry.append_accepted,
+            append_rejected: telemetry.append_rejected,
+            retry_attempts: self.retry_attempts,
+            backoff_ms: self.backoff_ms,
+            next_retry_after_ms: self.next_retry_after_ms,
+            inflight_entries: self.inflight_entries,
+            inflight_bytes: self.inflight_bytes,
+            append_queue_depth: self.append_queue_depth,
+            append_queue_limit: limits.max_inflights_replicate,
+            append_queue_max_depth: telemetry.append_queue_max_depth,
+            inflight_bytes_limit: limits.max_memory_replicate_log_bytes,
+            apply_inflight_tasks: self.apply_inflight_tasks,
+            apply_inflight_limit: limits.max_inflights_apply_task,
+            apply_queue_depth: self.apply_queue_depth,
+            apply_queue_max_depth: telemetry.apply_queue_max_depth,
+            apply_batch_bytes_limit: limits.max_apply_batch_bytes,
+            apply_backpressure_rejections: telemetry.apply_backpressure_rejections,
+            memory_backpressure_rejections: telemetry.memory_backpressure_rejections,
+            oversized_log_rejections: telemetry.oversized_log_rejections,
+            reorder_queue_depth: self.reorder_queue_depth,
+            out_of_order_append_rejections: telemetry.out_of_order_append_rejections,
+            reorder_entries_rejected: telemetry.reorder_entries_rejected,
+            reorder_entries_converged: telemetry.reorder_entries_converged,
+            reorder_entry_timeouts: telemetry.reorder_entry_timeouts,
+            reorder_dropped_packages: telemetry.reorder_dropped_packages,
+            stale_term_rejections: telemetry.stale_term_rejections,
+            packet_loss_events: telemetry.packet_loss_events,
+            network_error_probe_transitions: telemetry.network_error_probe_transitions,
+            snapshot_sending: self.snapshot_sending,
+            snapshot_installing: self.snapshot_installing,
+            snapshot_installed_index: self.snapshot_installed_index,
+            snapshot_send_attempts: telemetry.snapshot_send_attempts,
+            snapshot_install_total_chunks: self.snapshot_install_total_chunks,
+            snapshot_install_progress_per_mille: self.snapshot_install_progress_per_mille,
+            snapshot_backpressure_rejections: telemetry.snapshot_backpressure_rejections,
+            snapshot_rate_limit_rejections: telemetry.snapshot_rate_limit_rejections,
+            snapshot_install_rolled_back: telemetry.snapshot_install_rolled_back,
+            snapshot_chunk_retry_count: telemetry.snapshot_chunk_retry_count,
+            snapshot_send_timeouts: telemetry.snapshot_send_timeouts,
+            required_snapshot_index: self.required_snapshot_index,
+            acked_snapshot_index: self.acked_snapshot_index,
+            snapshot_during_membership_change: telemetry.snapshot_during_membership_change,
+            snapshot_rejoin_after_compacted_log: telemetry.snapshot_rejoin_after_compacted_log,
+            transfer_leader_target: telemetry.transfer_leader_target,
+            transfer_leader_timeouts: telemetry.transfer_leader_timeouts,
+            pre_vote_rejections: telemetry.pre_vote_rejections,
+            election_rejections: telemetry.election_rejections,
+            offline_timeout_reached: self.offline_timeout_reached,
+            offline_timeout_rejections: telemetry.offline_timeout_rejections,
+            follower_lag: self.follower_lag,
+            learner_catchup_rounds: telemetry.learner_catchup_rounds,
+            learner_caught_up: self.learner_caught_up,
+            witness_quorum_required: self.witness_quorum_required,
+            witness_quorum_acked: self.witness_quorum_acked,
+            witness_quorum_reached: self.witness_quorum_reached,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObservedPeerPipeline {
     pub peer_id: NodeId,
@@ -611,7 +868,7 @@ where
 pub struct ReplicationPipeline {
     peer_id: NodeId,
     limits: PipelineLimits,
-    status: PeerProgress,
+    status: CompactPeerProgress,
     append_queue: SparseDeque<QueuedAppend>,
     append_queue_bytes: u64,
     inflight: SparseDeque<InflightAppend>,
@@ -630,7 +887,7 @@ pub struct ReplicationPipeline {
 struct ReplicationPipelineRef<'a> {
     peer_id: NodeId,
     limits: &'a PipelineLimits,
-    status: &'a PeerProgress,
+    status: PeerProgress,
     append_queue: &'a SparseDeque<QueuedAppend>,
     append_queue_bytes: u64,
     inflight: &'a SparseDeque<InflightAppend>,
@@ -660,7 +917,7 @@ impl Serialize for ReplicationPipeline {
         ReplicationPipelineRef {
             peer_id: self.peer_id,
             limits: &self.limits,
-            status: &self.status,
+            status: self.status(),
             append_queue: &self.append_queue,
             append_queue_bytes: self.append_queue_bytes,
             inflight: &self.inflight,
@@ -695,7 +952,7 @@ impl<'de> Deserialize<'de> for ReplicationPipeline {
         Ok(Self {
             peer_id: pipeline.peer_id,
             limits: pipeline.limits,
-            status: pipeline.status,
+            status: CompactPeerProgress::from_public(pipeline.status),
             append_queue: pipeline.append_queue,
             append_queue_bytes: pipeline.append_queue_bytes,
             inflight: pipeline.inflight,
@@ -712,7 +969,7 @@ impl fmt::Debug for ReplicationPipeline {
             .debug_struct("ReplicationPipeline")
             .field("peer_id", &self.peer_id)
             .field("limits", &self.limits)
-            .field("status", &self.status)
+            .field("status", &self.status())
             .field("append_queue", &self.append_queue)
             .field("append_queue_bytes", &self.append_queue_bytes)
             .field("inflight", &self.inflight)
@@ -727,7 +984,7 @@ impl PartialEq for ReplicationPipeline {
     fn eq(&self, other: &Self) -> bool {
         self.peer_id == other.peer_id
             && self.limits == other.limits
-            && self.status == other.status
+            && self.status() == other.status()
             && self.append_queue == other.append_queue
             && self.append_queue_bytes == other.append_queue_bytes
             && self.inflight == other.inflight
@@ -764,7 +1021,7 @@ impl ReplicationPipeline {
         Self {
             peer_id,
             limits,
-            status: PeerProgress::new(peer_id, next_index, limits),
+            status: CompactPeerProgress::new(next_index),
             append_queue: SparseDeque::default(),
             append_queue_bytes: 0,
             inflight: SparseDeque::default(),
@@ -780,7 +1037,7 @@ impl ReplicationPipeline {
         next_index: LogIndex,
         progress_state: ProgressState,
     ) {
-        self.status = PeerProgress::new(self.peer_id, next_index, self.limits);
+        self.status.reset(next_index);
         self.status.match_index = match_index;
         self.status.next_index = next_index;
         self.status.progress_state = progress_state;
@@ -797,7 +1054,7 @@ impl ReplicationPipeline {
     }
 
     pub fn status(&self) -> PeerProgress {
-        self.status.clone()
+        self.status.to_public(self.peer_id, self.limits)
     }
 
     fn snapshot_transfer_view(&self) -> Option<ActiveSnapshotTransferView> {
@@ -865,13 +1122,13 @@ impl ReplicationPipeline {
     pub fn queue_append(&mut self, entry: &LogEntry) -> Result<(), RaftError> {
         let bytes = entry.payload.len() as u64;
         if bytes > self.limits.max_apply_batch_bytes {
-            self.status.oversized_log_rejections += 1;
+            self.status.telemetry_mut().oversized_log_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "append entry exceeds max apply batch bytes".to_string(),
             ));
         }
-        if self.append_queue.len() as u64 >= self.status.append_queue_limit {
-            self.status.apply_backpressure_rejections += 1;
+        if self.append_queue.len() as u64 >= self.limits.max_inflights_replicate {
+            self.status.telemetry_mut().apply_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "append queue backpressure limit reached".to_string(),
             ));
@@ -879,7 +1136,7 @@ impl ReplicationPipeline {
         if self.status.inflight_bytes + self.append_queue_bytes + bytes
             > self.limits.max_memory_replicate_log_bytes
         {
-            self.status.memory_backpressure_rejections += 1;
+            self.status.telemetry_mut().memory_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "replication memory backpressure limit reached".to_string(),
             ));
@@ -890,10 +1147,9 @@ impl ReplicationPipeline {
         });
         self.append_queue_bytes = self.append_queue_bytes.saturating_add(bytes);
         self.status.append_queue_depth = self.append_queue.len() as u64;
-        self.status.append_queue_max_depth = self
-            .status
-            .append_queue_max_depth
-            .max(self.status.append_queue_depth);
+        let depth = self.status.append_queue_depth;
+        let telemetry = self.status.telemetry_mut();
+        telemetry.append_queue_max_depth = telemetry.append_queue_max_depth.max(depth);
         Ok(())
     }
 
@@ -983,7 +1239,7 @@ impl ReplicationPipeline {
                 self.append_queue_bytes = self.append_queue_bytes.saturating_sub(entry_bytes);
             }
             if entry_count == 0 {
-                self.status.memory_backpressure_rejections += 1;
+                self.status.telemetry_mut().memory_backpressure_rejections += 1;
                 break;
             }
             let inflight = InflightAppend {
@@ -992,14 +1248,12 @@ impl ReplicationPipeline {
                 entry_count,
                 bytes,
             };
-            self.status.append_requests += 1;
-            self.status.append_batches += 1;
-            self.status.max_append_batch_entries = self
-                .status
-                .max_append_batch_entries
-                .max(inflight.entry_count);
-            self.status.max_append_batch_bytes =
-                self.status.max_append_batch_bytes.max(inflight.bytes);
+            let telemetry = self.status.telemetry_mut();
+            telemetry.append_requests += 1;
+            telemetry.append_batches += 1;
+            telemetry.max_append_batch_entries =
+                telemetry.max_append_batch_entries.max(inflight.entry_count);
+            telemetry.max_append_batch_bytes = telemetry.max_append_batch_bytes.max(inflight.bytes);
             self.status.inflight_entries += inflight.entry_count;
             self.status.inflight_bytes += inflight.bytes;
             self.inflight.push_back(inflight.clone());
@@ -1032,10 +1286,10 @@ impl ReplicationPipeline {
         response: &AppendEntriesResponse,
     ) -> Result<(), RaftError> {
         if response.term == 0 {
-            self.status.stale_term_rejections += 1;
+            self.status.telemetry_mut().stale_term_rejections += 1;
         }
         if response.success {
-            self.status.append_accepted += 1;
+            self.status.telemetry_mut().append_accepted += 1;
             self.status.old_paused = self.is_paused();
             // `response.match_index` is what a FOLLOWER said, taken with
             // `.max()` and no upper bound, and the next line used to add one to
@@ -1092,7 +1346,7 @@ impl ReplicationPipeline {
             {
                 return Ok(());
             }
-            self.status.append_rejected += 1;
+            self.status.telemetry_mut().append_rejected += 1;
             self.status.retry_attempts += 1;
             self.status.backoff_ms = next_backoff_ms(self.status.retry_attempts);
             self.status.next_retry_after_ms = self.status.backoff_ms;
@@ -1133,7 +1387,8 @@ impl ReplicationPipeline {
     }
 
     pub fn record_network_error(&mut self) -> bool {
-        self.status.packet_loss_events = self.status.packet_loss_events.saturating_add(1);
+        let telemetry = self.status.telemetry_mut();
+        telemetry.packet_loss_events = telemetry.packet_loss_events.saturating_add(1);
         let was_replicating = self.status.progress_state == ProgressState::Replicate;
         if !was_replicating {
             return false;
@@ -1143,10 +1398,9 @@ impl ReplicationPipeline {
         self.reset_inflight_window();
         self.status.next_index = self.status.match_index.saturating_add(1);
         self.status.next_retry_after_ms = 0;
-        self.status.network_error_probe_transitions = self
-            .status
-            .network_error_probe_transitions
-            .saturating_add(1);
+        let telemetry = self.status.telemetry_mut();
+        telemetry.network_error_probe_transitions =
+            telemetry.network_error_probe_transitions.saturating_add(1);
         true
     }
 
@@ -1162,7 +1416,7 @@ impl ReplicationPipeline {
     }
 
     pub fn record_learner_catchup_round(&mut self, leader_commit_index: LogIndex) -> bool {
-        self.status.learner_catchup_rounds += 1;
+        self.status.telemetry_mut().learner_catchup_rounds += 1;
         self.update_follower_lag(leader_commit_index);
         self.status.learner_caught_up = self.status.match_index >= leader_commit_index;
         self.status.learner_caught_up
@@ -1189,13 +1443,13 @@ impl ReplicationPipeline {
         batch_bytes: u64,
     ) -> Result<(), RaftError> {
         if batch_bytes > self.limits.max_apply_batch_bytes {
-            self.status.oversized_log_rejections += 1;
+            self.status.telemetry_mut().oversized_log_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "apply batch exceeds max apply batch bytes".to_string(),
             ));
         }
         if self.status.apply_inflight_tasks >= self.limits.max_inflights_apply_task {
-            self.status.apply_backpressure_rejections += 1;
+            self.status.telemetry_mut().apply_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "apply inflight task limit reached".to_string(),
             ));
@@ -1206,10 +1460,9 @@ impl ReplicationPipeline {
         });
         self.status.apply_inflight_tasks = self.apply_inflight.len() as u64;
         self.status.apply_queue_depth = self.status.apply_inflight_tasks;
-        self.status.apply_queue_max_depth = self
-            .status
-            .apply_queue_max_depth
-            .max(self.status.apply_queue_depth);
+        let depth = self.status.apply_queue_depth;
+        let telemetry = self.status.telemetry_mut();
+        telemetry.apply_queue_max_depth = telemetry.apply_queue_max_depth.max(depth);
         Ok(())
     }
 
@@ -1235,15 +1488,16 @@ impl ReplicationPipeline {
 
     pub fn record_offline_timeout(&mut self) {
         if !self.status.offline_timeout_reached {
-            self.status.offline_timeout_rejections =
-                self.status.offline_timeout_rejections.saturating_add(1);
+            let telemetry = self.status.telemetry_mut();
+            telemetry.offline_timeout_rejections =
+                telemetry.offline_timeout_rejections.saturating_add(1);
         }
         self.status.offline_timeout_reached = true;
     }
 
     pub fn receive_out_of_order(&mut self, entry: &LogEntry) -> Result<(), RaftError> {
         if entry.log_id.index < self.status.next_index {
-            self.status.out_of_order_append_rejections += 1;
+            self.status.telemetry_mut().out_of_order_append_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "append is below peer next index".to_string(),
             ));
@@ -1255,7 +1509,7 @@ impl ReplicationPipeline {
             // honest answer: clamping would leave the next index pointing at
             // an entry already taken.
             let Some(next_index) = entry.log_id.index.checked_add(1) else {
-                self.status.out_of_order_append_rejections += 1;
+                self.status.telemetry_mut().out_of_order_append_rejections += 1;
                 return Err(RaftError::InvalidRequest(
                     "append index is the largest representable index".to_string(),
                 ));
@@ -1266,17 +1520,21 @@ impl ReplicationPipeline {
             return Ok(());
         }
         if !self.limits.enable_reorder_queue {
-            self.status.out_of_order_append_rejections += 1;
+            self.status.telemetry_mut().out_of_order_append_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "out-of-order append received while reorder queue is disabled".to_string(),
             ));
         }
         if self.reorder_queue.len() as u64 >= self.limits.reorder_window_size {
-            self.status.reorder_entries_rejected += 1;
+            self.status.telemetry_mut().reorder_entries_rejected += 1;
             return Err(RaftError::InvalidRequest(
                 "reorder queue window is full".to_string(),
             ));
         }
+        // The timeout path records what it drops. Earn that counter storage
+        // while this path is already allocating its first queue node, not on
+        // a later sweep that otherwise needs no heap work.
+        let _ = self.status.telemetry_mut();
         self.reorder_queue.insert(entry.log_id.index, 0);
         self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
         Ok(())
@@ -1322,10 +1580,10 @@ impl ReplicationPipeline {
             return 0;
         }
         self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
-        self.status.reorder_entry_timeouts =
-            self.status.reorder_entry_timeouts.saturating_add(dropped);
-        self.status.reorder_dropped_packages =
-            self.status.reorder_dropped_packages.saturating_add(dropped);
+        let telemetry = self.status.telemetry_mut();
+        telemetry.reorder_entry_timeouts = telemetry.reorder_entry_timeouts.saturating_add(dropped);
+        telemetry.reorder_dropped_packages =
+            telemetry.reorder_dropped_packages.saturating_add(dropped);
         dropped
     }
 
@@ -1334,8 +1592,9 @@ impl ReplicationPipeline {
         if dropped > 0 {
             self.reorder_queue.clear();
             self.status.reorder_queue_depth = 0;
-            self.status.reorder_entry_timeouts += dropped;
-            self.status.reorder_dropped_packages += dropped;
+            let telemetry = self.status.telemetry_mut();
+            telemetry.reorder_entry_timeouts += dropped;
+            telemetry.reorder_dropped_packages += dropped;
         }
         dropped
     }
@@ -1408,14 +1667,14 @@ impl ReplicationPipeline {
         batch: Arc<ActiveSnapshotTransferBatch>,
     ) -> Result<(), RaftError> {
         if self.status.snapshot_sending || self.status.snapshot_installing {
-            self.status.snapshot_backpressure_rejections += 1;
+            self.status.telemetry_mut().snapshot_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "snapshot transfer is already active".to_string(),
             ));
         }
         batch.with_progress(self.peer_id, |_| ())?;
         self.status.snapshot_sending = true;
-        self.status.snapshot_send_attempts += 1;
+        self.status.telemetry_mut().snapshot_send_attempts += 1;
         self.status.snapshot_install_total_chunks = batch.total_chunks;
         self.status.snapshot_install_progress_per_mille = 0;
         self.snapshot_transfer = Some(batch);
@@ -1522,7 +1781,7 @@ impl ReplicationPipeline {
             return Ok(());
         }
 
-        self.status.snapshot_chunk_retry_count += 1;
+        self.status.telemetry_mut().snapshot_chunk_retry_count += 1;
         Ok(())
     }
 
@@ -1558,7 +1817,7 @@ impl ReplicationPipeline {
         self.status.snapshot_sending = false;
         self.status.snapshot_installing = false;
         self.status.snapshot_install_progress_per_mille = 0;
-        self.status.snapshot_send_timeouts += 1;
+        self.status.telemetry_mut().snapshot_send_timeouts += 1;
         true
     }
 
@@ -1568,7 +1827,7 @@ impl ReplicationPipeline {
                 "snapshot transfer is not active".to_string(),
             ));
         }
-        self.status.snapshot_chunk_retry_count += 1;
+        self.status.telemetry_mut().snapshot_chunk_retry_count += 1;
         Ok(())
     }
 
@@ -1579,7 +1838,7 @@ impl ReplicationPipeline {
         total_chunks: u64,
     ) -> Result<(), RaftError> {
         if self.status.snapshot_sending || self.status.snapshot_installing {
-            self.status.snapshot_backpressure_rejections += 1;
+            self.status.telemetry_mut().snapshot_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "snapshot transfer is already active".to_string(),
             ));
@@ -1625,11 +1884,13 @@ impl ReplicationPipeline {
         self.snapshot_transfer = None;
         self.status.snapshot_sending = false;
         self.status.snapshot_installing = false;
-        self.status.snapshot_install_rolled_back += 1;
+        self.status.telemetry_mut().snapshot_install_rolled_back += 1;
     }
 
     pub fn mark_snapshot_rejoin_after_compacted_log(&mut self) {
-        self.status.snapshot_rejoin_after_compacted_log = true;
+        self.status
+            .telemetry_mut()
+            .snapshot_rejoin_after_compacted_log = true;
     }
 
     fn release_inflight_through(&mut self, match_index: LogIndex) {
@@ -1683,10 +1944,12 @@ impl ReplicationPipeline {
             self.status.next_index = self.status.next_index.saturating_add(1);
             converged = converged.saturating_add(1);
         }
-        self.status.reorder_entries_converged = self
-            .status
-            .reorder_entries_converged
-            .saturating_add(converged);
+        if converged > 0 {
+            let telemetry = self.status.telemetry_mut();
+            telemetry.reorder_entries_converged = telemetry
+                .reorder_entries_converged
+                .saturating_add(converged);
+        }
         self.status.reorder_queue_depth = self.reorder_queue.len() as u64;
     }
 
