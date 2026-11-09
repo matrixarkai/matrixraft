@@ -4,7 +4,8 @@
 //! Replication pipeline evidence and BaselineRaft-style backpressure validation.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -235,8 +236,16 @@ pub struct SnapshotTransferState {
     pub latest_receiving_elapsed_ms: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct ActiveSnapshotTransfer {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveSnapshotProgress {
+    acknowledged_chunks: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+    latest_receiving_elapsed_ms: u64,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct ActiveSnapshotTransferView {
     snapshot_id: Arc<str>,
     snapshot_index: LogIndex,
     total_chunks: u64,
@@ -244,6 +253,108 @@ struct ActiveSnapshotTransfer {
     bytes_sent: u64,
     bytes_received: u64,
     latest_receiving_elapsed_ms: u64,
+}
+
+#[derive(Debug)]
+enum ActiveSnapshotSlots {
+    One {
+        peer_id: NodeId,
+        progress: ActiveSnapshotProgress,
+    },
+    Many(Vec<(NodeId, ActiveSnapshotProgress)>),
+}
+
+#[derive(Debug)]
+pub(crate) struct ActiveSnapshotTransferBatch {
+    // Publication starts the same immutable snapshot for many peers. Keep that
+    // descriptor once and pack only their mutable progress into one allocation.
+    snapshot_id: Arc<str>,
+    snapshot_index: LogIndex,
+    total_chunks: u64,
+    slots: Mutex<ActiveSnapshotSlots>,
+}
+
+impl ActiveSnapshotTransferBatch {
+    fn one(
+        snapshot_id: Arc<str>,
+        peer_id: NodeId,
+        snapshot_index: LogIndex,
+        total_chunks: u64,
+        progress: ActiveSnapshotProgress,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            snapshot_id,
+            snapshot_index,
+            total_chunks,
+            slots: Mutex::new(ActiveSnapshotSlots::One { peer_id, progress }),
+        })
+    }
+
+    fn many(
+        snapshot_id: Arc<str>,
+        peers: impl IntoIterator<Item = NodeId>,
+        peer_count: usize,
+        snapshot_index: LogIndex,
+        total_chunks: u64,
+        progress: ActiveSnapshotProgress,
+    ) -> Arc<Self> {
+        let mut slots = Vec::with_capacity(peer_count);
+        slots.extend(peers.into_iter().map(|peer_id| (peer_id, progress)));
+        slots.sort_unstable_by_key(|(peer_id, _)| *peer_id);
+        Arc::new(Self {
+            snapshot_id,
+            snapshot_index,
+            total_chunks,
+            slots: Mutex::new(ActiveSnapshotSlots::Many(slots)),
+        })
+    }
+
+    fn with_progress<T>(
+        &self,
+        peer_id: NodeId,
+        update: impl FnOnce(&mut ActiveSnapshotProgress) -> T,
+    ) -> Result<T, RaftError> {
+        let mut slots = self.slots.lock().map_err(|_| {
+            RaftError::Storage("snapshot transfer state mutex poisoned".to_string())
+        })?;
+        let progress = match &mut *slots {
+            ActiveSnapshotSlots::One {
+                peer_id: slot_peer_id,
+                progress,
+            } if *slot_peer_id == peer_id => progress,
+            ActiveSnapshotSlots::Many(slots) => {
+                let index = slots
+                    .binary_search_by_key(&peer_id, |(slot_peer_id, _)| *slot_peer_id)
+                    .map_err(|_| RaftError::NodeNotFound(peer_id))?;
+                &mut slots[index].1
+            }
+            _ => return Err(RaftError::NodeNotFound(peer_id)),
+        };
+        Ok(update(progress))
+    }
+
+    fn snapshot_view(&self, peer_id: NodeId) -> Result<ActiveSnapshotTransferView, RaftError> {
+        self.with_progress(peer_id, |progress| ActiveSnapshotTransferView {
+            snapshot_id: Arc::clone(&self.snapshot_id),
+            snapshot_index: self.snapshot_index,
+            total_chunks: self.total_chunks,
+            acknowledged_chunks: progress.acknowledged_chunks,
+            bytes_sent: progress.bytes_sent,
+            bytes_received: progress.bytes_received,
+            latest_receiving_elapsed_ms: progress.latest_receiving_elapsed_ms,
+        })
+    }
+
+    fn clone_for_peer(&self, peer_id: NodeId) -> Result<Arc<Self>, RaftError> {
+        let progress = self.with_progress(peer_id, |progress| *progress)?;
+        Ok(Self::one(
+            Arc::clone(&self.snapshot_id),
+            peer_id,
+            self.snapshot_index,
+            self.total_chunks,
+            progress,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -497,7 +608,6 @@ where
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplicationPipeline {
     peer_id: NodeId,
     limits: PipelineLimits,
@@ -513,7 +623,140 @@ pub struct ReplicationPipeline {
     /// queue is bounded by `reorder_window_size`, so a full window costs twice
     /// what it did -- and only while it is full of out-of-order appends.
     reorder_queue: SparseBTreeMap<LogIndex, u64>,
-    snapshot_transfer: Option<Box<ActiveSnapshotTransfer>>,
+    snapshot_transfer: Option<Arc<ActiveSnapshotTransferBatch>>,
+}
+
+#[derive(Serialize)]
+struct ReplicationPipelineRef<'a> {
+    peer_id: NodeId,
+    limits: &'a PipelineLimits,
+    status: &'a PeerProgress,
+    append_queue: &'a SparseDeque<QueuedAppend>,
+    append_queue_bytes: u64,
+    inflight: &'a SparseDeque<InflightAppend>,
+    apply_inflight: &'a SparseDeque<ApplyInflightTask>,
+    reorder_queue: &'a SparseBTreeMap<LogIndex, u64>,
+    snapshot_transfer: Option<ActiveSnapshotTransferView>,
+}
+
+#[derive(Deserialize)]
+struct ReplicationPipelineOwned {
+    peer_id: NodeId,
+    limits: PipelineLimits,
+    status: PeerProgress,
+    append_queue: SparseDeque<QueuedAppend>,
+    append_queue_bytes: u64,
+    inflight: SparseDeque<InflightAppend>,
+    apply_inflight: SparseDeque<ApplyInflightTask>,
+    reorder_queue: SparseBTreeMap<LogIndex, u64>,
+    snapshot_transfer: Option<SnapshotTransferState>,
+}
+
+impl Serialize for ReplicationPipeline {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        ReplicationPipelineRef {
+            peer_id: self.peer_id,
+            limits: &self.limits,
+            status: &self.status,
+            append_queue: &self.append_queue,
+            append_queue_bytes: self.append_queue_bytes,
+            inflight: &self.inflight,
+            apply_inflight: &self.apply_inflight,
+            reorder_queue: &self.reorder_queue,
+            snapshot_transfer: self.snapshot_transfer_view(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReplicationPipeline {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let pipeline = ReplicationPipelineOwned::deserialize(deserializer)?;
+        let snapshot_transfer = pipeline.snapshot_transfer.map(|transfer| {
+            ActiveSnapshotTransferBatch::one(
+                Arc::<str>::from(transfer.snapshot_id),
+                pipeline.peer_id,
+                transfer.snapshot_index,
+                transfer.total_chunks,
+                ActiveSnapshotProgress {
+                    acknowledged_chunks: transfer.acknowledged_chunks,
+                    bytes_sent: transfer.bytes_sent,
+                    bytes_received: transfer.bytes_received,
+                    latest_receiving_elapsed_ms: transfer.latest_receiving_elapsed_ms,
+                },
+            )
+        });
+        Ok(Self {
+            peer_id: pipeline.peer_id,
+            limits: pipeline.limits,
+            status: pipeline.status,
+            append_queue: pipeline.append_queue,
+            append_queue_bytes: pipeline.append_queue_bytes,
+            inflight: pipeline.inflight,
+            apply_inflight: pipeline.apply_inflight,
+            reorder_queue: pipeline.reorder_queue,
+            snapshot_transfer,
+        })
+    }
+}
+
+impl fmt::Debug for ReplicationPipeline {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReplicationPipeline")
+            .field("peer_id", &self.peer_id)
+            .field("limits", &self.limits)
+            .field("status", &self.status)
+            .field("append_queue", &self.append_queue)
+            .field("append_queue_bytes", &self.append_queue_bytes)
+            .field("inflight", &self.inflight)
+            .field("apply_inflight", &self.apply_inflight)
+            .field("reorder_queue", &self.reorder_queue)
+            .field("snapshot_transfer", &self.snapshot_transfer_view())
+            .finish()
+    }
+}
+
+impl PartialEq for ReplicationPipeline {
+    fn eq(&self, other: &Self) -> bool {
+        self.peer_id == other.peer_id
+            && self.limits == other.limits
+            && self.status == other.status
+            && self.append_queue == other.append_queue
+            && self.append_queue_bytes == other.append_queue_bytes
+            && self.inflight == other.inflight
+            && self.apply_inflight == other.apply_inflight
+            && self.reorder_queue == other.reorder_queue
+            && self.snapshot_transfer_view() == other.snapshot_transfer_view()
+    }
+}
+
+impl Eq for ReplicationPipeline {}
+
+impl Clone for ReplicationPipeline {
+    fn clone(&self) -> Self {
+        Self {
+            peer_id: self.peer_id,
+            limits: self.limits,
+            status: self.status.clone(),
+            append_queue: self.append_queue.clone(),
+            append_queue_bytes: self.append_queue_bytes,
+            inflight: self.inflight.clone(),
+            apply_inflight: self.apply_inflight.clone(),
+            reorder_queue: self.reorder_queue.clone(),
+            snapshot_transfer: self.snapshot_transfer.as_ref().map(|batch| {
+                batch
+                    .clone_for_peer(self.peer_id)
+                    .expect("active snapshot transfer must retain its peer slot")
+            }),
+        }
+    }
 }
 
 impl ReplicationPipeline {
@@ -555,6 +798,14 @@ impl ReplicationPipeline {
 
     pub fn status(&self) -> PeerProgress {
         self.status.clone()
+    }
+
+    fn snapshot_transfer_view(&self) -> Option<ActiveSnapshotTransferView> {
+        self.snapshot_transfer.as_ref().map(|batch| {
+            batch
+                .snapshot_view(self.peer_id)
+                .expect("active snapshot transfer must retain its peer slot")
+        })
     }
 
     pub fn progress_state(&self) -> ProgressState {
@@ -1108,25 +1359,66 @@ impl ReplicationPipeline {
         snapshot_index: LogIndex,
         total_chunks: u64,
     ) -> Result<(), RaftError> {
+        let batch = ActiveSnapshotTransferBatch::one(
+            snapshot_id,
+            self.peer_id,
+            snapshot_index,
+            total_chunks,
+            ActiveSnapshotProgress {
+                acknowledged_chunks: 0,
+                bytes_sent: 0,
+                bytes_received: 0,
+                latest_receiving_elapsed_ms: 0,
+            },
+        );
+        self.begin_snapshot_send_batch(batch)
+    }
+
+    pub(crate) fn can_begin_snapshot_send_for(&self, snapshot_index: LogIndex) -> bool {
+        self.status.required_snapshot_index > 0
+            && self.status.required_snapshot_index <= snapshot_index
+            && !self.status.snapshot_sending
+            && !self.status.snapshot_installing
+    }
+
+    pub(crate) fn snapshot_send_batch(
+        snapshot_id: Arc<str>,
+        peer_ids: impl IntoIterator<Item = NodeId>,
+        peer_count: usize,
+        snapshot_index: LogIndex,
+        total_chunks: u64,
+    ) -> Arc<ActiveSnapshotTransferBatch> {
+        ActiveSnapshotTransferBatch::many(
+            snapshot_id,
+            peer_ids,
+            peer_count,
+            snapshot_index,
+            total_chunks,
+            ActiveSnapshotProgress {
+                acknowledged_chunks: 0,
+                bytes_sent: 0,
+                bytes_received: 0,
+                latest_receiving_elapsed_ms: 0,
+            },
+        )
+    }
+
+    pub(crate) fn begin_snapshot_send_batch(
+        &mut self,
+        batch: Arc<ActiveSnapshotTransferBatch>,
+    ) -> Result<(), RaftError> {
         if self.status.snapshot_sending || self.status.snapshot_installing {
             self.status.snapshot_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "snapshot transfer is already active".to_string(),
             ));
         }
+        batch.with_progress(self.peer_id, |_| ())?;
         self.status.snapshot_sending = true;
         self.status.snapshot_send_attempts += 1;
-        self.status.snapshot_install_total_chunks = total_chunks;
+        self.status.snapshot_install_total_chunks = batch.total_chunks;
         self.status.snapshot_install_progress_per_mille = 0;
-        self.snapshot_transfer = Some(Box::new(ActiveSnapshotTransfer {
-            snapshot_id,
-            snapshot_index,
-            total_chunks,
-            acknowledged_chunks: 0,
-            bytes_sent: 0,
-            bytes_received: 0,
-            latest_receiving_elapsed_ms: 0,
-        }));
+        self.snapshot_transfer = Some(batch);
         Ok(())
     }
 
@@ -1171,11 +1463,11 @@ impl ReplicationPipeline {
     }
 
     pub fn record_snapshot_chunk_sent(&mut self, bytes: u64) -> Result<(), RaftError> {
-        let transfer = self
+        let batch = self
             .snapshot_transfer
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| RaftError::InvalidRequest("snapshot send is not active".to_string()))?;
-        transfer.bytes_sent += bytes;
+        batch.with_progress(self.peer_id, |progress| progress.bytes_sent += bytes)?;
         Ok(())
     }
 
@@ -1190,14 +1482,19 @@ impl ReplicationPipeline {
     }
 
     pub fn acknowledge_snapshot_chunk(&mut self) -> Result<(), RaftError> {
-        let transfer = self.snapshot_transfer.as_mut().ok_or_else(|| {
+        let batch = self.snapshot_transfer.as_ref().ok_or_else(|| {
             RaftError::InvalidRequest("snapshot transfer is not active".to_string())
         })?;
-        transfer.acknowledged_chunks += 1;
-        self.status.snapshot_install_progress_per_mille = (transfer.acknowledged_chunks * 1000)
-            .checked_div(transfer.total_chunks)
-            .map_or(1000, |per_mille| per_mille.min(1000));
-        if transfer.acknowledged_chunks >= transfer.total_chunks {
+        let total_chunks = batch.total_chunks;
+        let (per_mille, complete) = batch.with_progress(self.peer_id, |progress| {
+            progress.acknowledged_chunks += 1;
+            let per_mille = (progress.acknowledged_chunks * 1000)
+                .checked_div(total_chunks)
+                .map_or(1000, |per_mille| per_mille.min(1000));
+            (per_mille, progress.acknowledged_chunks >= total_chunks)
+        })?;
+        self.status.snapshot_install_progress_per_mille = per_mille;
+        if complete {
             self.finish_snapshot_install()?;
         }
         Ok(())
@@ -1208,16 +1505,16 @@ impl ReplicationPipeline {
         accepted: bool,
         committed_index: LogIndex,
     ) -> Result<(), RaftError> {
-        let transfer = self.snapshot_transfer.take().ok_or_else(|| {
+        let batch = self.snapshot_transfer.take().ok_or_else(|| {
             RaftError::InvalidRequest("snapshot transfer is not active".to_string())
         })?;
+        batch.with_progress(self.peer_id, |_| ())?;
+        let snapshot_index = batch.snapshot_index;
         self.status.snapshot_sending = false;
         self.status.snapshot_installing = false;
         if accepted {
-            self.status.snapshot_installed_index = self
-                .status
-                .snapshot_installed_index
-                .max(transfer.snapshot_index);
+            self.status.snapshot_installed_index =
+                self.status.snapshot_installed_index.max(snapshot_index);
             self.status.snapshot_install_progress_per_mille = 1000;
             self.status.match_index = self.status.match_index.max(committed_index);
             self.status.next_index = self.status.match_index.saturating_add(1);
@@ -1235,20 +1532,25 @@ impl ReplicationPipeline {
         elapsed_since_last_update_ms: u64,
         send_timeout_ms: u64,
     ) -> bool {
-        let Some(transfer) = self.snapshot_transfer.as_mut() else {
+        let Some(batch) = self.snapshot_transfer.as_ref() else {
             return false;
         };
         if !self.status.snapshot_sending {
             return false;
         }
-        if remote_receiving {
-            transfer.latest_receiving_elapsed_ms = 0;
+        let Ok(timed_out) = batch.with_progress(self.peer_id, |progress| {
+            if remote_receiving {
+                progress.latest_receiving_elapsed_ms = 0;
+                return false;
+            }
+            progress.latest_receiving_elapsed_ms = progress
+                .latest_receiving_elapsed_ms
+                .saturating_add(elapsed_since_last_update_ms);
+            progress.latest_receiving_elapsed_ms > send_timeout_ms
+        }) else {
             return false;
-        }
-        transfer.latest_receiving_elapsed_ms = transfer
-            .latest_receiving_elapsed_ms
-            .saturating_add(elapsed_since_last_update_ms);
-        if transfer.latest_receiving_elapsed_ms <= send_timeout_ms {
+        };
+        if !timed_out {
             return false;
         }
 
@@ -1285,27 +1587,34 @@ impl ReplicationPipeline {
         self.status.snapshot_installing = true;
         self.status.snapshot_install_total_chunks = total_chunks;
         self.status.snapshot_install_progress_per_mille = 0;
-        self.snapshot_transfer = Some(Box::new(ActiveSnapshotTransfer {
-            snapshot_id: Arc::<str>::from(snapshot_id.into()),
+        self.snapshot_transfer = Some(ActiveSnapshotTransferBatch::one(
+            Arc::<str>::from(snapshot_id.into()),
+            self.peer_id,
             snapshot_index,
             total_chunks,
-            acknowledged_chunks: 0,
-            bytes_sent: 0,
-            bytes_received: 0,
-            latest_receiving_elapsed_ms: 0,
-        }));
+            ActiveSnapshotProgress {
+                acknowledged_chunks: 0,
+                bytes_sent: 0,
+                bytes_received: 0,
+                latest_receiving_elapsed_ms: 0,
+            },
+        ));
         Ok(())
     }
 
     pub fn receive_snapshot_chunk(&mut self, bytes: u64, done: bool) -> Result<(), RaftError> {
-        let transfer = self.snapshot_transfer.as_mut().ok_or_else(|| {
+        let batch = self.snapshot_transfer.as_ref().ok_or_else(|| {
             RaftError::InvalidRequest("snapshot install is not active".to_string())
         })?;
-        transfer.bytes_received += bytes;
-        transfer.acknowledged_chunks += 1;
-        self.status.snapshot_install_progress_per_mille = (transfer.acknowledged_chunks * 1000)
-            .checked_div(transfer.total_chunks)
-            .map_or(1000, |per_mille| per_mille.min(1000));
+        let total_chunks = batch.total_chunks;
+        self.status.snapshot_install_progress_per_mille =
+            batch.with_progress(self.peer_id, |progress| {
+                progress.bytes_received += bytes;
+                progress.acknowledged_chunks += 1;
+                (progress.acknowledged_chunks * 1000)
+                    .checked_div(total_chunks)
+                    .map_or(1000, |per_mille| per_mille.min(1000))
+            })?;
         if done {
             self.finish_snapshot_install()?;
         }
@@ -1382,17 +1691,17 @@ impl ReplicationPipeline {
     }
 
     fn finish_snapshot_install(&mut self) -> Result<(), RaftError> {
-        let transfer = self.snapshot_transfer.take().ok_or_else(|| {
+        let batch = self.snapshot_transfer.take().ok_or_else(|| {
             RaftError::InvalidRequest("snapshot transfer is not active".to_string())
         })?;
+        batch.with_progress(self.peer_id, |_| ())?;
+        let snapshot_index = batch.snapshot_index;
         self.status.snapshot_sending = false;
         self.status.snapshot_installing = false;
-        self.status.snapshot_installed_index = self
-            .status
-            .snapshot_installed_index
-            .max(transfer.snapshot_index);
+        self.status.snapshot_installed_index =
+            self.status.snapshot_installed_index.max(snapshot_index);
         self.status.snapshot_install_progress_per_mille = 1000;
-        self.status.match_index = self.status.match_index.max(transfer.snapshot_index);
+        self.status.match_index = self.status.match_index.max(snapshot_index);
         self.status.next_index = self.status.match_index.saturating_add(1);
         self.reset_apply_inflight_window();
         Ok(())

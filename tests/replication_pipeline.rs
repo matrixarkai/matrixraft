@@ -687,6 +687,23 @@ fn active_snapshot_ids_keep_the_pipeline_wire_shape() {
 }
 
 #[test]
+fn cloning_an_active_pipeline_keeps_transfer_progress_independent() {
+    let mut original = ReplicationPipeline::new(2, 10, PipelineLimits::default());
+    original
+        .begin_snapshot_send("snap-clone", 20, 2)
+        .expect("begin send");
+    let mut cloned = original.clone();
+    cloned
+        .record_snapshot_chunk_sent(64)
+        .expect("record on clone");
+
+    let original_json = serde_json::to_value(&original).expect("serialize original");
+    let cloned_json = serde_json::to_value(&cloned).expect("serialize clone");
+    assert_eq!(original_json["snapshot_transfer"]["bytes_sent"], 0);
+    assert_eq!(cloned_json["snapshot_transfer"]["bytes_sent"], 64);
+}
+
+#[test]
 fn populated_and_cleared_pipeline_storage_round_trips_logically() {
     let mut pipeline = ReplicationPipeline::new(2, 1, small_limits());
     let queued = entry(1, &[7]);
