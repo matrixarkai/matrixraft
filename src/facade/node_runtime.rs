@@ -161,6 +161,225 @@ impl LifecycleReply {
     }
 }
 
+// The public message stays a value type. The private queue boxes only the large
+// snapshot-chunk request so every group's fixed command slot stays compact.
+enum RuntimeStepMessage {
+    Admin {
+        command: AdminCommand,
+    },
+    Propose {
+        payload: Payload,
+        options: ProposeOptions,
+    },
+    Membership {
+        operation: MembershipOperation,
+    },
+    AutoPromoteLearner {
+        learner_id: NodeId,
+    },
+    CatchUpPeer {
+        peer_id: NodeId,
+    },
+    PreVote {
+        candidate_id: NodeId,
+    },
+    AppendEntries {
+        target: NodeId,
+        request: AppendEntriesRequest,
+    },
+    AppendEntriesResponse {
+        local_node_id: NodeId,
+        peer_id: NodeId,
+        response: AppendEntriesResponse,
+    },
+    Vote {
+        target: NodeId,
+        request: VoteRequest,
+    },
+    VoteResponse {
+        local_node_id: NodeId,
+        peer_id: Option<NodeId>,
+        response: VoteResponse,
+        pre_vote: bool,
+    },
+    InstallSnapshot {
+        target: NodeId,
+        request: Box<InstallSnapshotRequest>,
+    },
+    InstallSnapshotResponse {
+        local_node_id: NodeId,
+        peer_id: NodeId,
+        response: InstallSnapshotResponse,
+    },
+    NetworkError {
+        peer_id: NodeId,
+    },
+    SnapshotFinish {
+        peer_id: NodeId,
+        accepted: bool,
+        committed_index: LogIndex,
+    },
+    SnapshotProgress {
+        peer_id: NodeId,
+        remote_receiving: bool,
+        elapsed_since_last_receiving_ms: u64,
+        send_timeout_ms: u64,
+    },
+    ReadIndex {
+        request: ReadIndexRequest,
+    },
+    TimeoutNow {
+        from: NodeId,
+        target: NodeId,
+    },
+}
+
+impl From<Message> for RuntimeStepMessage {
+    fn from(message: Message) -> Self {
+        match message {
+            Message::Admin { command } => Self::Admin { command },
+            Message::Propose { payload, options } => Self::Propose { payload, options },
+            Message::Membership { operation } => Self::Membership { operation },
+            Message::AutoPromoteLearner { learner_id } => Self::AutoPromoteLearner { learner_id },
+            Message::CatchUpPeer { peer_id } => Self::CatchUpPeer { peer_id },
+            Message::PreVote { candidate_id } => Self::PreVote { candidate_id },
+            Message::AppendEntries { target, request } => Self::AppendEntries { target, request },
+            Message::AppendEntriesResponse {
+                local_node_id,
+                peer_id,
+                response,
+            } => Self::AppendEntriesResponse {
+                local_node_id,
+                peer_id,
+                response,
+            },
+            Message::Vote { target, request } => Self::Vote { target, request },
+            Message::VoteResponse {
+                local_node_id,
+                peer_id,
+                response,
+                pre_vote,
+            } => Self::VoteResponse {
+                local_node_id,
+                peer_id,
+                response,
+                pre_vote,
+            },
+            Message::InstallSnapshot { target, request } => Self::InstallSnapshot {
+                target,
+                request: Box::new(request),
+            },
+            Message::InstallSnapshotResponse {
+                local_node_id,
+                peer_id,
+                response,
+            } => Self::InstallSnapshotResponse {
+                local_node_id,
+                peer_id,
+                response,
+            },
+            Message::NetworkError { peer_id } => Self::NetworkError { peer_id },
+            Message::SnapshotFinish {
+                peer_id,
+                accepted,
+                committed_index,
+            } => Self::SnapshotFinish {
+                peer_id,
+                accepted,
+                committed_index,
+            },
+            Message::SnapshotProgress {
+                peer_id,
+                remote_receiving,
+                elapsed_since_last_receiving_ms,
+                send_timeout_ms,
+            } => Self::SnapshotProgress {
+                peer_id,
+                remote_receiving,
+                elapsed_since_last_receiving_ms,
+                send_timeout_ms,
+            },
+            Message::ReadIndex { request } => Self::ReadIndex { request },
+            Message::TimeoutNow { from, target } => Self::TimeoutNow { from, target },
+        }
+    }
+}
+
+impl From<RuntimeStepMessage> for Message {
+    fn from(message: RuntimeStepMessage) -> Self {
+        match message {
+            RuntimeStepMessage::Admin { command } => Self::Admin { command },
+            RuntimeStepMessage::Propose { payload, options } => Self::Propose { payload, options },
+            RuntimeStepMessage::Membership { operation } => Self::Membership { operation },
+            RuntimeStepMessage::AutoPromoteLearner { learner_id } => {
+                Self::AutoPromoteLearner { learner_id }
+            }
+            RuntimeStepMessage::CatchUpPeer { peer_id } => Self::CatchUpPeer { peer_id },
+            RuntimeStepMessage::PreVote { candidate_id } => Self::PreVote { candidate_id },
+            RuntimeStepMessage::AppendEntries { target, request } => {
+                Self::AppendEntries { target, request }
+            }
+            RuntimeStepMessage::AppendEntriesResponse {
+                local_node_id,
+                peer_id,
+                response,
+            } => Self::AppendEntriesResponse {
+                local_node_id,
+                peer_id,
+                response,
+            },
+            RuntimeStepMessage::Vote { target, request } => Self::Vote { target, request },
+            RuntimeStepMessage::VoteResponse {
+                local_node_id,
+                peer_id,
+                response,
+                pre_vote,
+            } => Self::VoteResponse {
+                local_node_id,
+                peer_id,
+                response,
+                pre_vote,
+            },
+            RuntimeStepMessage::InstallSnapshot { target, request } => Self::InstallSnapshot {
+                target,
+                request: *request,
+            },
+            RuntimeStepMessage::InstallSnapshotResponse {
+                local_node_id,
+                peer_id,
+                response,
+            } => Self::InstallSnapshotResponse {
+                local_node_id,
+                peer_id,
+                response,
+            },
+            RuntimeStepMessage::NetworkError { peer_id } => Self::NetworkError { peer_id },
+            RuntimeStepMessage::SnapshotFinish {
+                peer_id,
+                accepted,
+                committed_index,
+            } => Self::SnapshotFinish {
+                peer_id,
+                accepted,
+                committed_index,
+            },
+            RuntimeStepMessage::SnapshotProgress {
+                peer_id,
+                remote_receiving,
+                elapsed_since_last_receiving_ms,
+                send_timeout_ms,
+            } => Self::SnapshotProgress {
+                peer_id,
+                remote_receiving,
+                elapsed_since_last_receiving_ms,
+                send_timeout_ms,
+            },
+            RuntimeStepMessage::ReadIndex { request } => Self::ReadIndex { request },
+            RuntimeStepMessage::TimeoutNow { from, target } => Self::TimeoutNow { from, target },
+        }
+    }
+}
+
 enum NodeRuntimeOp {
     Start(LifecycleReply),
     Stop(LifecycleReply),
@@ -172,7 +391,7 @@ enum NodeRuntimeOp {
     WalLifecycleStatus(mpsc::Sender<Result<WalLifecycleStatus, RaftError>>),
     WalRecoveryReport(mpsc::Sender<Result<Option<WalRecoveryReport>, RaftError>>),
     Step(
-        Message,
+        RuntimeStepMessage,
         mpsc::Sender<Result<StepResult, RaftError>>,
     ),
     StepBatch(
@@ -195,7 +414,7 @@ enum NodeRuntimeOp {
     MembershipReports(mpsc::Sender<Result<Vec<MembershipExecutionReport>, RaftError>>),
     InstallSnapshot(
         NodeId,
-        RaftSnapshot,
+        Box<RaftSnapshot>,
         ApplySnapshotFence,
         mpsc::Sender<Result<(), RaftError>>,
     ),
@@ -720,7 +939,7 @@ impl NodeRuntime {
     pub fn step(&self, message: Message) -> Result<StepResult, RaftError> {
         let sender = self.sender()?;
         let (reply_tx, reply_rx) = self.step_replies.take();
-        if let Err(error) = sender.send(NodeRuntimeOp::Step(message, reply_tx.clone())) {
+        if let Err(error) = sender.send(NodeRuntimeOp::Step(message.into(), reply_tx.clone())) {
             let transport = RaftError::Transport(format!(
                 "failed to send step to raft node: {error}"
             ));
@@ -894,7 +1113,10 @@ impl NodeRuntime {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.sender()?
             .send(NodeRuntimeOp::InstallSnapshot(
-                target, snapshot, fence, reply_tx,
+                target,
+                Box::new(snapshot),
+                fence,
+                reply_tx,
             ))
             .map_err(|err| {
                 RaftError::Transport(format!(
@@ -1907,7 +2129,10 @@ fn apply_unpersisted_proposal(
     wal: &mut Option<PersistentRaftWal>,
     membership_executor: &mut MembershipExecutor,
     node_id: NodeId,
-    proposal: (Message, mpsc::Sender<Result<StepResult, RaftError>>),
+    proposal: (
+        RuntimeStepMessage,
+        mpsc::Sender<Result<StepResult, RaftError>>,
+    ),
 ) -> (
     Result<StepResult, RaftError>,
     mpsc::Sender<Result<StepResult, RaftError>>,
@@ -1918,7 +2143,7 @@ fn apply_unpersisted_proposal(
         wal,
         membership_executor,
         node_id,
-        message,
+        message.into(),
         false,
     );
     (result, reply)
@@ -2352,12 +2577,15 @@ impl NodeCore {
         // ordinary path below unchanged, and a drained command that turned out
         // not to be a proposal is carried into the next iteration.
         let command = match command {
-            NodeRuntimeOp::Step(message @ Message::Propose { .. }, reply)
+            NodeRuntimeOp::Step(message @ RuntimeStepMessage::Propose { .. }, reply)
                 if *state == NodeRuntimeState::Running =>
             {
                 let first = (message, reply);
                 let second = match command_rx.try_recv() {
-                    Ok(NodeRuntimeOp::Step(next @ Message::Propose { .. }, next_reply)) => {
+                    Ok(NodeRuntimeOp::Step(
+                        next @ RuntimeStepMessage::Propose { .. },
+                        next_reply,
+                    )) => {
                         Some((next, next_reply))
                     }
                     Ok(other) => {
@@ -2392,7 +2620,7 @@ impl NodeCore {
                     while outcomes.len() < 128 {
                         match command_rx.try_recv() {
                             Ok(NodeRuntimeOp::Step(
-                                next @ Message::Propose { .. },
+                                next @ RuntimeStepMessage::Propose { .. },
                                 next_reply,
                             )) => {
                                 let outcome = apply_unpersisted_proposal(
@@ -2543,6 +2771,7 @@ impl NodeCore {
                 let _ = reply.send(Ok(Some(last_wal_recovery_report.to_report())));
             }
             NodeRuntimeOp::Step(message, reply) => {
+                let message: Message = message.into();
                 let operation_name = runtime_step_operation_name(&message);
                 if matches!(&message, Message::PreVote { .. }) {
                     *pre_vote_executions += 1;
@@ -2816,7 +3045,7 @@ impl NodeCore {
             NodeRuntimeOp::InstallSnapshot(target, snapshot, fence, reply) => {
                 let _ = reply.send(record_runtime_result(
                     "install_snapshot",
-                    cluster.install_snapshot_to(target, snapshot, fence),
+                    cluster.install_snapshot_to(target, *snapshot, fence),
                     blocker_log,
                     false,
                 ));
@@ -4041,11 +4270,19 @@ mod runtime_command_queue_tests {
         assert!(std::mem::size_of::<StoredWalRecoveryReport>() <= 32);
         assert!(std::mem::size_of::<RuntimeBlockerLog>() <= 8);
         assert!(
-            std::mem::size_of::<RuntimeCommandQueue>() <= 224,
+            std::mem::size_of::<RuntimeStepMessage>() <= 104,
+            "the compact command message widened"
+        );
+        assert!(
+            std::mem::size_of::<NodeRuntimeOp>() <= 120,
+            "the runtime command widened"
+        );
+        assert!(
+            std::mem::size_of::<RuntimeCommandQueue>() <= 144,
             "the fixed command queue widened"
         );
         assert!(
-            std::mem::size_of::<RuntimeCommandChannel>() <= 240,
+            std::mem::size_of::<RuntimeCommandChannel>() <= 160,
             "the command channel widened"
         );
         assert!(std::mem::size_of::<RuntimeCommandSender>() <= 8);
@@ -4053,6 +4290,24 @@ mod runtime_command_queue_tests {
         assert!(std::mem::size_of::<SparseVec<u64>>() <= 8);
         assert!(std::mem::size_of::<SparseSet<u64>>() <= 8);
     };
+
+    #[test]
+    fn compact_runtime_messages_preserve_public_messages() {
+        let messages = [
+            Message::Admin {
+                command: AdminCommand::ReleaseMemory,
+            },
+            Message::NetworkError { peer_id: 7 },
+            Message::TimeoutNow {
+                from: 11,
+                target: 13,
+            },
+        ];
+        for message in messages {
+            let round_trip: Message = RuntimeStepMessage::from(message.clone()).into();
+            assert_eq!(round_trip, message);
+        }
+    }
 
     #[test]
     fn sparse_collections_keep_sequence_and_set_wire_shapes() {
