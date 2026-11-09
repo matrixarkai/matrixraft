@@ -430,7 +430,6 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Node {
-    id: NodeId,
     replica_role: ReplicaRole,
     raft_role: StateRole,
     hard_state: HardState,
@@ -466,13 +465,12 @@ struct Node {
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(std::mem::size_of::<SnapshotMetadata>() <= 96);
-    assert!(std::mem::size_of::<Node>() <= 160);
+    assert!(std::mem::size_of::<Node>() <= 152);
 };
 
 impl Node {
-    fn new(id: NodeId, replica_role: ReplicaRole, auto_promote: bool) -> Self {
+    fn new(replica_role: ReplicaRole, auto_promote: bool) -> Self {
         Self {
-            id,
             replica_role,
             raft_role: if replica_role == ReplicaRole::Learner {
                 StateRole::Learner
@@ -790,6 +788,68 @@ fn stored_snapshot_metadata(meta: SnapshotMetadata) -> Box<SnapshotTriggerState>
     })
 }
 
+mod nodes_with_ids {
+    use super::{CompactMap, Node, NodeId};
+    use serde::de::Error as _;
+    use serde::ser::SerializeMap;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    #[derive(Serialize)]
+    struct NodeWithId<'a> {
+        id: NodeId,
+        #[serde(flatten)]
+        node: &'a Node,
+    }
+
+    #[derive(Deserialize)]
+    struct OwnedNodeWithId {
+        id: NodeId,
+        #[serde(flatten)]
+        node: Node,
+    }
+
+    pub fn serialize<S>(
+        nodes: &CompactMap<NodeId, Box<Node>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(nodes.len()))?;
+        for (node_id, node) in nodes.iter() {
+            map.serialize_entry(
+                node_id,
+                &NodeWithId {
+                    id: *node_id,
+                    node: node.as_ref(),
+                },
+            )?;
+        }
+        map.end()
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<CompactMap<NodeId, Box<Node>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = BTreeMap::<NodeId, OwnedNodeWithId>::deserialize(deserializer)?;
+        let mut nodes = CompactMap::default();
+        for (node_id, encoded_node) in encoded {
+            if encoded_node.id != node_id {
+                return Err(D::Error::custom(format!(
+                    "node id {} does not match directory key {node_id}",
+                    encoded_node.id
+                )));
+            }
+            nodes.insert(node_id, Box::new(encoded_node.node));
+        }
+        Ok(nodes)
+    }
+}
+
 mod installed_snapshot_metadata {
     use super::{stored_snapshot_metadata, SnapshotMetadata, SnapshotTriggerState};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -940,6 +1000,7 @@ pub struct RaftCluster {
     /// exactly one key and pointer per member. Small groups otherwise reserve
     /// most of a tree leaf around their one node. Both layers are transparent
     /// to serde and preserve key ordering.
+    #[serde(with = "nodes_with_ids")]
     nodes: CompactMap<NodeId, Box<Node>>,
     /// Box the large values so the compact directory stores one key and pointer
     /// per peer. Keeping a pipeline inline in a tree leaf retained about 7 KiB
@@ -1111,7 +1172,7 @@ impl RaftCluster {
             if nodes
                 .insert(
                     peer.node_id,
-                    Box::new(Node::new(peer.node_id, peer.role, peer.auto_promote)),
+                    Box::new(Node::new(peer.role, peer.auto_promote)),
                 )
                 .is_some()
             {
@@ -1201,9 +1262,9 @@ impl RaftCluster {
         if self.leader_id.is_none() {
             let leader = self
                 .nodes
-                .values()
-                .find(|node| node.replica_role.can_be_leader() && node.healthy)
-                .map(|node| node.id)
+                .iter()
+                .find(|(_, node)| node.replica_role.can_be_leader() && node.healthy)
+                .map(|(node_id, _)| *node_id)
                 .ok_or_else(|| RaftError::InvalidRequest("no healthy voter".to_string()))?;
             self.campaign(leader, true)?;
         }
@@ -1904,7 +1965,7 @@ impl RaftCluster {
         let mut voters = 0usize;
         let mut witnesses = 0usize;
         let mut votes = 0usize;
-        for node in self.nodes.values() {
+        for (node_id, node) in self.nodes.iter() {
             let counts_towards_quorum = match node.replica_role {
                 ReplicaRole::Voter => {
                     voters += 1;
@@ -1919,10 +1980,10 @@ impl RaftCluster {
             if !counts_towards_quorum {
                 continue;
             }
-            let acknowledged = node.id == leader_id
+            let acknowledged = *node_id == leader_id
                 || self
                     .leader_lease_confirmations
-                    .get(&node.id)
+                    .get(node_id)
                     .map(|confirmation| {
                         confirmation.epoch == self.leader_lease_epoch
                             && confirmation.role == node.replica_role
@@ -2316,8 +2377,8 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(leader_id))?;
         let mut lowest = leader.safety_applied_index;
         if leader.raft_role == StateRole::Leader {
-            for peer in self.nodes.values() {
-                if peer.id != leader_id && peer.replica_role.can_serve_data() {
+            for (peer_id, peer) in self.nodes.iter() {
+                if *peer_id != leader_id && peer.replica_role.can_serve_data() {
                     lowest = lowest.min(peer.match_index());
                 }
             }
@@ -2335,8 +2396,8 @@ impl RaftCluster {
             .ok_or(RaftError::NodeNotFound(node_id))?;
         let mut replicated_index = node.safety_applied_index;
         if node.raft_role == StateRole::Leader {
-            for peer in self.nodes.values() {
-                if peer.id != node_id && peer.healthy {
+            for (peer_id, peer) in self.nodes.iter() {
+                if *peer_id != node_id && peer.healthy {
                     replicated_index = replicated_index.min(peer.match_index());
                 }
             }
@@ -2601,10 +2662,10 @@ impl RaftCluster {
         }
         self.reset_leader_lease_epoch();
         self.invalidate_follower_lease();
-        for node in self.nodes.values_mut() {
+        for (node_id, node) in self.nodes.iter_mut() {
             node.hard_state.current_term = self.current_term;
             node.hard_state.voted_for = Some(candidate_id);
-            node.raft_role = if node.id == candidate_id {
+            node.raft_role = if *node_id == candidate_id {
                 StateRole::Leader
             } else if node.replica_role == ReplicaRole::Learner {
                 StateRole::Learner
@@ -2664,8 +2725,8 @@ impl RaftCluster {
         self.last_log_index = log_id.index;
         let entry = Arc::new(entry);
 
-        for node in self.nodes.values_mut() {
-            if node.id == leader_id {
+        for (node_id, node) in self.nodes.iter_mut() {
+            if *node_id == leader_id {
                 node.append_entry(Arc::clone(&entry));
                 continue;
             }
@@ -2761,10 +2822,10 @@ impl RaftCluster {
         self.clear_reorder_queues();
         self.reset_leader_lease_epoch();
         self.invalidate_follower_lease();
-        for node in self.nodes.values_mut() {
+        for (node_id, node) in self.nodes.iter_mut() {
             node.hard_state.current_term = self.current_term;
             node.hard_state.voted_for = Some(candidate_id);
-            node.raft_role = if node.id == candidate_id {
+            node.raft_role = if *node_id == candidate_id {
                 StateRole::Leader
             } else if node.replica_role == ReplicaRole::Learner {
                 StateRole::Learner
@@ -2807,10 +2868,10 @@ impl RaftCluster {
         self.clear_reorder_queues();
         self.reset_leader_lease_epoch();
         self.invalidate_follower_lease();
-        for node in self.nodes.values_mut() {
+        for (node_id, node) in self.nodes.iter_mut() {
             node.hard_state.current_term = self.current_term;
             node.hard_state.voted_for = Some(candidate_id);
-            node.raft_role = if node.id == candidate_id {
+            node.raft_role = if *node_id == candidate_id {
                 StateRole::Candidate
             } else if node.replica_role == ReplicaRole::Learner {
                 StateRole::Learner
@@ -4313,8 +4374,8 @@ impl RaftCluster {
             }
             self.reset_leader_lease_epoch();
             self.invalidate_follower_lease();
-            for peer in self.nodes.values_mut() {
-                peer.raft_role = if peer.id == request.leader_id {
+            for (peer_id, peer) in self.nodes.iter_mut() {
+                peer.raft_role = if *peer_id == request.leader_id {
                     StateRole::Leader
                 } else if peer.replica_role == ReplicaRole::Learner {
                     StateRole::Learner
@@ -4840,10 +4901,10 @@ impl RaftCluster {
         } else {
             witness_count
         });
-        for node in self.nodes.values().filter(|node| node.healthy) {
+        for (node_id, node) in self.nodes.iter().filter(|(_, node)| node.healthy) {
             match node.replica_role {
-                ReplicaRole::Voter => live_voters.push(node.id),
-                ReplicaRole::Witness if !self.ignore_witness => live_witnesses.push(node.id),
+                ReplicaRole::Voter => live_voters.push(*node_id),
+                ReplicaRole::Witness if !self.ignore_witness => live_witnesses.push(*node_id),
                 ReplicaRole::Learner | ReplicaRole::Witness => {}
             }
         }
@@ -5004,8 +5065,8 @@ impl RaftCluster {
         let mut best_match_index = None;
         let mut successor = None;
         let mut wrapped = None;
-        for node in self.nodes.values() {
-            if node.id == leader_id || !node.healthy || !node.replica_role.can_be_leader() {
+        for (node_id, node) in self.nodes.iter() {
+            if *node_id == leader_id || !node.healthy || !node.replica_role.can_be_leader() {
                 continue;
             }
             let match_index = node.match_index();
@@ -5018,10 +5079,10 @@ impl RaftCluster {
                     wrapped = None;
                 }
             }
-            wrapped = Some(wrapped.map_or(node.id, |current: NodeId| current.min(node.id)));
-            if node.id > leader_id {
+            wrapped = Some(wrapped.map_or(*node_id, |current: NodeId| current.min(*node_id)));
+            if *node_id > leader_id {
                 successor = Some(
-                    successor.map_or(node.id, |current: NodeId| current.min(node.id)),
+                    successor.map_or(*node_id, |current: NodeId| current.min(*node_id)),
                 );
             }
         }
@@ -5146,21 +5207,21 @@ impl RaftCluster {
             group_id: self.group_id,
             voters: self
                 .nodes
-                .values()
-                .filter(|node| node.replica_role == ReplicaRole::Voter)
-                .map(|node| node.id)
+                .iter()
+                .filter(|(_, node)| node.replica_role == ReplicaRole::Voter)
+                .map(|(node_id, _)| *node_id)
                 .collect(),
             learners: self
                 .nodes
-                .values()
-                .filter(|node| node.replica_role == ReplicaRole::Learner)
-                .map(|node| node.id)
+                .iter()
+                .filter(|(_, node)| node.replica_role == ReplicaRole::Learner)
+                .map(|(node_id, _)| *node_id)
                 .collect(),
             witnesses: self
                 .nodes
-                .values()
-                .filter(|node| node.replica_role == ReplicaRole::Witness)
-                .map(|node| node.id)
+                .iter()
+                .filter(|(_, node)| node.replica_role == ReplicaRole::Witness)
+                .map(|(node_id, _)| *node_id)
                 .collect(),
             epoch: self.current_term,
         }
@@ -5181,7 +5242,7 @@ impl RaftCluster {
         self.clear_reorder_queue_for(peer_id);
         self.nodes.insert(
             peer_id,
-            Box::new(Node::new(peer_id, peer.role, peer.auto_promote)),
+            Box::new(Node::new(peer.role, peer.auto_promote)),
         );
         self.peer_pipelines.insert(
             peer_id,
@@ -5376,13 +5437,13 @@ impl RaftCluster {
             } else {
                 self.nodes.insert(
                     peer.node_id,
-                    Box::new(Node::new(peer.node_id, peer.role, peer.auto_promote)),
+                    Box::new(Node::new(peer.role, peer.auto_promote)),
                 );
             }
         }
         for node_id in retained {
             self.nodes.get_or_insert_with(node_id, || {
-                Box::new(Node::new(node_id, ReplicaRole::Voter, false))
+                Box::new(Node::new(ReplicaRole::Voter, false))
             });
         }
 
@@ -5390,8 +5451,8 @@ impl RaftCluster {
         self.refresh_commit_index();
         self.refresh_replication_pipelines();
         if let Some(leader_id) = self.leader_id {
-            for node in self.nodes.values_mut() {
-                node.raft_role = if node.id == leader_id {
+            for (node_id, node) in self.nodes.iter_mut() {
+                node.raft_role = if *node_id == leader_id {
                     StateRole::Leader
                 } else if node.replica_role == ReplicaRole::Learner {
                     StateRole::Learner
@@ -6161,9 +6222,9 @@ impl RaftCluster {
         let leader_compaction_limit = leader_limit;
         let removed = self
             .nodes
-            .values_mut()
-            .map(|node| {
-                let log_index = if Some(node.id) == leader_id {
+            .iter_mut()
+            .map(|(node_id, node)| {
+                let log_index = if Some(*node_id) == leader_id {
                     leader_compaction_limit
                         .map(|limit| log_index.min(limit))
                         .unwrap_or(log_index)
@@ -6743,9 +6804,9 @@ impl RaftCluster {
             self.reset_leader_lease_epoch();
             self.invalidate_follower_lease();
         }
-        for peer in self.nodes.values_mut() {
+        for (peer_id, peer) in self.nodes.iter_mut() {
             peer.hard_state.current_term = peer.hard_state.current_term.max(request.term);
-            peer.raft_role = if peer.id == request.leader_id {
+            peer.raft_role = if *peer_id == request.leader_id {
                 StateRole::Leader
             } else if peer.replica_role == ReplicaRole::Learner {
                 StateRole::Learner
@@ -6776,10 +6837,10 @@ impl RaftCluster {
                 .unwrap_or_default(),
             peers: self
                 .nodes
-                .values()
-                .filter(|peer| peer.id != node_id)
-                .map(|peer| PeerStatus {
-                    node_id: peer.id,
+                .iter()
+                .filter(|(peer_id, _)| **peer_id != node_id)
+                .map(|(peer_id, peer)| PeerStatus {
+                    node_id: *peer_id,
                     matched: peer.match_index(),
                     next_index: peer.match_index().saturating_add(1),
                     learner: peer.replica_role == ReplicaRole::Learner,
@@ -7304,9 +7365,9 @@ impl RaftCluster {
 
     fn snapshot_members(&self) -> Vec<Peer> {
         self.nodes
-            .values()
-            .map(|node| Peer {
-                node_id: node.id,
+            .iter()
+            .map(|(node_id, node)| Peer {
+                node_id: *node_id,
                 raft_addr: String::new(),
                 snapshot_addr: String::new(),
                 role: node.replica_role,
@@ -7633,9 +7694,9 @@ impl Consensus for RaftCluster {
     fn campaign(&mut self, forced: bool) -> Result<(), RaftError> {
         let candidate_id = self.leader_id.unwrap_or_else(|| {
             self.nodes
-                .values()
-                .find(|node| node.replica_role.can_be_leader())
-                .map(|node| node.id)
+                .iter()
+                .find(|(_, node)| node.replica_role.can_be_leader())
+                .map(|(node_id, _)| *node_id)
                 .unwrap_or_default()
         });
         RaftCluster::campaign(self, candidate_id, forced)
@@ -7658,9 +7719,41 @@ impl Consensus for RaftCluster {
 mod node_snapshot_storage_tests {
     use super::*;
 
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn node_identity_uses_the_directory_slot() {
+        assert_eq!(std::mem::size_of::<Node>(), 152);
+
+        let cluster = RaftCluster::new(
+            5,
+            Config::default(),
+            vec![Peer {
+                node_id: 7,
+                raft_addr: String::new(),
+                snapshot_addr: String::new(),
+                role: ReplicaRole::Voter,
+                auto_promote: false,
+            }],
+        )
+        .expect("cluster");
+        let mut encoded = serde_json::to_value(&cluster).expect("serialize cluster");
+        assert_eq!(encoded["nodes"]["7"]["id"], serde_json::json!(7));
+
+        let decoded: RaftCluster =
+            serde_json::from_value(encoded.clone()).expect("deserialize cluster");
+        assert_eq!(decoded, cluster);
+
+        encoded["nodes"]["7"]["id"] = serde_json::json!(8);
+        let error = serde_json::from_value::<RaftCluster>(encoded)
+            .expect_err("mismatched node identity must be rejected");
+        assert!(error
+            .to_string()
+            .contains("node id 8 does not match directory key 7"));
+    }
+
     #[test]
     fn snapshot_metadata_stays_absent_until_install_and_keeps_its_wire_shape() {
-        let mut node = Node::new(1, ReplicaRole::Voter, false);
+        let mut node = Node::new(ReplicaRole::Voter, false);
         assert!(node.installed_snapshot.is_none());
 
         let metadata = SnapshotMetadata {

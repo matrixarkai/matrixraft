@@ -29,7 +29,7 @@ mod log_addressing_tests {
     }
 
     fn voter() -> Node {
-        Node::new(1, ReplicaRole::Voter, false)
+        Node::new(ReplicaRole::Voter, false)
     }
 
     #[test]
@@ -1761,9 +1761,9 @@ mod tests {
         .expect("cluster");
         cluster.current_term = 2;
         cluster.leader_id = Some(1);
-        for node in cluster.nodes.values_mut() {
+        for (node_id, node) in cluster.nodes.iter_mut() {
             node.hard_state.current_term = 2;
-            node.raft_role = if node.id == 1 {
+            node.raft_role = if *node_id == 1 {
                 StateRole::Leader
             } else {
                 StateRole::Follower
@@ -1824,14 +1824,14 @@ mod tests {
         let mut cluster = RaftCluster::new(11, Config::default(), peers).expect("cluster");
         cluster.current_term = 1;
         cluster.leader_id = Some(17);
-        for node in cluster.nodes.values_mut() {
+        for (node_id, node) in cluster.nodes.iter_mut() {
             node.hard_state.current_term = 1;
-            node.raft_role = if node.id == 17 {
+            node.raft_role = if *node_id == 17 {
                 StateRole::Leader
             } else {
                 StateRole::Follower
             };
-            for index in 1..=node.id {
+            for index in 1..=*node_id {
                 node.append_entry(std::sync::Arc::new(LogEntry {
                     log_id: LogId { term: 1, index },
                     payload: Vec::new(),
@@ -2407,7 +2407,7 @@ mod the_truncation_is_floored_at_the_commit_point {
 
     /// Five entries at term 1, with `commit_index` advanced to `commit`.
     fn node_with_five_entries_committed_through(commit: LogIndex) -> Node {
-        let mut node = Node::new(1, ReplicaRole::Voter, false);
+        let mut node = Node::new(ReplicaRole::Voter, false);
         for index in 1..=5 {
             node.append_entry(std::sync::Arc::new(entry(1, index)));
         }
