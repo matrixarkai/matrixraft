@@ -859,7 +859,7 @@ where
 
 pub struct ReplicationPipeline {
     peer_id: NodeId,
-    limits: PipelineLimits,
+    limits: Option<Arc<PipelineLimits>>,
     status: CompactPeerProgress,
     append_queue: SparseDeque<QueuedAppend>,
     append_queue_bytes: u64,
@@ -908,7 +908,7 @@ impl Serialize for ReplicationPipeline {
     {
         ReplicationPipelineRef {
             peer_id: self.peer_id,
-            limits: &self.limits,
+            limits: self.limits(),
             status: self.status(),
             append_queue: &self.append_queue,
             append_queue_bytes: self.append_queue_bytes,
@@ -943,7 +943,7 @@ impl<'de> Deserialize<'de> for ReplicationPipeline {
         });
         Ok(Self {
             peer_id: pipeline.peer_id,
-            limits: pipeline.limits,
+            limits: Self::limit_handle(pipeline.limits),
             status: CompactPeerProgress::from_public(pipeline.status),
             append_queue: pipeline.append_queue,
             append_queue_bytes: pipeline.append_queue_bytes,
@@ -960,7 +960,7 @@ impl fmt::Debug for ReplicationPipeline {
         formatter
             .debug_struct("ReplicationPipeline")
             .field("peer_id", &self.peer_id)
-            .field("limits", &self.limits)
+            .field("limits", self.limits())
             .field("status", &self.status())
             .field("append_queue", &self.append_queue)
             .field("append_queue_bytes", &self.append_queue_bytes)
@@ -975,7 +975,7 @@ impl fmt::Debug for ReplicationPipeline {
 impl PartialEq for ReplicationPipeline {
     fn eq(&self, other: &Self) -> bool {
         self.peer_id == other.peer_id
-            && self.limits == other.limits
+            && self.limits() == other.limits()
             && self.status() == other.status()
             && self.append_queue == other.append_queue
             && self.append_queue_bytes == other.append_queue_bytes
@@ -992,7 +992,7 @@ impl Clone for ReplicationPipeline {
     fn clone(&self) -> Self {
         Self {
             peer_id: self.peer_id,
-            limits: self.limits,
+            limits: self.limits.clone(),
             status: self.status.clone(),
             append_queue: self.append_queue.clone(),
             append_queue_bytes: self.append_queue_bytes,
@@ -1010,6 +1010,38 @@ impl Clone for ReplicationPipeline {
 
 impl ReplicationPipeline {
     pub fn new(peer_id: NodeId, next_index: LogIndex, limits: PipelineLimits) -> Self {
+        Self::new_with_limit_handle(peer_id, next_index, Self::limit_handle(limits))
+    }
+
+    pub(crate) fn limit_handle(limits: PipelineLimits) -> Option<Arc<PipelineLimits>> {
+        (limits != DEFAULT_PIPELINE_LIMITS).then(|| Arc::new(limits))
+    }
+
+    pub(crate) fn cloned_limit_handle_for(
+        &self,
+        limits: PipelineLimits,
+    ) -> Option<Arc<PipelineLimits>> {
+        if self.limits() == &limits {
+            self.limits.clone()
+        } else {
+            Self::limit_handle(limits)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_limit_allocation_with(&self, other: &Self) -> bool {
+        match (&self.limits, &other.limits) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn new_with_limit_handle(
+        peer_id: NodeId,
+        next_index: LogIndex,
+        limits: Option<Arc<PipelineLimits>>,
+    ) -> Self {
         Self {
             peer_id,
             limits,
@@ -1021,6 +1053,10 @@ impl ReplicationPipeline {
             reorder_queue: SparseBTreeMap::default(),
             snapshot_transfer: None,
         }
+    }
+
+    fn limits(&self) -> &PipelineLimits {
+        self.limits.as_deref().unwrap_or(&DEFAULT_PIPELINE_LIMITS)
     }
 
     pub fn reset_for_leader_transition(
@@ -1048,7 +1084,7 @@ impl ReplicationPipeline {
     pub fn status(&self) -> PeerProgress {
         self.status.to_public(
             self.peer_id,
-            self.limits,
+            *self.limits(),
             self.append_queue.len() as u64,
             self.apply_inflight.len() as u64,
             self.reorder_queue.len() as u64,
@@ -1119,20 +1155,20 @@ impl ReplicationPipeline {
 
     pub fn queue_append(&mut self, entry: &LogEntry) -> Result<(), RaftError> {
         let bytes = entry.payload.len() as u64;
-        if bytes > self.limits.max_apply_batch_bytes {
+        if bytes > self.limits().max_apply_batch_bytes {
             self.status.telemetry_mut().oversized_log_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "append entry exceeds max apply batch bytes".to_string(),
             ));
         }
-        if self.append_queue.len() as u64 >= self.limits.max_inflights_replicate {
+        if self.append_queue.len() as u64 >= self.limits().max_inflights_replicate {
             self.status.telemetry_mut().apply_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "append queue backpressure limit reached".to_string(),
             ));
         }
         if self.status.inflight_bytes + self.append_queue_bytes + bytes
-            > self.limits.max_memory_replicate_log_bytes
+            > self.limits().max_memory_replicate_log_bytes
         {
             self.status.telemetry_mut().memory_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
@@ -1151,7 +1187,7 @@ impl ReplicationPipeline {
     }
 
     pub fn flush_append_window(&mut self) -> Vec<InflightAppend> {
-        self.flush_append_batch(1, self.limits.max_apply_batch_bytes)
+        self.flush_append_batch(1, self.limits().max_apply_batch_bytes)
     }
 
     /// Flushes into a vector this pipeline does not own.
@@ -1204,7 +1240,7 @@ impl ReplicationPipeline {
         };
         let max_bytes = max_bytes.max(1);
         while !self.is_paused()
-            && self.status.inflight_entries < self.limits.max_inflights_replicate
+            && self.status.inflight_entries < self.limits().max_inflights_replicate
         {
             let Some(first_log_id) = self
                 .append_queue
@@ -1225,7 +1261,7 @@ impl ReplicationPipeline {
                     break;
                 }
                 if self.status.inflight_bytes + bytes + entry_bytes
-                    > self.limits.max_memory_replicate_log_bytes
+                    > self.limits().max_memory_replicate_log_bytes
                 {
                     break;
                 }
@@ -1436,13 +1472,13 @@ impl ReplicationPipeline {
         applied_index: LogIndex,
         batch_bytes: u64,
     ) -> Result<(), RaftError> {
-        if batch_bytes > self.limits.max_apply_batch_bytes {
+        if batch_bytes > self.limits().max_apply_batch_bytes {
             self.status.telemetry_mut().oversized_log_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "apply batch exceeds max apply batch bytes".to_string(),
             ));
         }
-        if self.apply_inflight.len() as u64 >= self.limits.max_inflights_apply_task {
+        if self.apply_inflight.len() as u64 >= self.limits().max_inflights_apply_task {
             self.status.telemetry_mut().apply_backpressure_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "apply inflight task limit reached".to_string(),
@@ -1509,13 +1545,13 @@ impl ReplicationPipeline {
             self.drain_reorder_queue();
             return Ok(());
         }
-        if !self.limits.enable_reorder_queue {
+        if !self.limits().enable_reorder_queue {
             self.status.telemetry_mut().out_of_order_append_rejections += 1;
             return Err(RaftError::InvalidRequest(
                 "out-of-order append received while reorder queue is disabled".to_string(),
             ));
         }
-        if self.reorder_queue.len() as u64 >= self.limits.reorder_window_size {
+        if self.reorder_queue.len() as u64 >= self.limits().reorder_window_size {
             self.status.telemetry_mut().reorder_entries_rejected += 1;
             return Err(RaftError::InvalidRequest(
                 "reorder queue window is full".to_string(),
@@ -1555,7 +1591,7 @@ impl ReplicationPipeline {
         if self.reorder_queue.is_empty() {
             return 0;
         }
-        let timeout_us = self.limits.reorder_timeout_us;
+        let timeout_us = self.limits().reorder_timeout_us;
         let mut dropped = 0_u64;
         self.reorder_queue.retain(|_, age_us| {
             *age_us = age_us.saturating_add(elapsed_us);
@@ -1899,7 +1935,7 @@ impl ReplicationPipeline {
     }
 
     fn inflight_is_full(&self) -> bool {
-        self.status.inflight_entries >= self.limits.max_inflights_replicate
+        self.status.inflight_entries >= self.limits().max_inflights_replicate
     }
 
     fn free_first_inflight(&mut self) {
@@ -2052,17 +2088,19 @@ pub struct ReplicationPipelineEvidenceValidationReport {
     pub missing: Vec<String>,
 }
 
+const DEFAULT_PIPELINE_LIMITS: PipelineLimits = PipelineLimits {
+    max_inflights_replicate: 256,
+    max_memory_replicate_log_bytes: 64 * 1024 * 1024,
+    max_inflights_apply_task: 1024,
+    max_apply_batch_bytes: 8 * 1024 * 1024,
+    enable_reorder_queue: true,
+    reorder_window_size: 1024,
+    reorder_timeout_us: 5_000_000,
+};
+
 impl PipelineLimits {
     pub fn production_default() -> Self {
-        Self {
-            max_inflights_replicate: 256,
-            max_memory_replicate_log_bytes: 64 * 1024 * 1024,
-            max_inflights_apply_task: 1024,
-            max_apply_batch_bytes: 8 * 1024 * 1024,
-            enable_reorder_queue: true,
-            reorder_window_size: 1024,
-            reorder_timeout_us: 5_000_000,
-        }
+        DEFAULT_PIPELINE_LIMITS
     }
 }
 

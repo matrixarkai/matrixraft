@@ -53,6 +53,11 @@ fn measured<T>(run: impl FnOnce() -> T) -> (T, usize, usize) {
 
 #[test]
 fn idle_status_stays_allocation_free_and_telemetry_allocates_once() {
+    let (_, construct_allocations, construct_bytes) = measured(|| {
+        black_box(ReplicationPipeline::new(1, 1, PipelineLimits::default()));
+    });
+    assert_eq!((construct_allocations, construct_bytes), (0, 0));
+
     let mut pipeline = ReplicationPipeline::new(2, 1, PipelineLimits::default());
 
     let (_, idle_allocations, idle_bytes) = measured(|| {

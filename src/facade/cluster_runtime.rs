@@ -1127,13 +1127,14 @@ impl RaftCluster {
             ));
         }
 
+        let pipeline_limits = ReplicationPipeline::limit_handle(config.pipeline_limits());
         let peer_pipelines = CompactMap::from_sorted_iter(nodes.keys().copied().map(|node_id| {
                 (
                     node_id,
-                    Box::new(ReplicationPipeline::new(
+                    Box::new(ReplicationPipeline::new_with_limit_handle(
                         node_id,
                         1,
-                        config.pipeline_limits(),
+                        pipeline_limits.clone(),
                     )),
                 )
             }));
@@ -5174,7 +5175,7 @@ impl RaftCluster {
             )));
         }
         let peer_id = peer.node_id;
-        let limits = self.config.pipeline_limits();
+        let limits = self.pipeline_limit_handle();
         self.snapshot_installers.remove(&peer_id);
         self.pending_snapshots.remove(&peer_id);
         self.clear_reorder_queue_for(peer_id);
@@ -5184,7 +5185,7 @@ impl RaftCluster {
         );
         self.peer_pipelines.insert(
             peer_id,
-            Box::new(ReplicationPipeline::new(
+            Box::new(ReplicationPipeline::new_with_limit_handle(
                 peer_id,
                 self.last_log_index + 1,
                 limits,
@@ -7472,7 +7473,7 @@ impl RaftCluster {
 
     fn reset_replication_pipelines_for_leader(&mut self, leader_id: NodeId) {
         let next_index = self.last_log_index.saturating_add(1);
-        let limits = self.config.pipeline_limits();
+        let limits = self.pipeline_limit_handle();
         let mut after = std::ops::Bound::Unbounded;
         loop {
             let mut node_ids = [0; NODE_ID_CHUNK];
@@ -7490,7 +7491,11 @@ impl RaftCluster {
             after = std::ops::Bound::Excluded(node_ids[node_count - 1]);
             for &node_id in &node_ids[..node_count] {
                 let pipeline = self.peer_pipelines.get_or_insert_with(node_id, || {
-                    Box::new(ReplicationPipeline::new(node_id, next_index, limits))
+                    Box::new(ReplicationPipeline::new_with_limit_handle(
+                        node_id,
+                        next_index,
+                        limits.clone(),
+                    ))
                 });
                 let is_leader = node_id == leader_id;
                 pipeline.reset_for_leader_transition(
@@ -7506,14 +7511,22 @@ impl RaftCluster {
         }
     }
 
+    fn pipeline_limit_handle(&self) -> Option<Arc<PipelineLimits>> {
+        let configured_limits = self.config.pipeline_limits();
+        self.peer_pipelines.values().next().map_or_else(
+            || ReplicationPipeline::limit_handle(configured_limits),
+            |pipeline| pipeline.cloned_limit_handle_for(configured_limits),
+        )
+    }
+
     fn refresh_replication_pipelines(&mut self) {
-        let limits = self.config.pipeline_limits();
+        let limits = self.pipeline_limit_handle();
         for (node_id, node) in self.nodes.iter() {
             self.peer_pipelines.get_or_insert_with(*node_id, || {
-                Box::new(ReplicationPipeline::new(
+                Box::new(ReplicationPipeline::new_with_limit_handle(
                     *node_id,
                     node.match_index().saturating_add(1),
-                    limits,
+                    limits.clone(),
                 ))
             });
         }
@@ -7723,6 +7736,57 @@ mod compact_map_tests {
             map.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
             vec![1, 3, 4]
         );
+    }
+}
+
+#[cfg(test)]
+mod shared_pipeline_limit_tests {
+    use super::*;
+
+    fn peer(node_id: NodeId) -> Peer {
+        Peer {
+            node_id,
+            raft_addr: String::new(),
+            snapshot_addr: String::new(),
+            role: ReplicaRole::Voter,
+            auto_promote: false,
+        }
+    }
+
+    fn custom_config() -> Config {
+        Config::default().with_pipeline_limits(PipelineLimits {
+            max_inflights_replicate: 7,
+            ..PipelineLimits::default()
+        })
+    }
+
+    fn share(cluster: &RaftCluster, left: NodeId, right: NodeId) -> bool {
+        cluster.peer_pipelines[&left]
+            .shares_limit_allocation_with(&cluster.peer_pipelines[&right])
+    }
+
+    #[test]
+    fn custom_limits_share_one_allocation_across_every_peer_creation_path() {
+        let mut cluster = RaftCluster::new(
+            31,
+            custom_config(),
+            vec![peer(1), peer(2), peer(3)],
+        )
+        .expect("cluster");
+        assert!(share(&cluster, 1, 2));
+        assert!(share(&cluster, 1, 3));
+
+        cluster.start().expect("start");
+        cluster.add_peer(peer(4)).expect("add peer");
+        assert!(share(&cluster, 1, 4));
+
+        cluster.peer_pipelines.remove(&2);
+        cluster.refresh_replication_pipelines();
+        assert!(share(&cluster, 1, 2));
+
+        cluster.peer_pipelines.remove(&3);
+        cluster.reset_replication_pipelines_for_leader(1);
+        assert!(share(&cluster, 1, 3));
     }
 }
 
