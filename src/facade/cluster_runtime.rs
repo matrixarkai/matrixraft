@@ -6957,23 +6957,36 @@ impl RaftCluster {
             .expect("snapshot metadata remains owned by the cluster")
             .snapshot_id
             .as_str();
+        let transfer_count = self
+            .peer_pipelines
+            .iter()
+            .filter(|(peer_id, pipeline)| {
+                **peer_id != leader_id
+                    && pipeline.can_begin_snapshot_send_for(snapshot_index)
+            })
+            .count();
+        if transfer_count == 0 {
+            return Ok(());
+        }
         let snapshot_id = Arc::<str>::from(snapshot_id);
+        let transfer_batch = ReplicationPipeline::snapshot_send_batch(
+            Arc::clone(&snapshot_id),
+            self.peer_pipelines.iter().filter_map(|(peer_id, pipeline)| {
+                (*peer_id != leader_id
+                    && pipeline.can_begin_snapshot_send_for(snapshot_index))
+                    .then_some(*peer_id)
+            }),
+            transfer_count,
+            snapshot_index,
+            1,
+        );
         for (peer_id, pipeline) in self.peer_pipelines.iter_mut() {
             let peer_id = *peer_id;
             if peer_id == leader_id {
                 continue;
             }
-            let status = pipeline.status();
-            if status.required_snapshot_index > 0
-                && status.required_snapshot_index <= snapshot_index
-                && !status.snapshot_sending
-                && !status.snapshot_installing
-            {
-                pipeline.begin_snapshot_send_shared(
-                    Arc::clone(&snapshot_id),
-                    snapshot_index,
-                    1,
-                )?;
+            if pipeline.can_begin_snapshot_send_for(snapshot_index) {
+                pipeline.begin_snapshot_send_batch(Arc::clone(&transfer_batch))?;
             }
         }
         Ok(())
