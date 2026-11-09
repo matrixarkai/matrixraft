@@ -414,6 +414,7 @@ fn node_runtime_runs_heartbeat_election_timer_loop_and_peer_state_machine() {
     assert!(status.timer_status.election_ticks > 0);
     assert_eq!(status.timer_status.heartbeat_interval_ms, 10);
     assert_eq!(status.timer_status.election_timeout_ms, 50);
+    assert_eq!(status.timer_status.leader_lease_timeout_ms, 20);
     assert_eq!(status.peer_runtime.len(), 3);
     assert!(!status
         .peer_runtime
