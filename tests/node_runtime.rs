@@ -881,6 +881,89 @@ fn node_runtime_installs_snapshot_with_apply_fence() {
 }
 
 #[test]
+fn snapshot_backed_recycling_waits_for_flush_and_recovers() {
+    check_snapshot_backed_recycling(1);
+    check_snapshot_backed_recycling(u64::MAX);
+}
+
+fn check_snapshot_backed_recycling(threshold: u64) {
+    let dir = temp_runtime_dir("snapshot-recycling");
+    let mut options = node_options_in(dir.clone());
+    options.config = options.config.with_applied_log_byte_threshold(threshold);
+    options.config.can_trigger_snapshot = false;
+    options.config.max_segment_bytes = 1024;
+    options.config.min_keep_segment_num = 2;
+    let mut runtime = NodeRuntime::create(options.clone()).expect("create");
+    runtime.start().expect("start");
+    let mut last = LogId { term: 1, index: 1 };
+    for _ in 0..30 {
+        last = runtime.propose(vec![9; 256]).expect("write");
+    }
+    let before = runtime.wal_lifecycle_status().expect("WAL status");
+    assert!(before.segment_count > 2);
+    assert_eq!(
+        runtime
+            .recycle_applied_logs(last.index)
+            .expect("no snapshot"),
+        0
+    );
+    last.index += 1;
+    runtime
+        .install_snapshot_to(
+            1,
+            RaftSnapshot {
+                group_id: 77,
+                meta: SnapshotMetadata {
+                    snapshot_id: "recycling-checkpoint".to_string(),
+                    last_log_id: last.clone(),
+                    membership: vec![1, 2, 3],
+                    members: Vec::new(),
+                    payload_bytes: 0,
+                },
+                payload: Vec::new(),
+            },
+            ApplySnapshotFence {
+                applied_index: last.index,
+                commit_index: last.index,
+                installed_snapshot_index: last.index,
+                first_retained_log_index: last.index + 1,
+            },
+        )
+        .expect("install local checkpoint");
+    assert_eq!(runtime.recycle_applied_logs(0).expect("unflushed"), 0);
+    let released = runtime.recycle_applied_logs(last.index).expect("recycle");
+    assert_eq!(released > 0, threshold != u64::MAX);
+    let after = runtime
+        .wal_lifecycle_status()
+        .expect("WAL status after recycling");
+    if threshold != u64::MAX {
+        assert!(after.segment_count < before.segment_count);
+    } else {
+        assert_eq!(after.segment_count, before.segment_count);
+    }
+    runtime.shutdown().expect("shutdown");
+    let mut recovered = NodeRuntime::create(options).expect("recover runtime");
+    recovered.start().expect("start recovered");
+    let status = recovered.status().expect("recovered status");
+    let local = status
+        .cluster_status
+        .expect("cluster")
+        .nodes
+        .into_iter()
+        .find(|node| node.node_id == 1)
+        .expect("local node");
+    if threshold != u64::MAX {
+        assert_eq!(local.last_snapshot_index, last.index);
+        assert!(local.applied_index >= last.index);
+    } else {
+        assert_eq!(local.last_snapshot_index, 0);
+        assert!(local.applied_index >= last.index - 1);
+    }
+    recovered.shutdown().expect("shutdown recovered");
+    fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
 fn node_runtime_installs_snapshot_chunk_through_runtime() {
     let mut runtime = NodeRuntime::create(node_options()).expect("create runtime");
     runtime.start().expect("start runtime");

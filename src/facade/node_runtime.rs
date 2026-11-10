@@ -397,6 +397,7 @@ enum NodeRuntimeOp {
     ),
     WalLifecycleStatus(mpsc::Sender<Result<WalLifecycleStatus, RaftError>>),
     WalRecoveryReport(mpsc::Sender<Result<Option<WalRecoveryReport>, RaftError>>),
+    RecycleAppliedLogs(LogIndex, mpsc::Sender<Result<u64, RaftError>>),
     Step(
         RuntimeStepMessage,
         mpsc::Sender<Result<StepResult, RaftError>>,
@@ -1470,6 +1471,15 @@ impl NodeRuntime {
         }
     }
 
+    /// Reclaim byte-pressure logs covered by a durable FSM and local snapshot.
+    pub fn recycle_applied_logs(&self, flushed_index: LogIndex) -> Result<u64, RaftError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?
+            .send(NodeRuntimeOp::RecycleAppliedLogs(flushed_index, reply_tx))
+            .map_err(|err| RaftError::Transport(format!("failed to send log recycling: {err}")))?;
+        recv_runtime_reply(reply_rx)?
+    }
+
     pub fn release_memory(&self) -> Result<bool, RaftError> {
         match self.step(Message::Admin {
             command: AdminCommand::ReleaseMemory,
@@ -2153,6 +2163,45 @@ fn persist_after_promise(
     };
     let appended = append_runtime_wal(cluster, open_wal, node_id);
     after_durable_write(cluster, node_id, appended)
+}
+
+fn recycle_runtime_applied_logs(
+    cluster: &mut RaftCluster,
+    wal: &mut Option<Box<MatrixRaftWalHandle>>,
+    node_id: NodeId,
+    flushed_index: LogIndex,
+) -> Result<u64, RaftError> {
+    let Some(threshold) = cluster.config.snapshot_applied_byte_threshold() else {
+        return Ok(0);
+    };
+    let Some(open_wal) = wal.as_mut() else {
+        return Ok(0);
+    };
+    let node = cluster.nodes.get(&node_id).ok_or(RaftError::NodeNotFound(node_id))?;
+    let snapshot_index = node.installed_snapshot.as_ref()
+        .map(|snapshot| snapshot.meta.last_log_id.index).unwrap_or(0);
+    let through = flushed_index.min(node.safety_applied_index).min(snapshot_index);
+    if through == 0 || open_wal.status().total_bytes < threshold {
+        return Ok(0);
+    }
+    let fence = StorageApplyFence {
+        group_id: cluster.group_id,
+        node_id,
+        committed_index: node.commit_index,
+        applied_index: node.applied_index,
+        durable_applied_index: through,
+        storage_flushed_index: flushed_index,
+        installed_snapshot_index: snapshot_index,
+        first_retained_log_index: snapshot_index.saturating_add(1),
+    };
+    // Persist snapshot coverage before deleting any segment that supplied it.
+    let appended = append_runtime_wal(cluster, open_wal, node_id);
+    after_durable_write(cluster, node_id, appended)?;
+    let report = open_wal.compact_through_with_fence(through, &fence)?;
+    if !report.fence_valid {
+        return Err(RaftError::Storage(report.blocker.unwrap_or_else(|| "log recycling fence refused".to_string())));
+    }
+    Ok(report.released_segments)
 }
 
 fn append_runtime_wal(
@@ -3230,6 +3279,10 @@ impl NodeCore {
                     blocker_log,
                     false,
                 ));
+            }
+            NodeRuntimeOp::RecycleAppliedLogs(flushed_index, reply) => {
+                let result = recycle_runtime_applied_logs(cluster, wal, node_id, flushed_index);
+                let _ = reply.send(result);
             }
             NodeRuntimeOp::IsBusy(reply) => {
                 let _ = reply.send(record_runtime_result(
@@ -4388,6 +4441,10 @@ fn raft_peer_runtime_states(
 
 fn respond_runtime_error(command: NodeRuntimeOp, error: RaftError) -> bool {
     match command {
+        NodeRuntimeOp::RecycleAppliedLogs(_, reply) => {
+            let _ = reply.send(Err(error));
+            false
+        }
         NodeRuntimeOp::Start(reply) | NodeRuntimeOp::Stop(reply) => {
             reply.send(Err(error));
             false
