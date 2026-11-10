@@ -3672,6 +3672,7 @@ impl MatrixRaftOptions {
         PipelineLimits {
             max_inflights_replicate: self.max_inflights_replicate.max(1),
             max_memory_replicate_log_bytes: self.max_memory_replicate_log_bytes.max(1),
+            max_replicate_batch_entries: self.max_disk_replicate_log_num.max(1),
             max_inflights_apply_task: self.max_inflights_apply_task.max(1),
             max_apply_batch_bytes: self.max_apply_batch_bytes.max(1),
             enable_reorder_queue: self.enable_reorder_queue,

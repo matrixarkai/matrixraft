@@ -31,6 +31,7 @@ fn small_limits() -> PipelineLimits {
     PipelineLimits {
         max_inflights_replicate: 1,
         max_memory_replicate_log_bytes: 16,
+        max_replicate_batch_entries: 64,
         max_inflights_apply_task: 2,
         max_apply_batch_bytes: 8,
         enable_reorder_queue: true,
@@ -176,6 +177,7 @@ fn replication_pipeline_batches_retries_backoff_and_lag() {
         PipelineLimits {
             max_inflights_replicate: 8,
             max_memory_replicate_log_bytes: 1024,
+            max_replicate_batch_entries: 64,
             max_inflights_apply_task: 2,
             max_apply_batch_bytes: 256,
             enable_reorder_queue: true,
@@ -308,6 +310,7 @@ fn replication_pipeline_pauses_and_resumes_progress() {
         PipelineLimits {
             max_inflights_replicate: 4,
             max_memory_replicate_log_bytes: 1024,
+            max_replicate_batch_entries: 64,
             max_inflights_apply_task: 2,
             max_apply_batch_bytes: 256,
             enable_reorder_queue: true,
@@ -600,6 +603,7 @@ fn replication_pipeline_enforces_windows_and_memory_backpressure() {
         PipelineLimits {
             max_inflights_replicate: 8,
             max_memory_replicate_log_bytes: 10,
+            max_replicate_batch_entries: 64,
             max_inflights_apply_task: 2,
             max_apply_batch_bytes: 8,
             enable_reorder_queue: true,
@@ -1077,6 +1081,7 @@ fn the_lending_flush_appends_and_counts_only_what_it_added() {
     let limits = PipelineLimits {
         max_inflights_replicate: 64,
         max_memory_replicate_log_bytes: 1 << 20,
+        max_replicate_batch_entries: 64,
         max_inflights_apply_task: 64,
         max_apply_batch_bytes: 1 << 16,
         enable_reorder_queue: false,

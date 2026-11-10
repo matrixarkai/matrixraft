@@ -32,6 +32,7 @@ fn limits(reorder_timeout_us: u64, reorder_window_size: u64) -> PipelineLimits {
     PipelineLimits {
         max_inflights_replicate: 128,
         max_memory_replicate_log_bytes: 1024 * 1024,
+        max_replicate_batch_entries: 64,
         max_inflights_apply_task: 8,
         max_apply_batch_bytes: 1024 * 1024,
         enable_reorder_queue: true,

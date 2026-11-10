@@ -1996,10 +1996,18 @@ fn next_backoff_ms(retry_attempts: u64) -> u64 {
     10_u64.saturating_mul(1_u64 << shift).min(5_000)
 }
 
+fn default_max_replicate_batch_entries() -> u64 {
+    64
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineLimits {
     pub max_inflights_replicate: u64,
     pub max_memory_replicate_log_bytes: u64,
+    /// Maximum entries copied into one lagging-peer replication round or
+    /// flushed as one queued append batch.
+    #[serde(default = "default_max_replicate_batch_entries")]
+    pub max_replicate_batch_entries: u64,
     pub max_inflights_apply_task: u64,
     pub max_apply_batch_bytes: u64,
     pub enable_reorder_queue: bool,
@@ -2091,6 +2099,7 @@ pub struct ReplicationPipelineEvidenceValidationReport {
 const DEFAULT_PIPELINE_LIMITS: PipelineLimits = PipelineLimits {
     max_inflights_replicate: 256,
     max_memory_replicate_log_bytes: 64 * 1024 * 1024,
+    max_replicate_batch_entries: 64,
     max_inflights_apply_task: 1024,
     max_apply_batch_bytes: 8 * 1024 * 1024,
     enable_reorder_queue: true,
