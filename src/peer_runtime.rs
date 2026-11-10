@@ -58,6 +58,57 @@ pub struct PeerOptions {
     /// A file in an existing directory, exclusively locked while the peer is open.
     pub wal_path: PathBuf,
 }
+
+/// Local consensus timing and replication admission budgets. Tick duration is
+/// supplied by the host; these settings are not journaled and may change on reopen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerTuning {
+    pub election_tick: usize,
+    pub heartbeat_tick: usize,
+    pub pre_vote: bool,
+    pub check_quorum: bool,
+    pub max_size_per_msg: u64,
+    pub max_inflight_msgs: usize,
+    pub max_uncommitted_size: u64,
+}
+impl Default for PeerTuning {
+    fn default() -> Self {
+        Self {
+            election_tick: 10,
+            heartbeat_tick: 2,
+            pre_vote: true,
+            check_quorum: true,
+            max_size_per_msg: 1024 * 1024,
+            max_inflight_msgs: 64,
+            max_uncommitted_size: 4 * 1024 * 1024,
+        }
+    }
+}
+impl PeerTuning {
+    fn config(self, id: u64) -> Result<Config, RaftError> {
+        if self.election_tick > usize::MAX / 2
+            || self.max_size_per_msg == 0
+            || self.max_size_per_msg > (LIMIT / 2) as u64
+            || self.max_inflight_msgs > 65536
+        {
+            return Err(invalid("peer tuning exceeds supported bounds"));
+        }
+        let config = Config {
+            id,
+            election_tick: self.election_tick,
+            heartbeat_tick: self.heartbeat_tick,
+            pre_vote: self.pre_vote,
+            check_quorum: self.check_quorum,
+            max_size_per_msg: self.max_size_per_msg,
+            max_inflight_msgs: self.max_inflight_msgs,
+            max_uncommitted_size: self.max_uncommitted_size,
+            read_only_option: ReadOnlyOption::Safe,
+            ..Default::default()
+        };
+        config.validate().map_err(invalid)?;
+        Ok(config)
+    }
+}
 /// A binary protobuf packet. Delivery must preserve these bytes.
 #[derive(Clone, Debug)]
 pub struct PeerPacket {
@@ -1922,7 +1973,17 @@ impl DurablePeer {
     pub fn open(options: PeerOptions) -> Result<Self, RaftError> {
         Self::open_inner(options, Vec::new())
     }
-    fn open_inner(mut options: PeerOptions, permitted: Vec<u64>) -> Result<Self, RaftError> {
+    pub fn open_with_tuning(options: PeerOptions, tuning: PeerTuning) -> Result<Self, RaftError> {
+        Self::open_inner_with_tuning(options, Vec::new(), tuning)
+    }
+    fn open_inner(options: PeerOptions, permitted: Vec<u64>) -> Result<Self, RaftError> {
+        Self::open_inner_with_tuning(options, permitted, PeerTuning::default())
+    }
+    fn open_inner_with_tuning(
+        mut options: PeerOptions,
+        permitted: Vec<u64>,
+        tuning: PeerTuning,
+    ) -> Result<Self, RaftError> {
         let unique: BTreeSet<_> = options.voters.iter().copied().collect();
         if options.group_id == 0
             || options.node_id == 0
@@ -1935,6 +1996,7 @@ impl DurablePeer {
             return Err(invalid("invalid peer identity or voter set"));
         }
         options.voters = unique.into_iter().collect();
+        let mut config = tuning.config(options.node_id)?;
         let store = PeerStorage {
             permitted,
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
@@ -1945,21 +2007,9 @@ impl DurablePeer {
         };
         let journal = Journal::open(&options, &store)?;
         let restore_on_open = store.checkpoint.lock().unwrap().clone();
-        let config = Config {
-            applied: restore_on_open
-                .as_ref()
-                .map_or(0, |s| s.get_metadata().index),
-            id: options.node_id,
-            election_tick: 10,
-            heartbeat_tick: 2,
-            check_quorum: true,
-            read_only_option: ReadOnlyOption::Safe,
-            pre_vote: true,
-            max_size_per_msg: 1024 * 1024,
-            max_inflight_msgs: 64,
-            max_uncommitted_size: 4 * 1024 * 1024,
-            ..Default::default()
-        };
+        config.applied = restore_on_open
+            .as_ref()
+            .map_or(0, |s| s.get_metadata().index);
         let logger = slog::Logger::root(slog::Discard, slog::o!());
         let raw = RawNode::new(&config, store.clone(), &logger).map_err(invalid)?;
         let mut stream = snapshot_stream::Stream::new(
