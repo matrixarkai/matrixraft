@@ -90,6 +90,16 @@ no positions. The consensus core's uncommitted-byte budget still applies; a full
 budget rejects the batch. Admission is not commitment, and applications must
 still wait for the matching successful committed-entry callbacks.
 
+`propose_in_term(expected_term, payload)` and
+`propose_batch_in_term(expected_term, payloads)` additionally require local
+leadership in exactly the supplied term. Capture the term when accepting work
+whose authority must not survive a leadership change. The fence is checked on
+the exclusive peer worker before admission, including when the same peer wins
+leadership again in a later term. A mismatch returns `InvalidRequest`; a follower
+returns `NotLeader`. Rejection allocates no log positions and does not append to
+the WAL. Ordinary payload, batch, and backpressure limits remain in force.
+These calls still return admissions, not durable commit acknowledgments.
+
 `cargo run --release --features peer-runtime --example durable_peer_write_cost`
 compares immediate individual proposals, deferred Ready processing after 16
 individual proposals, and grouped admission of 16 values. It reports aggregate
