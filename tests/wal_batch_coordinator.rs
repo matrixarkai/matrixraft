@@ -398,6 +398,20 @@ fn runtime_replies_wait_for_the_shared_commit() {
         assert_eq!(state.records.get(&(102, 1)).map(Vec::len), Some(1));
     }
 
+    for runtime in &runtimes {
+        let error = runtime
+            .read_wal_entries(1, 1, 0)
+            .expect_err("backend has no range reader");
+        assert!(error
+            .to_string()
+            .contains("does not support log range reads"));
+    }
+    assert_eq!(
+        sink.batch_sizes(),
+        vec![2],
+        "unsupported reads must not append"
+    );
+
     sink.fail_next();
     let refused = propose_together(&runtimes, 2);
     assert!(refused.iter().all(|result| {

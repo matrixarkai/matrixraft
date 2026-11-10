@@ -398,6 +398,7 @@ enum NodeRuntimeOp {
     WalLifecycleStatus(mpsc::Sender<Result<WalLifecycleStatus, RaftError>>),
     WalRecoveryReport(mpsc::Sender<Result<Option<WalRecoveryReport>, RaftError>>),
     RecycleAppliedLogs(LogIndex, mpsc::Sender<Result<u64, RaftError>>),
+    ReadWalEntries(LogIndex, LogIndex, usize, mpsc::Sender<Result<Vec<LogEntry>, RaftError>>),
     Step(
         RuntimeStepMessage,
         mpsc::Sender<Result<StepResult, RaftError>>,
@@ -479,6 +480,7 @@ impl NodeRuntimeOp {
                 .max()
                 .unwrap_or(RuntimeCommandPriority::Normal),
             Self::Status(_)
+            | Self::ReadWalEntries(_, _, _, _)
             | Self::WalLifecycleStatus(_)
             | Self::WalRecoveryReport(_)
             | Self::MembershipReports(_)
@@ -1477,6 +1479,14 @@ impl NodeRuntime {
         self.sender()?
             .send(NodeRuntimeOp::RecycleAppliedLogs(flushed_index, reply_tx))
             .map_err(|err| RaftError::Transport(format!("failed to send log recycling: {err}")))?;
+        recv_runtime_reply(reply_rx)?
+    }
+
+    /// Read local durable log entries, serialized with append and compaction.
+    pub fn read_wal_entries(&self, from: LogIndex, to: LogIndex, limit_bytes: usize) -> Result<Vec<LogEntry>, RaftError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.sender()?.send(NodeRuntimeOp::ReadWalEntries(from, to, limit_bytes, reply_tx))
+            .map_err(|err| RaftError::Transport(format!("failed to send durable log read: {err}")))?;
         recv_runtime_reply(reply_rx)?
     }
 
@@ -3294,6 +3304,11 @@ impl NodeCore {
                     false,
                 ));
             }
+            NodeRuntimeOp::ReadWalEntries(from, to, limit_bytes, reply) => {
+                let result = wal.as_ref().ok_or_else(|| RaftError::Storage("WAL is not available".to_string()))
+                    .and_then(|wal| wal.read_log_entries(from, to, limit_bytes));
+                let _ = reply.send(result);
+            }
             NodeRuntimeOp::RecycleAppliedLogs(flushed_index, reply) => {
                 let result = recycle_runtime_applied_logs(cluster, wal, node_id, flushed_index);
                 let _ = reply.send(result);
@@ -4463,6 +4478,10 @@ fn raft_peer_runtime_states(
 
 fn respond_runtime_error(command: NodeRuntimeOp, error: RaftError) -> bool {
     match command {
+        NodeRuntimeOp::ReadWalEntries(_, _, _, reply) => {
+            let _ = reply.send(Err(error));
+            false
+        }
         NodeRuntimeOp::RecycleAppliedLogs(_, reply) => {
             let _ = reply.send(Err(error));
             false

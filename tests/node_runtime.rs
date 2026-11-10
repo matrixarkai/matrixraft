@@ -887,6 +887,50 @@ fn snapshot_backed_recycling_waits_for_flush_and_recovers() {
 }
 
 #[test]
+fn runtime_reads_durable_log_ranges_without_writes() {
+    let dir = temp_runtime_dir("durable-log-reads");
+    let mut options = node_options_in(dir.clone());
+    options.config.max_segment_bytes = 1024;
+    let mut runtime = NodeRuntime::create(options.clone()).expect("create");
+    runtime.start().expect("start");
+    let mut last = LogId { term: 1, index: 1 };
+    for _ in 0..12 {
+        last = runtime.propose(vec![7; 256]).expect("write");
+    }
+    let before = runtime.wal_lifecycle_status().expect("before");
+    let entries = runtime
+        .read_wal_entries(2, last.index, 0)
+        .expect("durable read");
+    assert_eq!(entries.len(), 12);
+    assert!(entries.iter().all(|entry| entry.payload == vec![7; 256]));
+    assert_eq!(
+        runtime
+            .read_wal_entries(2, last.index, 1)
+            .expect("bounded read")
+            .len(),
+        1
+    );
+    assert!(runtime.read_wal_entries(0, 2, 0).is_err());
+    assert!(runtime
+        .read_wal_entries(last.index + 1, last.index + 1, 0)
+        .is_err());
+    let after = runtime.wal_lifecycle_status().expect("after");
+    assert_eq!(after.fsync_count, before.fsync_count);
+    assert_eq!(after.total_records, before.total_records);
+    runtime.shutdown().expect("shutdown");
+    let mut reopened = NodeRuntime::create(options).expect("reopen");
+    reopened.start().expect("start reopened");
+    assert_eq!(
+        reopened
+            .read_wal_entries(2, last.index, 0)
+            .expect("read after restart"),
+        entries
+    );
+    reopened.shutdown().expect("shutdown reopened");
+    fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
 fn flushed_logs_recycle_without_a_snapshot_and_keep_the_boundary_term() {
     let dir = temp_runtime_dir("durable-boundary-recycling");
     let mut options = node_options_in(dir.clone());

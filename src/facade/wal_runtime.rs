@@ -1483,6 +1483,11 @@ pub type FileRaftWal = PersistentRaftWal;
 /// handle per replica and drives it for every durable promise, recovery query,
 /// and fenced compaction.
 pub trait MatrixRaftWalBackend: Send {
+    /// Read durable retained entries without changing storage or writer state.
+    /// Zero means no byte cap; a positive cap includes the crossing entry.
+    fn read_log_entries(&self, _from: LogIndex, _to: LogIndex, _limit_bytes: usize) -> Result<Vec<LogEntry>, RaftError> {
+        Err(RaftError::Storage("WAL backend does not support log range reads".to_string()))
+    }
     /// Whether a compaction attempt can release storage at this frontier.
     /// Backends without a cheap preflight retain the unconditional path.
     fn has_reclaimable_segments(&self, _log_index: LogIndex) -> bool {
@@ -1528,6 +1533,9 @@ impl std::fmt::Debug for MatrixRaftWalHandle {
 }
 
 impl MatrixRaftWalHandle {
+    fn read_log_entries(&self, from: LogIndex, to: LogIndex, limit_bytes: usize) -> Result<Vec<LogEntry>, RaftError> {
+        self.backend().read_log_entries(from, to, limit_bytes)
+    }
     fn has_reclaimable_segments(&self, log_index: LogIndex) -> bool {
         self.backend().has_reclaimable_segments(log_index)
     }
@@ -1585,6 +1593,9 @@ impl MatrixRaftWalHandle {
 }
 
 impl MatrixRaftWalBackend for PersistentRaftWal {
+    fn read_log_entries(&self, from: LogIndex, to: LogIndex, limit_bytes: usize) -> Result<Vec<LogEntry>, RaftError> {
+        PersistentRaftWal::read_log_entries(self, from, to, limit_bytes)
+    }
     fn has_reclaimable_segments(&self, log_index: LogIndex) -> bool {
         let removable = self.segments.len().saturating_sub(self.options.min_keep_segments);
         self.segments.iter().take(removable)
