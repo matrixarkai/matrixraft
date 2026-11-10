@@ -1485,6 +1485,12 @@ impl NodeRuntime {
     /// Read local durable log entries, serialized with append and compaction.
     pub fn read_wal_entries(&self, from: LogIndex, to: LogIndex, limit_bytes: usize) -> Result<Vec<LogEntry>, RaftError> {
         let (reply_tx, reply_rx) = mpsc::channel();
+        if let Some((runtime, key)) = &self.shared {
+            if let Some(readers) = &runtime.readers {
+                readers.send(*key, MailPriority::Normal, WalReadRequest { from, to, limit_bytes, reply: reply_tx })?;
+                return recv_runtime_reply(reply_rx)?;
+            }
+        }
         self.sender()?.send(NodeRuntimeOp::ReadWalEntries(from, to, limit_bytes, reply_tx))
             .map_err(|err| RaftError::Transport(format!("failed to send durable log read: {err}")))?;
         recv_runtime_reply(reply_rx)?
@@ -3562,6 +3568,26 @@ impl DriverTickReceiver for PooledGroupTicker {
 }
 
 /// Runs a group when a worker picks its wake-up out of the pool.
+struct WalReadRequest {
+    from: LogIndex,
+    to: LogIndex,
+    limit_bytes: usize,
+    reply: mpsc::Sender<Result<Vec<LogEntry>, RaftError>>,
+}
+
+struct PooledWalReader {
+    group: Arc<PooledGroup>,
+}
+
+impl DriverMailHandler<WalReadRequest> for PooledWalReader {
+    fn handle_mail(&self, requests: Vec<WalReadRequest>) {
+        for request in requests {
+            let mut core = self.group.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = core.handle(NodeRuntimeOp::ReadWalEntries(request.from, request.to, request.limit_bytes, request.reply));
+        }
+    }
+}
+
 struct PooledGroupWorker {
     group: Arc<PooledGroup>,
     pool: Arc<DriverWorkerPool<()>>,
@@ -3954,6 +3980,7 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// `examples/idle_tick_cost.rs`, or [`SharedRuntimeStats::ticks_handed_over`]
 /// on a running store.
 pub struct SharedGroupRuntime {
+    readers: Option<Arc<DriverWorkerPool<WalReadRequest>>>,
     /// One ticker per shard, with groups hashed across them.
     ///
     /// A tick now runs on the ticker that owns the group rather than being
@@ -3990,6 +4017,12 @@ impl SharedGroupRuntime {
 
     /// Start with independently sized ticker shards and command executors.
     pub fn start_with_executor_count(options: DriverOptions, executors: usize) -> Result<Self, RaftError> {
+        Self::start_with_worker_counts(options, executors, 0)
+    }
+
+    /// Independently size command and durable-log readers. Zero readers keeps
+    /// reads on the command actor for existing standalone callers.
+    pub fn start_with_worker_counts(options: DriverOptions, executors: usize, readers: usize) -> Result<Self, RaftError> {
         let shards = options.worker_num.max(1);
         let mut tickers = Vec::with_capacity(shards);
         for _ in 0..shards {
@@ -4002,6 +4035,7 @@ impl SharedGroupRuntime {
         }
         Ok(Self {
             tickers,
+            readers: if readers == 0 { None } else { Some(Arc::new(DriverWorkerPool::start(DriverOptions { worker_num: readers, ..options })?)) },
             pool: Arc::new(DriverWorkerPool::start(DriverOptions {
                 worker_num: executors.max(1),
                 ..options
@@ -4106,7 +4140,7 @@ impl SharedGroupRuntime {
     /// Threads the whole runtime uses, whatever the group count.
     pub fn thread_count(&self) -> usize {
         let tickers: usize = self.tickers.iter().map(Driver::thread_count).sum();
-        tickers + self.pool.thread_count()
+        tickers + self.pool.thread_count() + self.readers.as_ref().map_or(0, |readers| readers.thread_count())
     }
 
     fn host(
@@ -4131,6 +4165,12 @@ impl SharedGroupRuntime {
                 max_each_visit: self.max_each_visit,
             }),
         )?;
+        if let Some(readers) = &self.readers {
+            if let Err(error) = readers.register_group(key, Arc::new(PooledWalReader { group: Arc::clone(&group) })) {
+                self.pool.cancel_group(key);
+                return Err(error);
+            }
+        }
         if let Err(error) = self.ticker_for(key).register_group_every(
             key,
             Arc::new(PooledGroupTicker {
@@ -4142,6 +4182,7 @@ impl SharedGroupRuntime {
             tick_interval_ms,
         ) {
             self.pool.cancel_group(key);
+            if let Some(readers) = &self.readers { readers.cancel_group(key); }
             return Err(error);
         }
         self.hosted_groups.fetch_add(1, Ordering::Relaxed);
@@ -4150,6 +4191,7 @@ impl SharedGroupRuntime {
 
     fn release(&self, key: DriverGroupKey) {
         self.ticker_for(key).cancel_group(key);
+        if let Some(readers) = &self.readers { readers.cancel_group(key); }
         if self.pool.cancel_group(key) {
             self.hosted_groups.fetch_sub(1, Ordering::Relaxed);
         }

@@ -815,16 +815,19 @@ assertion.
 
 Recorded, reported back, and reaching nothing that runs:
 
-<!-- inert-settings: reader_num, watched_address_resolver, snapshot_dir, recover_fsm_from_snapshot -->
+<!-- inert-settings: watched_address_resolver, snapshot_dir, recover_fsm_from_snapshot -->
 
-Two are on `MatrixRaftGroupContext`:
+One is on `MatrixRaftGroupContext`:
 
-- `reader_num`
 - `watched_address_resolver`
 
 With shared hosting enabled, `executor_num` sizes the command worker pool
 independently of `worker_num`, which sizes ticker shards. Each setting has a
 minimum of one. Per-group hosting does not use the shared command pool.
+
+`reader_num` sizes a separate bounded pool for shared-hosting durable WAL
+range reads. Reads retain per-node serialization with writes and compaction.
+Standalone constructors keep actor-based reads unless reader workers are requested.
 
 `MatrixRaftOptions::max_applied_log_bytes` is live. It selects the
 applied-payload byte policy in `Config`; direct `Config` users retain the

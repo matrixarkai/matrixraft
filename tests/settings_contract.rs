@@ -112,7 +112,7 @@ fn the_settings_the_readme_calls_inert_really_reach_nothing() {
     );
 }
 
-/// The marker names four settings, and dropping one is not a silent act.
+/// The marker names three settings, and dropping one is not a silent act.
 ///
 /// The two tests either side of this check what the list *claims* -- that each
 /// name reaches nothing, and that each name is a real field. Neither notices a
@@ -125,9 +125,9 @@ fn the_inert_settings_marker_is_the_length_it_was_last_decided_to_be() {
     let claimed = settings_the_readme_calls_inert();
     assert_eq!(
         claimed.len(),
-        4,
-        "the README's `inert-settings` marker names {} settings rather than 4: \
-         {claimed:?}.\n\nTwo are on `MatrixRaftGroupContext`, one on \
+        3,
+        "the README's `inert-settings` marker names {} settings rather than 3: \
+         {claimed:?}.\n\nOne is on `MatrixRaftGroupContext`, one on \
          `NodeOptions`, and one is a node method parameter. Removing one means a setting became live -- say so \
          in the settings section -- or that a documented shortfall is being \
          undocumented, which is the thing to stop. Then update this count.",
