@@ -27,6 +27,13 @@ while transfer is pending. A received timeout-now request must identify the
 current recognized leader and current term; network transfer commands remain
 unsupported, so only the local host can initiate this operation.
 
+After an outbound delivery failure, `report_unreachable(target)` reports the
+local transport observation to the core. It can reset a full optimistic append
+window to probing. Continue normal inputs and Ready processing to obtain retry
+packets; the report itself never acknowledges data, commits an entry, or changes
+membership. Targets must be other committed voters or learners. Repeated reports
+are allowed, and network-injected unreachable messages remain unsupported.
+
 `DurablePeer::campaign`, `tick`, and `step` feed the local consensus state.
 `capture_log_reader` pins the current durable journal generation and its log
 bounds. Its reader can move to another thread and read bounded entry ranges
