@@ -193,15 +193,16 @@ fn matrixraft_builders_capture_node_group_transport_and_option_shape() {
             last_follower_lease_ms: 200,
             max_payload_bytes: 64 * 1024,
             max_log_buffer_bytes: 16 * 1024 * 1024,
-            // Not max_apply_batch_bytes: that is a byte budget, this is a count.
-            snapshot_threshold_entries: 10_000,
+            // The compatibility option uses bytes. Its all-ones default means
+            // no automatic threshold, and is distinct from the apply-batch
+            // byte budget above.
+            snapshot_threshold_entries: u64::MAX,
             max_segment_bytes: 64 * 1024 * 1024,
             min_keep_segment_num: 2,
             enable_pre_vote: true,
             enable_lease_read: true,
             assume_lease_when_start: false,
-            // The options' own flag, which gates the entry-threshold snapshot
-            // decision. It reached only snapshot_recycle_options before.
+            // The options' own flag gates the automatic snapshot decision.
             can_trigger_snapshot: true,
             // The two tick-valued timeouts, which reached nothing at all
             // before: a transfer timed out on the election interval and so did
@@ -221,6 +222,8 @@ fn matrixraft_builders_capture_node_group_transport_and_option_shape() {
             pipeline: Box::new(options.to_pipeline_limits()),
         }
     );
+    assert_eq!(config.snapshot_entry_threshold(), None);
+    assert_eq!(config.snapshot_applied_byte_threshold(), None);
     assert_eq!(config.pipeline.reorder_timeout_us, 3_000);
     assert_eq!(config.pipeline.reorder_window_size, 128);
     assert_eq!(config.pipeline.max_inflights_replicate, 128);

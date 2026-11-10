@@ -20,6 +20,7 @@ const REPLICATE_ENTRIES: u64 = 37;
 const CACHE_BYTES: u64 = 5 * 1024;
 const APPLY_BATCH_BYTES: u64 = 7 * 1024;
 const SEGMENT_BYTES: u64 = 11 * 1024;
+const APPLIED_LOG_BYTES: u64 = 13 * 1024;
 
 fn options() -> MatrixRaftOptions {
     MatrixRaftOptions {
@@ -52,13 +53,13 @@ fn options() -> MatrixRaftOptions {
         max_segment_bytes: SEGMENT_BYTES,
         min_keep_segment_num: 2,
         can_trigger_snapshot: true,
-        max_applied_log_bytes: u64::MAX,
+        max_applied_log_bytes: APPLIED_LOG_BYTES,
         send_snapshot_timeout_ms: 60_000,
     }
 }
 
 #[test]
-fn the_snapshot_threshold_is_a_count_so_no_byte_budget_may_reach_it() {
+fn snapshot_threshold_units_reach_their_matching_config_fields() {
     let config = options().to_raft_config();
 
     // Control: the byte-valued knobs do carry through, so this test can see the
@@ -75,10 +76,10 @@ fn the_snapshot_threshold_is_a_count_so_no_byte_budget_may_reach_it() {
         config.snapshot_threshold_entries, APPLY_BATCH_BYTES,
         "a byte budget must not arrive as a count of entries"
     );
+    assert_eq!(config.snapshot_entry_threshold(), None);
     assert_eq!(
-        config.snapshot_threshold_entries,
-        Config::default().snapshot_threshold_entries,
-        "MatrixRaftOptions has no threshold in entries, so the default stands"
+        config.snapshot_applied_byte_threshold(),
+        Some(APPLIED_LOG_BYTES)
     );
 
     // And it does not follow the byte budget around.
@@ -89,6 +90,36 @@ fn the_snapshot_threshold_is_a_count_so_no_byte_budget_may_reach_it() {
         config.snapshot_threshold_entries,
         "the threshold does not move when the apply batch budget moves"
     );
+    assert_eq!(
+        bigger.to_raft_config().snapshot_applied_byte_threshold(),
+        Some(APPLIED_LOG_BYTES),
+        "the applied-log limit does not move with the apply batch budget"
+    );
+}
+
+#[test]
+fn applied_log_byte_threshold_survives_config_round_trip() {
+    let config = options().to_raft_config();
+    let encoded = serde_json::to_vec(&config).expect("encode config");
+    let decoded: Config = serde_json::from_slice(&encoded).expect("decode config");
+    assert_eq!(decoded.snapshot_entry_threshold(), None);
+    assert_eq!(
+        decoded.snapshot_applied_byte_threshold(),
+        Some(APPLIED_LOG_BYTES)
+    );
+
+    let mut disabled = options();
+    disabled.max_applied_log_bytes = u64::MAX;
+    let disabled = disabled.to_raft_config();
+    assert_eq!(disabled.snapshot_entry_threshold(), None);
+    assert_eq!(disabled.snapshot_applied_byte_threshold(), None);
+
+    let entry_config = Config::default();
+    assert_eq!(
+        entry_config.snapshot_entry_threshold(),
+        Some(entry_config.snapshot_threshold_entries)
+    );
+    assert_eq!(entry_config.snapshot_applied_byte_threshold(), None);
 }
 
 #[test]

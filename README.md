@@ -815,7 +815,7 @@ assertion.
 
 Recorded, reported back, and reaching nothing that runs:
 
-<!-- inert-settings: reader_num, executor_num, watched_address_resolver, max_applied_log_bytes, snapshot_dir, recover_fsm_from_snapshot -->
+<!-- inert-settings: reader_num, executor_num, watched_address_resolver, snapshot_dir, recover_fsm_from_snapshot -->
 
 Three are on `MatrixRaftGroupContext`:
 
@@ -823,14 +823,12 @@ Three are on `MatrixRaftGroupContext`:
 - `executor_num`
 - `watched_address_resolver`
 
-One is on `MatrixRaftOptions`:
-
-- `max_applied_log_bytes` — the **byte**-valued twin of
-  `Config::snapshot_threshold_entries`, which is the entry-valued one and is
-  live. Wiring both would cost a second threshold on every group for the same
-  decision, so this one stays recorded and the entry threshold is the one to
-  set. It defaults to `u64::MAX`, which is "never", so a host that leaves it
-  alone is not relying on it.
+`MatrixRaftOptions::max_applied_log_bytes` is live. It selects the
+applied-payload byte policy in `Config`; direct `Config` users retain the
+entry-count policy. Its `u64::MAX` default disables automatic threshold
+triggering for compatibility-created nodes. The check uses the leader's
+retained-byte total and subtracts only its unapplied tail, preserving the
+allocation-free heartbeat path without rescanning the applied log.
 
 `max_disk_replicate_log_num` is live. It maps to
 `PipelineLimits::max_replicate_batch_entries`, bounds each lagging-peer

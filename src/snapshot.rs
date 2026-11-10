@@ -15,7 +15,8 @@ pub use crate::{
 
 use crate::RaftError;
 
-/// Whether the leader's retained log is long enough that a snapshot is due.
+/// Whether the leader's retained applied log is large enough that a snapshot
+/// is due.
 ///
 /// A snapshot used to start only when a host asked for one:
 /// `snapshot_threshold_entries` was declared, defaulted, validated and read
@@ -28,6 +29,10 @@ pub struct SnapshotDueReport {
     pub retained_entries: u64,
     pub threshold_entries: u64,
     pub entries_exceeded: bool,
+    /// Applied payload bytes still retained by the leader, and their limit.
+    pub retained_applied_bytes: u64,
+    pub threshold_bytes: u64,
+    pub bytes_exceeded: bool,
     /// True when a snapshot this decision would start is already in flight.
     pub trigger_in_flight: bool,
     /// `Config::can_trigger_snapshot`.

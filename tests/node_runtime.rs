@@ -2079,6 +2079,37 @@ fn node_runtime_triggers_snapshot_metadata() {
 }
 
 #[test]
+fn node_runtime_triggers_snapshot_at_the_applied_byte_limit() {
+    let mut options = timer_node_options();
+    options.config = options.config.with_applied_log_byte_threshold(8);
+    let mut runtime = NodeRuntime::create(options).expect("create runtime");
+    runtime.start().expect("start runtime");
+    runtime
+        .propose(vec![7; 8])
+        .expect("proposal reaches byte limit");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = runtime.status().expect("status");
+        if status.snapshot_trigger_status.in_progress {
+            assert_eq!(
+                status.snapshot_trigger_status.last_log_id,
+                Some(LogId { term: 1, index: 2 })
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "applied-byte snapshot trigger did not start: {:?}",
+            status.snapshot_trigger_status
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    runtime.shutdown().expect("shutdown runtime");
+}
+
+#[test]
 fn node_runtime_reports_stale_snapshot_trigger_timeout() {
     let mut options = node_options();
     options.config.heartbeat_interval_ms = 5;
