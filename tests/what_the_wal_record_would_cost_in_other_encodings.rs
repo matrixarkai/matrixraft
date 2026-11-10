@@ -3,8 +3,8 @@
 
 //! What the WAL record would cost in other encodings.
 //!
-//! A sibling suite pins what an append costs: 2 bytes per segment file, 64
-//! bytes per record, plus the payload, so a 9-byte command costs about eight
+//! A sibling suite pins what an append costs: 2 bytes per segment file, 53
+//! bytes per record, plus the payload, so a 9-byte command costs about seven
 //! times its own size. It cost forty-seven times under the JSON record this
 //! file prices, roughly three quarters of which was its own field names.
 //!
@@ -25,7 +25,7 @@
 //! | JSON with one-character keys | 183 B | 21.7x | 1.333x |
 //! | binary, every integer eight bytes | 169 B | 19.8x | 1.000x |
 //! | binary, varint integers | **35 B** | **4.9x** | 1.000x |
-//! | **protobuf, as written today, measured** | **64 B** | **8.3x** | 1.000x |
+//! | **protobuf, as written today, measured** | **53 B** | **7.1x** | 1.000x |
 //!
 //! Two things fall out of that table.
 //!
@@ -38,7 +38,7 @@
 //! record's integers are a term of 3, an index of 1, a node of 1, an epoch of
 //! 3: each costs one byte as a varint and up to twenty-six characters as
 //! `"installed_snapshot_index":0`. Collapsing both at once is what takes 408
-//! bytes to 35 on this file's arithmetic -- and to 64 in the format that
+//! bytes to 35 on this file's arithmetic -- and to 53 in the format that
 //! actually landed -- and it is also what moves the payload slope from 4/3 to
 //! 1, because a binary record has no reason to base64 anything.
 //!
@@ -51,7 +51,7 @@
 //! same way it already read pre-base64 number arrays.
 //!
 //! So the varint row stopped being hypothetical, and it can be checked. It is
-//! **wrong by 1.8x**: the landed envelope is 64 bytes, not 35. The direction
+//! **wrong by 1.5x**: the landed envelope is 53 bytes, not 35. The direction
 //! held and the magnitude did not, and the three reasons are the lesson worth
 //! keeping, because they are what pricing a format from its field widths
 //! leaves out:
@@ -59,27 +59,21 @@
 //! - **No record frame was priced.** A record on disk carries 8 bytes in front
 //!   of it -- a length and a digest of the body -- so a torn tail can be found
 //!   and cut. Arithmetic over field widths has no reason to invent that.
-//! - **The checksum was priced as the `u64` it encodes**, at 8 bytes. It is a
-//!   `fixed64` on the wire, which costs 9 with its tag -- so this line, which
-//!   says what it assumed out loud ("the raw u64 the hex text already
-//!   encodes"), is now off by only +1. It was off by +10 while the wire spelled
-//!   the checksum in hex, and closing that was the whole 73 -> 64 move.
+//! - **The checksum was priced as the `u64` it encodes**, at 8 bytes. Canonical
+//!   records now spend two bytes on a derivation marker and restore the checksum
+//!   after the frame digest validates, so this term is six bytes smaller.
 //! - **Tags and nested lengths were not priced.** protobuf pays a tag for each
 //!   field present and a tag plus a length for each nested message, and
 //!   `hard_state`, `membership`, `apply_snapshot_fence` and every entry are
 //!   nested messages.
 //!
-//! The first two are exact. The remaining 20 bytes are attributed to the third
+//! The first two are exact. The remaining 16 bytes are attributed to the third
 //! as a **remainder**, not measured field by field, and the identity below
 //! holds the three terms together so that changing one without re-reading the
 //! others goes red.
 //!
-//! That remainder has since earned some credit. The checksum term moved from
-//! +10 to +1 and the landed envelope from 73 to 64, and the remainder came out
-//! at 20 both times -- so it is not a number fitted once to make an equation
-//! close. It is the same 20 bytes of tags and nested lengths, measured twice
-//! by difference, which is weak evidence next to attributing them but much
-//! better than none.
+//! The remainder also excludes the duplicate membership group id and fence
+//! commit index, which the decoder restores from their enclosing values.
 //!
 //! ## How the figures are produced, which differs per column
 //!
@@ -148,7 +142,7 @@ fn record(payload_len: usize) -> WalRecord {
 }
 
 #[test]
-fn the_envelope_was_408_bytes_as_json_and_is_64_as_protobuf() {
+fn the_envelope_was_408_bytes_as_json_and_is_53_as_protobuf() {
     let empty = record(0);
     assert_eq!(
         serde_json::to_string(&empty).expect("encode").len(),
@@ -301,7 +295,7 @@ fn varint_bytes(record: &WalRecord) -> usize {
 
 /// What this file's arithmetic missed, held together as an identity.
 ///
-/// The computed varint column is 35 bytes and the landed format measures 73.
+/// The computed varint column is 35 bytes and the landed format measures 53.
 /// The difference is not a mystery and it is not fully attributed either: two
 /// terms are exact and the third is a remainder. Writing it as an equality
 /// means nobody can revise one term and leave the other two telling a story
@@ -315,19 +309,17 @@ fn varint_bytes(record: &WalRecord) -> usize {
 /// written here -- as an `assert!` it would compare three constants, be folded
 /// at compile time and check nothing.
 #[test]
-fn the_computed_varint_price_missed_the_landed_format_by_a_frame_a_checksum_and_its_tags() {
+fn the_computed_varint_price_accounts_for_the_landed_format() {
     /// Measured by the sibling suite, from two directions: 100 appends weighing
-    /// 6,402 bytes, and one stored record written alone weighing 64.
-    const LANDED: usize = 64;
+    /// 5,302 bytes, and one stored record written alone weighing 53.
+    const LANDED: usize = 53;
     /// A length and a digest, in front of every record on disk.
     const FRAME: usize = 8;
-    /// A `fixed64` and its tag, where this file priced the `u64` it carries at
-    /// 8 bytes flat. This was `18 - 8` while the wire spelled the checksum in
-    /// sixteen hex characters.
-    const CHECKSUM_EXCESS: usize = 9 - 8;
+    /// The two-byte derivation marker replaces the eight-byte value priced here.
+    const CHECKSUM_ADJUSTMENT: isize = 2 - 8;
     /// A tag per present field, and a tag and a length per nested message. Not
     /// measured field by field: this is what is left over.
-    const TAGS_AND_NESTED_LENGTHS: usize = 20;
+    const TAGS_AND_NESTED_LENGTHS: usize = 16;
 
     let computed = varint_bytes(&record(0));
     assert_eq!(
@@ -335,8 +327,8 @@ fn the_computed_varint_price_missed_the_landed_format_by_a_frame_a_checksum_and_
         "the computed varint envelope moved, so the identity below is pricing something else"
     );
     assert_eq!(
-        computed + FRAME + CHECKSUM_EXCESS + TAGS_AND_NESTED_LENGTHS,
-        LANDED,
+        computed as isize + FRAME as isize + CHECKSUM_ADJUSTMENT + TAGS_AND_NESTED_LENGTHS as isize,
+        LANDED as isize,
         "the computed price plus what it left out no longer reaches the landed envelope"
     );
 }
