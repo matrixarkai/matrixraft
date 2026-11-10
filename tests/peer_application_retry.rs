@@ -2,7 +2,9 @@
 // Copyright 2026 MatrixArkAI
 #![cfg(feature = "peer-runtime")]
 use matrixraft::{
-    peer_runtime::{ApplyDecision, DurablePeer, MembershipChange, PeerOptions, PeerTuning},
+    peer_runtime::{
+        ApplyDecision, DurablePeer, MembershipChange, PeerOptions, PeerTuning, RestoreDecision,
+    },
     RaftError,
 };
 use std::{cell::RefCell, collections::BTreeMap};
@@ -48,6 +50,14 @@ impl Cluster {
         cluster
     }
     fn drive(&mut self, blocked: Option<u64>, isolated: Option<u64>) {
+        self.drive_restore(blocked, isolated, None);
+    }
+    fn drive_restore(
+        &mut self,
+        blocked: Option<u64>,
+        isolated: Option<u64>,
+        restore_blocked: Option<u64>,
+    ) {
         // Fixed rounds let consensus settle without treating a deferred application
         // as idle or repeatedly entering an unbounded host drain loop.
         for _ in 0..64 {
@@ -56,7 +66,7 @@ impl Cluster {
                 let values = RefCell::new(self.values.remove(id).unwrap_or_default());
                 let mut restores = 0;
                 let outgoing = peer
-                    .process_ready_retryable_with_snapshot_reader(
+                    .process_ready_retryable_with_restore(
                         |_, data| {
                             if blocked == Some(*id) && !data.is_empty() {
                                 return Ok(ApplyDecision::Retry);
@@ -65,13 +75,19 @@ impl Cluster {
                             Ok(ApplyDecision::Applied)
                         },
                         |_, reader, _| {
+                            if restore_blocked == Some(*id) {
+                                let mut first = [0];
+                                reader.read_exact(&mut first).unwrap();
+                                assert_eq!(first, [1]);
+                                return Ok(RestoreDecision::Retry);
+                            }
                             let mut restored = Vec::new();
                             reader
                                 .read_to_end(&mut restored)
                                 .map_err(|e| RaftError::Storage(e.to_string()))?;
                             *values.borrow_mut() = restored;
                             restores += 1;
-                            Ok(())
+                            Ok(RestoreDecision::Restored)
                         },
                     )
                     .unwrap();
@@ -98,6 +114,236 @@ impl Cluster {
             .unwrap()
             .index
     }
+}
+
+#[test]
+fn restore_retries_reopen_the_reader_and_keep_recovery_and_suffix_application_waiting() {
+    let mut cluster = Cluster::new();
+    cluster.propose(1..=3);
+    cluster.drive(None, None);
+    cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint(vec![1, 2, 3])
+        .unwrap();
+    let last = cluster.propose(4..=6);
+    cluster.drive(None, None);
+    let options = cluster.options(1);
+    cluster.peers.remove(&1);
+    let mut peer = DurablePeer::open_with_membership(options.clone(), vec![1, 2, 3, 4]).unwrap();
+    assert_eq!(peer.applied_index(), 0);
+    let bytes = peer.persisted_wal_bytes().unwrap();
+    let mut attempts = 0;
+    for _ in 0..5 {
+        peer.process_ready_batch_with_restore(
+            |_| panic!("suffix before image"),
+            |_, reader, length| {
+                attempts += 1;
+                assert_eq!(length, 3);
+                let mut first = [0];
+                reader.read_exact(&mut first).unwrap();
+                assert_eq!(first, [1]);
+                Ok(RestoreDecision::Retry)
+            },
+        )
+        .unwrap();
+        assert_eq!(peer.applied_index(), 0);
+        assert!(peer.has_ready());
+        assert!(peer.campaign().is_err());
+        assert!(peer.tick().is_err());
+    }
+    assert_eq!(attempts, 5);
+    assert_eq!(peer.persisted_wal_bytes().unwrap(), bytes);
+    drop(peer);
+    let mut peer = DurablePeer::open_with_membership(options, vec![1, 2, 3, 4]).unwrap();
+    let values = RefCell::new(Vec::new());
+    let restored = std::cell::Cell::new(false);
+    peer.process_ready_batch_with_restore(
+        |batch| {
+            assert!(restored.get());
+            for entry in batch.iter() {
+                values.borrow_mut().extend_from_slice(entry.payload);
+            }
+            Ok(batch.len())
+        },
+        |_, reader, _| {
+            reader.read_to_end(&mut values.borrow_mut()).unwrap();
+            restored.set(true);
+            Ok(RestoreDecision::Restored)
+        },
+    )
+    .unwrap();
+    assert_eq!(values.into_inner(), (1..=6).collect::<Vec<_>>());
+    assert_eq!(peer.applied_index(), last);
+    assert!(!peer.has_ready());
+    peer.tick().unwrap();
+}
+
+#[test]
+fn pending_restore_keeps_quorum_progress_and_a_newer_image_supersedes_it() {
+    let mut cluster = Cluster::new();
+    cluster.propose(1..=3);
+    cluster.drive(None, None);
+    let applied = cluster.peers[&2].applied_index();
+    cluster.propose(4..=9);
+    cluster.drive(None, Some(2));
+    cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint((1..=9).collect())
+        .unwrap();
+    cluster.propose(10..=10);
+    cluster.drive_restore(None, None, Some(2));
+    assert_eq!(cluster.peers[&2].applied_index(), applied);
+    assert_eq!(cluster.values[&2], vec![1, 2, 3]);
+    assert_eq!(cluster.restores[&2], 0);
+    let last = cluster.propose(11..=11);
+    cluster.drive_restore(None, Some(3), Some(2));
+    assert_eq!(
+        cluster.peers[&1].commit_index(),
+        last,
+        "the paused loader must still acknowledge durable replication"
+    );
+    assert_eq!(cluster.peers[&2].commit_index(), last);
+    assert_eq!(cluster.peers[&2].applied_index(), applied);
+    cluster.peers.get_mut(&2).unwrap().tick().unwrap();
+    for _ in 0..2 {
+        cluster.peers.get_mut(&1).unwrap().tick().unwrap();
+        cluster.drive_restore(None, None, Some(2));
+    }
+    cluster.propose(12..=15);
+    cluster.drive_restore(None, Some(2), Some(2));
+    cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint((1..=15).collect())
+        .unwrap();
+    let last = cluster.propose(16..=16);
+    cluster.drive_restore(None, None, Some(2));
+    for _ in 0..4 {
+        cluster.peers.get_mut(&1).unwrap().tick().unwrap();
+        cluster.drive_restore(None, None, Some(2));
+    }
+    assert_eq!(cluster.peers[&2].applied_index(), applied);
+    assert_eq!(cluster.restores[&2], 0);
+    cluster.drive(None, None);
+    assert_eq!(cluster.values[&2], (1..=16).collect::<Vec<_>>());
+    assert_eq!(cluster.peers[&2].applied_index(), last);
+    assert_eq!(cluster.restores[&2], 1);
+}
+
+#[test]
+fn read_confirmation_waits_for_the_reopened_image_and_its_committed_suffix() {
+    let root = tempfile::tempdir().unwrap();
+    let options = PeerOptions {
+        group_id: 1,
+        node_id: 1,
+        voters: vec![1],
+        wal_path: root.path().join("peer.wal"),
+    };
+    let mut peer = DurablePeer::open(options.clone()).unwrap();
+    peer.campaign().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    peer.propose(vec![1]).unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    peer.checkpoint(vec![1]).unwrap();
+    peer.propose(vec![2]).unwrap();
+    peer.process_ready_with_snapshot_reader(
+        |_, _| Ok(()),
+        |_, reader, _| {
+            std::io::copy(reader, &mut std::io::sink()).unwrap();
+            Ok(())
+        },
+    )
+    .unwrap();
+    drop(peer);
+    let mut peer = DurablePeer::open(options).unwrap();
+    peer.process_ready_retryable_with_restore(
+        |_, _| panic!("suffix before image"),
+        |_, _, _| Ok(RestoreDecision::Retry),
+    )
+    .unwrap();
+    let before_election = peer.commit_index();
+    peer.campaign().unwrap();
+    for _ in 0..5 {
+        peer.process_ready_retryable_with_restore(
+            |_, _| panic!("suffix before image"),
+            |_, _, _| Ok(RestoreDecision::Retry),
+        )
+        .unwrap();
+    }
+    assert!(peer.is_leader());
+    assert!(peer.commit_index() > before_election);
+    let read = peer.begin_read().unwrap();
+    peer.process_ready_retryable_with_restore(
+        |_, _| panic!("suffix before image"),
+        |_, _, _| Ok(RestoreDecision::Retry),
+    )
+    .unwrap();
+    assert_eq!(peer.applied_index(), 0);
+    assert!(!peer.poll_read(read).unwrap());
+    let values = RefCell::new(Vec::new());
+    peer.process_ready_retryable_with_restore(
+        |_, data| {
+            values.borrow_mut().extend_from_slice(data);
+            Ok(ApplyDecision::Applied)
+        },
+        |_, reader, _| {
+            reader.read_to_end(&mut values.borrow_mut()).unwrap();
+            Ok(RestoreDecision::Restored)
+        },
+    )
+    .unwrap();
+    assert_eq!(values.into_inner(), vec![1, 2]);
+    assert!(peer.poll_read(read).unwrap());
+}
+
+#[test]
+fn restore_errors_and_incomplete_success_still_stop_the_peer() {
+    let mut cluster = Cluster::new();
+    cluster.propose(1..=3);
+    cluster.drive(None, None);
+    cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint(vec![1, 2, 3])
+        .unwrap();
+    let options = cluster.options(1);
+    cluster.peers.remove(&1);
+    for incomplete in [false, true] {
+        let mut peer =
+            DurablePeer::open_with_membership(options.clone(), vec![1, 2, 3, 4]).unwrap();
+        assert!(peer
+            .process_ready_batch_with_restore(
+                |_| panic!("suffix before image"),
+                |_, _, _| {
+                    if incomplete {
+                        Ok(RestoreDecision::Restored)
+                    } else {
+                        Err(RaftError::Storage("restore failed".into()))
+                    }
+                }
+            )
+            .is_err());
+        assert_eq!(peer.applied_index(), 0);
+        assert!(!peer.has_ready());
+        assert!(peer.process_ready(|_, _| Ok(())).is_err());
+    }
+    let mut peer = DurablePeer::open_with_membership(options, vec![1, 2, 3, 4]).unwrap();
+    let mut restored = Vec::new();
+    peer.process_ready_batch_with_restore(
+        |_| panic!("unexpected suffix"),
+        |_, reader, _| {
+            reader.read_to_end(&mut restored).unwrap();
+            Ok(RestoreDecision::Restored)
+        },
+    )
+    .unwrap();
+    assert_eq!(restored, vec![1, 2, 3]);
 }
 
 #[test]
