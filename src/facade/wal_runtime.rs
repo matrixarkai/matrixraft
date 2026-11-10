@@ -1132,7 +1132,7 @@ impl PersistentRaftWal {
         }
         if !removable_ids.is_empty() {
             self.segments
-                .retain(|segment| !removable_ids.contains(&segment.segment_id));
+                .retain(|segment| removable_ids.binary_search(&segment.segment_id).is_err());
             let removed = removable_ids.len() as u64;
             let activity = self.activity_mut();
             activity.released_segment_count += removed;
@@ -1156,7 +1156,7 @@ impl PersistentRaftWal {
         let Some(position) = self
             .segments
             .iter()
-            .position(|segment| !removable_ids.contains(&segment.segment_id))
+            .position(|segment| removable_ids.binary_search(&segment.segment_id).is_err())
         else {
             return Ok(());
         };
