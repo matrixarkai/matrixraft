@@ -3685,6 +3685,14 @@ impl MatrixRaftOptions {
         MatrixRaftNode::create(self.to_node_options(), start_index)
     }
 
+    pub fn create_node_with_wal_storage(
+        &self,
+        start_index: LogIndex,
+        storage: Arc<dyn MatrixRaftWalStorage>,
+    ) -> Result<MatrixRaftNode, RaftError> {
+        MatrixRaftNode::create_with_wal_storage(self.to_node_options(), start_index, storage)
+    }
+
     /// Creates the node on a shared runtime rather than a thread of its own.
     pub fn create_node_on(
         &self,
@@ -3692,6 +3700,20 @@ impl MatrixRaftOptions {
         runtime: Arc<SharedGroupRuntime>,
     ) -> Result<MatrixRaftNode, RaftError> {
         MatrixRaftNode::create_on(self.to_node_options(), start_index, runtime)
+    }
+
+    pub fn create_node_on_with_wal_storage(
+        &self,
+        start_index: LogIndex,
+        runtime: Arc<SharedGroupRuntime>,
+        storage: Arc<dyn MatrixRaftWalStorage>,
+    ) -> Result<MatrixRaftNode, RaftError> {
+        MatrixRaftNode::create_on_with_wal_storage(
+            self.to_node_options(),
+            start_index,
+            runtime,
+            storage,
+        )
     }
 }
 
@@ -3711,7 +3733,15 @@ pub struct MatrixRaftNode {
 
 impl MatrixRaftNode {
     pub fn create(options: NodeOptions, start_index: LogIndex) -> Result<Self, RaftError> {
-        Self::create_hosted(options, start_index, None)
+        Self::create_hosted(options, start_index, None, None)
+    }
+
+    pub fn create_with_wal_storage(
+        options: NodeOptions,
+        start_index: LogIndex,
+        storage: Arc<dyn MatrixRaftWalStorage>,
+    ) -> Result<Self, RaftError> {
+        Self::create_hosted(options, start_index, None, Some(storage))
     }
 
     /// Creates the node on a shared runtime rather than a thread of its own.
@@ -3720,13 +3750,23 @@ impl MatrixRaftNode {
         start_index: LogIndex,
         runtime: Arc<SharedGroupRuntime>,
     ) -> Result<Self, RaftError> {
-        Self::create_hosted(options, start_index, Some(runtime))
+        Self::create_hosted(options, start_index, Some(runtime), None)
+    }
+
+    pub fn create_on_with_wal_storage(
+        options: NodeOptions,
+        start_index: LogIndex,
+        runtime: Arc<SharedGroupRuntime>,
+        storage: Arc<dyn MatrixRaftWalStorage>,
+    ) -> Result<Self, RaftError> {
+        Self::create_hosted(options, start_index, Some(runtime), Some(storage))
     }
 
     fn create_hosted(
         options: NodeOptions,
         start_index: LogIndex,
         runtime: Option<Arc<SharedGroupRuntime>>,
+        storage: Option<Arc<dyn MatrixRaftWalStorage>>,
     ) -> Result<Self, RaftError> {
         let mut peers = CompactMap::default();
         for peer in options.peers.iter().cloned() {
@@ -3739,9 +3779,13 @@ impl MatrixRaftNode {
             role: options.role,
             auto_promote: false,
         }));
-        let runtime = match runtime {
-            Some(shared) => NodeRuntime::create_on(options, shared)?,
-            None => NodeRuntime::create(options)?,
+        let runtime = match (runtime, storage) {
+            (Some(shared), Some(storage)) => {
+                NodeRuntime::create_on_with_wal_storage(options, shared, storage)?
+            }
+            (Some(shared), None) => NodeRuntime::create_on(options, shared)?,
+            (None, Some(storage)) => NodeRuntime::create_with_wal_storage(options, storage)?,
+            (None, None) => NodeRuntime::create(options)?,
         };
         Ok(Self {
             runtime,
@@ -18179,6 +18223,8 @@ pub struct MatrixRaftMultiRaftServer {
     nodes: CompactMap<MatrixRaftRouteKey, MatrixRaftNode>,
     snapshot_routes: BTreeMap<MatrixRaftRouteKey, MatrixRaftSnapshotDesc>,
     runtime_wiring_count: usize,
+    group_wal_storages: BTreeMap<usize, Arc<dyn MatrixRaftWalStorage>>,
+    default_group_wal_storage: Arc<dyn MatrixRaftWalStorage>,
     replica_factory: Option<Arc<dyn MatrixRaftReplicaFactory + Send + Sync>>,
     on_demand_created: u64,
     on_demand_refused: u64,
@@ -18194,6 +18240,7 @@ impl std::fmt::Debug for MatrixRaftMultiRaftServer {
             .field("nodes", &self.nodes)
             .field("snapshot_routes", &self.snapshot_routes)
             .field("runtime_wiring_count", &self.runtime_wiring_count)
+            .field("group_wal_storages", &self.group_wal_storages.len())
             .field("replica_factory", &self.replica_factory.is_some())
             .field("on_demand_created", &self.on_demand_created)
             .field("on_demand_refused", &self.on_demand_refused)
@@ -18230,6 +18277,8 @@ impl MatrixRaftMultiRaftServer {
             nodes: CompactMap::default(),
             snapshot_routes: BTreeMap::new(),
             runtime_wiring_count: 0,
+            group_wal_storages: BTreeMap::new(),
+            default_group_wal_storage: Arc::new(MatrixRaftFileWalStorage),
             replica_factory: None,
             on_demand_created: 0,
             on_demand_refused: 0,
@@ -18249,6 +18298,16 @@ impl MatrixRaftMultiRaftServer {
         factory: Arc<dyn MatrixRaftReplicaFactory + Send + Sync>,
     ) -> Self {
         self.replica_factory = Some(factory);
+        self
+    }
+
+    /// Assigns one shared WAL provider to groups created by this creator.
+    pub fn with_group_wal_storage(
+        mut self,
+        creator_index: usize,
+        storage: Arc<dyn MatrixRaftWalStorage>,
+    ) -> Self {
+        self.group_wal_storages.insert(creator_index, storage);
         self
     }
 
@@ -18515,15 +18574,28 @@ impl MatrixRaftMultiRaftServer {
             })?)
         };
         let bound_creator_index = creator.map(|_| creator_index);
+        let uses_group_wal_storage = creator.is_some_and(|creator| creator.has_group_storage);
         let wiring = MatrixRaftRuntimeWiring::from_context_and_creator(
             &self.context,
             &options,
             bound_creator_index,
             creator,
         )?;
-        let mut node = match self.shared_runtime()? {
-            Some(runtime) => options.create_node_on(start_index, runtime)?,
-            None => options.create_node(start_index)?,
+        let storage = uses_group_wal_storage.then(|| {
+            self.group_wal_storages
+                .get(&creator_index)
+                .cloned()
+                .unwrap_or_else(|| Arc::clone(&self.default_group_wal_storage))
+        });
+        let mut node = match (self.shared_runtime()?, storage) {
+            (Some(runtime), Some(storage)) => {
+                options.create_node_on_with_wal_storage(start_index, runtime, storage)?
+            }
+            (Some(runtime), None) => options.create_node_on(start_index, runtime)?,
+            (None, Some(storage)) => {
+                options.create_node_with_wal_storage(start_index, storage)?
+            }
+            (None, None) => options.create_node(start_index)?,
         };
         node.runtime_wiring = Some(Box::new(wiring));
         self.nodes.insert(key, node);

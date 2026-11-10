@@ -1293,9 +1293,10 @@ in a separate file from the data. Three details that follow:
   a stale hint would make `owned_bytes` fiction — which is the number a host
   watches to decide whether to sweep at all.
 
-### Storage interfaces the engine does not drive
+### Storage interfaces
 
-Three exported traits describe Raft storage. **This crate calls none of them.**
+Three exported compatibility traits describe Raft storage. **This crate calls
+none of them.**
 
 <!-- unwired-traits: Storage, MatrixRaftLogStorage, MatrixRaftGroupStorage -->
 
@@ -1311,10 +1312,18 @@ plug-in point: no driver, node or runtime holds one, and a host that
 implements one gets a conformant storage engine that this crate will not call.
 It has to drive it itself.
 
-The engine's own log is `wal.rs`, which declares **no trait at all**, so log
-storage cannot be substituted from outside even in principle. That is the
-state of things rather than a recommendation, and it is written down here
-because the alternative is someone finding out after writing a backend.
+Runtime WAL storage is independently replaceable through
+`MatrixRaftWalStorage`. A node creator configured with `group_storage()` uses
+one provider shared by all groups assigned to that creator. The provider opens
+one `MatrixRaftWalHandle` per replica and may return a custom
+`MatrixRaftWalBackend`. The runtime drives that backend for complete WAL record
+appends, recovery, lifecycle status, descriptor release and fenced compaction.
+`MatrixRaftFileWalStorage` is the built-in segmented-file provider and remains
+the default when no custom provider is bound.
+
+The runtime interface is separate from the three compatibility traits because
+it preserves the complete durable record and snapshot fence contract rather
+than exposing only log entries.
 
 `Storage`'s doc comment used to claim it was "used by production adapters".
 It said that while having no implementation, no bound and no caller anywhere
