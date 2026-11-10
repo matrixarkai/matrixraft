@@ -77,6 +77,77 @@ impl Drop for Directory {
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
 
 #[test]
+fn forced_campaign_bypasses_lease_inhibition_but_waits_for_received_votes() {
+    for forced in [false, true] {
+        let dir = Directory::new();
+        let mut group = peers(&dir);
+        let mut applied = Applied::new();
+        group.get_mut(&1).unwrap().campaign().unwrap();
+        pump(&mut group, &mut applied, None);
+        let term = group.get(&1).unwrap().term();
+        group.get_mut(&1).unwrap().force_campaign().unwrap();
+        assert_eq!(group.get(&1).unwrap().term(), term);
+        let candidate = group.get_mut(&2).unwrap();
+        candidate.set_automatic_elections(false).unwrap();
+        if forced {
+            candidate.force_campaign().unwrap();
+            let started_term = candidate.term();
+            assert!(candidate.force_campaign().is_err());
+            assert_eq!(candidate.term(), started_term);
+        } else {
+            candidate.campaign().unwrap();
+        }
+        assert!(
+            !candidate.is_leader(),
+            "a local request cannot synthesize votes"
+        );
+        assert!(candidate.propose(vec![9]).is_err());
+        pump(&mut group, &mut applied, None);
+        if forced {
+            assert!(group.get(&2).unwrap().is_leader());
+            assert!(group.get(&2).unwrap().term() > term);
+            group
+                .get_mut(&2)
+                .unwrap()
+                .propose(b"forced leader".to_vec())
+                .unwrap();
+            pump(&mut group, &mut applied, None);
+            assert_eq!(applied.get(&1), applied.get(&2));
+            assert_eq!(applied.get(&2), applied.get(&3));
+        } else {
+            assert!(!group.get(&2).unwrap().is_leader());
+            assert!(group.get(&1).unwrap().is_leader());
+            assert_eq!(group.get(&2).unwrap().term(), term);
+            assert!(
+                group.get_mut(&2).unwrap().force_campaign().is_err(),
+                "pre-campaign is already in progress"
+            );
+        }
+    }
+}
+
+#[test]
+fn forced_campaign_cannot_elect_a_stale_voter() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    for value in 0..10u8 {
+        group.get_mut(&1).unwrap().propose(vec![value; 32]).unwrap();
+        pump(&mut group, &mut applied, Some(2));
+    }
+    let committed = group.get(&1).unwrap().commit_index();
+    assert!(group.get(&2).unwrap().commit_index() < committed);
+    group.get_mut(&2).unwrap().force_campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    assert!(!group.get(&2).unwrap().is_leader());
+    assert!(group.get_mut(&2).unwrap().propose(vec![9]).is_err());
+    assert_eq!(group.get(&1).unwrap().commit_index(), committed);
+    assert_eq!(group.get(&3).unwrap().commit_index(), committed);
+}
+
+#[test]
 fn canceled_read_responses_cannot_confirm_a_newer_token() {
     let dir = Directory::new();
     let mut group = peers(&dir);

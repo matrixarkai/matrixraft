@@ -41,6 +41,14 @@ heartbeats and quorum checks. Re-enable it to resume automatic elections. The
 policy is volatile: reopening a peer enables automatic elections by default, so
 a host requiring suppression must set it again before driving ticks.
 
+`force_campaign()` is a local administrative request to bypass pre-vote and
+current-leader lease inhibition. It still requires committed-voter eligibility,
+an up-to-date log, and received quorum votes; process Ready and deliver packets
+to complete the election. Already leading is a no-op, and an in-progress election
+or pre-election is refused. This operation remains available when automatic
+elections are suppressed. Network timeout-now requests keep their existing
+current-leader and current-term validation.
+
 `DurablePeer::campaign`, `tick`, and `step` feed the local consensus state.
 `capture_log_reader` pins the current durable journal generation and its log
 bounds. Its reader can move to another thread and read bounded entry ranges
