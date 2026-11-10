@@ -22,15 +22,18 @@ use matrixraft::{
     MatrixRaftRouteResultStatus, MatrixRaftRoutedAdminCommand, MatrixRaftRoutedMessage,
     MatrixRaftSnapshotDesc, MatrixRaftSnapshotProgress, MatrixRaftStepDownReport,
     MatrixRaftSyncedReport, MatrixRaftTransferLeaderReport, MatrixRaftTransportBuilder,
-    MembershipOperation, Peer, RaftError, RaftSnapshot, ReadIndexRequest, ReadIndexResponse,
-    ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState, StateRole, StorageApplyFence,
-    TcpRaftTransportRequest, TcpRaftTransportServer, TimeoutNowResponse, Transport, VoteRequest,
-    VoteResponse, WalCompactionReport, WitnessQuorumReport,
+    MatrixRaftWalBackend, MatrixRaftWalHandle, MatrixRaftWalOpenOptions, MatrixRaftWalStorage,
+    MembershipOperation, Peer, PersistentRaftWal, RaftError, RaftSnapshot, ReadIndexRequest,
+    ReadIndexResponse, ReplicaRole, SnapshotChunk, SnapshotMetadata, SnapshotState, StateRole,
+    StorageApplyFence, TcpRaftTransportRequest, TcpRaftTransportServer, Term, TimeoutNowResponse,
+    Transport, VoteRequest, VoteResponse, WalCompactionReport, WalLifecycleStatus, WalRecord,
+    WalRecoveryReport, WitnessQuorumReport,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,6 +46,117 @@ fn temp_dir(name: &str) -> PathBuf {
         "matrixraft-matrixraft-multi-{name}-{}-{nonce}",
         std::process::id()
     ))
+}
+
+#[derive(Default)]
+struct CountingWalStorage {
+    opens: AtomicUsize,
+    appends: Arc<AtomicUsize>,
+    groups: Mutex<Vec<(u64, u64)>>,
+}
+
+impl MatrixRaftWalStorage for CountingWalStorage {
+    fn open(
+        &self,
+        options: MatrixRaftWalOpenOptions,
+    ) -> Result<(MatrixRaftWalHandle, WalRecoveryReport), RaftError> {
+        self.opens.fetch_add(1, Ordering::Relaxed);
+        self.groups
+            .lock()
+            .expect("group observations")
+            .push((options.group_id, options.node_id));
+        let (inner, report) = PersistentRaftWal::open_recovered(options.wal)?;
+        Ok((
+            MatrixRaftWalHandle::custom(Box::new(CountingWalBackend {
+                inner,
+                appends: Arc::clone(&self.appends),
+            })),
+            report,
+        ))
+    }
+}
+
+struct CountingWalBackend {
+    inner: PersistentRaftWal,
+    appends: Arc<AtomicUsize>,
+}
+
+impl MatrixRaftWalBackend for CountingWalBackend {
+    fn active_coverage(&self) -> Option<(u64, u64, Term)> {
+        MatrixRaftWalBackend::active_coverage(&self.inner)
+    }
+
+    fn append_record(&mut self, record: WalRecord) -> Result<(), RaftError> {
+        self.appends.fetch_add(1, Ordering::Relaxed);
+        MatrixRaftWalBackend::append_record(&mut self.inner, record)
+    }
+
+    fn compact_through_with_fence(
+        &mut self,
+        log_index: u64,
+        fence: &StorageApplyFence,
+    ) -> Result<WalCompactionReport, RaftError> {
+        MatrixRaftWalBackend::compact_through_with_fence(&mut self.inner, log_index, fence)
+    }
+
+    fn status(&self) -> WalLifecycleStatus {
+        MatrixRaftWalBackend::status(&self.inner)
+    }
+
+    fn release_idle_segment_descriptor(&mut self) -> bool {
+        MatrixRaftWalBackend::release_idle_segment_descriptor(&mut self.inner)
+    }
+}
+
+#[test]
+fn creator_group_storage_drives_shared_runtime_wal_handles() {
+    let creator = MatrixRaftNodeCreatorBuilder::new().group_storage().build();
+    let transport = MatrixRaftTransportBuilder::new()
+        .set_cluster_id(100)
+        .bind_address_resolver()
+        .build()
+        .expect("transport");
+    let context = MatrixRaftGroupContextBuilder::new()
+        .transport(transport)
+        .shared_runtime(true)
+        .add_raft_node_creator(creator)
+        .build()
+        .expect("context");
+    let storage = Arc::new(CountingWalStorage::default());
+    let mut server =
+        MatrixRaftMultiRaftServer::new(context).with_group_wal_storage(0, storage.clone());
+    let wal_1 = temp_dir("custom-wal-1");
+    let snap_1 = temp_dir("custom-snap-1");
+    let wal_2 = temp_dir("custom-wal-2");
+    let snap_2 = temp_dir("custom-snap-2");
+
+    for (group_id, wal_dir, snapshot_dir) in [(710, &wal_1, &snap_1), (711, &wal_2, &snap_2)] {
+        let mut options = options(group_id, wal_dir, snapshot_dir);
+        options.peers = vec![peer(group_id, 1)];
+        server
+            .create_node_with_creator_index(options, 1, 0)
+            .expect("create group with shared WAL storage");
+    }
+
+    server.start_all(1).expect("start groups");
+    for group_id in [710, 711] {
+        let node = server.node(group_id, 1).expect("group node");
+        node.forced_campaign().expect("lead single-node group");
+        node.propose(format!("group-{group_id}").into_bytes())
+            .expect("persist proposal through custom backend");
+    }
+
+    assert_eq!(storage.opens.load(Ordering::Relaxed), 2);
+    assert!(storage.appends.load(Ordering::Relaxed) >= 2);
+    let mut groups = storage.groups.lock().expect("group observations").clone();
+    groups.sort_unstable();
+    assert_eq!(groups, vec![(710, 1), (711, 1)]);
+
+    server.shutdown_all().expect("shutdown groups");
+    let _ = fs::remove_dir_all(wal_1);
+    let _ = fs::remove_dir_all(snap_1);
+    let _ = fs::remove_dir_all(wal_2);
+    let _ = fs::remove_dir_all(snap_2);
 }
 
 fn peer(group_id: u64, node_id: u64) -> Peer {

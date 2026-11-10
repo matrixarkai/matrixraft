@@ -1417,6 +1417,164 @@ impl PersistentRaftWal {
 
 pub type FileRaftWal = PersistentRaftWal;
 
+/// The complete durable-log operations a node runtime needs after open.
+///
+/// A backend owns its record format and shared resources. The runtime owns one
+/// handle per replica and drives it for every durable promise, recovery query,
+/// and fenced compaction.
+pub trait MatrixRaftWalBackend: Send {
+    fn active_coverage(&self) -> Option<(LogIndex, LogIndex, Term)>;
+    fn append_record(&mut self, record: WalRecord) -> Result<(), RaftError>;
+    fn compact_through_with_fence(
+        &mut self,
+        log_index: LogIndex,
+        fence: &StorageApplyFence,
+    ) -> Result<WalCompactionReport, RaftError>;
+    fn status(&self) -> WalLifecycleStatus;
+    fn release_idle_segment_descriptor(&mut self) -> bool;
+}
+
+enum MatrixRaftWalHandleKind {
+    File(PersistentRaftWal),
+    Custom(Box<dyn MatrixRaftWalBackend>),
+}
+
+/// One runtime-owned WAL handle.
+///
+/// The built-in file WAL stays inline so the ordinary path keeps one heap
+/// allocation per group. A custom backend is boxed behind the same handle.
+pub struct MatrixRaftWalHandle {
+    kind: MatrixRaftWalHandleKind,
+}
+
+impl std::fmt::Debug for MatrixRaftWalHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MatrixRaftWalHandle")
+            .field(
+                "kind",
+                &match &self.kind {
+                    MatrixRaftWalHandleKind::File(_) => "file",
+                    MatrixRaftWalHandleKind::Custom(_) => "custom",
+                },
+            )
+            .finish()
+    }
+}
+
+impl MatrixRaftWalHandle {
+    pub fn file(wal: PersistentRaftWal) -> Self {
+        Self {
+            kind: MatrixRaftWalHandleKind::File(wal),
+        }
+    }
+
+    pub fn custom(wal: Box<dyn MatrixRaftWalBackend>) -> Self {
+        Self {
+            kind: MatrixRaftWalHandleKind::Custom(wal),
+        }
+    }
+
+    fn backend(&self) -> &dyn MatrixRaftWalBackend {
+        match &self.kind {
+            MatrixRaftWalHandleKind::File(wal) => wal,
+            MatrixRaftWalHandleKind::Custom(wal) => wal.as_ref(),
+        }
+    }
+
+    fn backend_mut(&mut self) -> &mut dyn MatrixRaftWalBackend {
+        match &mut self.kind {
+            MatrixRaftWalHandleKind::File(wal) => wal,
+            MatrixRaftWalHandleKind::Custom(wal) => wal.as_mut(),
+        }
+    }
+
+    fn active_coverage(&self) -> Option<(LogIndex, LogIndex, Term)> {
+        self.backend().active_coverage()
+    }
+
+    fn append_record(&mut self, record: WalRecord) -> Result<(), RaftError> {
+        self.backend_mut().append_record(record)
+    }
+
+    fn compact_through_with_fence(
+        &mut self,
+        log_index: LogIndex,
+        fence: &StorageApplyFence,
+    ) -> Result<WalCompactionReport, RaftError> {
+        self.backend_mut()
+            .compact_through_with_fence(log_index, fence)
+    }
+
+    fn status(&self) -> WalLifecycleStatus {
+        self.backend().status()
+    }
+
+    fn release_idle_segment_descriptor(&mut self) -> bool {
+        self.backend_mut().release_idle_segment_descriptor()
+    }
+}
+
+impl MatrixRaftWalBackend for PersistentRaftWal {
+    fn active_coverage(&self) -> Option<(LogIndex, LogIndex, Term)> {
+        PersistentRaftWal::active_coverage(self)
+    }
+
+    fn append_record(&mut self, record: WalRecord) -> Result<(), RaftError> {
+        let mut record = Some(record);
+        self.append_built_without_report(|_| {
+            record.take().ok_or_else(|| {
+                RaftError::Storage("WAL append requested its record more than once".to_string())
+            })
+        })
+    }
+
+    fn compact_through_with_fence(
+        &mut self,
+        log_index: LogIndex,
+        fence: &StorageApplyFence,
+    ) -> Result<WalCompactionReport, RaftError> {
+        PersistentRaftWal::compact_through_with_fence(self, log_index, fence)
+    }
+
+    fn status(&self) -> WalLifecycleStatus {
+        PersistentRaftWal::status(self)
+    }
+
+    fn release_idle_segment_descriptor(&mut self) -> bool {
+        PersistentRaftWal::release_idle_segment_descriptor(self)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MatrixRaftWalOpenOptions {
+    pub group_id: GroupId,
+    pub node_id: NodeId,
+    pub wal: PersistentRaftWalOptions,
+}
+
+/// A storage provider shared by all replicas assigned to one node creator.
+pub trait MatrixRaftWalStorage: Send + Sync {
+    fn open(
+        &self,
+        options: MatrixRaftWalOpenOptions,
+    ) -> Result<(MatrixRaftWalHandle, WalRecoveryReport), RaftError>;
+}
+
+/// The built-in segmented file storage provider.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MatrixRaftFileWalStorage;
+
+impl MatrixRaftWalStorage for MatrixRaftFileWalStorage {
+    fn open(
+        &self,
+        options: MatrixRaftWalOpenOptions,
+    ) -> Result<(MatrixRaftWalHandle, WalRecoveryReport), RaftError> {
+        let (wal, report) = PersistentRaftWal::open_recovered(options.wal)?;
+        Ok((MatrixRaftWalHandle::file(wal), report))
+    }
+}
+
 fn whole_record(record: &WalRecord) -> WalRecord {
     let mut whole = record.clone();
     whole.entries_are_delta = false;

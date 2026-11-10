@@ -732,12 +732,26 @@ pub struct NodeRuntime {
 
 impl NodeRuntime {
     pub fn create(options: NodeOptions) -> Result<Self, RaftError> {
+        Self::create_with_optional_wal_storage(options, None)
+    }
+
+    pub fn create_with_wal_storage(
+        options: NodeOptions,
+        storage: Arc<dyn MatrixRaftWalStorage>,
+    ) -> Result<Self, RaftError> {
+        Self::create_with_optional_wal_storage(options, Some(storage))
+    }
+
+    fn create_with_optional_wal_storage(
+        options: NodeOptions,
+        storage: Option<Arc<dyn MatrixRaftWalStorage>>,
+    ) -> Result<Self, RaftError> {
         let node_id = options.node_id;
         let group_id = options.group_id;
         let (command_tx, command_rx) = runtime_command_channel();
         let worker = thread::Builder::new()
             .name(format!("rustraft-node-{group_id}-{node_id}"))
-            .spawn(move || raft_node_runtime_loop(options, command_rx))
+            .spawn(move || raft_node_runtime_loop(options, command_rx, storage))
             .map_err(|err| RaftError::Transport(format!("failed to spawn raft node: {err}")))?;
         Ok(Self {
             node_id,
@@ -765,6 +779,22 @@ impl NodeRuntime {
         options: NodeOptions,
         runtime: Arc<SharedGroupRuntime>,
     ) -> Result<Self, RaftError> {
+        Self::create_on_with_optional_wal_storage(options, runtime, None)
+    }
+
+    pub fn create_on_with_wal_storage(
+        options: NodeOptions,
+        runtime: Arc<SharedGroupRuntime>,
+        storage: Arc<dyn MatrixRaftWalStorage>,
+    ) -> Result<Self, RaftError> {
+        Self::create_on_with_optional_wal_storage(options, runtime, Some(storage))
+    }
+
+    fn create_on_with_optional_wal_storage(
+        options: NodeOptions,
+        runtime: Arc<SharedGroupRuntime>,
+        storage: Option<Arc<dyn MatrixRaftWalStorage>>,
+    ) -> Result<Self, RaftError> {
         let node_id = options.node_id;
         let group_id = options.group_id;
         let tick_interval_ms = options.config.heartbeat_interval_ms.max(1);
@@ -773,7 +803,8 @@ impl NodeRuntime {
         // The error is reported rather than answered into the channel: no
         // command can have been sent yet, because this is what hands the
         // sender out.
-        let core = NodeCore::new(options, command_rx).map_err(|(error, _rx)| error)?;
+        let core = NodeCore::new(options, command_rx, storage.as_deref())
+            .map_err(|(error, _rx)| error)?;
         runtime.host(key, core, tick_interval_ms)?;
         Ok(Self {
             node_id,
@@ -2114,20 +2145,28 @@ fn local_term_and_vote(
 /// configured persists nothing, which is the existing behaviour for proposals.
 fn persist_after_promise(
     cluster: &mut RaftCluster,
-    wal: &mut Option<Box<PersistentRaftWal>>,
+    wal: &mut Option<Box<MatrixRaftWalHandle>>,
     node_id: NodeId,
 ) -> Result<(), RaftError> {
     let Some(open_wal) = wal.as_mut() else {
         return Ok(());
     };
-    let appended = open_wal
-        .append_built_without_report(|coverage| cluster.wal_record_for_coverage(node_id, coverage));
+    let appended = append_runtime_wal(cluster, open_wal, node_id);
     after_durable_write(cluster, node_id, appended)
+}
+
+fn append_runtime_wal(
+    cluster: &RaftCluster,
+    wal: &mut MatrixRaftWalHandle,
+    node_id: NodeId,
+) -> Result<(), RaftError> {
+    let record = cluster.wal_record_for_coverage(node_id, wal.active_coverage())?;
+    wal.append_record(record)
 }
 
 fn runtime_step_message(
     cluster: &mut RaftCluster,
-    wal: &mut Option<Box<PersistentRaftWal>>,
+    wal: &mut Option<Box<MatrixRaftWalHandle>>,
     membership_executor: &mut MembershipExecutor,
     node_id: NodeId,
     message: Message,
@@ -2144,12 +2183,11 @@ fn runtime_step_message(
             if wal.as_ref().is_some_and(|_| persist_proposal) {
                 // Built against what the WAL already holds, so a proposal does
                 // not copy and hash the whole log to write one entry.
-                let appended = wal
-                    .as_mut()
-                    .expect("checked just above")
-                    .append_built_without_report(|coverage| {
-                        cluster.wal_record_for_coverage(node_id, coverage)
-                    });
+                let appended = append_runtime_wal(
+                    cluster,
+                    wal.as_mut().expect("checked just above"),
+                    node_id,
+                );
                 after_durable_write(cluster, node_id, appended)?;
             }
             Ok(StepResult::Proposed(log_id))
@@ -2196,7 +2234,7 @@ fn runtime_step_message(
 
 fn apply_unpersisted_proposal(
     cluster: &mut RaftCluster,
-    wal: &mut Option<Box<PersistentRaftWal>>,
+    wal: &mut Option<Box<MatrixRaftWalHandle>>,
     membership_executor: &mut MembershipExecutor,
     node_id: NodeId,
     proposal: (
@@ -2314,7 +2352,7 @@ struct NodeCore {
     /// The WAL owns files and segment storage independently of the consensus
     /// state walked on every tick, so keep its large handle out of that hot
     /// inline working set.
-    wal: Option<Box<PersistentRaftWal>>,
+    wal: Option<Box<MatrixRaftWalHandle>>,
     last_wal_recovery_report: StoredWalRecoveryReport,
     state: NodeRuntimeState,
     heartbeat_ticks: u64,
@@ -2359,6 +2397,7 @@ impl NodeCore {
     fn new(
         options: NodeOptions,
         command_rx: RuntimeCommandReceiver,
+        storage: Option<&dyn MatrixRaftWalStorage>,
     ) -> Result<Self, (RaftError, RuntimeCommandReceiver)> {
     let node_id = options.node_id;
     let group_id = options.group_id;
@@ -2392,8 +2431,10 @@ impl NodeCore {
     // append-open, and those were already fatal to creating a node. Failing is
     // also the safer of the two, since the alternative is a node that quietly did
     // not restore its last record.
-    let (wal, last_wal_recovery_report) = match PersistentRaftWal::open_recovered(
-        PersistentRaftWalOptions {
+    let open_options = MatrixRaftWalOpenOptions {
+        group_id,
+        node_id,
+        wal: PersistentRaftWalOptions {
             dir: PathBuf::from(&options.wal_dir),
             // See `PersistentRaftWalOptions::new`: this is now just how much the
             // node holds in memory, and smaller is strictly cheaper.
@@ -2402,7 +2443,12 @@ impl NodeCore {
             min_keep_segments: options.config.min_keep_segment_num as usize,
             fsync_on_append: true,
         },
-    ) {
+    };
+    let opened = match storage {
+        Some(storage) => storage.open(open_options),
+        None => MatrixRaftFileWalStorage.open(open_options),
+    };
+    let (wal, last_wal_recovery_report) = match opened {
         Ok((wal, report)) => {
             if let Some(record) = report.recovered.clone() {
                 let _ = cluster.restore_wal_record(record);
@@ -2764,9 +2810,7 @@ impl NodeCore {
                     // persist.
                     let persisted: Result<(), RaftError> = if any_applied {
                         match wal.as_mut() {
-                            Some(wal) => wal.append_built_without_report(|coverage| {
-                                    cluster.wal_record_for_coverage(node_id, coverage)
-                                }),
+                            Some(wal) => append_runtime_wal(cluster, wal, node_id),
                             None => Ok(()),
                         }
                     } else {
@@ -2970,9 +3014,7 @@ impl NodeCore {
                     || step_installed_a_snapshot(snapshot_completes_install, &result)
                 {
                     if let Some(open_wal) = wal.as_mut() {
-                        let appended = open_wal.append_built_without_report(|coverage| {
-                            cluster.wal_record_for_coverage(node_id, coverage)
-                        });
+                        let appended = append_runtime_wal(cluster, open_wal, node_id);
                         if let Err(error) = after_durable_write(cluster, node_id, appended) {
                             result = Err(error);
                         }
@@ -3081,9 +3123,7 @@ impl NodeCore {
                     || local_term_and_vote(cluster, node_id) != term_and_vote_before
                 {
                     match wal.as_mut() {
-                        Some(wal) => wal.append_built_without_report(|coverage| {
-                                cluster.wal_record_for_coverage(node_id, coverage)
-                            }),
+                        Some(wal) => append_runtime_wal(cluster, wal, node_id),
                         None => Ok(()),
                     }
                 } else {
@@ -4072,8 +4112,12 @@ impl CommandSender {
 ///
 /// See [`NodeCore`] for what this costs at scale. The scheduling lives here
 /// rather than in the core so that something else can schedule it instead.
-fn raft_node_runtime_loop(options: NodeOptions, command_rx: RuntimeCommandReceiver) {
-    let mut core = match NodeCore::new(options, command_rx) {
+fn raft_node_runtime_loop(
+    options: NodeOptions,
+    command_rx: RuntimeCommandReceiver,
+    storage: Option<Arc<dyn MatrixRaftWalStorage>>,
+) {
+    let mut core = match NodeCore::new(options, command_rx, storage.as_deref()) {
         Ok(core) => core,
         Err((error, command_rx)) => {
             drain_with_error(&command_rx, &error);
