@@ -937,6 +937,20 @@ pub(crate) fn encode_framed(record: &WalRecord) -> Result<Vec<u8>, RaftError> {
     Ok(out)
 }
 
+pub(crate) fn framed_record_len(record: &WalRecord) -> Result<usize, RaftError> {
+    let canonical_checksum =
+        checksum_as_u64(&record.checksum) == Some(matrixraft_wal_checksum_digest(record));
+    let checksum_digest = if canonical_checksum {
+        None
+    } else {
+        checksum_as_u64(&record.checksum)
+    };
+    let body_len = wal_record_encoded_len(record, checksum_digest, canonical_checksum);
+    u32::try_from(body_len)
+        .map_err(|_| RaftError::Storage("WAL record exceeds a frame length".to_string()))?;
+    Ok(FRAME_BYTES + body_len)
+}
+
 pub(crate) fn encode_framed_into(record: &WalRecord, out: &mut Vec<u8>) -> Result<(), RaftError> {
     let canonical_checksum =
         checksum_as_u64(&record.checksum) == Some(matrixraft_wal_checksum_digest(record));

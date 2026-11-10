@@ -1325,6 +1325,15 @@ The runtime interface is separate from the three compatibility traits because
 it preserves the complete durable record and snapshot fence contract rather
 than exposing only log entries.
 
+Providers that can commit several replicas in one storage transaction can use
+`MatrixRaftWalBatchCoordinator`. Each per-replica backend submits its complete
+record and waits. The coordinator gathers concurrent submissions up to the
+configured record and byte limits, calls one `MatrixRaftWalBatchSink::commit`,
+and releases every waiter only after that atomic commit succeeds. Queue depth
+and maximum wait time are bounded, and one sink error is returned to every
+record in that batch. This keeps acknowledgement ordering correct while a
+shared database amortizes its durability barrier across groups.
+
 `Storage`'s doc comment used to claim it was "used by production adapters".
 It said that while having no implementation, no bound and no caller anywhere
 in the crate.

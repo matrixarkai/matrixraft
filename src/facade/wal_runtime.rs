@@ -1561,6 +1561,230 @@ pub trait MatrixRaftWalStorage: Send + Sync {
     ) -> Result<(MatrixRaftWalHandle, WalRecoveryReport), RaftError>;
 }
 
+/// Limits for one provider-owned atomic WAL commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatrixRaftWalBatchOptions {
+    pub max_records: usize,
+    pub max_bytes: usize,
+    pub queue_depth: usize,
+    pub max_wait: Duration,
+}
+
+impl Default for MatrixRaftWalBatchOptions {
+    fn default() -> Self {
+        Self {
+            max_records: 256,
+            max_bytes: 64 * 1024,
+            queue_depth: 1_024,
+            max_wait: Duration::from_micros(200),
+        }
+    }
+}
+
+impl MatrixRaftWalBatchOptions {
+    fn validate(self) -> Result<Self, RaftError> {
+        if self.max_records == 0 {
+            return Err(RaftError::InvalidRequest(
+                "WAL batch max_records must be greater than zero".to_string(),
+            ));
+        }
+        if self.max_bytes == 0 {
+            return Err(RaftError::InvalidRequest(
+                "WAL batch max_bytes must be greater than zero".to_string(),
+            ));
+        }
+        if self.queue_depth == 0 {
+            return Err(RaftError::InvalidRequest(
+                "WAL batch queue_depth must be greater than zero".to_string(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+/// One complete record in a shared provider commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatrixRaftWalBatchRecord {
+    pub record: WalRecord,
+}
+
+impl MatrixRaftWalBatchRecord {
+    pub fn new(record: WalRecord) -> Self {
+        Self { record }
+    }
+
+    pub fn group_id(&self) -> GroupId {
+        self.record.group_id
+    }
+
+    pub fn node_id(&self) -> NodeId {
+        self.record.node_id
+    }
+}
+
+/// Commits records from several replicas as one durable storage operation.
+///
+/// Returning `Ok` promises that every record is durable. Returning an error
+/// fails every waiting submitter; a sink must not report partial success.
+pub trait MatrixRaftWalBatchSink: Send + Sync + 'static {
+    fn commit(&self, records: &[MatrixRaftWalBatchRecord]) -> Result<(), RaftError>;
+}
+
+struct MatrixRaftWalBatchRequest {
+    record: MatrixRaftWalBatchRecord,
+    bytes: usize,
+    reply: mpsc::SyncSender<Result<(), RaftError>>,
+}
+
+struct MatrixRaftWalBatchCoordinatorInner {
+    sender: mpsc::SyncSender<Option<MatrixRaftWalBatchRequest>>,
+    worker: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl Drop for MatrixRaftWalBatchCoordinatorInner {
+    fn drop(&mut self) {
+        let _ = self.sender.send(None);
+        if let Ok(worker) = self.worker.get_mut() {
+            if let Some(worker) = worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+
+/// Bounded shared commit coordinator for provider-backed WAL handles.
+///
+/// Each submitter blocks until its batch has committed. Concurrent runtime
+/// workers can therefore combine records from different groups without
+/// acknowledging any group before the provider's atomic commit succeeds.
+#[derive(Clone)]
+pub struct MatrixRaftWalBatchCoordinator {
+    inner: Arc<MatrixRaftWalBatchCoordinatorInner>,
+}
+
+impl std::fmt::Debug for MatrixRaftWalBatchCoordinator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MatrixRaftWalBatchCoordinator")
+            .finish_non_exhaustive()
+    }
+}
+
+impl MatrixRaftWalBatchCoordinator {
+    pub fn start(
+        options: MatrixRaftWalBatchOptions,
+        sink: Arc<dyn MatrixRaftWalBatchSink>,
+    ) -> Result<Self, RaftError> {
+        let options = options.validate()?;
+        let (sender, receiver) = mpsc::sync_channel(options.queue_depth);
+        let worker = thread::Builder::new()
+            .name("matrixraft-wal-batch".to_string())
+            .spawn(move || matrixraft_wal_batch_loop(options, sink, receiver))
+            .map_err(|error| {
+                RaftError::Transport(format!("failed to spawn WAL batch worker: {error}"))
+            })?;
+        Ok(Self {
+            inner: Arc::new(MatrixRaftWalBatchCoordinatorInner {
+                sender,
+                worker: Mutex::new(Some(worker)),
+            }),
+        })
+    }
+
+    pub fn submit(&self, record: WalRecord) -> Result<(), RaftError> {
+        let bytes = crate::wal_binary::framed_record_len(&record)?;
+        let (reply, result) = mpsc::sync_channel(1);
+        self.inner
+            .sender
+            .send(Some(MatrixRaftWalBatchRequest {
+                record: MatrixRaftWalBatchRecord::new(record),
+                bytes,
+                reply,
+            }))
+            .map_err(|_| RaftError::Storage("WAL batch worker is unavailable".to_string()))?;
+        result
+            .recv()
+            .map_err(|_| RaftError::Storage("WAL batch worker stopped before commit".to_string()))?
+    }
+}
+
+fn matrixraft_wal_batch_loop(
+    options: MatrixRaftWalBatchOptions,
+    sink: Arc<dyn MatrixRaftWalBatchSink>,
+    receiver: mpsc::Receiver<Option<MatrixRaftWalBatchRequest>>,
+) {
+    let mut pending = None;
+    let mut stopping = false;
+    let mut records = Vec::with_capacity(options.max_records);
+    let mut replies = Vec::with_capacity(options.max_records);
+    while !stopping {
+        let first = match pending.take() {
+            Some(request) => request,
+            None => match receiver.recv() {
+                Ok(Some(request)) => request,
+                Ok(None) | Err(_) => break,
+            },
+        };
+        let mut bytes = first.bytes;
+        records.push(first.record);
+        replies.push(first.reply);
+        let started = Instant::now();
+
+        while records.len() < options.max_records && bytes < options.max_bytes {
+            let next = if options.max_wait.is_zero() {
+                match receiver.try_recv() {
+                    Ok(command) => Ok(command),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        stopping = true;
+                        break;
+                    }
+                }
+            } else {
+                let elapsed = started.elapsed();
+                if elapsed >= options.max_wait {
+                    break;
+                }
+                receiver
+                    .recv_timeout(options.max_wait.saturating_sub(elapsed))
+                    .map_err(|error| match error {
+                        mpsc::RecvTimeoutError::Timeout => mpsc::TryRecvError::Empty,
+                        mpsc::RecvTimeoutError::Disconnected => mpsc::TryRecvError::Disconnected,
+                    })
+            };
+            match next {
+                Ok(Some(request)) => {
+                    if bytes.saturating_add(request.bytes) > options.max_bytes {
+                        pending = Some(request);
+                        break;
+                    }
+                    bytes = bytes.saturating_add(request.bytes);
+                    records.push(request.record);
+                    replies.push(request.reply);
+                }
+                Ok(None) => {
+                    stopping = true;
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    stopping = true;
+                    break;
+                }
+            }
+        }
+
+        let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sink.commit(&records)
+        }))
+        .unwrap_or_else(|_| Err(RaftError::Storage("WAL batch sink panicked".to_string())));
+        records.clear();
+        for reply in replies.drain(..) {
+            let _ = reply.send(committed.clone());
+        }
+    }
+}
+
 /// The built-in segmented file storage provider.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MatrixRaftFileWalStorage;
