@@ -2238,6 +2238,44 @@ impl DurablePeer {
         Ok(())
     }
 
+    fn require_proposal_term(&self, expected_term: u64) -> Result<(), RaftError> {
+        self.healthy()?;
+        if !self.is_leader() {
+            return Err(RaftError::NotLeader(self.options.node_id));
+        }
+        if expected_term != self.term() {
+            return Err(invalid(format!(
+                "expected term {} does not match current term {}",
+                expected_term,
+                self.term()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Admit a value only while leading in exactly the caller's expected term.
+    /// A rejected fence allocates no position. Acceptance is not commitment.
+    pub fn propose_in_term(
+        &mut self,
+        expected_term: u64,
+        payload: Vec<u8>,
+    ) -> Result<LogId, RaftError> {
+        self.require_proposal_term(expected_term)?;
+        self.propose(payload)
+    }
+
+    /// Admit an entire batch only while leading in the expected term.
+    /// The term check and admission run on the same exclusive peer worker.
+    /// All ordinary batch limits and uncommitted-byte limits still apply.
+    pub fn propose_batch_in_term(
+        &mut self,
+        expected_term: u64,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<LogId>, RaftError> {
+        self.require_proposal_term(expected_term)?;
+        self.propose_batch(payloads)
+    }
+
     /// Acceptance allocates a log position; it does not mean the proposal committed.
     pub fn propose(&mut self, payload: Vec<u8>) -> Result<LogId, RaftError> {
         self.healthy()?;

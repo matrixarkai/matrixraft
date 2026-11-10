@@ -77,6 +77,106 @@ impl Drop for Directory {
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
 
 #[test]
+fn term_fenced_writes_reject_old_leadership_without_allocating_positions() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let first_term = group[&1].term();
+    let first = group
+        .get_mut(&1)
+        .unwrap()
+        .propose_in_term(first_term, b"first".to_vec())
+        .unwrap();
+    pump(&mut group, &mut applied, None);
+    assert_eq!(group[&1].commit_index(), first.index);
+    for id in [2, 1] {
+        group.get_mut(&id).unwrap().force_campaign().unwrap();
+        pump(&mut group, &mut applied, None);
+        assert!(group[&id].is_leader());
+    }
+    let term = group[&1].term();
+    assert!(term > first_term);
+    let follower = group.get_mut(&2).unwrap();
+    assert!(matches!(
+        follower.propose_in_term(term, vec![9]),
+        Err(RaftError::NotLeader(2))
+    ));
+    assert!(matches!(
+        follower.propose_batch_in_term(term, vec![vec![9]]),
+        Err(RaftError::NotLeader(2))
+    ));
+    let leader = group.get_mut(&1).unwrap();
+    let before = leader.commit_index();
+    let wal_bytes = leader.persisted_wal_bytes().unwrap();
+    for rejected in [0, first_term, term + 1, u64::MAX] {
+        assert!(matches!(
+            leader.propose_in_term(rejected, vec![9]),
+            Err(RaftError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            leader.propose_batch_in_term(rejected, vec![vec![9], vec![8]]),
+            Err(RaftError::InvalidRequest(_))
+        ));
+    }
+    assert!(leader
+        .process_ready(|_, _| panic!("rejected writes cannot apply"))
+        .unwrap()
+        .is_empty());
+    assert_eq!(leader.persisted_wal_bytes().unwrap(), wal_bytes);
+    assert_eq!(leader.commit_index(), before);
+    assert!(leader.propose_in_term(term, Vec::new()).is_err());
+    assert!(leader
+        .propose_batch_in_term(term, vec![vec![9], Vec::new()])
+        .is_err());
+    let single = leader.propose_in_term(term, b"current".to_vec()).unwrap();
+    let batch = leader
+        .propose_batch_in_term(term, vec![b"batch-a".to_vec(), b"batch-b".to_vec()])
+        .unwrap();
+    assert_eq!(single.index, before + 1);
+    assert_eq!(single.term, term);
+    assert_eq!(
+        batch
+            .iter()
+            .map(|id| (id.term, id.index))
+            .collect::<Vec<_>>(),
+        vec![(term, before + 2), (term, before + 3)]
+    );
+    assert_eq!(leader.commit_index(), before);
+    pump(&mut group, &mut applied, None);
+    let expected = applied[&1].clone();
+    assert_eq!(
+        expected
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(_, value)| value.as_slice())
+            .collect::<Vec<_>>(),
+        vec![
+            b"first".as_slice(),
+            b"current".as_slice(),
+            b"batch-a".as_slice(),
+            b"batch-b".as_slice()
+        ]
+    );
+    for id in 1..=3 {
+        assert_eq!(applied[&id], expected);
+    }
+    drop(group);
+    let mut recovered = peers(&dir);
+    let mut replay = Applied::new();
+    pump(&mut recovered, &mut replay, None);
+    for id in 1..=3 {
+        assert_eq!(replay[&id], expected);
+        assert!(recovered
+            .get_mut(&id)
+            .unwrap()
+            .propose_in_term(term, vec![9])
+            .is_err());
+    }
+}
+
+#[test]
 fn forced_campaign_bypasses_lease_inhibition_but_waits_for_received_votes() {
     for forced in [false, true] {
         let dir = Directory::new();
