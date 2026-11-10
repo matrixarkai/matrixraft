@@ -34,6 +34,13 @@ packets; the report itself never acknowledges data, commits an entry, or changes
 membership. Targets must be other committed voters or learners. Repeated reports
 are allowed, and network-injected unreachable messages remain unsupported.
 
+`set_automatic_elections(false)` suppresses timeout-driven campaigns locally.
+It does not suppress voting, replication, explicit `campaign`, or transfer-driven
+elections. Follower lease clocks continue advancing, and leaders continue
+heartbeats and quorum checks. Re-enable it to resume automatic elections. The
+policy is volatile: reopening a peer enables automatic elections by default, so
+a host requiring suppression must set it again before driving ticks.
+
 `DurablePeer::campaign`, `tick`, and `step` feed the local consensus state.
 `capture_log_reader` pins the current durable journal generation and its log
 bounds. Its reader can move to another thread and read bounded entry ranges
