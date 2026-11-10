@@ -998,11 +998,14 @@ fn compaction_preflight_tracks_the_release_frontier_and_new_segments() {
         &wal, 20
     ));
     assert!(wal.compact_through(20).expect("compact") > 0);
+    assert_eq!(
+        wal.segments().len(),
+        1,
+        "the materialized survivor must be active"
+    );
     assert!(!matrixraft::MatrixRaftWalBackend::has_reclaimable_segments(
         &wal, 20
     ));
-    drop(wal);
-    let mut wal = PersistentRaftWal::open(options).expect("reopen compacted WAL");
     for index in 31..=60 {
         wal.append(growing_wal_record(index, 3))
             .expect("append again");
@@ -1010,7 +1013,21 @@ fn compaction_preflight_tracks_the_release_frontier_and_new_segments() {
     assert!(matrixraft::MatrixRaftWalBackend::has_reclaimable_segments(
         &wal, 40
     ));
+    assert!(wal.compact_through(40).expect("compact again") > 0);
+    for index in 61..=90 {
+        wal.append(growing_wal_record(index, 3))
+            .expect("append after second compaction");
+    }
     drop(wal);
+    let mut reopened = PersistentRaftWal::open(options).expect("reopen after continuous recycling");
+    let recovered = reopened
+        .recover()
+        .expect("recover")
+        .recovered
+        .expect("record");
+    assert_eq!(recovered.entries.len(), 90);
+    assert_eq!(recovered.entries.last().expect("tail").log_id.index, 90);
+    drop(reopened);
     fs::remove_dir_all(dir).expect("cleanup");
 }
 
