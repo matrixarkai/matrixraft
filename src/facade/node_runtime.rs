@@ -2964,9 +2964,12 @@ impl NodeCore {
                 // covers every proposal in the batch. Persisting per proposal
                 // made a batch of N cost N fsyncs, and an fsync is essentially
                 // the whole cost of a durable append.
-                let batch_has_proposal = messages
+                let proposal_count = messages
                     .iter()
-                    .any(|message| matches!(message, Message::Propose { .. }));
+                    .filter(|message| matches!(message, Message::Propose { .. }))
+                    .count();
+                let batch_has_proposal = proposal_count > 0;
+                cluster.reserve_proposal_batch(proposal_count);
                 // Raised inside the closure so each result is matched against
                 // the message that produced it. Pairing them afterwards would
                 // need the messages kept alongside the results, and asking
