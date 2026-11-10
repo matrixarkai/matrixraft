@@ -978,6 +978,38 @@ worth watching rather than merely available: a node given the wrong cluster id
 is indistinguishable from a node that is down — every RPC fails — and the
 counter is what tells the two apart.
 
+### A stale process generation cannot write
+
+A cluster id separates clusters, but it does not separate two generations of
+the same process. After a rollout, an old sender can still hold a warm
+connection to the new server and deliver requests with the right cluster id.
+
+The transport and server therefore carry a live network epoch:
+
+```rust
+let transport = TcpRaftTransport::new_in_cluster(peers, 42);
+transport.set_network_epoch(8);
+
+let server = TcpRaftTransportServer::start_in_cluster(
+    "0.0.0.0:7001",
+    handler,
+    42,
+)?;
+server.set_network_epoch(8);
+```
+
+The server accepts a sender whose epoch is equal to or newer than its own and
+refuses one whose epoch is older, before payload observation or Raft dispatch.
+That ordering supports a rolling update: raise senders first, then receivers.
+Advancing either side is live. Transport clones share the sending epoch, and a
+server's kept-alive connection threads read its current epoch for every
+request, so neither side has to throw away a warm connection pool.
+
+`DEFAULT_NETWORK_EPOCH` is zero. The field is omitted from the JSON shape at
+zero and defaults to zero in both JSON and framed requests, so peers that
+predate it keep talking while the receiving epoch remains at its default. Once
+a receiver advances past zero, those old senders are deliberately retired.
+
 ### Addresses that move
 
 A peer that moves from one host to another leaves every send to it failing at
