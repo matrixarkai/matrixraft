@@ -77,6 +77,78 @@ impl Drop for Directory {
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
 
 #[test]
+fn canceled_read_responses_cannot_confirm_a_newer_token() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let leader = group.get_mut(&1).unwrap();
+    let bytes = leader.persisted_wal_bytes().unwrap();
+    let old = leader.begin_read().unwrap();
+    let old_packets = leader.process_ready(|_, _| Ok(())).unwrap();
+    assert!(leader.cancel_read(old).unwrap());
+    assert!(!leader.cancel_read(old).unwrap());
+    assert!(leader.poll_read(old).is_err());
+    let new = leader.begin_read().unwrap();
+    assert!(new > old);
+    assert!(!leader.cancel_read(old).unwrap());
+    let new_packets = leader.process_ready(|_, _| Ok(())).unwrap();
+    for packet in old_packets {
+        group
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    pump(&mut group, &mut applied, None);
+    assert!(!group.get_mut(&1).unwrap().poll_read(new).unwrap());
+    for packet in new_packets {
+        group
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    pump(&mut group, &mut applied, None);
+    assert!(group.get_mut(&1).unwrap().poll_read(new).unwrap());
+    assert_eq!(group.get(&1).unwrap().persisted_wal_bytes().unwrap(), bytes);
+}
+
+#[test]
+fn repeated_read_cancellation_bounds_queued_heartbeats_and_releases_admission() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let leader = group.get_mut(&1).unwrap();
+    let bytes = leader.persisted_wal_bytes().unwrap();
+    for _ in 0..64 {
+        let token = leader.begin_read().unwrap();
+        assert!(leader.cancel_read(token).unwrap());
+    }
+    let packets = leader.process_ready(|_, _| Ok(())).unwrap();
+    assert_eq!(
+        packets.len(),
+        2,
+        "keep only one liveness heartbeat per follower"
+    );
+    assert_eq!(leader.persisted_wal_bytes().unwrap(), bytes);
+    for packet in packets {
+        group
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    pump(&mut group, &mut applied, None);
+    let token = group.get_mut(&1).unwrap().begin_read().unwrap();
+    pump(&mut group, &mut applied, None);
+    assert!(group.get_mut(&1).unwrap().poll_read(token).unwrap());
+}
+
+#[test]
 fn automatic_elections_can_be_suppressed_and_resumed() {
     let dir = Directory::new();
     let mut peer = DurablePeer::open_with_tuning(

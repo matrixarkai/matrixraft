@@ -274,9 +274,12 @@ application worker. Leadership loss, unknown tokens, and failed peers are errors
 This uses the safe quorum mode, not a clock-based lease.
 
 Only one confirmation may be outstanding. Concurrent application reads may share
-a confirmation if all were admitted before it began. Do not forget an unresolved
-token on client timeout: keep polling until completion or leadership loss. This
-bounds the core's pending read contexts even during a partition. Read tokens are
+a confirmation if all were admitted before it began. On client timeout, keep
+polling or call `cancel_read(token)`. Cancellation releases the matching core
+request and ready confirmation; a mismatched token cannot cancel a newer read.
+Queued heartbeats retain liveness but lose the canceled context and are coalesced
+per destination. Late responses cannot confirm a subsequent token. This bounds
+pending contexts and queued heartbeats even during repeated cancellation in a partition. Read tokens are
 not persistent and must not be reused across peer instances. Confirmations do
 not append entries or WAL records; writes and elections still do, and snapshot
 compaction remains necessary for a long-running write workload.
