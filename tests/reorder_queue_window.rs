@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 
-use matrixraft::{AppendEntriesRequest, Config, LogEntry, LogId, Peer, RaftCluster, ReplicaRole};
+use matrixraft::{
+    AppendEntriesRequest, Config, LogEntry, LogId, Peer, PipelineLimits, RaftCluster, ReplicaRole,
+};
 
 fn peer(node_id: u64, role: ReplicaRole) -> Peer {
     Peer {
@@ -13,10 +15,10 @@ fn peer(node_id: u64, role: ReplicaRole) -> Peer {
     }
 }
 
-fn cluster() -> RaftCluster {
+fn cluster(limits: PipelineLimits) -> RaftCluster {
     RaftCluster::new(
         7,
-        Config::default(),
+        Config::default().with_pipeline_limits(limits),
         vec![
             peer(1, ReplicaRole::Voter),
             peer(2, ReplicaRole::Voter),
@@ -46,12 +48,21 @@ fn bytes(cluster: &RaftCluster) -> usize {
     serde_json::to_string(&cached(cluster)).expect("json").len()
 }
 
-#[test]
-fn the_cluster_reorder_queue_grows_once_per_distinct_prev_index() {
-    let mut c = cluster();
-    c.start().expect("starts");
+fn keys(cluster: &RaftCluster, node: u64) -> Vec<u64> {
+    let mut keys: Vec<_> = cached(cluster)
+        .get(node.to_string())
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|queue| queue.keys())
+        .map(|key| key.parse().expect("numeric log index"))
+        .collect();
+    keys.sort_unstable();
+    keys
+}
 
-    // One accepted entry, so match_index == 1 and anything past it is out of order.
+fn start_with_base(limits: PipelineLimits) -> RaftCluster {
+    let mut c = cluster(limits);
+    c.start().expect("starts");
     let base = c
         .append_entries_to(
             2,
@@ -72,68 +83,71 @@ fn the_cluster_reorder_queue_grows_once_per_distinct_prev_index() {
         .expect("base append");
     assert!(base.success);
     assert_eq!(depth(&c, 2), 0, "nothing cached while appends are in order");
+    c
+}
 
+fn reject_ahead(c: &mut RaftCluster, prev: u64, payload_bytes: usize) {
+    let rejected = c
+        .append_entries_to(
+            2,
+            AppendEntriesRequest {
+                group_id: 7,
+                term: 1,
+                leader_id: 1,
+                prev_log_id: Some(LogId {
+                    term: 1,
+                    index: prev,
+                }),
+                entries: vec![LogEntry {
+                    log_id: LogId {
+                        term: 1,
+                        index: prev + 1,
+                    },
+                    payload: vec![b'x'; payload_bytes],
+                    is_command: true,
+                }],
+                leader_commit: prev + 1,
+                lease_epoch: 0,
+            },
+        )
+        .expect("append is answered");
+    assert!(!rejected.success, "an append past match_index is rejected");
+    assert_eq!(
+        rejected.rejection_hint,
+        Some(2),
+        "the sender is still told exactly which index is missing"
+    );
+}
+
+#[test]
+fn rejected_append_heap_stays_inside_the_replication_memory_budget() {
     const AHEAD: u64 = 64;
     const PAYLOAD: usize = 4096;
+    const RETAINED_PER_REQUEST: usize = PAYLOAD + std::mem::size_of::<LogEntry>();
+    let limits = PipelineLimits {
+        reorder_window_size: 8,
+        max_memory_replicate_log_bytes: (2 * RETAINED_PER_REQUEST) as u64,
+        ..PipelineLimits::default()
+    };
+    let mut c = start_with_base(limits);
     let empty = bytes(&c);
 
     for k in 0..AHEAD {
-        let prev = 2 + k * 2; // distinct, all beyond match_index
-        let rejected = c
-            .append_entries_to(
-                2,
-                AppendEntriesRequest {
-                    group_id: 7,
-                    term: 1,
-                    leader_id: 1,
-                    prev_log_id: Some(LogId {
-                        term: 1,
-                        index: prev,
-                    }),
-                    entries: vec![LogEntry {
-                        log_id: LogId {
-                            term: 1,
-                            index: prev + 1,
-                        },
-                        payload: vec![b'x'; PAYLOAD],
-                        is_command: true,
-                    }],
-                    leader_commit: prev + 1,
-                    lease_epoch: 0,
-                },
-            )
-            .expect("append is answered");
-        assert!(!rejected.success, "an append past match_index is rejected");
-        assert_eq!(
-            rejected.rejection_hint,
-            Some(2),
-            "every rejection names the same next index, so a leader that honours \
-             the hint never reaches this queue"
-        );
+        reject_ahead(&mut c, 2 + k * 2, PAYLOAD);
     }
 
     let grown = bytes(&c);
-    eprintln!(
-        "cached={} appends  state={} bytes  ({} bytes per cached append, payload {})",
-        depth(&c, 2),
-        grown - empty,
-        (grown - empty) / AHEAD as usize,
-        PAYLOAD
-    );
     assert_eq!(
         depth(&c, 2),
-        AHEAD as usize,
-        "one cached append per distinct prev index -- the queue has no window"
+        2,
+        "two payloads consume the entire configured byte budget"
     );
+    assert_eq!(keys(&c, 2), vec![2, 4], "the nearest requests survive");
     assert!(
-        grown - empty > AHEAD as usize * PAYLOAD,
-        "the cache keeps whole payloads, not just indexes: {} bytes of state for \
-         {} rejected appends",
-        grown - empty,
-        AHEAD
+        grown - empty < 4 * PAYLOAD,
+        "serialized retained state must stay proportional to the two cached payloads"
     );
 
-    // A successful append drains only the contiguous run, so the rest stays cached.
     let fill = c
         .append_entries_to(
             2,
@@ -153,19 +167,12 @@ fn the_cluster_reorder_queue_grows_once_per_distinct_prev_index() {
         )
         .expect("append that fills the hole");
     assert!(fill.success);
-    let after_drain = depth(&c, 2);
-    eprintln!(
-        "after filling one hole: {} of {} cached appends remain",
-        after_drain, AHEAD
-    );
     assert_eq!(
-        after_drain,
-        AHEAD as usize - 1,
-        "filling one hole drains the one cached append it unblocks; the other {} stay, because their prev indexes are still ahead of match_index",
-        AHEAD - 1
+        keys(&c, 2),
+        vec![4],
+        "filling the first hole drains the cached request it releases"
     );
 
-    // The operator lever that names this queue drains a different one.
     let expired = c.expire_peer_reorder_queue(2).expect("peer exists");
     assert_eq!(
         expired, 0,
@@ -173,7 +180,112 @@ fn the_cluster_reorder_queue_grows_once_per_distinct_prev_index() {
     );
     assert_eq!(
         depth(&c, 2),
-        after_drain,
-        "and it leaves the cluster-level queue untouched"
+        1,
+        "the pipeline queue control does not alter this separately bounded cache"
     );
+}
+
+#[test]
+fn zero_payload_entries_still_count_against_the_memory_budget() {
+    let limits = PipelineLimits {
+        reorder_window_size: 8,
+        max_memory_replicate_log_bytes: (2 * std::mem::size_of::<LogEntry>()) as u64,
+        ..PipelineLimits::default()
+    };
+    let mut c = start_with_base(limits);
+    let prev = 20;
+    let entries = (1..=8)
+        .map(|offset| LogEntry {
+            log_id: LogId {
+                term: 1,
+                index: prev + offset,
+            },
+            payload: Vec::new(),
+            is_command: true,
+        })
+        .collect();
+    let rejected = c
+        .append_entries_to(
+            2,
+            AppendEntriesRequest {
+                group_id: 7,
+                term: 1,
+                leader_id: 1,
+                prev_log_id: Some(LogId {
+                    term: 1,
+                    index: prev,
+                }),
+                entries,
+                leader_commit: prev + 8,
+                lease_epoch: 0,
+            },
+        )
+        .expect("append is answered");
+    assert!(!rejected.success);
+    assert_eq!(
+        depth(&c, 2),
+        0,
+        "entry storage exceeds the budget even when every payload is empty"
+    );
+}
+
+#[test]
+fn a_full_count_window_keeps_the_requests_nearest_the_hole() {
+    let limits = PipelineLimits {
+        reorder_window_size: 3,
+        max_memory_replicate_log_bytes: u64::MAX,
+        ..PipelineLimits::default()
+    };
+    let mut c = start_with_base(limits);
+    for prev in [100, 200, 300, 400] {
+        reject_ahead(&mut c, prev, 1);
+    }
+    assert_eq!(keys(&c, 2), vec![100, 200, 300]);
+
+    reject_ahead(&mut c, 50, 1);
+    assert_eq!(
+        keys(&c, 2),
+        vec![50, 100, 200],
+        "a nearer request displaces the farthest retained request"
+    );
+}
+
+#[test]
+fn a_restored_queue_rebuilds_its_payload_budget() {
+    const PAYLOAD: usize = 4096;
+    const RETAINED_PER_REQUEST: usize = PAYLOAD + std::mem::size_of::<LogEntry>();
+    let limits = PipelineLimits {
+        reorder_window_size: 8,
+        max_memory_replicate_log_bytes: (2 * RETAINED_PER_REQUEST) as u64,
+        ..PipelineLimits::default()
+    };
+    let mut c = start_with_base(limits);
+    reject_ahead(&mut c, 2, PAYLOAD);
+    reject_ahead(&mut c, 4, PAYLOAD);
+    assert_eq!(keys(&c, 2), vec![2, 4]);
+
+    let encoded = serde_json::to_string(&c).expect("serialize cluster");
+    let mut restored: RaftCluster = serde_json::from_str(&encoded).expect("restore cluster");
+    reject_ahead(&mut restored, 3, PAYLOAD);
+    let retained = keys(&restored, 2);
+    assert!(
+        retained.contains(&2),
+        "the request nearest the hole must survive"
+    );
+    assert!(
+        !retained.contains(&4) && retained.len() <= 2,
+        "the restored byte total must evict the farther payload and refuse growth: {retained:?}"
+    );
+}
+
+#[test]
+fn disabling_reordering_keeps_rejected_requests_out_of_the_cache() {
+    let limits = PipelineLimits {
+        enable_reorder_queue: false,
+        ..PipelineLimits::default()
+    };
+    let mut c = start_with_base(limits);
+    reject_ahead(&mut c, 2, 4096);
+    assert_eq!(depth(&c, 2), 0);
+    assert_eq!(cached(&c), serde_json::json!({}));
 }
