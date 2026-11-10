@@ -29,6 +29,9 @@ mod checkpoint_file;
 #[path = "peer_log_reader.rs"]
 mod log_reader;
 pub use log_reader::PeerLogReader;
+#[path = "peer_async_reads.rs"]
+mod async_reads;
+pub use async_reads::{PeerLogReadCompletion, PeerLogReadTask};
 #[path = "peer_membership.rs"]
 mod membership;
 #[path = "peer_snapshot_stream.rs"]
@@ -579,6 +582,7 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
 struct PeerStorage {
     permitted: Vec<u64>,
     memory: MemStorage,
+    async_reads: Arc<Mutex<Option<async_reads::State>>>,
     checkpoint: Arc<Mutex<Option<Arc<Snapshot>>>>,
     payload_directory: PathBuf,
     payload: Arc<Mutex<Option<Arc<checkpoint_file::Blob>>>>,
@@ -600,7 +604,7 @@ impl Storage for PeerStorage {
         max_size: impl Into<Option<u64>>,
         context: raft_core::GetEntriesContext,
     ) -> raft_core::Result<Vec<Entry>> {
-        self.memory.entries(low, high, max_size, context)
+        async_reads::fetch(self, low, high, max_size.into(), context)
     }
     fn term(&self, index: u64) -> raft_core::Result<u64> {
         self.memory.term(index)
@@ -1934,6 +1938,7 @@ impl DurablePeer {
         let store = PeerStorage {
             permitted,
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
+            async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
@@ -2851,6 +2856,7 @@ mod tests {
         let store = PeerStorage {
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
+            async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
@@ -2915,6 +2921,7 @@ mod tests {
         let recovered = PeerStorage {
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
+            async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
@@ -2955,6 +2962,7 @@ mod tests {
         let store = PeerStorage {
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
+            async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),

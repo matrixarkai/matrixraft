@@ -11,6 +11,14 @@ bounds. Its reader can move to another thread and read bounded entry ranges
 without repairing files or sharing the writer cursor. Later appends are excluded;
 checkpoint replacement does not invalidate an already captured generation.
 The caller must still reject obsolete results before using them for replication.
+`enable_async_log_reads(capacity)` opts replication into bounded host-executed
+durable reads. Drain `take_log_read_tasks`, execute each task on a host-owned
+worker, and return its completion through `complete_log_read` on the exclusive
+peer worker. Completion checks peer identity, current term, and current log
+contents before resuming the core. Then process Ready as usual; a completion
+does not itself acknowledge or emit durable network packets. The capacity covers
+queued work, running work, and unconsumed completions; dropping work releases its
+slot. The default remains synchronous storage reads.
 Call `process_ready` after inputs. It synchronizes protobuf WAL batches before
 returning outgoing protobuf packets or invoking the committed-entry callback.
 Deliver packets only to their `to` peer. A successful `propose` allocates a log
