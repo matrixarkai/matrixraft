@@ -1095,6 +1095,58 @@ impl PersistentRaftWal {
         })
     }
 
+    /// Read a retained inclusive log range without repairing files or changing
+    /// writer state. The shared borrow excludes append and compaction.
+    ///
+    /// A zero byte limit is unbounded. Otherwise entries cost payload bytes
+    /// plus 24 bytes, and the entry crossing the limit is included for progress.
+    pub fn read_log_entries(&self, from: LogIndex, to: LogIndex, limit_bytes: usize) -> Result<Vec<LogEntry>, RaftError> {
+        if from == 0 || from > to {
+            return Err(RaftError::InvalidRequest("invalid WAL read range".to_string()));
+        }
+        let mut selected: Vec<LogEntry> = Vec::new();
+        for segment in &self.segments {
+            let records = matrixraft_read_wal_segment_file(
+                &wal_segment_path(&self.options.dir, segment.segment_id))?;
+            if records.len() as u64 != segment.record_count {
+                return Err(RaftError::Storage("WAL read encountered an incomplete segment".to_string()));
+            }
+            for record in records {
+                if !matrixraft_wal_checksum_valid(&record) {
+                    return Err(RaftError::Storage("WAL read encountered an invalid checksum".to_string()));
+                }
+                if !record.entries_are_delta {
+                    selected.clear();
+                } else if let Some(first) = record.entries.first() {
+                    selected.retain(|entry| entry.log_id.index < first.log_id.index);
+                }
+                let mut bytes = selected.iter().fold(0usize, |total, entry|
+                    total.saturating_add(24usize.saturating_add(entry.payload.len())));
+                for entry in record.entries {
+                    if entry.log_id.index < from || entry.log_id.index > to {
+                        continue;
+                    }
+                    if limit_bytes != 0 && bytes >= limit_bytes {
+                        break;
+                    }
+                    bytes = bytes.saturating_add(24usize.saturating_add(entry.payload.len()));
+                    selected.push(entry);
+                }
+            }
+        }
+        let selected_bytes = selected.iter().fold(0usize, |total, entry|
+            total.saturating_add(24usize.saturating_add(entry.payload.len())));
+        let last_required = if limit_bytes == 0 || selected_bytes < limit_bytes { to } else {
+            selected.last().map(|entry| entry.log_id.index).unwrap_or(to)
+        };
+        if selected.first().map(|entry| entry.log_id.index) != Some(from)
+            || selected.last().map(|entry| entry.log_id.index) != Some(last_required)
+            || selected.windows(2).any(|pair| pair[0].log_id.index.checked_add(1) != Some(pair[1].log_id.index)) {
+            return Err(RaftError::Storage("requested WAL range is not retained".to_string()));
+        }
+        Ok(selected)
+    }
+
     pub fn compact_through(&mut self, log_index: LogIndex) -> Result<u64, RaftError> {
         if self.segments.len() <= self.options.min_keep_segments {
             return Ok(0);

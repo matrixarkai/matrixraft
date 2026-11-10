@@ -1031,6 +1031,64 @@ fn compaction_preflight_tracks_the_release_frontier_and_new_segments() {
     fs::remove_dir_all(dir).expect("cleanup");
 }
 
+#[test]
+fn read_only_ranges_fold_deltas_bound_output_and_preserve_writer_state() {
+    let dir = temp_wal_dir("read-only-ranges");
+    let mut wal = PersistentRaftWal::open(roll_options(dir.clone())).expect("open");
+    for index in 1..=30 {
+        wal.append(growing_wal_record(index, 3)).expect("append");
+    }
+    let before = wal.status();
+    let entries = wal.read_log_entries(5, 9, 0).expect("range");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.log_id.index)
+            .collect::<Vec<_>>(),
+        vec![5, 6, 7, 8, 9]
+    );
+    assert_eq!(wal.read_log_entries(5, 9, 1).expect("progress").len(), 1);
+    assert_eq!(
+        wal.read_log_entries(5, 9, 24 + entries[0].payload.len())
+            .expect("exact budget")
+            .len(),
+        1
+    );
+    assert!(wal.read_log_entries(0, 9, 0).is_err());
+    assert!(wal.read_log_entries(9, 5, 0).is_err());
+    assert!(wal.read_log_entries(29, 35, 0).is_err());
+    assert!(wal.read_log_entries(29, 35, 1000).is_err());
+    assert_eq!(wal.status(), before);
+    wal.compact_through(20).expect("compact");
+    assert_eq!(
+        wal.read_log_entries(5, 9, 0).expect("materialized read"),
+        entries
+    );
+    wal.append(growing_wal_record(31, 3))
+        .expect("writer remains usable");
+    assert_eq!(wal.read_log_entries(31, 31, 0).expect("new tail").len(), 1);
+    wal.append(growing_wal_record(10, 7)).expect("rewrite tail");
+    assert!(wal.read_log_entries(29, 31, 0).is_err());
+    assert_eq!(
+        wal.read_log_entries(10, 10, 0).expect("rewritten term")[0]
+            .log_id
+            .term,
+        7
+    );
+    let active = wal.status().active_segment_id;
+    let path = dir.join(format!("{active:020}.wal"));
+    let bytes = fs::read(&path).expect("active bytes");
+    fs::write(&path, &bytes[..bytes.len() - 1]).expect("torn acknowledged frame");
+    assert!(wal.read_log_entries(5, 9, 0).is_err());
+    assert_eq!(
+        fs::read(&path).expect("unchanged damaged file"),
+        bytes[..bytes.len() - 1]
+    );
+    fs::write(&path, bytes).expect("restore fixture");
+    drop(wal);
+    fs::remove_dir_all(dir).expect("cleanup");
+}
+
 /// Compaction happening more than once is the case where a materialised record
 /// becomes the base for the next materialisation.
 #[test]
