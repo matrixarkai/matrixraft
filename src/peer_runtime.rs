@@ -2159,6 +2159,37 @@ impl DurablePeer {
         }
         self.raw.campaign().map_err(invalid)
     }
+    /// Request a local forced election, bypassing pre-vote and leader lease
+    /// inhibition but not log freshness, voter eligibility, or quorum voting.
+    /// Already leading is a no-op; an election already in progress is refused.
+    pub fn force_campaign(&mut self) -> Result<(), RaftError> {
+        self.healthy()?;
+        self.membership_recovered()?;
+        if self.is_leader() {
+            return Ok(());
+        }
+        if !self.raw.raft.promotable() {
+            return Err(invalid("local peer is not a committed voter"));
+        }
+        if matches!(
+            self.raw.raft.state,
+            StateRole::Candidate | StateRole::PreCandidate
+        ) {
+            return Err(invalid("an election is already in progress"));
+        }
+        // Use the core's guarded handoff-election path, including its check
+        // for committed configuration changes awaiting application.
+        self.raw
+            .raft
+            .step(Message {
+                from: self.options.node_id,
+                to: self.options.node_id,
+                msg_type: MessageType::MsgTimeoutNow as i32,
+                ..Default::default()
+            })
+            .map_err(invalid)
+    }
+
     /// Report a failed outbound delivery locally. This can reset optimistic
     /// replication to probing; it never acknowledges a log entry or a vote.
     /// Continue normal inputs and Ready processing to produce retry packets.

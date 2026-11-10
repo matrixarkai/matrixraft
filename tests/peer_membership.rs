@@ -195,6 +195,7 @@ fn learner_promotion_and_removal_replay_from_committed_history() {
 fn a_caught_up_learner_is_not_a_leadership_transfer_target() {
     let mut cluster = Cluster::new();
     cluster.add_caught_up_learner();
+    assert!(cluster.peers.get_mut(&4).unwrap().force_campaign().is_err());
     assert!(cluster
         .peers
         .get_mut(&1)
