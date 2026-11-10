@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 #![cfg(feature = "peer-runtime")]
-use matrixraft::peer_runtime::{DurablePeer, MembershipChange, PeerOptions};
+use matrixraft::peer_runtime::{DurablePeer, MembershipChange, PeerOptions, PeerTuning};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -12,6 +12,39 @@ struct Cluster {
     peers: BTreeMap<u64, DurablePeer>,
     values: BTreeMap<u64, RefCell<Vec<u64>>>,
     isolated: BTreeSet<u64>,
+}
+
+#[test]
+fn bounded_membership_recovery_refuses_inputs_until_the_committed_tail_is_applied() {
+    let mut cluster = Cluster::new();
+    for value in 0..12 {
+        cluster.write(1, value);
+    }
+    cluster.add_caught_up_learner();
+    let expected = cluster.peers[&1].membership();
+    let options = cluster.options(1);
+    cluster.peers.remove(&1);
+    let mut peer = DurablePeer::open_with_membership_and_tuning(
+        options,
+        vec![1, 2, 3, 4, 5],
+        PeerTuning {
+            max_apply_bytes: Some(1),
+            ..PeerTuning::default()
+        },
+    )
+    .unwrap();
+    let mut calls = 0;
+    while peer.has_ready() {
+        assert!(peer.campaign().is_err());
+        assert!(peer.tick().is_err());
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        calls += 1;
+        assert!(calls < 100);
+    }
+    assert!(calls > 12);
+    assert_eq!(peer.membership(), expected);
+    assert_eq!(peer.applied_index(), peer.commit_index());
+    peer.campaign().unwrap();
 }
 impl Cluster {
     fn new() -> Self {

@@ -70,6 +70,9 @@ pub struct PeerTuning {
     pub max_size_per_msg: u64,
     pub max_inflight_msgs: usize,
     pub max_uncommitted_size: u64,
+    /// Optional encoded-entry byte target for one application batch per Ready call.
+    /// A single larger entry is delivered whole. None retains drain-to-idle behavior.
+    pub max_apply_bytes: Option<u64>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -81,6 +84,7 @@ impl Default for PeerTuning {
             max_size_per_msg: 1024 * 1024,
             max_inflight_msgs: 64,
             max_uncommitted_size: 4 * 1024 * 1024,
+            max_apply_bytes: None,
         }
     }
 }
@@ -90,6 +94,9 @@ impl PeerTuning {
             || self.max_size_per_msg == 0
             || self.max_size_per_msg > (LIMIT / 2) as u64
             || self.max_inflight_msgs > 65536
+            || self
+                .max_apply_bytes
+                .is_some_and(|bytes| bytes == 0 || bytes > 4 * 1024 * 1024)
         {
             return Err(invalid("peer tuning exceeds supported bounds"));
         }
@@ -102,6 +109,7 @@ impl PeerTuning {
             max_size_per_msg: self.max_size_per_msg,
             max_inflight_msgs: self.max_inflight_msgs,
             max_uncommitted_size: self.max_uncommitted_size,
+            max_committed_size_per_ready: self.max_apply_bytes.unwrap_or(u64::MAX),
             read_only_option: ReadOnlyOption::Safe,
             ..Default::default()
         };
@@ -1950,6 +1958,7 @@ impl PreparedCheckpoint {
 }
 /// One actual Raft peer. Remote votes and append acknowledgments enter only via `step`.
 pub struct DurablePeer {
+    bounded_apply: bool,
     automatic_elections: bool,
     recovering_membership: bool,
     options: PeerOptions,
@@ -2024,6 +2033,7 @@ impl DurablePeer {
         stream.payload_directory = store.payload_directory.clone();
         stream.permitted = store.permitted.clone();
         Ok(Self {
+            bounded_apply: tuning.max_apply_bytes.is_some(),
             automatic_elections: true,
             recovering_membership: !store.permitted.is_empty(),
             options,
@@ -2861,6 +2871,12 @@ impl DurablePeer {
         }
         Ok(output)
     }
+    /// Whether local Ready processing can advance without new input. This excludes
+    /// in-flight host reads and checkpoint transfers, which still need completion polling.
+    pub fn has_ready(&self) -> bool {
+        !self.failed && (self.restore_on_open.is_some() || self.raw.has_ready())
+    }
+
     /// Persist before returning packets or applying committed entries. Empty payloads
     /// are election no-ops and still carry an application position. On restart the
     /// callback must rebuild a fresh application (or provide idempotent application).
@@ -2933,7 +2949,7 @@ impl DurablePeer {
         })();
         if result.is_err() {
             self.failed = true;
-        } else {
+        } else if self.applied_index() >= self.commit_index() {
             self.recovering_membership = false;
         }
         result
@@ -3037,6 +3053,15 @@ impl DurablePeer {
             output.extend(self.packets(ready.take_persisted_messages())?);
             for entry in ready.take_committed_entries() {
                 self.apply_committed(entry, apply)?;
+            }
+            if self.bounded_apply {
+                // Persistence above is complete. Defer newly available commit work
+                // to the next Ready instead of pulling a second application batch.
+                let number = ready.number();
+                self.raw.advance_append_async(ready);
+                self.raw.on_persist_ready(number);
+                self.raw.advance_apply();
+                break;
             }
             let mut light = self.raw.advance(ready);
             if let Some(commit) = light.commit_index() {
