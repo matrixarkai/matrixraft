@@ -435,6 +435,61 @@ enum NodeRuntimeOp {
     Shutdown(LifecycleReply),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RuntimeCommandPriority {
+    Slowly,
+    Normal,
+    Urgent,
+}
+
+impl RuntimeStepMessage {
+    fn command_priority(&self) -> RuntimeCommandPriority {
+        match self {
+            Self::AppendEntries { .. }
+            | Self::AppendEntriesResponse { .. }
+            | Self::Vote { .. }
+            | Self::VoteResponse { .. }
+            | Self::PreVote { .. }
+            | Self::TimeoutNow { .. } => RuntimeCommandPriority::Urgent,
+            _ => RuntimeCommandPriority::Normal,
+        }
+    }
+}
+
+fn message_command_priority(message: &Message) -> RuntimeCommandPriority {
+    match message {
+        Message::AppendEntries { .. }
+        | Message::AppendEntriesResponse { .. }
+        | Message::Vote { .. }
+        | Message::VoteResponse { .. }
+        | Message::PreVote { .. }
+        | Message::TimeoutNow { .. } => RuntimeCommandPriority::Urgent,
+        _ => RuntimeCommandPriority::Normal,
+    }
+}
+
+impl NodeRuntimeOp {
+    fn command_priority(&self) -> RuntimeCommandPriority {
+        match self {
+            Self::Step(message, _) => message.command_priority(),
+            Self::StepBatch(messages, _) => messages
+                .iter()
+                .map(message_command_priority)
+                .max()
+                .unwrap_or(RuntimeCommandPriority::Normal),
+            Self::Status(_)
+            | Self::WalLifecycleStatus(_)
+            | Self::WalRecoveryReport(_)
+            | Self::MembershipReports(_)
+            | Self::PeerPipelineStatus(_, _)
+            | Self::PeerPipelineStatuses(_)
+            | Self::IsBusy(_)
+            | Self::LeaderTransferState(_) => RuntimeCommandPriority::Slowly,
+            _ => RuntimeCommandPriority::Normal,
+        }
+    }
+}
+
 struct RuntimeCommandQueue {
     /// The common case: one command waiting while its group is scheduled.
     first: Option<NodeRuntimeOp>,
@@ -472,9 +527,17 @@ impl RuntimeCommandQueue {
     }
 
     fn pop(&mut self) -> Option<NodeRuntimeOp> {
-        let command = self.first.take()?;
-        self.first = self.overflow.take().map(|next| *next);
-        Some(command)
+        let first = self.first.take()?;
+        let Some(overflow) = self.overflow.take() else {
+            return Some(first);
+        };
+        if overflow.command_priority() > first.command_priority() {
+            self.first = Some(first);
+            Some(*overflow)
+        } else {
+            self.first = Some(*overflow);
+            Some(first)
+        }
     }
 }
 
@@ -4585,6 +4648,70 @@ mod runtime_command_queue_tests {
             };
             let stored = StoredWalRecoveryReport::from_report(report.clone());
             assert_eq!(stored.to_report(), report);
+        }
+    }
+
+    #[test]
+    fn protocol_commands_run_before_slow_queries() {
+        let (command_tx, command_rx) = runtime_command_channel();
+        let (status_reply, _status_reply_rx) = mpsc::channel();
+        command_tx
+            .send(NodeRuntimeOp::Status(status_reply))
+            .expect("queue status query");
+        let (step_reply, _step_reply_rx) = mpsc::channel();
+        command_tx
+            .send(NodeRuntimeOp::Step(
+                RuntimeStepMessage::PreVote { candidate_id: 7 },
+                step_reply,
+            ))
+            .expect("queue protocol command");
+
+        assert!(matches!(
+            command_rx.recv(),
+            Ok(NodeRuntimeOp::Step(RuntimeStepMessage::PreVote { candidate_id: 7 }, _))
+        ));
+        assert!(matches!(command_rx.recv(), Ok(NodeRuntimeOp::Status(_))));
+    }
+
+    #[test]
+    fn normal_commands_run_before_slow_queries() {
+        let (command_tx, command_rx) = runtime_command_channel();
+        let (status_reply, _status_reply_rx) = mpsc::channel();
+        command_tx
+            .send(NodeRuntimeOp::Status(status_reply))
+            .expect("queue status query");
+        let (start_reply, _start_reply_rx) = mpsc::sync_channel(1);
+        command_tx
+            .send(NodeRuntimeOp::Start(LifecycleReply::Single(start_reply)))
+            .expect("queue lifecycle command");
+
+        assert!(matches!(command_rx.recv(), Ok(NodeRuntimeOp::Start(_))));
+        assert!(matches!(command_rx.recv(), Ok(NodeRuntimeOp::Status(_))));
+    }
+
+    #[test]
+    fn equal_priority_commands_keep_arrival_order() {
+        let (command_tx, command_rx) = runtime_command_channel();
+        for candidate_id in [11, 13] {
+            let (reply, _reply_rx) = mpsc::channel();
+            command_tx
+                .send(NodeRuntimeOp::Step(
+                    RuntimeStepMessage::PreVote { candidate_id },
+                    reply,
+                ))
+                .expect("queue protocol command");
+        }
+
+        for candidate_id in [11, 13] {
+            assert!(matches!(
+                command_rx.recv(),
+                Ok(NodeRuntimeOp::Step(
+                    RuntimeStepMessage::PreVote {
+                        candidate_id: observed
+                    },
+                    _
+                )) if observed == candidate_id
+            ));
         }
     }
 
