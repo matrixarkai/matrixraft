@@ -994,6 +994,17 @@ fn check_snapshot_backed_recycling(threshold: u64) {
     } else {
         assert_eq!(after.segment_count, before.segment_count);
     }
+    for _ in 0..16 {
+        assert_eq!(
+            runtime
+                .recycle_applied_logs(last.index)
+                .expect("idle recycle"),
+            0
+        );
+    }
+    let idle = runtime.wal_lifecycle_status().expect("idle WAL status");
+    assert_eq!(idle.fsync_count, after.fsync_count);
+    assert_eq!(idle.total_records, after.total_records);
     runtime.shutdown().expect("shutdown");
     let mut recovered = NodeRuntime::create(options).expect("recover runtime");
     recovered.start().expect("start recovered");

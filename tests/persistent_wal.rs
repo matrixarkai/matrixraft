@@ -979,6 +979,41 @@ fn compaction_materialises_the_record_its_survivors_depend_on() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn compaction_preflight_tracks_the_release_frontier_and_new_segments() {
+    let dir = temp_wal_dir("compaction-preflight");
+    let options = roll_options(dir.clone());
+    let mut wal = PersistentRaftWal::open(options.clone()).expect("open");
+    assert!(!matrixraft::MatrixRaftWalBackend::has_reclaimable_segments(
+        &wal,
+        u64::MAX
+    ));
+    for index in 1..=30 {
+        wal.append(growing_wal_record(index, 3)).expect("append");
+    }
+    assert!(!matrixraft::MatrixRaftWalBackend::has_reclaimable_segments(
+        &wal, 0
+    ));
+    assert!(matrixraft::MatrixRaftWalBackend::has_reclaimable_segments(
+        &wal, 20
+    ));
+    assert!(wal.compact_through(20).expect("compact") > 0);
+    assert!(!matrixraft::MatrixRaftWalBackend::has_reclaimable_segments(
+        &wal, 20
+    ));
+    drop(wal);
+    let mut wal = PersistentRaftWal::open(options).expect("reopen compacted WAL");
+    for index in 31..=60 {
+        wal.append(growing_wal_record(index, 3))
+            .expect("append again");
+    }
+    assert!(matrixraft::MatrixRaftWalBackend::has_reclaimable_segments(
+        &wal, 40
+    ));
+    drop(wal);
+    fs::remove_dir_all(dir).expect("cleanup");
+}
+
 /// Compaction happening more than once is the case where a materialised record
 /// becomes the base for the next materialisation.
 #[test]

@@ -2190,7 +2190,8 @@ fn recycle_runtime_applied_logs(
     } else {
         0
     };
-    if through == 0 || open_wal.status().total_bytes < threshold {
+    if through == 0 || !open_wal.has_reclaimable_segments(through)
+        || open_wal.status().total_bytes < threshold {
         return Ok(0);
     }
     let fence = StorageApplyFence {
