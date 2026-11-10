@@ -86,7 +86,14 @@ impl DurablePeer {
     /// A non-bootstrap identity starts without a vote and must be added by a leader.
     pub fn open_with_membership(
         options: PeerOptions,
+        permitted: Vec<u64>,
+    ) -> Result<Self, RaftError> {
+        Self::open_with_membership_and_tuning(options, permitted, PeerTuning::default())
+    }
+    pub fn open_with_membership_and_tuning(
+        options: PeerOptions,
         mut permitted: Vec<u64>,
+        tuning: PeerTuning,
     ) -> Result<Self, RaftError> {
         permitted.sort_unstable();
         if permitted.is_empty()
@@ -98,7 +105,7 @@ impl DurablePeer {
         {
             return Err(invalid("invalid permitted peer inventory"));
         }
-        Self::open_inner(options, permitted)
+        Self::open_inner_with_tuning(options, permitted, tuning)
     }
     /// A compacted image predates the committed configuration. Capture a fresh
     /// application checkpoint so newly added learners can restore that membership.

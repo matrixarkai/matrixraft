@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 #![cfg(feature = "peer-runtime")]
 use matrixraft::{
-    peer_runtime::{DurablePeer, PeerOptions},
+    peer_runtime::{DurablePeer, PeerOptions, PeerTuning},
     RaftError,
 };
 use prost::Message as _;
@@ -75,6 +75,115 @@ impl Drop for Directory {
     }
 }
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
+
+#[test]
+fn peer_tuning_validates_before_creating_storage_and_controls_election_ticks() {
+    let dir = Directory::new();
+    let options = dir.options(1, vec![1, 2, 3]);
+    for tuning in [
+        PeerTuning {
+            election_tick: 2,
+            heartbeat_tick: 2,
+            ..PeerTuning::default()
+        },
+        PeerTuning {
+            heartbeat_tick: 0,
+            ..PeerTuning::default()
+        },
+        PeerTuning {
+            election_tick: usize::MAX,
+            ..PeerTuning::default()
+        },
+        PeerTuning {
+            max_inflight_msgs: 0,
+            ..PeerTuning::default()
+        },
+        PeerTuning {
+            max_uncommitted_size: 1,
+            ..PeerTuning::default()
+        },
+    ] {
+        assert!(DurablePeer::open_with_tuning(options.clone(), tuning).is_err());
+        assert!(!options.wal_path.exists());
+        assert!(!options.wal_path.with_extension("runtime.lock").exists());
+    }
+    let mut fast = DurablePeer::open_with_tuning(
+        options,
+        PeerTuning {
+            election_tick: 3,
+            heartbeat_tick: 1,
+            pre_vote: false,
+            ..PeerTuning::default()
+        },
+    )
+    .unwrap();
+    for _ in 0..6 {
+        fast.tick().unwrap();
+        fast.process_ready(|_, _| Ok(())).unwrap();
+    }
+    assert!(fast.term() > 0);
+    assert!(
+        !fast.is_leader(),
+        "timing cannot substitute for received quorum votes"
+    );
+    let other = Directory::new();
+    let mut default = DurablePeer::open(other.options(1, vec![1, 2, 3])).unwrap();
+    for _ in 0..6 {
+        default.tick().unwrap();
+        default.process_ready(|_, _| Ok(())).unwrap();
+    }
+    assert_eq!(default.term(), 0);
+}
+
+#[test]
+fn tuned_uncommitted_budget_refuses_and_releases_admission() {
+    let dir = Directory::new();
+    let tuning = PeerTuning {
+        max_size_per_msg: 128,
+        max_uncommitted_size: 256,
+        max_inflight_msgs: 1,
+        ..PeerTuning::default()
+    };
+    let mut group: BTreeMap<_, _> = (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(dir.options(id, vec![1, 2, 3]), tuning).unwrap(),
+            )
+        })
+        .collect();
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let first = group.get_mut(&1).unwrap().propose(vec![7; 128]).unwrap();
+    let second = group.get_mut(&1).unwrap().propose(vec![8; 128]).unwrap();
+    assert_eq!(second.index, first.index + 1);
+    assert!(group.get_mut(&1).unwrap().propose(vec![9; 128]).is_err());
+    pump(&mut group, &mut applied, None);
+    let next = group.get_mut(&1).unwrap().propose(vec![9; 128]).unwrap();
+    assert_eq!(next.index, second.index + 1);
+    pump(&mut group, &mut applied, None);
+    assert_eq!(applied.get(&1), applied.get(&3));
+    let expected = applied.get(&1).unwrap().clone();
+    drop(group);
+    let mut reopened = DurablePeer::open_with_tuning(
+        dir.options(1, vec![1, 2, 3]),
+        PeerTuning {
+            election_tick: 5,
+            heartbeat_tick: 1,
+            ..PeerTuning::default()
+        },
+    )
+    .unwrap();
+    let mut replayed = Vec::new();
+    reopened
+        .process_ready(|id, bytes| {
+            replayed.push((id.index, bytes.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(replayed, expected);
+}
 
 #[test]
 fn captured_log_reads_pin_a_durable_generation_across_checkpoint_replacement() {

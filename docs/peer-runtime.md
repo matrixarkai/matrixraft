@@ -5,6 +5,18 @@ API hosts one voter per instance, backed by a pinned raft-rs core. The existing
 `RaftCluster` and `NodeRuntime` APIs continue to model a peer group locally; they
 must not be used as evidence that remote peers voted or persisted an entry.
 
+`open_with_tuning` accepts `PeerTuning` for heartbeat and election ticks,
+pre-vote, quorum checking, replication message bytes, in-flight messages, and
+uncommitted payload bytes. `open_with_membership_and_tuning` applies the same
+settings to membership-enabled peers. Existing constructors retain their defaults.
+Tuning is local, is validated before opening storage, and may change on reopen;
+hosts still supply the tick duration. Heartbeats must be positive and elections
+longer than heartbeats. Replication message budgets are 1 byte through 4 MiB,
+in-flight counts are 1 through 65,536, and the uncommitted budget must cover the
+message budget. Election ticks cannot exceed half the platform's maximum `usize`.
+Read confirmation continues to use quorum-safe mode even if quorum-based leader
+step-down is disabled.
+
 `DurablePeer::campaign`, `tick`, and `step` feed the local consensus state.
 `capture_log_reader` pins the current durable journal generation and its log
 bounds. Its reader can move to another thread and read bounded entry ranges
