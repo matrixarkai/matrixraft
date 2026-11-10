@@ -296,6 +296,7 @@ fn command_executors_are_sized_independently_of_ticker_shards() {
         .transport(transport)
         .worker_num(2)
         .executor_num(3)
+        .reader_num(2)
         .shared_runtime(true)
         .build()
         .expect("context");
@@ -307,7 +308,7 @@ fn command_executors_are_sized_independently_of_ticker_shards() {
     server
         .create_node(options(1, 100, &wal, &snapshot), 0)
         .expect("node");
-    assert_eq!(server.shared_thread_count(), Some(7));
+    assert_eq!(server.shared_thread_count(), Some(9));
     server.start_all(0).expect("start");
     assert!(
         server
@@ -317,6 +318,13 @@ fn command_executors_are_sized_independently_of_ticker_shards() {
             .expect("status")
             .worker_running
     );
+    let node = server.node(1, 1).expect("node");
+    let written = node.propose(vec![8; 32]).expect("proposal");
+    let entries = node
+        .read_wal_entries(written.index, written.index, 0)
+        .expect("reader pool read");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].payload, vec![8; 32]);
     server.stop_all().expect("stop");
     drop(server);
     std::fs::remove_dir_all(root).expect("cleanup");

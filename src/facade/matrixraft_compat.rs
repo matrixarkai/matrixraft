@@ -18339,13 +18339,13 @@ impl MatrixRaftMultiRaftServer {
             return Ok(None);
         }
         if self.shared.is_none() {
-            self.shared = Some(Arc::new(SharedGroupRuntime::start_with_executor_count(DriverOptions {
+            self.shared = Some(Arc::new(SharedGroupRuntime::start_with_worker_counts(DriverOptions {
                 worker_num: self.context.worker_num.max(1),
                 max_messages_each_poll: self.context.max_messages_each_poll.max(1) as usize,
                 max_queue_depth: self.context.max_queue_depth.max(1) as usize,
                 driver_batch_bytes: self.context.driver_batch_bytes.max(1),
                 tick_interval_ms: self.context.tick_interval_ms.max(1),
-            }, self.context.executor_num)?));
+            }, self.context.executor_num, self.context.reader_num.max(1))?));
         }
         Ok(self.shared.clone())
     }
