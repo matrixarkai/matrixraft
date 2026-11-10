@@ -73,7 +73,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const RECORDS: u64 = 5;
 /// Measured: the five-record segment this file builds.
-const SEGMENT_BYTES: usize = 379;
+const SEGMENT_BYTES: usize = 324;
 
 fn temp_dir(name: &str) -> PathBuf {
     let nonce = SystemTime::now()

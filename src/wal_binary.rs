@@ -37,9 +37,10 @@
 //! Length-prefixing is not a preference here, it is forced: a JSON segment is
 //! framed by newlines, and a binary payload can contain `0x0A`.
 
+use crate::wal::matrixraft_wal_checksum_digest;
 use crate::{
-    ApplySnapshotFence, HardState, LogEntry, LogId, Membership, Peer, RaftError, ReplicaRole,
-    SnapshotMetadata, WalRecord,
+    matrixraft_wal_checksum, ApplySnapshotFence, HardState, LogEntry, LogId, Membership, Peer,
+    RaftError, ReplicaRole, SnapshotMetadata, WalRecord,
 };
 
 /// Marks a segment file as binary. Deliberately not starting with `{`, so the
@@ -226,6 +227,10 @@ pub(crate) struct WalRecordProto {
     /// that nothing computed.
     #[prost(fixed64, optional, tag = "10")]
     pub checksum_digest: Option<u64>,
+    /// The frame digest already protects canonical record bytes. This marker
+    /// distinguishes a derived checksum from an intentionally absent one.
+    #[prost(bool, tag = "11")]
+    pub canonical_checksum: bool,
 }
 
 impl TryFrom<LogEntryProto> for LogEntry {
@@ -359,7 +364,13 @@ impl From<&LogIdProto> for LogId {
 
 impl From<&WalRecord> for WalRecordProto {
     fn from(record: &WalRecord) -> Self {
-        let (text, digest) = checksum_to_wire(&record.checksum);
+        let canonical_checksum =
+            checksum_as_u64(&record.checksum) == Some(matrixraft_wal_checksum_digest(record));
+        let (text, digest) = if canonical_checksum {
+            (String::new(), None)
+        } else {
+            checksum_to_wire(&record.checksum)
+        };
         Self {
             group_id: record.group_id,
             node_id: record.node_id,
@@ -369,7 +380,8 @@ impl From<&WalRecord> for WalRecordProto {
                 committed: record.hard_state.committed.as_ref().map(LogIdProto::from),
             }),
             membership: Some(MembershipProto {
-                group_id: record.membership.group_id,
+                // The enclosing record already carries the same value.
+                group_id: 0,
                 voters: record.membership.voters.clone(),
                 learners: record.membership.learners.clone(),
                 witnesses: record.membership.witnesses.clone(),
@@ -391,12 +403,14 @@ impl From<&WalRecord> for WalRecordProto {
                 .map(SnapshotMetadataProto::from),
             apply_snapshot_fence: Some(ApplySnapshotFenceProto {
                 applied_index: record.apply_snapshot_fence.applied_index,
-                commit_index: record.apply_snapshot_fence.commit_index,
+                // Hard state already carries the committed index.
+                commit_index: 0,
                 installed_snapshot_index: record.apply_snapshot_fence.installed_snapshot_index,
                 first_retained_log_index: record.apply_snapshot_fence.first_retained_log_index,
             }),
             checksum: text,
             checksum_digest: digest,
+            canonical_checksum,
         }
     }
 }
@@ -426,16 +440,32 @@ impl TryFrom<WalRecordProto> for WalRecord {
             .map(SnapshotMetadata::try_from)
             .transpose()?;
 
-        Ok(WalRecord {
-            group_id: proto.group_id,
+        let group_id = proto.group_id;
+        let committed = hard_state.committed.as_ref().map(LogId::from);
+        let committed_index = committed.as_ref().map_or(0, |log_id| log_id.index);
+        let membership_group_id = if membership.group_id == 0 {
+            group_id
+        } else {
+            membership.group_id
+        };
+        let commit_index = if fence.commit_index == 0 {
+            committed_index
+        } else {
+            fence.commit_index
+        };
+        let canonical_checksum = proto.canonical_checksum;
+        let checksum = checksum_from_wire(proto.checksum, proto.checksum_digest);
+
+        let mut record = WalRecord {
+            group_id,
             node_id: proto.node_id,
             hard_state: HardState {
                 current_term: hard_state.current_term,
                 voted_for: hard_state.voted_for,
-                committed: hard_state.committed.as_ref().map(LogId::from),
+                committed,
             },
             membership: Membership {
-                group_id: membership.group_id,
+                group_id: membership_group_id,
                 voters: membership.voters,
                 learners: membership.learners,
                 witnesses: membership.witnesses,
@@ -446,12 +476,16 @@ impl TryFrom<WalRecordProto> for WalRecord {
             installed_snapshot,
             apply_snapshot_fence: ApplySnapshotFence {
                 applied_index: fence.applied_index,
-                commit_index: fence.commit_index,
+                commit_index,
                 installed_snapshot_index: fence.installed_snapshot_index,
                 first_retained_log_index: fence.first_retained_log_index,
             },
-            checksum: checksum_from_wire(proto.checksum, proto.checksum_digest),
-        })
+            checksum,
+        };
+        if canonical_checksum {
+            record.checksum = matrixraft_wal_checksum(&record);
+        }
+        Ok(record)
     }
 }
 
@@ -904,21 +938,31 @@ pub(crate) fn encode_framed(record: &WalRecord) -> Result<Vec<u8>, RaftError> {
 }
 
 pub(crate) fn encode_framed_into(record: &WalRecord, out: &mut Vec<u8>) -> Result<(), RaftError> {
-    let checksum_digest = checksum_as_u64(&record.checksum);
-    let body_len = wal_record_encoded_len(record, checksum_digest);
+    let canonical_checksum =
+        checksum_as_u64(&record.checksum) == Some(matrixraft_wal_checksum_digest(record));
+    let checksum_digest = if canonical_checksum {
+        None
+    } else {
+        checksum_as_u64(&record.checksum)
+    };
+    let body_len = wal_record_encoded_len(record, checksum_digest, canonical_checksum);
     let length = u32::try_from(body_len)
         .map_err(|_| RaftError::Storage("WAL record exceeds a frame length".to_string()))?;
     out.clear();
     out.reserve(FRAME_BYTES + body_len);
     out.extend_from_slice(&length.to_le_bytes());
     out.extend_from_slice(&[0; 4]);
-    encode_wal_record(record, checksum_digest, out);
+    encode_wal_record(record, checksum_digest, canonical_checksum, out);
     let digest = FrameDigest::Crc32c.of(&out[FRAME_BYTES..]);
     out[4..FRAME_BYTES].copy_from_slice(&digest.to_le_bytes());
     Ok(())
 }
 
-fn wal_record_encoded_len(record: &WalRecord, checksum_digest: Option<u64>) -> usize {
+fn wal_record_encoded_len(
+    record: &WalRecord,
+    checksum_digest: Option<u64>,
+    canonical_checksum: bool,
+) -> usize {
     nonzero_u64_len(1, record.group_id)
         + nonzero_u64_len(2, record.node_id)
         + message_len(3, hard_state_encoded_len(&record.hard_state))
@@ -933,16 +977,22 @@ fn wal_record_encoded_len(record: &WalRecord, checksum_digest: Option<u64>) -> u
             message_len(7, snapshot_metadata_encoded_len(snapshot))
         })
         + message_len(8, fence_encoded_len(&record.apply_snapshot_fence))
-        + match checksum_digest {
-            Some(value) => prost::encoding::fixed64::encoded_len(10, &value),
-            None if !record.checksum.is_empty() => {
+        + match (canonical_checksum, checksum_digest) {
+            (true, _) => nonzero_bool_len(11, true),
+            (false, Some(value)) => prost::encoding::fixed64::encoded_len(10, &value),
+            (false, None) if !record.checksum.is_empty() => {
                 prost::encoding::string::encoded_len(9, &record.checksum)
             }
-            None => 0,
+            (false, None) => 0,
         }
 }
 
-fn encode_wal_record(record: &WalRecord, checksum_digest: Option<u64>, out: &mut Vec<u8>) {
+fn encode_wal_record(
+    record: &WalRecord,
+    checksum_digest: Option<u64>,
+    canonical_checksum: bool,
+    out: &mut Vec<u8>,
+) {
     encode_nonzero_u64(1, record.group_id, out);
     encode_nonzero_u64(2, record.node_id, out);
     encode_message(3, hard_state_encoded_len(&record.hard_state), out, |out| {
@@ -968,12 +1018,13 @@ fn encode_wal_record(record: &WalRecord, checksum_digest: Option<u64>, out: &mut
         out,
         |out| encode_fence(&record.apply_snapshot_fence, out),
     );
-    match checksum_digest {
-        Some(value) => prost::encoding::fixed64::encode(10, &value, out),
-        None if !record.checksum.is_empty() => {
+    match (canonical_checksum, checksum_digest) {
+        (true, _) => encode_nonzero_bool(11, true, out),
+        (false, Some(value)) => prost::encoding::fixed64::encode(10, &value, out),
+        (false, None) if !record.checksum.is_empty() => {
             prost::encoding::string::encode(9, &record.checksum, out)
         }
-        None => {}
+        (false, None) => {}
     }
 }
 
@@ -1001,15 +1052,13 @@ fn encode_hard_state(state: &HardState, out: &mut Vec<u8>) {
 }
 
 fn membership_encoded_len(membership: &Membership) -> usize {
-    nonzero_u64_len(1, membership.group_id)
-        + prost::encoding::uint64::encoded_len_packed(2, &membership.voters)
+    prost::encoding::uint64::encoded_len_packed(2, &membership.voters)
         + prost::encoding::uint64::encoded_len_packed(3, &membership.learners)
         + prost::encoding::uint64::encoded_len_packed(4, &membership.witnesses)
         + nonzero_u64_len(5, membership.epoch)
 }
 
 fn encode_membership(membership: &Membership, out: &mut Vec<u8>) {
-    encode_nonzero_u64(1, membership.group_id, out);
     prost::encoding::uint64::encode_packed(2, &membership.voters, out);
     prost::encoding::uint64::encode_packed(3, &membership.learners, out);
     prost::encoding::uint64::encode_packed(4, &membership.witnesses, out);
@@ -1072,14 +1121,12 @@ fn encode_peer(peer: &Peer, out: &mut Vec<u8>) {
 
 fn fence_encoded_len(fence: &ApplySnapshotFence) -> usize {
     nonzero_u64_len(1, fence.applied_index)
-        + nonzero_u64_len(2, fence.commit_index)
         + nonzero_u64_len(3, fence.installed_snapshot_index)
         + nonzero_u64_len(4, fence.first_retained_log_index)
 }
 
 fn encode_fence(fence: &ApplySnapshotFence, out: &mut Vec<u8>) {
     encode_nonzero_u64(1, fence.applied_index, out);
-    encode_nonzero_u64(2, fence.commit_index, out);
     encode_nonzero_u64(3, fence.installed_snapshot_index, out);
     encode_nonzero_u64(4, fence.first_retained_log_index, out);
 }
@@ -1533,14 +1580,14 @@ mod tests {
             "2700 more payload bytes must cost exactly 2700 more on the wire"
         );
     }
-    /// The `fixed64` path is actually taken, which the byte count depends on.
+    /// A canonical checksum is derived from frame-protected bytes.
     ///
     /// A positive control. Every test below checks that some checksum survives
     /// the round trip, and all of them would pass with every checksum going
     /// through the text field and the nine-byte saving being imaginary -- so
     /// this one asserts the hex characters are NOT on the wire.
     #[test]
-    fn a_real_checksum_travels_as_eight_bytes_and_not_as_its_hex_text() {
+    fn a_real_checksum_uses_the_canonical_marker_and_not_its_hex_text() {
         let value = record(0, true);
         assert_eq!(
             value.checksum.len(),
@@ -1560,9 +1607,39 @@ mod tests {
             "the text field is populated as well, so the checksum is being written twice"
         );
         assert!(
-            proto.checksum_digest.is_some(),
-            "the digest field is empty, so nothing is carrying the checksum"
+            proto.checksum_digest.is_none(),
+            "a canonical checksum still travels as a fixed-width digest"
         );
+        assert!(
+            proto.canonical_checksum,
+            "the canonical marker is absent, so the decoder cannot restore the checksum"
+        );
+    }
+
+    #[test]
+    fn a_record_with_explicit_canonical_fields_still_decodes_unchanged() {
+        let value = record(9, true);
+        let mut proto = WalRecordProto::from(&value);
+        proto.canonical_checksum = false;
+        proto.checksum_digest = checksum_as_u64(&value.checksum);
+        proto.membership.as_mut().expect("membership").group_id = value.membership.group_id;
+        proto
+            .apply_snapshot_fence
+            .as_mut()
+            .expect("fence")
+            .commit_index = value.apply_snapshot_fence.commit_index;
+
+        let body = prost::Message::encode_to_vec(&proto);
+        let mut framed = Vec::with_capacity(FRAME_BYTES + body.len());
+        framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&crc32c(&body).to_le_bytes());
+        framed.extend_from_slice(&body);
+
+        let (decoded, used) = decode_framed(&framed, FrameDigest::Crc32c)
+            .expect("decodes")
+            .expect("whole frame");
+        assert_eq!(decoded, value);
+        assert_eq!(used, framed.len());
     }
 
     /// An empty checksum comes back empty, not as sixteen zeros.

@@ -6,19 +6,19 @@
 //! Three assertions in this suite already cared about this cost, and all three
 //! were one-sided bounds: a per-record cost "under 1000 bytes", a 4 KiB record
 //! "under 6500 bytes", and a legacy record "over 16000". A bound that loose
-//! cannot catch a regression -- the per-record figure is **64 bytes**, so the
-//! existing bound would admit a fifteenfold envelope growth without going red.
+//! cannot catch a regression -- the per-record figure is **53 bytes**, so the
+//! existing bound would admit an eighteenfold envelope growth without going red.
 //!
 //! Measured, the cost is a line, and it resolves into integers exactly:
 //!
 //! ```text
-//! 100 records, payload    0 B  ->   6,402 B on disk  =  100 *    64 + 2
-//! 100 records, payload    9 B  ->   7,502 B on disk  =  100 *    75 + 2
-//! 100 records, payload  300 B  ->  36,802 B on disk  =  100 *   368 + 2
-//! 100 records, payload 3000 B  -> 306,802 B on disk  =  100 * 3,068 + 2
+//! 100 records, payload    0 B  ->   5,302 B on disk  =  100 *    53 + 2
+//! 100 records, payload    9 B  ->   6,402 B on disk  =  100 *    64 + 2
+//! 100 records, payload  300 B  ->  35,702 B on disk  =  100 *   357 + 2
+//! 100 records, payload 3000 B  -> 305,702 B on disk  =  100 * 3,057 + 2
 //! ```
 //!
-//! so **64 bytes per record, plus the payload, plus 2 bytes per segment file.**
+//! so **53 bytes per record, plus the payload, plus 2 bytes per segment file.**
 //!
 //! That `+ 2` is not a file header, and reading it as one would be wrong in a
 //! way that matters: it is four bytes of segment magic (`MRWC`) less the two
@@ -41,25 +41,17 @@
 //!
 //! | payload | bytes per record | amplification |
 //! |---|---|---|
-//! | 9 B | 75 B | **8.33x** |
-//! | 300 B | 368 B | 1.23x |
-//! | 3000 B | 3068 B | 1.02x |
+//! | 9 B | 64 B | **7.11x** |
+//! | 300 B | 357 B | 1.19x |
+//! | 3000 B | 3057 B | 1.02x |
 //!
-//! A raft log carrying small commands pays about **eight times** its payload,
+//! A raft log carrying small commands pays about **seven times** its payload,
 //! where it used to pay about forty-seven.
 //!
-//! The lever this file named last time has been pulled. The checksum was a
-//! 16-character hex string spending 18 bytes of the envelope to carry a `u64`;
-//! on the wire it is now a `fixed64` costing 9, which is the whole of the
-//! 73 -> 64 move. The record's `checksum` field is still a `String` -- every
-//! caller and every stored WAL uses it -- and a value that is not sixteen
-//! lowercase hex characters still travels as text, because the point of storing
-//! a checksum is to hand back exactly what was stored.
-//!
-//! What is left in the 64 is the record's own integers and prost's framing
-//! around them, which is the floor this shape can reach without dropping a
-//! field. The last test below pins the checksum's width so it cannot drift
-//! either way without going red.
+//! Canonical records carry a two-byte marker instead of their nine-byte checksum
+//! digest; the verified frame bytes reproduce the checksum on read. The
+//! membership group id and fence commit index are also recovered from values
+//! already present in the record. Noncanonical checksums still travel verbatim.
 //!
 //! ## The file is not the device, and the difference decides what to optimise
 //!
@@ -69,21 +61,21 @@
 //!
 //! | records | payload | file B | allocated B | device per payload byte |
 //! |---|---|---|---|---|
-//! | 1 | 9 B | 77 | **4,096** | **455x** |
-//! | 10 | 9 B | 752 | 4,096 | 45.5x |
-//! | 100 | 9 B | 7,502 | 8,192 | **9.10x** |
-//! | 1000 | 9 B | 78,494 | 81,920 | 9.10x |
+//! | 1 | 9 B | 66 | **4,096** | **455x** |
+//! | 10 | 9 B | 642 | 4,096 | 45.5x |
+//! | 100 | 9 B | 6,402 | 8,192 | **9.10x** |
+//! | 1000 | 9 B | 67,494 | 69,632 | 7.74x |
 //!
 //! **A single append is a whole block whatever the envelope weighs.** One
-//! record was 424 bytes before the record became protobuf and is 77 now; both
+//! record was 424 bytes before the record became protobuf and is 66 now; both
 //! fit in one 4 KiB block, so the device was charged 4,096 bytes then and is
 //! charged 4,096 now. The 6.4x envelope reduction moved that figure by nothing.
 //! Anyone shaving further bytes off the envelope to help a one-record WAL is
 //! optimising something the filesystem rounds away.
 //!
 //! **For a WAL of any length it reached the device in full.** At 100 records
-//! allocation is 8,192 against 7,502 file bytes, within 9%, and at 1000 records
-//! 81,920 against 78,494, within 4.4%. So the envelope is the lever there, and
+//! allocation is 8,192 against 6,402 file bytes, and at 1000 records allocation
+//! is 69,632 against 67,494. So the envelope is the lever there, and
 //! the figures above are the right ones to watch.
 //!
 //! The fsync count is a separate axis and already answered: appending 100
@@ -96,26 +88,14 @@
 //! A green figure proves nothing about what it would catch, so each regression
 //! this file exists for was planted against it and the reddening was read off
 //! the output rather than predicted. All three figures below are against the
-//! current 64-byte envelope:
+//! current 53-byte envelope:
 //!
-//! - **Storing the whole log per record instead of a delta** reddens all six
-//!   assertions: 6,402 -> 55,704 bytes at an empty payload, 36,802 ->
-//!   1,590,904 at a 300-byte one, and a single stored record 64 -> 72. The
-//!   drift test reddens too, which is the shape of the failure -- the cost
-//!   would then grow with the log rather than staying flat.
-//! - **Widening the checksum to 32 hex characters** reddens every absolute
-//!   point and the width assertion, 6,402 -> 8,902. That is 25 bytes a record
-//!   rather than 16, and the extra 9 are worth following: a 32-character value
-//!   is not sixteen lowercase hex, so it stops qualifying for the `fixed64` and
-//!   falls back to travelling as text at a tag, a length and 32 bytes. The
-//!   plant therefore exercises the fallback as well as the width. The slope
-//!   identity stays green, because both of its points move by the same 2,500
-//!   bytes -- which is the blindness this file claims for itself, and the
-//!   reason the slope and the envelope are asserted separately.
-//! - **Carrying every checksum as text instead of a `fixed64`** puts every
-//!   point back exactly where it sat before the checksum narrowed: 6,402 ->
-//!   7,302, 7,502 -> 8,402, 36,802 -> 37,702, envelope 64 -> 73. That is what
-//!   makes those nine bytes a measured saving rather than an intention.
+//! - **Storing the whole log per record instead of a delta** makes per-record
+//!   cost grow with retained log length, so the exact points and drift bound fail.
+//! - **Writing a canonical checksum as text** adds sixteen bytes per record:
+//!   eighteen bytes replace the two-byte derivation marker.
+//! - **Writing duplicate group and commit values** adds four field bytes and
+//!   can also widen both nested message lengths.
 //!
 //! One plant in this file's history did **not** land, and its green run was
 //! nearly read as evidence that an assertion here was blind. The matcher looked
@@ -156,13 +136,13 @@ const RECORDS: u64 = 100;
 const SEGMENT_MAGIC: u64 = 4;
 const FIRST_RECORD_SAVING: u64 = 2;
 const SEGMENT_OVERHEAD: u64 = SEGMENT_MAGIC - FIRST_RECORD_SAVING;
-const PER_RECORD: u64 = 64;
+const PER_RECORD: u64 = 53;
 
 /// Measured, exact: the same appends always produce the same bytes.
-const DISK_AT_0: u64 = 6_402;
-const DISK_AT_9: u64 = 7_502;
-const DISK_AT_300: u64 = 36_802;
-const DISK_AT_3000: u64 = 306_802;
+const DISK_AT_0: u64 = 5_302;
+const DISK_AT_9: u64 = 6_402;
+const DISK_AT_300: u64 = 35_702;
+const DISK_AT_3000: u64 = 305_702;
 
 fn temp_wal_dir(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -247,7 +227,7 @@ fn disk_bytes(records: u64, payload_len: usize) -> u64 {
 }
 
 #[test]
-fn one_append_costs_a_fixed_envelope_and_the_envelope_is_64_bytes() {
+fn one_append_costs_a_fixed_envelope_and_the_envelope_is_53_bytes() {
     assert_eq!(
         disk_bytes(RECORDS, 0),
         DISK_AT_0,
@@ -325,17 +305,17 @@ fn a_payload_byte_costs_one_byte_and_nothing_else() {
 }
 
 #[test]
-fn a_small_command_pays_about_eight_times_its_own_size() {
+fn a_small_command_pays_about_seven_times_its_own_size() {
     let bytes = disk_bytes(RECORDS, 9);
     assert_eq!(bytes, DISK_AT_9, "the 9-byte point moved");
 
-    // The number this whole file exists to make visible. 64 bytes of envelope
+    // The number this whole file exists to make visible. 53 bytes of envelope
     // around 9 bytes of command, where it was 412 bytes around the same 9.
     let payload_total = 9 * RECORDS;
     assert_eq!(
         bytes * 100 / payload_total,
-        833,
-        "a 9-byte command should cost 8.34x on disk, got {:.2}x",
+        711,
+        "a 9-byte command should cost 7.11x on disk, got {:.2}x",
         bytes as f64 / payload_total as f64
     );
 }
@@ -358,20 +338,9 @@ fn a_records_cost_does_not_grow_with_the_length_of_the_log() {
     );
 }
 
-/// The checksum costs nine bytes, now that the wire stops spelling it in hex.
-///
-/// It used to cost 18 -- a tag, a length and sixteen hex characters -- to carry
-/// a `u64`, which was a quarter of the whole envelope. It now travels as a
-/// `fixed64`, so a tag and eight bytes. The record's `checksum` field is still
-/// a `String`, because that is what every caller and every stored WAL already
-/// uses; only the wire changed.
-///
-/// Pinned from both sides: a wider checksum would quietly worsen every figure
-/// above and a narrower one would quietly improve them, and either way the
-/// reader of this file should find out from a red test rather than from
-/// arithmetic that no longer adds up.
+/// A canonical checksum costs only its two-byte derivation marker.
 #[test]
-fn the_checksum_costs_nine_bytes_now_the_wire_does_not_spell_it_in_hex() {
+fn a_canonical_checksum_costs_a_two_byte_marker() {
     let dir = temp_wal_dir("checksum-width");
     let mut wal = PersistentRaftWal::open(one_wide_segment(dir.clone())).expect("open wal");
     for index in 1..=2u64 {
@@ -387,7 +356,7 @@ fn the_checksum_costs_nine_bytes_now_the_wire_does_not_spell_it_in_hex() {
     assert_eq!(
         record.checksum.len(),
         16,
-        "the stored checksum is {} hex characters, not 16, so the 18 bytes this file charges for it are wrong",
+        "the restored checksum is {} hex characters, not 16",
         record.checksum.len()
     );
 
@@ -401,13 +370,13 @@ fn the_checksum_costs_nine_bytes_now_the_wire_does_not_spell_it_in_hex() {
     without.checksum = String::new();
     let cost = framed_bytes(&record) - framed_bytes(&without);
     assert_eq!(
-        cost, 9,
-        "the checksum costs {cost} bytes, not the tag and eight bytes of a `fixed64` this file attributes to it"
+        cost, 2,
+        "the canonical checksum costs {cost} bytes, not its boolean tag and value"
     );
     assert_eq!(
         cost * 100 / PER_RECORD,
-        14,
-        "the checksum is {:.1}% of the envelope, not the ~14.1% this file claims",
+        3,
+        "the marker is {:.1}% of the envelope, not the expected 3.8%",
         cost as f64 * 100.0 / PER_RECORD as f64
     );
 }

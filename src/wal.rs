@@ -254,6 +254,17 @@ fn matrixraft_wal_checksum_without_payloads(record: &WalRecord) -> String {
 }
 
 fn wal_checksum(record: &WalRecord, cover_membership: bool, cover_payloads: bool) -> String {
+    format!(
+        "{:016x}",
+        wal_checksum_digest(record, cover_membership, cover_payloads)
+    )
+}
+
+pub(crate) fn matrixraft_wal_checksum_digest(record: &WalRecord) -> u64 {
+    wal_checksum_digest(record, true, true)
+}
+
+fn wal_checksum_digest(record: &WalRecord, cover_membership: bool, cover_payloads: bool) -> u64 {
     let mut hash = 14_695_981_039_346_656_037_u64;
     let mut mix = |value: u64| {
         for byte in value.to_le_bytes() {
@@ -324,7 +335,7 @@ fn wal_checksum(record: &WalRecord, cover_membership: bool, cover_payloads: bool
             }
         }
     }
-    format!("{hash:016x}")
+    hash
 }
 
 pub fn matrixraft_wal_checksum_format() -> WalChecksumFormat {
