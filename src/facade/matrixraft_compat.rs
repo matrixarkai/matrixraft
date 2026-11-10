@@ -4860,7 +4860,9 @@ impl MatrixRaftNode {
     {
         let status = self.get_status()?;
         let membership = self.get_membership()?;
-        binding.observe_status(&status, membership)
+        let report = binding.observe_status(&status, membership)?;
+        self.runtime.recycle_applied_logs(binding.fsm().flushed_index())?;
+        Ok(report)
     }
 
     pub fn alter_attribute(
