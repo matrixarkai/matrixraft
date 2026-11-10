@@ -84,6 +84,30 @@ Reads remain pending until their confirmed index is applied. Membership-enabled
 peers reopening a journal refuse inputs until bounded replay reaches the
 committed index. Reapply the tuning on reopen when bounded scheduling is needed.
 
+`process_ready_retryable` accepts `ApplyDecision::Applied` or `ApplyDecision::Retry`
+for each committed application entry. `Retry` must leave that entry unconsumed;
+it stops application at that position without stopping durable replication.
+Later application entries and membership changes wait behind it, and confirmed
+reads still require their index to be applied. The deferred entry is attempted
+at most once per call. Successfully applied prefix entries are not repeated in
+the same open instance. Deferred work retains log positions and reuses synced
+storage rather than retaining a separate queue of payload copies.
+
+`has_ready()` remains true while application work is deferred. Back off retries
+or wait for the application resource to become available, but keep driving ticks,
+packets, and Ready processing so consensus can proceed. Replication acknowledgments
+do not authorize client acknowledgments before successful local application.
+Storage capacity remains finite; indefinite application stalls are not an
+unbounded buffering guarantee. Local checkpoint capture and new membership
+proposals require application work to settle first.
+
+Use `process_ready_retryable_with_snapshot_reader` when checkpoints are enabled.
+A successful checkpoint restore supersedes deferred entries through its index,
+then suffix application resumes in order. Restore failures and callback errors
+remain fatal, just as with the original APIs. Reopening rebuilds a fresh or
+idempotent application from the checkpoint and committed log, including work
+that was deferred before restart.
+
 Hosts may submit several proposals or already-queued incoming packets on the same
 exclusive peer worker before calling `process_ready`. Bound each batch by count,
 bytes, and elapsed time; do not wait for a batch to fill or starve ticks and Ready

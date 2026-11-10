@@ -148,7 +148,7 @@ impl DurablePeer {
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.node_id()));
         }
-        if self.raw.has_ready()
+        if self.has_ready()
             || self.restore_on_open.is_some()
             || self.raw.raft.pending_conf_index > self.applied_index()
         {
@@ -228,8 +228,8 @@ impl DurablePeer {
     pub(super) fn apply_committed(
         &mut self,
         entry: Entry,
-        apply: &mut impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
-    ) -> Result<(), RaftError> {
+        apply: &mut impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
+    ) -> Result<ApplyDecision, RaftError> {
         if entry.entry_type == EntryType::EntryNormal as i32 {
             return apply(
                 LogId {
@@ -250,6 +250,6 @@ impl DurablePeer {
         }
         // A caller must start a new read under the committed configuration.
         self.pending_read = None;
-        Ok(())
+        Ok(ApplyDecision::Applied)
     }
 }
