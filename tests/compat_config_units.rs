@@ -16,6 +16,7 @@ fn peer(node_id: u64, role: ReplicaRole) -> Peer {
 // Byte-valued knobs, all distinct, so a mapping that picks the wrong one is
 // visible in the result rather than hidden behind equal numbers.
 const REPLICATE_BYTES: u64 = 3 * 1024;
+const REPLICATE_ENTRIES: u64 = 37;
 const CACHE_BYTES: u64 = 5 * 1024;
 const APPLY_BATCH_BYTES: u64 = 7 * 1024;
 const SEGMENT_BYTES: u64 = 11 * 1024;
@@ -39,7 +40,7 @@ fn options() -> MatrixRaftOptions {
         last_lease_duration_ms: 200,
         assume_lease_when_start: false,
         max_memory_replicate_log_bytes: REPLICATE_BYTES,
-        max_disk_replicate_log_num: 64,
+        max_disk_replicate_log_num: REPLICATE_ENTRIES,
         max_cache_memory_bytes: CACHE_BYTES,
         max_apply_batch_bytes: APPLY_BATCH_BYTES,
         enable_reorder_queue: true,
@@ -65,6 +66,10 @@ fn the_snapshot_threshold_is_a_count_so_no_byte_budget_may_reach_it() {
     assert_eq!(config.max_payload_bytes, REPLICATE_BYTES);
     assert_eq!(config.max_log_buffer_bytes, CACHE_BYTES);
     assert_eq!(config.max_segment_bytes, SEGMENT_BYTES);
+    assert_eq!(
+        config.pipeline_limits().max_replicate_batch_entries,
+        REPLICATE_ENTRIES
+    );
 
     assert_ne!(
         config.snapshot_threshold_entries, APPLY_BATCH_BYTES,

@@ -4134,6 +4134,10 @@ impl RaftCluster {
         // One allocation for the payload, shared by every node's log, rather
         // than a clone per node.
         let entry = Arc::new(entry);
+        let max_replicate_batch_entries = self
+            .config
+            .pipeline_limits()
+            .max_replicate_batch_entries;
 
         // Start the fresh epoch before responses arrive, then record only
         // successful acknowledgements into it. The generic response handler
@@ -4172,7 +4176,10 @@ impl RaftCluster {
                 let response = if let Some(pipeline) = self.peer_pipelines.get_mut(&node_id) {
                     pipeline.queue_append(&entry)?;
                     let _ = pipeline
-                        .flush_append_batch_counted(64, self.config.max_payload_bytes.max(1));
+                        .flush_append_batch_counted(
+                            max_replicate_batch_entries,
+                            self.config.max_payload_bytes.max(1),
+                        );
                     if node.healthy {
                         let match_index = node.match_index();
                         let append_is_contiguous =
@@ -5820,7 +5827,8 @@ impl RaftCluster {
             after = std::ops::Bound::Excluded(last_visited);
             for &peer_id in &peer_ids[..peer_count] {
                 match self.catch_up_peer_with_reason(peer_id, "") {
-                    Ok(_) => recovered = recovered.saturating_add(1),
+                    Ok(report) if report.caught_up => recovered = recovered.saturating_add(1),
+                    Ok(_) => {}
                     Err(error) => record_error(peer_id, error),
                 }
             }
@@ -5903,6 +5911,10 @@ impl RaftCluster {
         peer_id: NodeId,
         reason_prefix: &str,
     ) -> Result<LearnerCatchUpLoopReport, RaftError> {
+        let max_round_entries = usize::try_from(
+            self.config.pipeline_limits().max_replicate_batch_entries,
+        )
+        .unwrap_or(usize::MAX);
         let leader_id = self.leader_id.ok_or(RaftError::NoLeader)?;
         let leader_snapshot = self
             .nodes
@@ -5939,7 +5951,8 @@ impl RaftCluster {
             let position = leader.log_position_at_or_after(current_match.saturating_add(1));
             let count = position
                 .map(|position| leader.log.len().saturating_sub(position))
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .min(max_round_entries);
             (position, count)
         };
         if missing_entry_count > 0 {
@@ -5953,6 +5966,7 @@ impl RaftCluster {
                 peer.log.reserve(missing_entry_count);
             }
         }
+        let mut remaining_entries = missing_entry_count;
         while let Some(position) = next_position {
             let mut entries: [Option<Arc<LogEntry>>; NODE_ID_CHUNK] =
                 std::array::from_fn(|_| None);
@@ -5962,12 +5976,17 @@ impl RaftCluster {
                     .nodes
                     .get(&leader_id)
                     .ok_or(RaftError::NodeNotFound(leader_id))?;
-                for entry in leader.log[position..].iter().take(entries.len()) {
+                for entry in leader.log[position..]
+                    .iter()
+                    .take(entries.len().min(remaining_entries))
+                {
                     entries[entry_count] = Some(Arc::clone(entry));
                     entry_count += 1;
                 }
                 let following_position = position.saturating_add(entry_count);
-                next_position = (following_position < leader.log.len()).then_some(following_position);
+                remaining_entries = remaining_entries.saturating_sub(entry_count);
+                next_position = (remaining_entries > 0 && following_position < leader.log.len())
+                    .then_some(following_position);
             }
             if entry_count == 0 {
                 break;
@@ -8444,5 +8463,30 @@ mod lagging_peer_catchup_tests {
                 "node {node_id} was skipped"
             );
         }
+    }
+
+    #[test]
+    fn automatic_catchup_counts_only_completed_peers() {
+        let config = Config::default().with_pipeline_limits(PipelineLimits {
+            max_replicate_batch_entries: 3,
+            ..PipelineLimits::default()
+        });
+        let mut cluster =
+            RaftCluster::new(82, config, (1..=3).map(peer).collect()).expect("cluster");
+        cluster.start().expect("start");
+        cluster.set_node_healthy(2, false).expect("pause follower");
+        for value in 0..8_u8 {
+            cluster.propose(vec![value]).expect("propose");
+        }
+        cluster.set_node_healthy(2, true).expect("resume follower");
+
+        assert_eq!(cluster.catch_up_lagging_peers(|_, _| {}), 0);
+        assert_eq!(cluster.catch_up_lagging_peers(|_, _| {}), 0);
+        assert_eq!(cluster.catch_up_lagging_peers(|_, _| {}), 1);
+        assert_eq!(
+            cluster.nodes[&2].match_index(),
+            cluster.last_log_index,
+            "the third bounded round completes the peer"
+        );
     }
 }

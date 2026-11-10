@@ -815,7 +815,7 @@ assertion.
 
 Recorded, reported back, and reaching nothing that runs:
 
-<!-- inert-settings: reader_num, executor_num, watched_address_resolver, max_applied_log_bytes, max_disk_replicate_log_num, snapshot_dir, recover_fsm_from_snapshot -->
+<!-- inert-settings: reader_num, executor_num, watched_address_resolver, max_applied_log_bytes, snapshot_dir, recover_fsm_from_snapshot -->
 
 Three are on `MatrixRaftGroupContext`:
 
@@ -823,7 +823,7 @@ Three are on `MatrixRaftGroupContext`:
 - `executor_num`
 - `watched_address_resolver`
 
-Two are on `MatrixRaftOptions`:
+One is on `MatrixRaftOptions`:
 
 - `max_applied_log_bytes` — the **byte**-valued twin of
   `Config::snapshot_threshold_entries`, which is the entry-valued one and is
@@ -831,10 +831,12 @@ Two are on `MatrixRaftOptions`:
   decision, so this one stays recorded and the entry threshold is the one to
   set. It defaults to `u64::MAX`, which is "never", so a host that leaves it
   alone is not relying on it.
-- `max_disk_replicate_log_num` — how many log entries may be replicated from
-  disk rather than from the in-memory buffer. This crate's replication reads
-  from the log buffer, whose bound is `max_memory_replicate_log_bytes` and is
-  live; there is no separate disk path for this to bound.
+
+`max_disk_replicate_log_num` is live. It maps to
+`PipelineLimits::max_replicate_batch_entries`, bounds each lagging-peer
+catch-up round, and also supplies the entry ceiling when a replication pipeline
+flushes queued appends. A peer farther behind than the ceiling remains lagging
+and advances again on the next round instead of monopolizing one runtime turn.
 
 One is on the node itself, and arrives as a **method parameter** rather than a
 struct field:

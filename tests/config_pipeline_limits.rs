@@ -186,6 +186,7 @@ fn a_zero_capacity_becomes_one_and_a_zero_timeout_stays_off() {
     let config = Config::default().with_pipeline_limits(PipelineLimits {
         max_inflights_replicate: 0,
         max_memory_replicate_log_bytes: 0,
+        max_replicate_batch_entries: 0,
         max_inflights_apply_task: 0,
         max_apply_batch_bytes: 0,
         reorder_window_size: 0,
@@ -195,6 +196,7 @@ fn a_zero_capacity_becomes_one_and_a_zero_timeout_stays_off() {
     let limits = config.pipeline_limits();
     assert_eq!(limits.max_inflights_replicate, 1);
     assert_eq!(limits.max_memory_replicate_log_bytes, 1);
+    assert_eq!(limits.max_replicate_batch_entries, 1);
     assert_eq!(limits.max_inflights_apply_task, 1);
     assert_eq!(limits.max_apply_batch_bytes, 1);
     assert_eq!(limits.reorder_window_size, 1);

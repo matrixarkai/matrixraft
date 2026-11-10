@@ -35,6 +35,7 @@ fn small_limits() -> PipelineLimits {
     PipelineLimits {
         max_inflights_replicate: 4,
         max_memory_replicate_log_bytes: 1024,
+        max_replicate_batch_entries: 64,
         max_inflights_apply_task: 2,
         max_apply_batch_bytes: 8,
         enable_reorder_queue: true,

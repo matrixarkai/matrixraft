@@ -128,12 +128,10 @@ pub struct Config {
     /// is the production default this used to hardcode. Serde treats a `Box<T>`
     /// as a `T`, so the document shape is the same either way.
     ///
-    /// **Boxed because `RaftCluster` holds a `Config` by value.** Plain, these
-    /// 56 bytes took the cluster from 520 to 576 -- +10.8% on a struct a shard
-    /// walks once per group per visit, which is what
-    /// `tests/cluster_footprint.rs` is there to make someone think about.
-    /// Boxed it is 8 bytes and the cluster is 528. The cost is one allocation
-    /// per cluster: `Config` is cloned exactly once in this crate, when a node
+    /// **Boxed because `RaftCluster` holds a `Config` by value.** Plain, every
+    /// added limit widens every group a shard walks. Boxed, the group retains
+    /// one pointer while the limit set can grow. The cost is one allocation per
+    /// cluster: `Config` is cloned exactly once in this crate, when a node
     /// runtime is built. Use [`Config::with_pipeline_limits`] rather than
     /// writing the `Box` yourself.
     #[serde(default)]
@@ -191,7 +189,7 @@ impl Config {
     /// Zero is sanitised to one for every limit **except
     /// `reorder_timeout_us`**, where zero means the timeout is off -- so
     /// raising it to one would turn "never expire" into "expire on the first
-    /// tick", which is the opposite. The other five describe a capacity, and a
+    /// tick", which is the opposite. The other six describe a capacity, and a
     /// capacity of zero is a pipeline that can do nothing rather than a
     /// pipeline without a limit.
     ///
@@ -204,6 +202,7 @@ impl Config {
         PipelineLimits {
             max_inflights_replicate: self.pipeline.max_inflights_replicate.max(1),
             max_memory_replicate_log_bytes: self.pipeline.max_memory_replicate_log_bytes.max(1),
+            max_replicate_batch_entries: self.pipeline.max_replicate_batch_entries.max(1),
             max_inflights_apply_task: self.pipeline.max_inflights_apply_task.max(1),
             max_apply_batch_bytes: self.pipeline.max_apply_batch_bytes.max(1),
             enable_reorder_queue: self.pipeline.enable_reorder_queue,
