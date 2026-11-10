@@ -37,6 +37,51 @@ fn cluster_with_threshold(threshold: u64) -> RaftCluster {
     cluster
 }
 
+fn cluster_with_byte_threshold(threshold: u64) -> RaftCluster {
+    let config = Config::default().with_applied_log_byte_threshold(threshold);
+    let mut cluster =
+        RaftCluster::new(100, config, (1..=3u64).map(peer).collect()).expect("cluster");
+    cluster.start().expect("start");
+    cluster
+}
+
+#[test]
+fn applied_payload_bytes_make_a_snapshot_due_at_the_boundary() {
+    let mut cluster = cluster_with_byte_threshold(u64::MAX);
+    cluster.propose(Vec::new()).expect("advance startup entry");
+    let baseline = cluster.snapshot_due().retained_applied_bytes;
+    let threshold = baseline + 12;
+    cluster.config = cluster
+        .config
+        .clone()
+        .with_applied_log_byte_threshold(threshold);
+    cluster.propose(vec![1; 4]).expect("first proposal");
+    cluster.propose(vec![2; 4]).expect("second proposal");
+
+    let below = cluster.snapshot_due();
+    assert_eq!(below.retained_applied_bytes, baseline + 8);
+    assert_eq!(below.threshold_bytes, threshold);
+    assert!(!below.bytes_exceeded);
+    assert!(!below.due, "{below:?}");
+
+    cluster.propose(vec![3; 4]).expect("third proposal");
+    let at = cluster.snapshot_due();
+    assert_eq!(at.retained_applied_bytes, threshold);
+    assert!(at.bytes_exceeded, "{at:?}");
+    assert!(at.due, "{at:?}");
+    assert_eq!(at.reason, "retained_applied_bytes_reached_threshold");
+}
+
+#[test]
+fn the_default_byte_limit_is_disabled() {
+    let mut cluster = cluster_with_byte_threshold(u64::MAX);
+    cluster.propose(vec![9; 32]).expect("proposal");
+    let due = cluster.snapshot_due();
+    assert_eq!(due.threshold_bytes, u64::MAX);
+    assert!(!due.bytes_exceeded, "{due:?}");
+    assert!(!due.due, "{due:?}");
+}
+
 #[test]
 fn a_log_below_the_threshold_is_not_due() {
     let mut cluster = cluster_with_threshold(50);

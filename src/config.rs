@@ -29,11 +29,9 @@ pub struct Config {
     /// rejected when zero, and read nowhere, so there was no log-size snapshot
     /// trigger at all.
     ///
-    /// `MatrixRaftOptions::max_applied_log_bytes` is the **byte**-valued knob
-    /// for the same idea and is still unread, defaulting to `u64::MAX`. It is
-    /// not wired here because a second threshold expressing the same decision
-    /// would cost another eight bytes on every group -- the entry threshold is
-    /// the one `Config` already carries.
+    /// Direct values are entry counts. Use
+    /// [`Config::with_applied_log_byte_threshold`] to select the mutually
+    /// exclusive byte policy without adding another word to every group.
     pub snapshot_threshold_entries: u64,
     /// When to roll the active WAL segment, which is a threshold rather than
     /// a hard cap.
@@ -178,6 +176,39 @@ impl Default for Config {
 }
 
 impl Config {
+    const SNAPSHOT_BYTE_THRESHOLD_KIND: u64 = 1_u64 << 63;
+    const SNAPSHOT_BYTE_THRESHOLD_VALUE_MASK: u64 = Self::SNAPSHOT_BYTE_THRESHOLD_KIND - 1;
+    const MAX_SNAPSHOT_BYTE_THRESHOLD: u64 = Self::SNAPSHOT_BYTE_THRESHOLD_VALUE_MASK - 1;
+
+    /// Select an applied-payload byte threshold without widening `Config`.
+    ///
+    /// A snapshot uses either the entry threshold or the byte threshold, never
+    /// both. The kind therefore shares the existing threshold word. The
+    /// all-ones value remains the public "disabled" value; larger finite byte
+    /// limits saturate at the largest distinct encodable limit.
+    pub fn with_applied_log_byte_threshold(mut self, bytes: u64) -> Self {
+        self.snapshot_threshold_entries = if bytes == u64::MAX {
+            u64::MAX
+        } else {
+            Self::SNAPSHOT_BYTE_THRESHOLD_KIND | bytes.min(Self::MAX_SNAPSHOT_BYTE_THRESHOLD)
+        };
+        self
+    }
+
+    /// Active retained-entry threshold, or `None` in byte-threshold mode.
+    pub fn snapshot_entry_threshold(&self) -> Option<u64> {
+        (self.snapshot_threshold_entries & Self::SNAPSHOT_BYTE_THRESHOLD_KIND == 0)
+            .then_some(self.snapshot_threshold_entries)
+    }
+
+    /// Active applied-payload byte threshold, or `None` in entry mode or when
+    /// the byte threshold is disabled.
+    pub fn snapshot_applied_byte_threshold(&self) -> Option<u64> {
+        (self.snapshot_threshold_entries != u64::MAX
+            && self.snapshot_threshold_entries & Self::SNAPSHOT_BYTE_THRESHOLD_KIND != 0)
+            .then_some(self.snapshot_threshold_entries & Self::SNAPSHOT_BYTE_THRESHOLD_VALUE_MASK)
+    }
+
     /// This config with `pipeline` set, so a caller never writes the `Box`.
     pub fn with_pipeline_limits(mut self, limits: PipelineLimits) -> Self {
         self.pipeline = Box::new(limits);

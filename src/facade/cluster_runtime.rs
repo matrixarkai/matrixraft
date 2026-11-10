@@ -769,6 +769,22 @@ impl Node {
     fn retained_log_bytes(&self) -> u64 {
         self.retained_log_bytes
     }
+
+    /// Payload bytes at or below the applied frontier that remain in the log.
+    ///
+    /// The running total covers the whole log. Subtracting the unapplied tail
+    /// makes the fully applied steady state O(1), while a node with work in
+    /// flight pays only for that bounded tail.
+    fn retained_applied_log_bytes(&self) -> u64 {
+        let first_unapplied = self
+            .log
+            .partition_point(|entry| entry.log_id.index <= self.applied_index);
+        let unapplied_bytes = self.log[first_unapplied..]
+            .iter()
+            .map(|entry| entry.payload.len() as u64)
+            .fold(0_u64, u64::saturating_add);
+        self.retained_log_bytes.saturating_sub(unapplied_bytes)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -7133,7 +7149,19 @@ impl RaftCluster {
         if !self.config.can_trigger_snapshot || self.snapshot_trigger.is_some() {
             return false;
         }
-        self.retained_leader_entries() >= self.config.snapshot_threshold_entries
+        let Some(leader) = self
+            .leader_id
+            .and_then(|leader_id| self.nodes.get(&leader_id))
+        else {
+            return false;
+        };
+        self.config
+            .snapshot_entry_threshold()
+            .is_some_and(|threshold| leader.log.len() as u64 >= threshold)
+            || self
+                .config
+                .snapshot_applied_byte_threshold()
+                .is_some_and(|threshold| leader.retained_applied_log_bytes() >= threshold)
     }
 
     /// How many log entries the leader is holding, or zero without a leader.
@@ -7147,9 +7175,19 @@ impl RaftCluster {
     pub fn snapshot_due(&self) -> SnapshotDueReport {
         let can_trigger = self.config.can_trigger_snapshot;
         let trigger_in_flight = self.snapshot_trigger.is_some();
-        let threshold_entries = self.config.snapshot_threshold_entries;
+        let threshold_entries = self.config.snapshot_entry_threshold().unwrap_or(u64::MAX);
         let retained_entries = self.retained_leader_entries();
         let entries_exceeded = retained_entries >= threshold_entries;
+        let threshold_bytes = self
+            .config
+            .snapshot_applied_byte_threshold()
+            .unwrap_or(u64::MAX);
+        let retained_applied_bytes = self
+            .leader_id
+            .and_then(|leader_id| self.nodes.get(&leader_id))
+            .map(|leader| leader.retained_applied_log_bytes())
+            .unwrap_or(0);
+        let bytes_exceeded = threshold_bytes != u64::MAX && retained_applied_bytes >= threshold_bytes;
         let due = self.snapshot_is_due();
         let reason = if !can_trigger {
             "snapshot_trigger_disabled"
@@ -7159,14 +7197,21 @@ impl RaftCluster {
             "snapshot_trigger_in_flight"
         } else if entries_exceeded {
             "retained_entries_reached_threshold"
-        } else {
+        } else if bytes_exceeded {
+            "retained_applied_bytes_reached_threshold"
+        } else if self.config.snapshot_entry_threshold().is_some() {
             "retained_entries_below_threshold"
+        } else {
+            "retained_applied_bytes_below_threshold"
         };
         SnapshotDueReport {
             leader_id: self.leader_id,
             retained_entries,
             threshold_entries,
             entries_exceeded,
+            retained_applied_bytes,
+            threshold_bytes,
+            bytes_exceeded,
             trigger_in_flight,
             can_trigger,
             due,
@@ -7946,6 +7991,30 @@ mod node_snapshot_storage_tests {
         assert!(error
             .to_string()
             .contains("node id 8 does not match directory key 7"));
+    }
+
+    #[test]
+    fn retained_applied_bytes_exclude_the_unapplied_tail() {
+        let mut node = Node::new(ReplicaRole::Voter, false);
+        node.append_entry(Arc::new(LogEntry {
+            log_id: LogId { term: 1, index: 1 },
+            payload: vec![1; 3],
+            is_command: false,
+        }));
+        node.append_entry(Arc::new(LogEntry {
+            log_id: LogId { term: 1, index: 2 },
+            payload: vec![2; 5],
+            is_command: false,
+        }));
+
+        node.advance_commit(1);
+        assert_eq!(node.retained_log_bytes(), 8);
+        assert_eq!(node.retained_applied_log_bytes(), 3);
+
+        node.advance_commit(2);
+        assert_eq!(node.retained_applied_log_bytes(), 8);
+        node.discard_log_through(1);
+        assert_eq!(node.retained_applied_log_bytes(), 5);
     }
 
     #[test]
