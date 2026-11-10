@@ -16,8 +16,11 @@ use matrixraft::{Config, Peer, RaftCluster, ReplicaRole, ReplicationPipeline};
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(
-        std::mem::size_of::<RaftCluster>() == 416,
-        "RaftCluster changed width. It was 432 bytes until the usually empty \
+        std::mem::size_of::<RaftCluster>() == 400,
+        "RaftCluster changed width. It was 416 bytes until two nonzero \
+         membership-change indexes used the `NonZeroU64` option niche, saving \
+         16 inline bytes per group while preserving their optional-integer \
+         serialized shape. It was 432 bytes until the usually empty \
          membership-index set moved behind a lazy allocation, saving 16 inline \
          bytes per group while preserving the set's serialized shape. It was \
          544 bytes until seven transient maps \
@@ -169,6 +172,35 @@ fn empty_transient_maps_keep_their_map_wire_shape() {
             "{field} must remain an empty map on the wire"
         );
     }
+}
+
+#[test]
+fn compact_membership_indexes_keep_their_optional_integer_wire_shape() {
+    let absent = serde_json::to_value(leader()).expect("serialize absent indexes");
+    assert_eq!(
+        absent.get("pending_membership_change_index"),
+        Some(&serde_json::Value::Null)
+    );
+    assert_eq!(
+        absent.get("saving_membership_change_index"),
+        Some(&serde_json::Value::Null)
+    );
+
+    let mut cluster = leader();
+    cluster
+        .begin_saving_membership_change(7)
+        .expect("begin a nonzero membership change");
+    let json = serde_json::to_value(&cluster).expect("serialize present indexes");
+    assert_eq!(
+        json["pending_membership_change_index"],
+        serde_json::json!(7)
+    );
+    assert_eq!(json["saving_membership_change_index"], serde_json::json!(7));
+
+    let back: RaftCluster = serde_json::from_value(json.clone()).expect("round trip");
+    assert_eq!(back.pending_membership_change_index(), Some(7));
+    assert_eq!(back.saving_membership_change_index(), Some(7));
+    assert_eq!(serde_json::to_value(back).expect("reserialize"), json);
 }
 
 #[test]

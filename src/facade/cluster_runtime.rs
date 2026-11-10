@@ -30,6 +30,7 @@ impl From<ConfigError> for RaftError {
 
 const INLINE_QUORUM_CANDIDATES: usize = 16;
 const NODE_ID_CHUNK: usize = 16;
+type NonZeroLogIndex = std::num::NonZeroU64;
 
 /// A map that costs one pointer while empty and retains the ordinary map wire
 /// shape. Most clusters never enter snapshot installation, reorder buffering,
@@ -1025,11 +1026,11 @@ pub struct RaftCluster {
     applied_index: LogIndex,
     last_log_index: LogIndex,
     last_index_before_current_term: LogIndex,
-    pending_membership_change_index: Option<LogIndex>,
+    pending_membership_change_index: Option<NonZeroLogIndex>,
     #[serde(default)]
     membership_change_indexes: SparseSet<LogIndex>,
     #[serde(default)]
-    saving_membership_change_index: Option<LogIndex>,
+    saving_membership_change_index: Option<NonZeroLogIndex>,
     #[serde(default)]
     stabled_membership_change_index: LogIndex,
     running: bool,
@@ -2085,10 +2086,12 @@ impl RaftCluster {
 
     pub fn pending_membership_change_index(&self) -> Option<LogIndex> {
         self.pending_membership_change_index
+            .map(NonZeroLogIndex::get)
     }
 
     pub fn saving_membership_change_index(&self) -> Option<LogIndex> {
         self.saving_membership_change_index
+            .map(NonZeroLogIndex::get)
     }
 
     pub fn stabled_membership_change_index(&self) -> LogIndex {
@@ -2121,10 +2124,10 @@ impl RaftCluster {
     /// leader's own `safety_applied_index`; and the receiving side uses the
     /// receiving node's. This one is the strictest of the three.
     fn membership_change_fence_active(&self) -> bool {
-        self.pending_membership_change_index
+        self.pending_membership_change_index()
             .is_some_and(|pending| pending > self.applied_index)
             || self
-                .saving_membership_change_index
+                .saving_membership_change_index()
                 .is_some_and(|saving| saving > self.stabled_membership_change_index)
     }
 
@@ -2137,21 +2140,21 @@ impl RaftCluster {
                 "membership change log index must be non-zero".to_string(),
             ));
         }
-        if let Some(saving_index) = self.saving_membership_change_index {
+        if let Some(saving_index) = self.saving_membership_change_index() {
             if saving_index > self.stabled_membership_change_index {
                 return Err(RaftError::InvalidRequest(format!(
                     "saving_membership_change_index:{saving_index}"
                 )));
             }
         }
-        if let Some(pending_index) = self.pending_membership_change_index {
+        if let Some(pending_index) = self.pending_membership_change_index() {
             if pending_index > self.applied_index {
                 return Err(RaftError::InvalidRequest(format!(
                     "pending_membership_change_index:{pending_index}"
                 )));
             }
         }
-        self.pending_membership_change_index = Some(log_index);
+        self.pending_membership_change_index = NonZeroLogIndex::new(log_index);
         self.membership_change_indexes.insert(log_index);
         Ok(())
     }
@@ -2165,30 +2168,30 @@ impl RaftCluster {
                 "membership change log index must be non-zero".to_string(),
             ));
         }
-        if let Some(saving_index) = self.saving_membership_change_index {
+        if let Some(saving_index) = self.saving_membership_change_index() {
             if saving_index > self.stabled_membership_change_index {
                 return Err(RaftError::InvalidRequest(format!(
                     "saving_membership_change_index:{saving_index}"
                 )));
             }
         }
-        if let Some(pending_index) = self.pending_membership_change_index {
+        if let Some(pending_index) = self.pending_membership_change_index() {
             if pending_index != log_index && pending_index > self.applied_index {
                 return Err(RaftError::InvalidRequest(format!(
                     "pending_membership_change_index:{pending_index}"
                 )));
             }
         }
-        self.pending_membership_change_index = Some(log_index);
+        self.pending_membership_change_index = NonZeroLogIndex::new(log_index);
         self.membership_change_indexes.insert(log_index);
-        self.saving_membership_change_index = Some(log_index);
+        self.saving_membership_change_index = NonZeroLogIndex::new(log_index);
         Ok(())
     }
 
     pub fn mark_membership_change_stabled(&mut self, log_index: LogIndex) {
         self.stabled_membership_change_index = self.stabled_membership_change_index.max(log_index);
         if self
-            .saving_membership_change_index
+            .saving_membership_change_index()
             .is_some_and(|saving| saving <= self.stabled_membership_change_index)
         {
             self.saving_membership_change_index = None;
@@ -2230,10 +2233,10 @@ impl RaftCluster {
     pub fn mark_membership_change_applied(&mut self, log_index: LogIndex) {
         self.applied_index = self.applied_index.max(log_index);
         if self
-            .pending_membership_change_index
+            .pending_membership_change_index()
             .is_some_and(|pending| pending <= log_index)
             && !self
-                .saving_membership_change_index
+                .saving_membership_change_index()
                 .is_some_and(|saving| saving <= log_index)
         {
             self.pending_membership_change_index = None;
@@ -2245,15 +2248,19 @@ impl RaftCluster {
         self.membership_change_indexes
             .retain(|index| *index > snapshot_index);
         if self
-            .saving_membership_change_index
+            .saving_membership_change_index()
             .is_some_and(|saving| saving <= snapshot_index)
         {
             self.saving_membership_change_index = None;
             self.stabled_membership_change_index =
                 self.stabled_membership_change_index.max(snapshot_index);
         }
-        self.pending_membership_change_index =
-            self.membership_change_indexes.iter().next_back().copied();
+        self.pending_membership_change_index = self
+            .membership_change_indexes
+            .iter()
+            .next_back()
+            .copied()
+            .and_then(NonZeroLogIndex::new);
     }
 
     pub fn reset_pending_membership_change_after_truncation(
@@ -2264,7 +2271,7 @@ impl RaftCluster {
         self.membership_change_indexes
             .retain(|index| *index <= last_retained_log_index);
         if self
-            .saving_membership_change_index
+            .saving_membership_change_index()
             .is_some_and(|saving| saving > last_retained_log_index)
         {
             self.saving_membership_change_index = None;
@@ -2274,7 +2281,8 @@ impl RaftCluster {
             .iter()
             .rev()
             .copied()
-            .find(|index| *index > committed_index);
+            .find(|index| *index > committed_index)
+            .and_then(NonZeroLogIndex::new);
     }
 
     pub fn rejected_apply_index(
@@ -3882,7 +3890,7 @@ impl RaftCluster {
         &mut self,
         payload: Payload,
     ) -> Result<MembershipProposalOutcome, RaftError> {
-        let pending_before = self.pending_membership_change_index;
+        let pending_before = self.pending_membership_change_index();
         let log_id = self.propose_with_options(
             payload,
             ProposeOptions {
@@ -3891,7 +3899,7 @@ impl RaftCluster {
                 is_membership_change: true,
             },
         )?;
-        if self.pending_membership_change_index == Some(log_id.index) {
+        if self.pending_membership_change_index() == Some(log_id.index) {
             return Ok(MembershipProposalOutcome::Accepted {
                 index: log_id.index,
             });
@@ -3899,7 +3907,7 @@ impl RaftCluster {
         Ok(MembershipProposalOutcome::Downgraded {
             index: log_id.index,
             pending_at: self
-                .pending_membership_change_index
+                .pending_membership_change_index()
                 .or(pending_before)
                 .unwrap_or_default(),
         })
@@ -3949,7 +3957,7 @@ impl RaftCluster {
             index: self.next_log_index()?,
         };
         let membership_change_is_pending = self
-            .pending_membership_change_index
+            .pending_membership_change_index()
             .is_some_and(|pending| pending > leader_safety_applied_index);
         // Raft allows only one configuration change to be pending -- in the log
         // and not yet applied -- at a time. A second one is **downgraded** to an
@@ -3973,7 +3981,7 @@ impl RaftCluster {
             options.is_membership_change && !membership_change_is_pending;
 
         if proposed_as_membership_change {
-            self.pending_membership_change_index = Some(log_id.index);
+            self.pending_membership_change_index = NonZeroLogIndex::new(log_id.index);
             self.membership_change_indexes.insert(log_id.index);
         }
         let entry = LogEntry {
@@ -4568,7 +4576,9 @@ impl RaftCluster {
         } else {
             StateRole::Follower
         };
-        let mut pending_membership_change_index = self.pending_membership_change_index;
+        let mut pending_membership_change_index = self
+            .pending_membership_change_index
+            .map(NonZeroLogIndex::get);
         let mut last_index_before_current_term = self.last_index_before_current_term;
         let safety_applied_index = node.safety_applied_index;
         let mut last_retained_after_truncation = None;
@@ -4641,7 +4651,8 @@ impl RaftCluster {
         let term = node.hard_state.current_term;
         let require_snapshot = node.rejected_apply_index();
         self.last_index_before_current_term = last_index_before_current_term;
-        self.pending_membership_change_index = pending_membership_change_index;
+        self.pending_membership_change_index =
+            pending_membership_change_index.and_then(NonZeroLogIndex::new);
         if let Some(last_retained) = last_retained_after_truncation {
             self.reset_pending_membership_change_after_truncation(last_retained, node_commit_index);
         }

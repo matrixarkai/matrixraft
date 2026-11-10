@@ -3609,7 +3609,12 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// bytes and saving another 64 KiB across 8,192 hosted groups. Larger segment
 /// values retain the complete report just like other unusual layouts.
 ///
-/// The native measurement with all twenty-three changes is 41 MiB at
+/// Pending and saving membership-change indexes are nonzero whenever present.
+/// Using that option niche narrows `RaftCluster` from 416 to 400 bytes and
+/// `NodeCore` from 696 to 680 bytes, saving another 128 KiB across 8,192 hosted
+/// groups while their serialized values remain the same optional integers.
+///
+/// The native measurement with all twenty-four changes is 41 MiB at
 /// whole-MiB resolution for 8,192 live groups, or **4 KiB per group**; the
 /// allocation profiles above resolve reductions that RSS rounding does not.
 /// The handler-directory reduction is below that whole-MiB resolution. The
@@ -4342,7 +4347,7 @@ mod runtime_command_queue_tests {
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
-            std::mem::size_of::<NodeCore>() <= 696,
+            std::mem::size_of::<NodeCore>() <= 680,
             "cold runtime state widened NodeCore"
         );
         assert!(
