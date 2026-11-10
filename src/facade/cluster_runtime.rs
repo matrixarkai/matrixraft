@@ -3987,6 +3987,34 @@ impl RaftCluster {
         self.propose_with_options(payload, ProposeOptions::default())
     }
 
+    /// Proposes several payloads while growing replica logs once for the batch.
+    pub fn propose_batch(&mut self, payloads: Vec<Payload>) -> Result<Vec<LogId>, RaftError> {
+        self.propose_batch_with_options(payloads, ProposeOptions::default())
+    }
+
+    /// [`Self::propose_batch`], with the same options applied to every payload.
+    pub fn propose_batch_with_options(
+        &mut self,
+        payloads: Vec<Payload>,
+        options: ProposeOptions,
+    ) -> Result<Vec<LogId>, RaftError> {
+        self.reserve_proposal_batch(payloads.len());
+        let mut log_ids = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            log_ids.push(self.propose_with_options(payload, options.clone())?);
+        }
+        Ok(log_ids)
+    }
+
+    pub(crate) fn reserve_proposal_batch(&mut self, proposal_count: usize) {
+        if proposal_count == 0 {
+            return;
+        }
+        for node in self.nodes.values_mut().filter(|node| node.healthy) {
+            node.log.reserve(proposal_count);
+        }
+    }
+
     /// Proposes a membership change, reporting which of the two things
     /// happened.
     ///
