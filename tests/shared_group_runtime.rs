@@ -272,6 +272,57 @@ fn hosting_is_opt_in_and_the_default_gives_each_group_its_own_thread() {
 }
 
 #[test]
+fn command_executors_are_sized_independently_of_ticker_shards() {
+    for executors in [0, 1, 3] {
+        let runtime = SharedGroupRuntime::start_with_executor_count(
+            DriverOptions {
+                worker_num: 2,
+                ..DriverOptions::default()
+            },
+            executors,
+        )
+        .expect("runtime");
+        // Each existing ticker driver owns a ticker and its reserved worker.
+        assert_eq!(runtime.thread_count(), 4 + executors.max(1));
+    }
+    let root = probe_root("executor-sizing");
+    let transport = MatrixRaftTransportBuilder::new()
+        .set_cluster_id(1)
+        .set_num_connection_group(1)
+        .bind_address_resolver()
+        .build()
+        .expect("transport");
+    let context = MatrixRaftGroupContextBuilder::new()
+        .transport(transport)
+        .worker_num(2)
+        .executor_num(3)
+        .shared_runtime(true)
+        .build()
+        .expect("context");
+    let mut server = MatrixRaftMultiRaftServer::new(context);
+    let wal = root.join("wal");
+    let snapshot = root.join("snapshot");
+    std::fs::create_dir_all(&wal).expect("wal directory");
+    std::fs::create_dir_all(&snapshot).expect("snapshot directory");
+    server
+        .create_node(options(1, 100, &wal, &snapshot), 0)
+        .expect("node");
+    assert_eq!(server.shared_thread_count(), Some(7));
+    server.start_all(0).expect("start");
+    assert!(
+        server
+            .node(1, 1)
+            .expect("node")
+            .runtime_status()
+            .expect("status")
+            .worker_running
+    );
+    server.stop_all().expect("stop");
+    drop(server);
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
 fn a_fixed_pool_carries_any_number_of_groups() {
     // Asserted against the runtime's own count rather than the process's.
     //
