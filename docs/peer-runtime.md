@@ -54,6 +54,12 @@ current-leader and current-term validation.
 bounds. Its reader can move to another thread and read bounded entry ranges
 without repairing files or sharing the writer cursor. Later appends are excluded;
 checkpoint replacement does not invalidate an already captured generation.
+Range reads reuse a record buffer and decode entry byte fields as borrowed views,
+materializing only entries selected by the requested range and byte budget.
+Every captured record is still scanned and validated, including unselected entry
+wire fields and checksums outside the selected range. This reduces allocation,
+not the number of journal bytes read. The returned budget still includes its
+crossing entry so that an oversized entry can make progress.
 The caller must still reject obsolete results before using them for replication.
 `enable_async_log_reads(capacity)` opts replication into bounded host-executed
 durable reads. Drain `take_log_read_tasks`, execute each task on a host-owned

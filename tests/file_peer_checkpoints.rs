@@ -111,6 +111,39 @@ fn file_checkpoint_restore_can_retry_from_the_beginning_without_loading_the_payl
     assert!(!peer.has_ready());
 }
 
+#[test]
+fn a_bounded_log_range_materializes_only_the_requested_payloads() {
+    let _exercise = EXERCISE.lock().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut peer = DurablePeer::open(PeerOptions {
+        group_id: 17,
+        node_id: 1,
+        voters: vec![1],
+        wal_path: root.path().join("peer.wal"),
+    })
+    .unwrap();
+    peer.campaign().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    let low = peer.commit_index() + 1;
+    for value in 0..40u8 {
+        peer.propose_batch(vec![vec![value; 32768]; 4]).unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+    }
+    let high = peer.commit_index() + 1;
+    let mut reader = peer.capture_log_reader().unwrap();
+    ALLOCATED.store(0, std::sync::atomic::Ordering::Relaxed);
+    let selected = reader.entries(low, high, Some(1)).unwrap();
+    let allocated = ALLOCATED.load(std::sync::atomic::Ordering::Relaxed);
+    println!("bounded read allocated {allocated} bytes for a 32 KiB result across 5 MiB of payload history");
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].index, low);
+    assert_eq!(selected[0].data, vec![0; 32768]);
+    assert!(
+        allocated < 1024 * 1024,
+        "bounded read allocated {allocated} bytes"
+    );
+}
+
 fn drive(
     peers: &mut BTreeMap<u64, DurablePeer>,
     states: &mut BTreeMap<u64, State>,
