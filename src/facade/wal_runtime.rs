@@ -1423,6 +1423,11 @@ pub type FileRaftWal = PersistentRaftWal;
 /// handle per replica and drives it for every durable promise, recovery query,
 /// and fenced compaction.
 pub trait MatrixRaftWalBackend: Send {
+    /// Whether a compaction attempt can release storage at this frontier.
+    /// Backends without a cheap preflight retain the unconditional path.
+    fn has_reclaimable_segments(&self, _log_index: LogIndex) -> bool {
+        true
+    }
     fn active_coverage(&self) -> Option<(LogIndex, LogIndex, Term)>;
     fn append_record(&mut self, record: WalRecord) -> Result<(), RaftError>;
     fn compact_through_with_fence(
@@ -1463,6 +1468,10 @@ impl std::fmt::Debug for MatrixRaftWalHandle {
 }
 
 impl MatrixRaftWalHandle {
+    fn has_reclaimable_segments(&self, log_index: LogIndex) -> bool {
+        self.backend().has_reclaimable_segments(log_index)
+    }
+
     pub fn file(wal: PersistentRaftWal) -> Self {
         Self {
             kind: MatrixRaftWalHandleKind::File(wal),
@@ -1516,6 +1525,12 @@ impl MatrixRaftWalHandle {
 }
 
 impl MatrixRaftWalBackend for PersistentRaftWal {
+    fn has_reclaimable_segments(&self, log_index: LogIndex) -> bool {
+        let removable = self.segments.len().saturating_sub(self.options.min_keep_segments);
+        self.segments.iter().take(removable)
+            .any(|segment| segment.last_index > 0 && segment.last_index <= log_index)
+    }
+
     fn active_coverage(&self) -> Option<(LogIndex, LogIndex, Term)> {
         PersistentRaftWal::active_coverage(self)
     }
