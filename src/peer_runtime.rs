@@ -125,6 +125,49 @@ pub enum ApplyDecision {
     Retry,
 }
 
+/// One borrowed application entry, including empty election no-ops.
+#[derive(Clone, Debug)]
+pub struct ApplicationEntry<'a> {
+    pub position: LogId,
+    pub payload: &'a [u8],
+}
+
+/// A contiguous run of application entries that never crosses a membership change.
+/// Payloads borrow the committed log batch and cannot outlive the callback.
+#[derive(Clone, Copy)]
+pub struct ApplicationBatch<'a> {
+    entries: &'a [Entry],
+}
+fn application_entry(entry: &Entry) -> ApplicationEntry<'_> {
+    ApplicationEntry {
+        position: LogId {
+            term: entry.term,
+            index: entry.index,
+        },
+        payload: &entry.data,
+    }
+}
+impl<'a> ApplicationBatch<'a> {
+    pub fn len(self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(self) -> bool {
+        self.entries.is_empty()
+    }
+    pub fn get(self, index: usize) -> Option<ApplicationEntry<'a>> {
+        self.entries.get(index).map(application_entry)
+    }
+    pub fn iter(
+        self,
+    ) -> impl ExactSizeIterator<Item = ApplicationEntry<'a>> + DoubleEndedIterator + 'a {
+        self.entries.iter().map(application_entry)
+    }
+}
+struct ApplyProgress {
+    consumed: usize,
+    error: Option<RaftError>,
+}
+
 /// A binary protobuf packet. Delivery must preserve these bytes.
 #[derive(Clone, Debug)]
 pub struct PeerPacket {
@@ -2966,6 +3009,75 @@ impl DurablePeer {
     pub fn process_ready_retryable_with_snapshot_reader(
         &mut self,
         mut apply: impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
+        restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
+    ) -> Result<Vec<PeerPacket>, RaftError> {
+        self.process_application(
+            |entries| {
+                let mut progress = ApplyProgress {
+                    consumed: 0,
+                    error: None,
+                };
+                for entry in entries {
+                    match apply(
+                        LogId {
+                            term: entry.term,
+                            index: entry.index,
+                        },
+                        &entry.data,
+                    ) {
+                        Ok(ApplyDecision::Applied) => progress.consumed += 1,
+                        Ok(ApplyDecision::Retry) => break,
+                        Err(error) => {
+                            progress.error = Some(error);
+                            break;
+                        }
+                    }
+                }
+                progress
+            },
+            restore,
+        )
+    }
+
+    /// Apply borrowed batches, returning the consumed prefix length in 0..=len.
+    /// A shorter prefix defers its suffix. An error or an invalid length stops
+    /// this peer; restart still requires a fresh or idempotent application.
+    pub fn process_ready_batch(
+        &mut self,
+        apply: impl FnMut(ApplicationBatch<'_>) -> Result<usize, RaftError>,
+    ) -> Result<Vec<PeerPacket>, RaftError> {
+        self.process_ready_batch_with_snapshot_reader(apply, |_, _, _| {
+            Err(storage_error(
+                "application snapshot restore callback required",
+            ))
+        })
+    }
+
+    /// Batch application with streaming checkpoint restoration. Membership
+    /// entries are applied internally between batches, in log order.
+    pub fn process_ready_batch_with_snapshot_reader(
+        &mut self,
+        mut apply: impl FnMut(ApplicationBatch<'_>) -> Result<usize, RaftError>,
+        restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
+    ) -> Result<Vec<PeerPacket>, RaftError> {
+        self.process_application(
+            |entries| match apply(ApplicationBatch { entries }) {
+                Ok(consumed) => ApplyProgress {
+                    consumed,
+                    error: None,
+                },
+                Err(error) => ApplyProgress {
+                    consumed: 0,
+                    error: Some(error),
+                },
+            },
+            restore,
+        )
+    }
+
+    fn process_application(
+        &mut self,
+        mut apply: impl FnMut(&[Entry]) -> ApplyProgress,
         mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         self.healthy()?;
@@ -3028,7 +3140,7 @@ impl DurablePeer {
     fn apply_waiting(
         &mut self,
         entries: Vec<Entry>,
-        apply: &mut impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
+        apply: &mut impl FnMut(&[Entry]) -> ApplyProgress,
     ) -> Result<bool, RaftError> {
         if self.pending_apply <= self.applied_index() {
             return Ok(false);
@@ -3051,24 +3163,40 @@ impl DurablePeer {
                 )
                 .map_err(storage_error)?
         };
-        let mut applied = self.applied_index();
-        for entry in entries {
-            let index = entry.index;
-            match self.apply_committed(entry, apply) {
-                Ok(ApplyDecision::Applied) => applied = index,
-                other => {
-                    self.raw.advance_apply_to(applied);
-                    return other.map(|_| true);
-                }
+        let mut offset = 0;
+        while offset < entries.len() {
+            if entries[offset].entry_type != EntryType::EntryNormal as i32 {
+                self.apply_committed_membership(&entries[offset])?;
+                self.raw.advance_apply_to(entries[offset].index);
+                offset += 1;
+                continue;
             }
+            let end = entries[offset..]
+                .iter()
+                .position(|entry| entry.entry_type != EntryType::EntryNormal as i32)
+                .map_or(entries.len(), |length| offset + length);
+            let progress = apply(&entries[offset..end]);
+            if progress.consumed > end - offset {
+                return Err(invalid("application consumed beyond the supplied batch"));
+            }
+            if progress.consumed > 0 {
+                self.raw
+                    .advance_apply_to(entries[offset + progress.consumed - 1].index);
+            }
+            if let Some(error) = progress.error {
+                return Err(error);
+            }
+            if progress.consumed < end - offset {
+                return Ok(true);
+            }
+            offset = end;
         }
-        self.raw.advance_apply_to(applied);
         Ok(false)
     }
 
     fn process_inner(
         &mut self,
-        apply: &mut impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
+        apply: &mut impl FnMut(&[Entry]) -> ApplyProgress,
         restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         let mut output = Vec::new();
