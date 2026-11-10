@@ -4851,6 +4851,11 @@ impl MatrixRaftNode {
             .collect())
     }
 
+    /// Read this replica's durable WAL range without changing its writer state.
+    pub fn read_wal_entries(&self, from: LogIndex, to: LogIndex, limit_bytes: usize) -> Result<Vec<LogEntry>, RaftError> {
+        self.runtime.read_wal_entries(from, to, limit_bytes)
+    }
+
     pub fn sync_fsm_runtime<F>(
         &self,
         binding: &mut MatrixRaftFsmRuntimeBinding<F>,
