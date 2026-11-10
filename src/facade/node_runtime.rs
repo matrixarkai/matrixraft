@@ -2051,7 +2051,7 @@ fn local_term_and_vote(
 /// configured persists nothing, which is the existing behaviour for proposals.
 fn persist_after_promise(
     cluster: &mut RaftCluster,
-    wal: &mut Option<PersistentRaftWal>,
+    wal: &mut Option<Box<PersistentRaftWal>>,
     node_id: NodeId,
 ) -> Result<(), RaftError> {
     let Some(open_wal) = wal.as_mut() else {
@@ -2064,7 +2064,7 @@ fn persist_after_promise(
 
 fn runtime_step_message(
     cluster: &mut RaftCluster,
-    wal: &mut Option<PersistentRaftWal>,
+    wal: &mut Option<Box<PersistentRaftWal>>,
     membership_executor: &mut MembershipExecutor,
     node_id: NodeId,
     message: Message,
@@ -2133,7 +2133,7 @@ fn runtime_step_message(
 
 fn apply_unpersisted_proposal(
     cluster: &mut RaftCluster,
-    wal: &mut Option<PersistentRaftWal>,
+    wal: &mut Option<Box<PersistentRaftWal>>,
     membership_executor: &mut MembershipExecutor,
     node_id: NodeId,
     proposal: (
@@ -2248,7 +2248,10 @@ impl RuntimeExecutionCounters {
 struct NodeCore {
     node_id: NodeId,
     cluster: RaftCluster,
-    wal: Option<PersistentRaftWal>,
+    /// The WAL owns files and segment storage independently of the consensus
+    /// state walked on every tick, so keep its large handle out of that hot
+    /// inline working set.
+    wal: Option<Box<PersistentRaftWal>>,
     last_wal_recovery_report: StoredWalRecoveryReport,
     state: NodeRuntimeState,
     heartbeat_ticks: u64,
@@ -2341,7 +2344,10 @@ impl NodeCore {
             if let Some(record) = report.recovered.clone() {
                 let _ = cluster.restore_wal_record(record);
             }
-            (Some(wal), StoredWalRecoveryReport::from_report(report))
+            (
+                Some(Box::new(wal)),
+                StoredWalRecoveryReport::from_report(report),
+            )
         }
         Err(error) => {
             return Err((error, command_rx));
@@ -2777,7 +2783,7 @@ impl NodeCore {
                     restart_count: 0,
                     worker_running: *state != NodeRuntimeState::Shutdown,
                     cluster_status: cluster.cluster_status_report().ok(),
-                    wal_lifecycle_status: wal.as_ref().map(PersistentRaftWal::status),
+                    wal_lifecycle_status: wal.as_ref().map(|wal| wal.status()),
                     wal_recovery_report: Some(last_wal_recovery_report.to_report()),
                     snapshot_trigger_status: cluster.snapshot_trigger_status(),
                     timer_status: RuntimeTimerStatus {
@@ -2814,7 +2820,7 @@ impl NodeCore {
             NodeRuntimeOp::WalLifecycleStatus(reply) => {
                 let result = wal
                     .as_ref()
-                    .map(PersistentRaftWal::status)
+                    .map(|wal| wal.status())
                     .ok_or_else(|| RaftError::Storage("WAL is not available".to_string()));
                 let _ = reply.send(result);
             }
@@ -3619,11 +3625,19 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// `NodeCore` from 680 to 672 bytes, saving another 64 KiB across 8,192 hosted
 /// groups while the moved-file guard keeps the same behavior.
 ///
-/// The native measurement with all twenty-five changes is 41 MiB at
-/// whole-MiB resolution for 8,192 live groups, or **4 KiB per group**; the
+/// The WAL handle owns files and segment storage independently of the state a
+/// tick walks. Keeping that 168-byte handle behind one pointer narrows
+/// `NodeCore` from 672 to 512 bytes, saving another 1,280 KiB across 8,192
+/// hosted groups while every persistence path keeps borrowing the same handle.
+///
+/// The native measurement with all twenty-six changes is 30 MiB at
+/// whole-MiB resolution for 8,192 live groups, or **3 KiB per group**; the
 /// allocation profiles above resolve reductions that RSS rounding does not.
-/// The handler-directory reduction is below that whole-MiB resolution. The
-/// process is down from 43 MiB before compacting the server route directory,
+/// The exact layout reduction is the attributable result here: fresh-process
+/// RSS also moves with allocator page residency, so the larger difference from
+/// the preceding 41 MiB run is not assigned wholly to this change. The
+/// handler-directory reduction is below that whole-MiB resolution. Earlier
+/// process readings were 43 MiB before compacting the server route directory,
 /// 44 MiB before compacting the consensus node directory, 45 MiB before
 /// compacting the compatibility peer directory, 46 MiB before compacting the
 /// pipeline directory, 47 MiB before sharing the lifecycle replies, 48 MiB
@@ -3728,8 +3742,8 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// roughly twice as many cold groups; a host expecting every group to write
 /// still sizes `RLIMIT_NOFILE` above twice the group count.
 ///
-/// Measured after idle release and the eighteen memory changes: 8,192 live groups
-/// under that unchanged 10,240 limit all started, retained 41 MiB, and delivered
+/// Measured after idle release and the twenty-six memory changes: 8,192 live groups
+/// under that unchanged 10,240 limit all started, retained 30 MiB, and delivered
 /// 99.9% of their ticks at a one-second interval. Before idle release, starting
 /// those groups opened a segment for each one and crossed the limit before the
 /// store was live. Before the memory changes, the same run retained 171 MiB;
@@ -4352,8 +4366,9 @@ mod runtime_command_queue_tests {
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
-            std::mem::size_of::<NodeCore>() <= 672,
-            "cold runtime state widened NodeCore"
+            std::mem::size_of::<NodeCore>() == 512,
+            "NodeCore changed width. Keeping the 168-byte WAL handle behind one \
+             pointer removed 160 inline bytes from every hosted group."
         );
         assert!(
             std::mem::size_of::<PersistentRaftWal>() <= 168,
