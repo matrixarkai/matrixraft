@@ -2450,8 +2450,8 @@ impl DurablePeer {
         result
     }
     /// Start a quorum-confirmed read without appending an application entry.
-    /// Only one read may be outstanding. Keep polling after a caller timeout:
-    /// forgetting an unresolved read would allow unbounded consensus contexts.
+    /// Only one read may be outstanding. After a caller timeout, keep polling
+    /// or explicitly cancel the token to release its consensus context.
     /// The token is local to this open peer and is not a durable identifier.
     pub fn begin_read(&mut self) -> Result<u64, RaftError> {
         self.healthy()?;
@@ -2481,6 +2481,45 @@ impl DurablePeer {
         self.pending_read = Some(read);
         Ok(self.read_sequence)
     }
+    /// Cancel only the matching local read. False leaves any newer read intact.
+    /// Already delivered packets cannot be recalled; their old contexts cannot
+    /// confirm a later token. No application entry or WAL record is appended.
+    pub fn cancel_read(&mut self, token: u64) -> Result<bool, RaftError> {
+        self.healthy()?;
+        let Some(read) = self
+            .pending_read
+            .as_ref()
+            .filter(|read| read.token == token)
+        else {
+            return Ok(false);
+        };
+        let context = read.context();
+        self.pending_read = None;
+        let core = &mut self.raw.raft;
+        core.read_only.pending_read_index.remove(context.as_slice());
+        core.read_only
+            .read_index_queue
+            .retain(|queued| queued != &context);
+        core.read_states
+            .retain(|ready| ready.request_ctx != context);
+        for message in &mut core.msgs {
+            if message.get_msg_type() == MessageType::MsgHeartbeat && message.context == context {
+                message.context.clear();
+            }
+        }
+        // Preserve liveness and the latest commit position without retaining
+        // one redundant heartbeat per canceled client request.
+        let mut seen = BTreeSet::new();
+        core.msgs.reverse();
+        core.msgs.retain(|message| {
+            message.get_msg_type() != MessageType::MsgHeartbeat
+                || !message.context.is_empty()
+                || seen.insert((message.from, message.to, message.term))
+        });
+        core.msgs.reverse();
+        Ok(true)
+    }
+
     /// True consumes a quorum confirmation whose index has applied locally.
     /// Process and deliver Ready packets between polls. A lost leadership term
     /// invalidates the token; a local clock or an old confirmation cannot serve it.
@@ -4885,6 +4924,29 @@ mod tests {
         std::fs::remove_file(path.with_extension("runtime.lock")).unwrap();
         std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn canceling_ready_reads_releases_core_confirmations() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut peer = DurablePeer::open(options(directory.path().join("peer.wal"))).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let bytes = peer.persisted_wal_bytes().unwrap();
+        for _ in 0..64 {
+            let token = peer.begin_read().unwrap();
+            assert_eq!(peer.raw.raft.ready_read_count(), 1);
+            assert!(peer.cancel_read(token).unwrap());
+            assert_eq!(peer.raw.raft.ready_read_count(), 0);
+            assert_eq!(peer.raw.raft.pending_read_count(), 0);
+            assert!(peer.poll_read(token).is_err());
+        }
+        let token = peer.begin_read().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        assert!(peer.poll_read(token).unwrap());
+        assert!(!peer.cancel_read(token).unwrap());
+        assert_eq!(peer.persisted_wal_bytes().unwrap(), bytes);
+    }
+
     #[test]
     fn packet_decoder_rejects_local_commands_and_deep_unknown_groups() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();
