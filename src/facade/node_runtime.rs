@@ -3970,6 +3970,11 @@ impl SharedGroupRuntime {
     /// number is what bounds how many groups can be ticked, and tying it to
     /// `worker_num` means one setting still describes the whole runtime.
     pub fn start(options: DriverOptions) -> Result<Self, RaftError> {
+        Self::start_with_executor_count(options, options.worker_num)
+    }
+
+    /// Start with independently sized ticker shards and command executors.
+    pub fn start_with_executor_count(options: DriverOptions, executors: usize) -> Result<Self, RaftError> {
         let shards = options.worker_num.max(1);
         let mut tickers = Vec::with_capacity(shards);
         for _ in 0..shards {
@@ -3982,7 +3987,10 @@ impl SharedGroupRuntime {
         }
         Ok(Self {
             tickers,
-            pool: Arc::new(DriverWorkerPool::start(options)?),
+            pool: Arc::new(DriverWorkerPool::start(DriverOptions {
+                worker_num: executors.max(1),
+                ..options
+            })?),
             max_each_visit: options.max_messages_each_poll.max(1),
             counters: Arc::new(TickCounters::default()),
             hosted_groups: std::sync::atomic::AtomicUsize::new(0),
