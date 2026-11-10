@@ -886,6 +886,59 @@ fn snapshot_backed_recycling_waits_for_flush_and_recovers() {
     check_snapshot_backed_recycling(u64::MAX);
 }
 
+#[test]
+fn flushed_logs_recycle_without_a_snapshot_and_keep_the_boundary_term() {
+    let dir = temp_runtime_dir("durable-boundary-recycling");
+    let mut options = node_options_in(dir.clone());
+    options.config = options.config.with_applied_log_byte_threshold(1);
+    options.config.max_segment_bytes = 1024;
+    options.config.min_keep_segment_num = 2;
+    let mut runtime = NodeRuntime::create(options.clone()).expect("create");
+    runtime.start().expect("start");
+    let mut last = LogId { term: 1, index: 1 };
+    for _ in 0..30 {
+        last = runtime.propose(vec![9; 256]).expect("write");
+    }
+    assert_eq!(runtime.recycle_applied_logs(0).expect("unflushed"), 0);
+    let flushed = last.index - 5;
+    assert!(runtime.recycle_applied_logs(flushed).expect("recycle") > 0);
+    runtime.shutdown().expect("shutdown");
+    let mut recovered = NodeRuntime::create(options).expect("recover");
+    recovered.start().expect("start recovered");
+    let record = recovered
+        .wal_recovery_report()
+        .expect("report")
+        .expect("recovery occurred")
+        .recovered
+        .expect("record");
+    assert_eq!(
+        record.entries.first().expect("boundary").log_id,
+        LogId {
+            term: last.term,
+            index: flushed
+        }
+    );
+    assert_eq!(record.entries.last().expect("tail").log_id, last);
+    assert_eq!(record.entries.len(), 6);
+    let local = recovered
+        .status()
+        .expect("status")
+        .cluster_status
+        .expect("cluster")
+        .nodes
+        .into_iter()
+        .find(|node| node.node_id == 1)
+        .expect("local");
+    assert_eq!(local.last_snapshot_index, 0);
+    assert_eq!(local.applied_index, last.index);
+    let next = recovered
+        .propose(vec![7; 32])
+        .expect("append after recycled boundary");
+    assert!(next.index > last.index);
+    recovered.shutdown().expect("shutdown recovered");
+    fs::remove_dir_all(dir).expect("cleanup");
+}
+
 fn check_snapshot_backed_recycling(threshold: u64) {
     let dir = temp_runtime_dir("snapshot-recycling");
     let mut options = node_options_in(dir.clone());

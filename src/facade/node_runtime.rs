@@ -1471,7 +1471,7 @@ impl NodeRuntime {
         }
     }
 
-    /// Reclaim byte-pressure logs covered by a durable FSM and local snapshot.
+    /// Reclaim byte-pressure logs behind durable FSM and replication frontiers.
     pub fn recycle_applied_logs(&self, flushed_index: LogIndex) -> Result<u64, RaftError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.sender()?
@@ -2180,7 +2180,16 @@ fn recycle_runtime_applied_logs(
     let node = cluster.nodes.get(&node_id).ok_or(RaftError::NodeNotFound(node_id))?;
     let snapshot_index = node.installed_snapshot.as_ref()
         .map(|snapshot| snapshot.meta.last_log_id.index).unwrap_or(0);
-    let through = flushed_index.min(node.safety_applied_index).min(snapshot_index);
+    let durable_boundary = flushed_index.min(node.safety_applied_index);
+    let through = if snapshot_index > 0 {
+        durable_boundary.min(snapshot_index)
+    } else if cluster.config.can_trigger_snapshot {
+        // Keep the boundary entry itself: its term still anchors replication
+        // and recovery when no snapshot supplies that log identity.
+        durable_boundary.min(cluster.min_replicated_index(node_id)?).saturating_sub(1)
+    } else {
+        0
+    };
     if through == 0 || open_wal.status().total_bytes < threshold {
         return Ok(0);
     }
@@ -2192,9 +2201,13 @@ fn recycle_runtime_applied_logs(
         durable_applied_index: through,
         storage_flushed_index: flushed_index,
         installed_snapshot_index: snapshot_index,
-        first_retained_log_index: snapshot_index.saturating_add(1),
+        first_retained_log_index: snapshot_index.max(through).saturating_add(1),
     };
-    // Persist snapshot coverage before deleting any segment that supplied it.
+    if snapshot_index == 0 {
+        cluster.nodes.get_mut(&node_id).ok_or(RaftError::NodeNotFound(node_id))?
+            .compact_log_through(through);
+    }
+    // Persist the retained boundary before deleting any segment that supplied it.
     let appended = append_runtime_wal(cluster, open_wal, node_id);
     after_durable_write(cluster, node_id, appended)?;
     let report = open_wal.compact_through_with_fence(through, &fence)?;
