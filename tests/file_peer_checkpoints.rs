@@ -2,7 +2,7 @@
 // Copyright 2026 MatrixArkAI
 #![cfg(feature = "peer-runtime")]
 use matrixraft::{
-    peer_runtime::{DurablePeer, PeerOptions},
+    peer_runtime::{DurablePeer, PeerOptions, RestoreDecision},
     RaftError,
 };
 use std::{collections::BTreeMap, io::Read};
@@ -52,6 +52,65 @@ impl Read for Generated {
         Ok(n)
     }
 }
+
+#[test]
+fn file_checkpoint_restore_can_retry_from_the_beginning_without_loading_the_payload() {
+    let _exercise = EXERCISE.lock().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let options = PeerOptions {
+        group_id: 17,
+        node_id: 1,
+        voters: vec![1],
+        wal_path: root.path().join("peer.wal"),
+    };
+    let mut peer = DurablePeer::open(options.clone()).unwrap();
+    peer.campaign().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    let position = peer.applied_index();
+    let length = 128 * 1024;
+    let mut generated = Generated {
+        remaining: length,
+        value: 37,
+        largest: 0,
+    };
+    peer.checkpoint_from_reader(&mut generated, length).unwrap();
+    drop(peer);
+    let mut peer = DurablePeer::open(options).unwrap();
+    assert_eq!(peer.applied_index(), 0);
+    for _ in 0..3 {
+        peer.process_ready_batch_with_restore(
+            |_| panic!("unexpected suffix"),
+            |_, reader, size| {
+                assert_eq!(size, length);
+                let mut first = [0; 8];
+                reader.read_exact(&mut first).unwrap();
+                assert_eq!(first, [37; 8]);
+                Ok(RestoreDecision::Retry)
+            },
+        )
+        .unwrap();
+        assert_eq!(peer.applied_index(), 0);
+        assert!(peer.has_ready());
+    }
+    peer.process_ready_batch_with_restore(
+        |_| panic!("unexpected suffix"),
+        |_, reader, size| {
+            let mut remaining = size;
+            let mut buffer = [0; 8192];
+            while remaining > 0 {
+                let count = remaining.min(buffer.len() as u64) as usize;
+                reader.read_exact(&mut buffer[..count]).unwrap();
+                assert!(buffer[..count].iter().all(|byte| *byte == 37));
+                remaining -= count as u64;
+            }
+            Ok(RestoreDecision::Restored)
+        },
+    )
+    .unwrap();
+    assert_eq!(peer.applied_index(), position);
+    assert!(!peer.has_ready());
+}
+
 fn drive(
     peers: &mut BTreeMap<u64, DurablePeer>,
     states: &mut BTreeMap<u64, State>,

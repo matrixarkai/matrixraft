@@ -125,6 +125,14 @@ pub enum ApplyDecision {
     Retry,
 }
 
+/// A restore retry must leave the application unchanged. Each attempt receives
+/// a fresh reader at the beginning of the already persisted checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreDecision {
+    Restored,
+    Retry,
+}
+
 /// One borrowed application entry, including empty election no-ops.
 #[derive(Clone, Debug)]
 pub struct ApplicationEntry<'a> {
@@ -2021,7 +2029,8 @@ pub struct DurablePeer {
     failed: bool,
     read_sequence: u64,
     pending_read: Option<PendingRead>,
-    restore_on_open: Option<Arc<Snapshot>>,
+    pending_restore: Option<Arc<Snapshot>>,
+    restore_floor: u64,
     snapshot_flights: BTreeMap<u64, (u64, u64, u8)>,
     stream: snapshot_stream::Stream,
     incoming_payload: Option<(LogId, Arc<checkpoint_file::Blob>)>,
@@ -2069,8 +2078,8 @@ impl DurablePeer {
             payload: Arc::new(Mutex::new(None)),
         };
         let journal = Journal::open(&options, &store)?;
-        let restore_on_open = store.checkpoint.lock().unwrap().clone();
-        config.applied = restore_on_open
+        let pending_restore = store.checkpoint.lock().unwrap().clone();
+        config.applied = pending_restore
             .as_ref()
             .map_or(0, |s| s.get_metadata().index);
         let logger = slog::Logger::root(slog::Discard, slog::o!());
@@ -2097,7 +2106,8 @@ impl DurablePeer {
             failed: false,
             read_sequence: 0,
             pending_read: None,
-            restore_on_open,
+            pending_restore,
+            restore_floor: 0,
             snapshot_flights: BTreeMap::new(),
             stream,
             incoming_payload: None,
@@ -2146,8 +2156,14 @@ impl DurablePeer {
     pub fn commit_index(&self) -> u64 {
         self.raw.raft.raft_log.committed
     }
+    /// Last application position. A fresh application reports zero until its
+    /// persisted checkpoint has been successfully restored.
     pub fn applied_index(&self) -> u64 {
-        self.raw.raft.raft_log.applied
+        if self.pending_restore.is_some() {
+            self.restore_floor
+        } else {
+            self.raw.raft.raft_log.applied
+        }
     }
     /// Current persisted WAL file length, excluding checkpoint payload files.
     /// Updated by successful Ready persistence and checkpoint replacement;
@@ -2429,7 +2445,7 @@ impl DurablePeer {
         self.healthy()?;
         if self.has_ready()
             || self.pending_read.is_some()
-            || self.restore_on_open.is_some()
+            || self.pending_restore.is_some()
             || self.applied_index() == 0
         {
             return Err(invalid("checkpoint capture requires settled applied state"));
@@ -2507,7 +2523,7 @@ impl DurablePeer {
         if data.len() > MAX_CHECKPOINT_BYTES
             || self.has_ready()
             || self.pending_read.is_some()
-            || self.restore_on_open.is_some()
+            || self.pending_restore.is_some()
             || self.applied_index() == 0
         {
             return Err(invalid(
@@ -2931,7 +2947,7 @@ impl DurablePeer {
     /// in-flight host reads and checkpoint transfers, which still need completion polling.
     pub fn has_ready(&self) -> bool {
         !self.failed
-            && (self.restore_on_open.is_some()
+            && (self.pending_restore.is_some()
                 || self.raw.has_ready()
                 || self.pending_apply > self.applied_index())
     }
@@ -3008,8 +3024,21 @@ impl DurablePeer {
     /// restore errors remain fatal and cannot request Retry.
     pub fn process_ready_retryable_with_snapshot_reader(
         &mut self,
+        apply: impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
+        mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
+    ) -> Result<Vec<PeerPacket>, RaftError> {
+        self.process_ready_retryable_with_restore(apply, |id, reader, length| {
+            restore(id, reader, length).map(|()| RestoreDecision::Restored)
+        })
+    }
+
+    /// Retryable entries and checkpoint restoration. A restore Retry blocks all
+    /// suffix application, but not durable consensus. Back off restore attempts
+    /// while continuing ticks, packet delivery, and Ready processing.
+    pub fn process_ready_retryable_with_restore(
+        &mut self,
         mut apply: impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
-        restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
+        restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         self.process_application(
             |entries| {
@@ -3057,8 +3086,20 @@ impl DurablePeer {
     /// entries are applied internally between batches, in log order.
     pub fn process_ready_batch_with_snapshot_reader(
         &mut self,
+        apply: impl FnMut(ApplicationBatch<'_>) -> Result<usize, RaftError>,
+        mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
+    ) -> Result<Vec<PeerPacket>, RaftError> {
+        self.process_ready_batch_with_restore(apply, |id, reader, length| {
+            restore(id, reader, length).map(|()| RestoreDecision::Restored)
+        })
+    }
+
+    /// Borrowed application batches with retryable checkpoint restoration.
+    /// Restore errors remain fatal; only an explicit Retry defers the image.
+    pub fn process_ready_batch_with_restore(
+        &mut self,
         mut apply: impl FnMut(ApplicationBatch<'_>) -> Result<usize, RaftError>,
-        restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
+        restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         self.process_application(
             |entries| match apply(ApplicationBatch { entries }) {
@@ -3078,7 +3119,7 @@ impl DurablePeer {
     fn process_application(
         &mut self,
         mut apply: impl FnMut(&[Entry]) -> ApplyProgress,
-        mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
+        mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         self.healthy()?;
         let result = (|| {
@@ -3088,9 +3129,6 @@ impl DurablePeer {
             if let Ok(Some(message)) = self.stream.poll_finished(self.term(), &self.options.voters)
             {
                 self.accept_received_checkpoint(message)?;
-            }
-            if let Some(snapshot) = self.restore_on_open.take() {
-                self.restore_payload(&snapshot, &mut restore)?;
             }
             let mut output = self.process_inner(&mut apply, &mut restore)?;
             // Raft may advance through matching entries without installing the received image.
@@ -3106,7 +3144,7 @@ impl DurablePeer {
         })();
         if result.is_err() {
             self.failed = true;
-        } else if self.applied_index() >= self.commit_index() {
+        } else if self.pending_restore.is_none() && self.applied_index() >= self.commit_index() {
             self.recovering_membership = false;
         }
         result
@@ -3114,8 +3152,8 @@ impl DurablePeer {
     fn restore_payload(
         &self,
         snapshot: &Snapshot,
-        restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
-    ) -> Result<(), RaftError> {
+        restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
+    ) -> Result<RestoreDecision, RaftError> {
         let id = LogId {
             index: snapshot.get_metadata().index,
             term: snapshot.get_metadata().term,
@@ -3129,11 +3167,24 @@ impl DurablePeer {
             .as_ref()
             .map_or(snapshot.data.len() as u64, |p| p.manifest.length);
         let mut limited = reader.by_ref().take(length);
-        restore(id, &mut limited, length)?;
-        if limited.limit() != 0 {
+        let decision = restore(id, &mut limited, length)?;
+        if decision == RestoreDecision::Restored && limited.limit() != 0 {
             return Err(storage_error(
                 "checkpoint restore did not consume the payload",
             ));
+        }
+        Ok(decision)
+    }
+    fn attempt_restore(
+        &mut self,
+        restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
+    ) -> Result<(), RaftError> {
+        let Some(snapshot) = self.pending_restore.clone() else {
+            return Ok(());
+        };
+        if self.restore_payload(&snapshot, restore)? == RestoreDecision::Restored {
+            self.raw.advance_apply_to(snapshot.get_metadata().index);
+            self.pending_restore = None;
         }
         Ok(())
     }
@@ -3197,20 +3248,23 @@ impl DurablePeer {
     fn process_inner(
         &mut self,
         apply: &mut impl FnMut(&[Entry]) -> ApplyProgress,
-        restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
+        restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         let mut output = Vec::new();
         let mut deferred = false;
         let mut applied_batch = false;
+        let mut restore_attempted = false;
         loop {
             if !self.raw.has_ready() {
-                if !deferred && !applied_batch {
+                if !restore_attempted {
+                    self.attempt_restore(restore)?;
+                }
+                if self.pending_restore.is_none() && !deferred && !applied_batch {
                     self.apply_waiting(Vec::new(), apply)?;
                 }
                 break;
             }
             let mut ready = self.raw.ready();
-            let mut restored = None;
             for confirmation in ready.take_read_states() {
                 if let Some(read) = &mut self.pending_read {
                     if confirmation.request_ctx == read.context() {
@@ -3219,6 +3273,7 @@ impl DurablePeer {
                 }
             }
             if !ready.snapshot().is_empty() {
+                let restore_floor = self.applied_index();
                 let snapshot = Arc::new(ready.snapshot().clone());
                 validate_snapshot_for(&snapshot, &self.options.voters, &self.store.permitted)?;
                 let hs = ready
@@ -3253,8 +3308,9 @@ impl DurablePeer {
                 // Receive finalization already validated and synced this owned
                 // payload. Reuse it without scanning it again on the Raft loop.
                 install_received(&self.store, &record, Arc::clone(&snapshot), payload)?;
-                self.restore_payload(&snapshot, restore)?;
-                restored = Some(position.index);
+                self.restore_floor = restore_floor;
+                self.pending_apply = self.pending_apply.max(position.index);
+                self.pending_restore = Some(snapshot);
                 self.incoming_payload = None;
             } else if ready.hs().is_some() || !ready.entries().is_empty() {
                 let mut record = batch(&self.options, ready.hs(), &[]);
@@ -3284,11 +3340,11 @@ impl DurablePeer {
             let number = ready.number();
             self.raw.advance_append_async(ready);
             self.raw.on_persist_ready(number);
-            if let Some(index) = restored {
-                self.pending_apply = self.pending_apply.max(index);
-                self.raw.advance_apply_to(index);
+            if !restore_attempted && self.pending_restore.is_some() {
+                self.attempt_restore(restore)?;
+                restore_attempted = true;
             }
-            if !deferred {
+            if self.pending_restore.is_none() && !deferred {
                 deferred = self.apply_waiting(entries, apply)?;
                 applied_batch = true;
             }
@@ -5099,7 +5155,7 @@ mod tests {
             let retained = restored.store.checkpoint.lock().unwrap().clone().unwrap();
             assert!(Arc::ptr_eq(
                 &retained,
-                restored.restore_on_open.as_ref().unwrap()
+                restored.pending_restore.as_ref().unwrap()
             ));
             assert_eq!(retained.data.len(), length);
             assert_eq!(restored.store.first_index().unwrap(), position + 1);
@@ -5127,7 +5183,7 @@ mod tests {
                 )
                 .unwrap();
             assert!(seen);
-            assert!(restored.restore_on_open.is_none());
+            assert!(restored.pending_restore.is_none());
             assert_eq!(retained.data.len(), length);
         }
     }

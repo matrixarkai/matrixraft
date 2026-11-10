@@ -124,6 +124,25 @@ read ordering, byte targets, and restart requirements still apply.
 `process_ready_batch_with_snapshot_reader` adds streaming checkpoint restoration
 before suffix application. The per-entry APIs remain available unchanged.
 
+`process_ready_retryable_with_restore` and `process_ready_batch_with_restore`
+accept a restore callback returning `RestoreDecision::Restored` or `Retry`.
+`Restored` requires consuming the entire declared image. `Retry` may stop reading
+early, but must leave the application unchanged; the next attempt receives a new
+reader starting at byte zero. The synced checkpoint is reused, including after
+restart, without requiring another transfer or a full in-memory payload copy.
+The callback is attempted at most once per Ready-processing call.
+
+A pending image blocks all suffix application and application-dependent reads,
+but durable consensus and replication can continue. `applied_index()` stays at
+the position accepted by the application before the incoming image; a fresh
+application reopening a checkpoint reports zero until restoration succeeds.
+Membership-enabled startup recovery remains closed until restoration and replay
+finish. A newer accepted checkpoint supersedes an older pending image.
+`has_ready()` remains true while restoration is pending: back off restore attempts
+while continuing ticks, packets, and Ready. Errors and incomplete `Restored`
+results remain fatal. The original restore APIs retain their success-or-error
+contract and do not implicitly retry an error.
+
 Hosts may submit several proposals or already-queued incoming packets on the same
 exclusive peer worker before calling `process_ready`. Bound each batch by count,
 bytes, and elapsed time; do not wait for a batch to fill or starve ticks and Ready

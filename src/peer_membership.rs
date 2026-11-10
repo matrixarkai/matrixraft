@@ -149,7 +149,7 @@ impl DurablePeer {
             return Err(RaftError::NotLeader(self.node_id()));
         }
         if self.has_ready()
-            || self.restore_on_open.is_some()
+            || self.pending_restore.is_some()
             || self.raw.raft.pending_conf_index > self.applied_index()
         {
             return Err(invalid(
