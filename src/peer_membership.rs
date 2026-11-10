@@ -225,21 +225,8 @@ impl DurablePeer {
             index,
         })
     }
-    pub(super) fn apply_committed(
-        &mut self,
-        entry: Entry,
-        apply: &mut impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
-    ) -> Result<ApplyDecision, RaftError> {
-        if entry.entry_type == EntryType::EntryNormal as i32 {
-            return apply(
-                LogId {
-                    term: entry.term,
-                    index: entry.index,
-                },
-                &entry.data,
-            );
-        }
-        let change = decode_change(&entry, &self.store.permitted)?;
+    pub(super) fn apply_committed_membership(&mut self, entry: &Entry) -> Result<(), RaftError> {
+        let change = decode_change(entry, &self.store.permitted)?;
         let conf = self.raw.apply_conf_change(&change).map_err(invalid)?;
         validate_conf(&conf, &self.store.permitted)?;
         let local_voter =
@@ -250,6 +237,6 @@ impl DurablePeer {
         }
         // A caller must start a new read under the committed configuration.
         self.pending_read = None;
-        Ok(ApplyDecision::Applied)
+        Ok(())
     }
 }

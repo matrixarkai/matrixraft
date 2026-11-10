@@ -108,6 +108,22 @@ remain fatal, just as with the original APIs. Reopening rebuilds a fresh or
 idempotent application from the checkpoint and committed log, including work
 that was deferred before restart.
 
+`process_ready_batch` supplies an `ApplicationBatch` view of contiguous committed
+application entries. Its `iter()` and `get()` expose each entry's `position` and
+borrowed `payload` without constructing a payload copy or an array of views.
+Empty election no-ops are included. Membership changes are handled internally
+between batches, never hidden inside a supplied application batch.
+
+Return the number of entries consumed from the front, in `0..=batch.len()`.
+Returning the full length consumes the batch; a shorter count defers only its
+remaining suffix and all later application work. The returned count must match
+the effects successfully committed by the application. Zero consumption requests
+retry without applying anything. Batch errors and counts beyond the supplied
+length stop the peer; they do not mark the batch applied. Existing retry backoff,
+read ordering, byte targets, and restart requirements still apply.
+`process_ready_batch_with_snapshot_reader` adds streaming checkpoint restoration
+before suffix application. The per-entry APIs remain available unchanged.
+
 Hosts may submit several proposals or already-queued incoming packets on the same
 exclusive peer worker before calling `process_ready`. Bound each batch by count,
 bytes, and elapsed time; do not wait for a batch to fill or starve ticks and Ready
