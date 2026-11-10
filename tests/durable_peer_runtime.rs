@@ -150,6 +150,75 @@ fn pump(peers: &mut BTreeMap<u64, DurablePeer>, applied: &mut Applied, isolated:
     }
     panic!("peer message exchange did not settle");
 }
+
+fn pump_async_reads(peers: &mut BTreeMap<u64, DurablePeer>, applied: &mut Applied) -> usize {
+    let mut reads = 0;
+    for _ in 0..200 {
+        let mut packets = Vec::new();
+        let mut active = false;
+        for (&id, peer) in peers.iter_mut() {
+            let tasks = peer.take_log_read_tasks().unwrap();
+            assert!(
+                tasks.len() <= 1,
+                "the configured outstanding bound must hold"
+            );
+            for task in tasks {
+                reads += 1;
+                active = true;
+                let completion = std::thread::spawn(move || task.execute()).join().unwrap();
+                assert!(peer.complete_log_read(completion).unwrap());
+            }
+            packets.extend(
+                peer.process_ready(|log, payload| {
+                    applied
+                        .entry(id)
+                        .or_default()
+                        .push((log.index, payload.to_vec()));
+                    Ok(())
+                })
+                .unwrap(),
+            );
+        }
+        if packets.is_empty() && !active {
+            return reads;
+        }
+        for packet in packets {
+            peers
+                .get_mut(&packet.to)
+                .unwrap()
+                .step(&packet.bytes)
+                .unwrap();
+        }
+    }
+    panic!("asynchronous replication did not quiesce");
+}
+
+#[test]
+fn durable_read_completions_resume_replication_to_a_lagging_voter() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let baseline = applied.get(&1).unwrap().len();
+    for value in 0..20u8 {
+        group.get_mut(&1).unwrap().propose(vec![value; 64]).unwrap();
+        pump(&mut group, &mut applied, Some(3));
+    }
+    group
+        .get_mut(&1)
+        .unwrap()
+        .enable_async_log_reads(1)
+        .unwrap();
+    let mut reads = 0;
+    for _ in 0..6 {
+        group.get_mut(&1).unwrap().tick().unwrap();
+        reads += pump_async_reads(&mut group, &mut applied);
+    }
+    assert!(reads > 0, "catch-up must consume durable read completions");
+    assert_eq!(applied.get(&3), applied.get(&1));
+    assert_eq!(applied.get(&3).unwrap().len(), baseline + 20);
+}
 fn peers(dir: &Directory) -> BTreeMap<u64, DurablePeer> {
     (1..=3)
         .map(|id| {
