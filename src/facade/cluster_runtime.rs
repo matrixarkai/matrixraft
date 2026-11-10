@@ -914,6 +914,118 @@ struct ReorderedAppend {
     membership_change_indexes: Vec<LogIndex>,
 }
 
+fn reordered_append_heap_bytes(reordered: &ReorderedAppend) -> u64 {
+    let entry_storage = reordered
+        .request
+        .entries
+        .capacity()
+        .saturating_mul(std::mem::size_of::<LogEntry>());
+    let membership_storage = reordered
+        .membership_change_indexes
+        .capacity()
+        .saturating_mul(std::mem::size_of::<LogIndex>());
+    reordered.request.entries.iter().fold(
+        u64::try_from(entry_storage.saturating_add(membership_storage)).unwrap_or(u64::MAX),
+        |bytes, entry| {
+            bytes.saturating_add(u64::try_from(entry.payload.capacity()).unwrap_or(u64::MAX))
+        },
+    )
+}
+
+/// Whole rejected append requests retained for one follower.
+///
+/// The byte total lives beside the allocated map rather than in `RaftCluster`,
+/// so an idle group pays nothing for it. Custom serde keeps the existing map on
+/// the wire and rebuilds the derived total when a cluster is restored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ReorderQueue {
+    entries: BTreeMap<LogIndex, ReorderedAppend>,
+    heap_bytes: u64,
+}
+
+impl ReorderQueue {
+    fn insert(&mut self, index: LogIndex, reordered: ReorderedAppend) {
+        let added_bytes = reordered_append_heap_bytes(&reordered);
+        if let Some(replaced) = self.entries.insert(index, reordered) {
+            self.heap_bytes = self
+                .heap_bytes
+                .saturating_sub(reordered_append_heap_bytes(&replaced));
+        }
+        self.heap_bytes = self.heap_bytes.saturating_add(added_bytes);
+    }
+
+    fn remove(&mut self, index: &LogIndex) -> Option<ReorderedAppend> {
+        let removed = self.entries.remove(index)?;
+        self.heap_bytes = self
+            .heap_bytes
+            .saturating_sub(reordered_append_heap_bytes(&removed));
+        Some(removed)
+    }
+
+    fn retain_nearest(
+        &mut self,
+        index: LogIndex,
+        reordered: ReorderedAppend,
+        max_entries: usize,
+        max_heap_bytes: u64,
+    ) {
+        // A retransmission for the same position supersedes the older request.
+        // Remove it before applying the bounds so stale entries cannot survive
+        // merely because the replacement is larger.
+        self.remove(&index);
+        let candidate_bytes = reordered_append_heap_bytes(&reordered);
+        if candidate_bytes > max_heap_bytes {
+            return;
+        }
+        while self.entries.len() >= max_entries
+            || self.heap_bytes.saturating_add(candidate_bytes) > max_heap_bytes
+        {
+            let Some((&farthest_index, _)) = self.entries.last_key_value() else {
+                return;
+            };
+            if farthest_index <= index {
+                return;
+            }
+            self.remove(&farthest_index)
+                .expect("the farthest queued append exists");
+        }
+        self.insert(index, reordered);
+    }
+
+    fn next_at_or_before(&self, index: LogIndex) -> Option<LogIndex> {
+        self.entries.range(..=index).next().map(|(key, _)| *key)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Serialize for ReorderQueue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.entries.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReorderQueue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let entries = BTreeMap::<LogIndex, ReorderedAppend>::deserialize(deserializer)?;
+        let heap_bytes = entries.values().fold(0_u64, |bytes, reordered| {
+            bytes.saturating_add(reordered_append_heap_bytes(reordered))
+        });
+        Ok(Self {
+            entries,
+            heap_bytes,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct PendingSnapshotInstall {
     snapshot: RaftSnapshot,
@@ -1075,10 +1187,12 @@ pub struct RaftCluster {
     /// **Not the capped reorder queue.** `ReplicationPipeline` keeps one too, and
     /// that one is gated by `enable_reorder_queue`, held to `reorder_window_size`
     /// (default 1024) with a counter for what it turns away, dropped on
-    /// `reorder_timeout_us`, and published as `reorder_queue_depth`. This queue has
-    /// no window, no timeout and no counter, and it stores whole
-    /// `AppendEntriesRequest`s rather than a set of indexes: 64 rejected appends
-    /// cached 64 requests, roughly 96% of the retained bytes being entry payload.
+    /// `reorder_timeout_us`, and published as `reorder_queue_depth`. This queue
+    /// stores whole `AppendEntriesRequest`s rather than a set of indexes, so it
+    /// is bounded by both `reorder_window_size` and
+    /// `max_memory_replicate_log_bytes`. When full, it keeps the requests nearest
+    /// the follower's current match index because those are the ones a filled
+    /// hole can release first.
     ///
     /// Everything that carries the name reads the *other* queue.
     /// `expire_peer_reorder_queue` and `AdminCommand::ExpirePeerReorderQueue` go to
@@ -1088,12 +1202,11 @@ pub struct RaftCluster {
     /// nowhere outside this file, so draining it is not something an operator can
     /// ask for.
     ///
-    /// What holds it down is the rejection itself: an append past `match_index` is
-    /// answered with `rejection_hint: Some(match_index + 1)`, so a leader that
-    /// honours the hint caches nothing at all. Growth needs a driver that keeps
-    /// pipelining past a rejection, and a drain only clears the contiguous run --
-    /// filling one hole left 63 of 64 cached. See `tests/reorder_queue_window.rs`.
-    reorder_queues: SparseMap<NodeId, BTreeMap<LogIndex, ReorderedAppend>>,
+    /// An append past `match_index` is still answered with
+    /// `rejection_hint: Some(match_index + 1)`, so a leader that honours the hint
+    /// caches nothing at all. The bound protects a follower from a driver that
+    /// keeps pipelining past that rejection. See `tests/reorder_queue_window.rs`.
+    reorder_queues: SparseMap<NodeId, ReorderQueue>,
     ignore_witness: bool,
     count_witness_in_commit_quorum: bool,
     prohibits_election: bool,
@@ -4683,13 +4796,29 @@ impl RaftCluster {
         let Some(prev_log_id) = request.prev_log_id.as_ref() else {
             return;
         };
-        self.reorder_queues.entry(target).or_default().insert(
-            prev_log_id.index,
-            ReorderedAppend {
-                request,
-                membership_change_indexes: membership_change_indexes.to_vec(),
-            },
-        );
+        let limits = self.config.pipeline_limits();
+        if !limits.enable_reorder_queue {
+            self.reorder_queues.remove(&target);
+            return;
+        }
+        let max_entries = usize::try_from(limits.reorder_window_size).unwrap_or(usize::MAX);
+        let prev_index = prev_log_id.index;
+        let queue_is_empty = {
+            let queue = self.reorder_queues.entry(target).or_default();
+            queue.retain_nearest(
+                prev_index,
+                ReorderedAppend {
+                    request,
+                    membership_change_indexes: membership_change_indexes.to_vec(),
+                },
+                max_entries,
+                limits.max_memory_replicate_log_bytes,
+            );
+            queue.is_empty()
+        };
+        if queue_is_empty {
+            self.reorder_queues.remove(&target);
+        }
     }
 
     fn drain_reordered_appends(&mut self, target: NodeId) -> Result<(), RaftError> {
@@ -4702,7 +4831,7 @@ impl RaftCluster {
             let next_key = self
                 .reorder_queues
                 .get(&target)
-                .and_then(|queue| queue.range(..=match_index).next().map(|(key, _)| *key));
+                .and_then(|queue| queue.next_at_or_before(match_index));
             let Some(prev_index) = next_key else {
                 break;
             };
@@ -4725,7 +4854,7 @@ impl RaftCluster {
         if self
             .reorder_queues
             .get(&target)
-            .is_some_and(BTreeMap::is_empty)
+            .is_some_and(ReorderQueue::is_empty)
         {
             self.reorder_queues.remove(&target);
         }
