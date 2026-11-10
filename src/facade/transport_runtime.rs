@@ -345,6 +345,11 @@ pub enum TcpRaftTransportRequest {
 /// than a request from cluster 0.
 pub const ANY_CLUSTER_ID: u64 = 0;
 
+/// The network generation used until a host explicitly advances it.
+///
+/// Zero keeps an upgraded receiver open to senders that predate the field.
+pub const DEFAULT_NETWORK_EPOCH: u64 = 0;
+
 /// Whether a request stamped `sender` may be served by a node in `local`.
 ///
 /// Equal ids talk. Either side being [`ANY_CLUSTER_ID`] talks, which is what
@@ -355,6 +360,15 @@ pub const ANY_CLUSTER_ID: u64 = 0;
 /// if nothing stops them.
 pub fn raft_clusters_may_talk(local: u64, sender: u64) -> bool {
     local == ANY_CLUSTER_ID || sender == ANY_CLUSTER_ID || local == sender
+}
+
+/// Whether a sender belongs to the receiver's current network generation.
+///
+/// A newer sender is accepted so hosts can raise senders before receivers
+/// during a rolling update. Only traffic from a generation the receiver has
+/// already retired is refused.
+pub fn raft_network_epoch_is_current(local: u64, sender: u64) -> bool {
+    sender >= local
 }
 
 /// A request with the sending transport's cluster id on it.
@@ -374,6 +388,10 @@ pub struct TcpRaftTransportEnvelope {
     /// was not told, or when the sender predates this field.
     #[serde(default)]
     pub cluster_id: u64,
+    /// The sending process generation. Missing on older wire shapes and read
+    /// as [`DEFAULT_NETWORK_EPOCH`].
+    #[serde(default, skip_serializing_if = "is_default_network_epoch")]
+    pub network_epoch: u64,
     /// Whatever the sending host chose to tell this peer, carried beside the
     /// request rather than inside it.
     ///
@@ -476,6 +494,9 @@ pub struct TcpRaftTransport {
     /// Stamped on every request this transport sends. [`ANY_CLUSTER_ID`]
     /// unless the host asked for one, which is why `Default` is still right.
     cluster_id: u64,
+    /// Read for every send so a host can retire an old process generation
+    /// without rebuilding transports or dropping their connection pools.
+    network_epoch: Arc<AtomicU64>,
     /// Consulted when a connect fails, if the host said addresses move.
     /// `None` is the static map this transport has always been.
     resolver: Option<Arc<dyn HeartbeatAddressResolver + Send + Sync>>,
@@ -501,6 +522,7 @@ impl std::fmt::Debug for TcpRaftTransport {
         f.debug_struct("TcpRaftTransport")
             .field("peers", &self.peers.lock().ok().map(|peers| peers.len()))
             .field("cluster_id", &self.cluster_id)
+            .field("network_epoch", &self.network_epoch.load(Ordering::Relaxed))
             .field("resolver", &self.resolver.is_some())
             .field("local_node_id", &self.local_node_id)
             .field("re_resolved", &self.re_resolved.load(Ordering::Relaxed))
@@ -590,6 +612,7 @@ impl TcpRaftTransport {
             peers: Arc::new(Mutex::new(peers)),
             idle: Arc::default(),
             cluster_id,
+            network_epoch: Arc::new(AtomicU64::new(DEFAULT_NETWORK_EPOCH)),
             resolver: None,
             local_node_id: 0,
             re_resolved: Arc::default(),
@@ -791,6 +814,17 @@ impl TcpRaftTransport {
         self.cluster_id
     }
 
+    /// Advances or restores the generation stamped on subsequent requests.
+    /// Clones share the same value and existing pooled connections remain
+    /// usable because the generation belongs to each request, not the socket.
+    pub fn set_network_epoch(&self, epoch: u64) {
+        self.network_epoch.store(epoch, Ordering::Relaxed);
+    }
+
+    pub fn network_epoch(&self) -> u64 {
+        self.network_epoch.load(Ordering::Relaxed)
+    }
+
     fn send_rpc(
         &self,
         target: NodeId,
@@ -810,6 +844,7 @@ impl TcpRaftTransport {
         };
         let envelope = TcpRaftTransportEnvelope {
             cluster_id: self.cluster_id,
+            network_epoch: self.network_epoch(),
             user_payload,
             request,
         };
@@ -980,6 +1015,7 @@ pub struct TcpRaftTransportServer {
     shutdown: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
     cluster_id: u64,
+    network_epoch: Arc<AtomicU64>,
     refused: Arc<AtomicU64>,
     observed_payloads: Arc<AtomicU64>,
 }
@@ -1068,6 +1104,8 @@ impl TcpRaftTransportServer {
         let worker_shutdown = Arc::clone(&shutdown);
         let refused = Arc::new(AtomicU64::new(0));
         let worker_refused = Arc::clone(&refused);
+        let network_epoch = Arc::new(AtomicU64::new(DEFAULT_NETWORK_EPOCH));
+        let worker_network_epoch = Arc::clone(&network_epoch);
         let observed_payloads = Arc::new(AtomicU64::new(0));
         let worker_observed = Arc::clone(&observed_payloads);
         let worker = thread::Builder::new()
@@ -1092,6 +1130,7 @@ impl TcpRaftTransportServer {
                             let conn_handler = Arc::clone(&handler);
                             let conn_shutdown = Arc::clone(&worker_shutdown);
                             let conn_refused = Arc::clone(&worker_refused);
+                            let conn_network_epoch = Arc::clone(&worker_network_epoch);
                             let conn_observer = observer.clone();
                             let conn_observed = Arc::clone(&worker_observed);
                             let spawned = thread::Builder::new()
@@ -1102,6 +1141,7 @@ impl TcpRaftTransportServer {
                                         conn_handler.as_ref(),
                                         &conn_shutdown,
                                         cluster_id,
+                                        &conn_network_epoch,
                                         &conn_refused,
                                         conn_observer,
                                         &conn_observed,
@@ -1126,6 +1166,7 @@ impl TcpRaftTransportServer {
             shutdown,
             worker: Some(worker),
             cluster_id,
+            network_epoch,
             refused,
             observed_payloads,
         })
@@ -1147,6 +1188,18 @@ impl TcpRaftTransportServer {
     /// The cluster this server serves. [`ANY_CLUSTER_ID`] serves everything.
     pub fn cluster_id(&self) -> u64 {
         self.cluster_id
+    }
+
+    /// Retires requests from every earlier process generation.
+    ///
+    /// Existing kept-alive connections observe the new value on their next
+    /// request, so advancing the epoch does not require restarting the server.
+    pub fn set_network_epoch(&self, epoch: u64) {
+        self.network_epoch.store(epoch, Ordering::Relaxed);
+    }
+
+    pub fn network_epoch(&self) -> u64 {
+        self.network_epoch.load(Ordering::Relaxed)
     }
 
     /// Requests refused because they came stamped with another cluster's id.
@@ -1187,6 +1240,7 @@ fn serve_tcp_raft_connection<T>(
     handler: &T,
     shutdown: &AtomicBool,
     cluster_id: u64,
+    network_epoch: &AtomicU64,
     refused: &AtomicU64,
     observer: Option<MatrixRaftPayloadObserver>,
     observed: &AtomicU64,
@@ -1228,9 +1282,16 @@ where
         ))?;
         // Before the dispatch, deliberately. A refusal that ran inside the
         // handler would already have appended the entries it was refusing.
+        let local_network_epoch = network_epoch.load(Ordering::Relaxed);
         let response = if !raft_clusters_may_talk(cluster_id, envelope.cluster_id) {
             refused.fetch_add(1, Ordering::Relaxed);
             refuse_foreign_cluster(&envelope.request, cluster_id, envelope.cluster_id)
+        } else if !raft_network_epoch_is_current(local_network_epoch, envelope.network_epoch) {
+            refuse_stale_network_epoch(
+                &envelope.request,
+                local_network_epoch,
+                envelope.network_epoch,
+            )
         } else {
             // The payload, if there is one and somebody is listening. A
             // refusal here refuses the frame: a host that could not accept
@@ -1351,6 +1412,21 @@ fn refuse_foreign_cluster(
         request,
         format!("raft request from cluster {sender} refused by cluster {local}"),
     )
+}
+
+fn refuse_stale_network_epoch(
+    request: &TcpRaftTransportRequest,
+    local: u64,
+    sender: u64,
+) -> TcpRaftTransportResponse {
+    refuse_request(
+        request,
+        format!("raft request from network epoch {sender} refused at epoch {local}"),
+    )
+}
+
+fn is_default_network_epoch(epoch: &u64) -> bool {
+    *epoch == DEFAULT_NETWORK_EPOCH
 }
 
 /// The refusal, in the shape of the request that earned it.

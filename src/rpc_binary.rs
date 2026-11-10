@@ -331,6 +331,8 @@ pub(crate) struct EnvelopeProto {
     pub user_payload: Option<String>,
     #[prost(message, optional, tag = "3")]
     pub request: Option<RpcRequestProto>,
+    #[prost(uint64, tag = "4")]
+    pub network_epoch: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +750,7 @@ impl From<&TcpRaftTransportEnvelope> for EnvelopeProto {
             cluster_id: value.cluster_id,
             user_payload: value.user_payload.clone(),
             request: Some(RpcRequestProto::from(&value.request)),
+            network_epoch: value.network_epoch,
         }
     }
 }
@@ -758,6 +761,7 @@ impl TryFrom<EnvelopeProto> for TcpRaftTransportEnvelope {
     fn try_from(proto: EnvelopeProto) -> Result<Self, Self::Error> {
         Ok(Self {
             cluster_id: proto.cluster_id,
+            network_epoch: proto.network_epoch,
             user_payload: proto.user_payload,
             request: TcpRaftTransportRequest::try_from(
                 proto.request.ok_or_else(|| missing("its request"))?,

@@ -1761,6 +1761,48 @@ fn a_server_serves_its_own_cluster_and_the_any_cluster_either_way() {
 }
 
 #[test]
+fn advancing_the_network_epoch_retires_old_senders_on_live_connections() {
+    let (mut server, handler) = counting_server(7);
+    server.set_network_epoch(7);
+    assert_eq!(server.network_epoch(), 7);
+
+    let transport = transport_to(&server, 7);
+    transport.set_network_epoch(6);
+    let stale = transport
+        .append_entries(2, cluster_append())
+        .expect_err("an older process generation must be refused");
+    let stale = stale.to_string();
+    assert!(
+        stale.contains("network epoch 6") && stale.contains("epoch 7"),
+        "the refusal should identify both generations, got {stale}"
+    );
+    assert_eq!(handler.calls(), 0, "a stale request never reaches raft");
+
+    transport.set_network_epoch(7);
+    transport
+        .append_entries(2, cluster_append())
+        .expect("the current generation is served");
+    assert_eq!(handler.calls(), 1);
+    assert_eq!(transport.idle_connections(2), 1, "the connection is warm");
+
+    server.set_network_epoch(8);
+    transport
+        .append_entries(2, cluster_append())
+        .expect_err("advancing the server retires the sender on its warm connection");
+    assert_eq!(handler.calls(), 1);
+
+    let clone = transport.clone();
+    clone.set_network_epoch(9);
+    assert_eq!(transport.network_epoch(), 9, "clones share the live epoch");
+    transport
+        .append_entries(2, cluster_append())
+        .expect("a newer sender is accepted during a rolling update");
+    assert_eq!(handler.calls(), 2);
+
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
 fn a_batch_from_another_cluster_is_refused_in_every_slot() {
     // A batch is the way a refusal could be smuggled past: one check on the
     // outer frame that then dispatched the nested requests would serve them.
@@ -1839,6 +1881,7 @@ fn a_peer_that_sends_no_cluster_id_is_served_as_any_cluster() {
     // field.
     let stamped = TcpRaftTransportEnvelope {
         cluster_id: 7,
+        network_epoch: 0,
         user_payload: None,
         request: bare.clone(),
     };
@@ -2725,6 +2768,30 @@ fn what_a_peer_attaches_reaches_the_observer_and_nothing_else_does() {
 }
 
 #[test]
+fn a_stale_epoch_is_refused_before_payload_observation() {
+    let (mut server, handler, seen) = observing_server(|_, _| Ok(()));
+    server.set_network_epoch(4);
+    let transport = payload_transport(&server, "old-process");
+    transport.set_network_epoch(3);
+
+    transport
+        .append_entries(2, cluster_append())
+        .expect_err("the stale heartbeat is refused");
+    assert_eq!(handler.calls(), 0);
+    assert!(seen.lock().expect("lock").is_empty());
+    assert_eq!(server.observed_payloads(), 0);
+
+    transport.set_network_epoch(4);
+    transport
+        .append_entries(2, cluster_append())
+        .expect("the current heartbeat is observed and served");
+    assert_eq!(handler.calls(), 1);
+    assert_eq!(seen.lock().expect("lock").as_slice(), ["old-process-2"]);
+
+    server.shutdown().expect("shutdown");
+}
+
+#[test]
 fn an_observer_that_refuses_refuses_the_frame() {
     // A host that could not accept what it was told must not then serve the
     // request as though it had not been told.
@@ -2840,6 +2907,7 @@ fn a_peer_that_sends_no_payload_is_read_as_having_none() {
     };
     let old_shape = TcpRaftTransportEnvelope {
         cluster_id: 7,
+        network_epoch: 0,
         user_payload: None,
         request: bare.clone(),
     };
@@ -2848,7 +2916,12 @@ fn a_peer_that_sends_no_payload_is_read_as_having_none() {
         !encoded.contains("user_payload"),
         "an absent payload should not be written at all, got {encoded}"
     );
+    assert!(
+        !encoded.contains("network_epoch"),
+        "the default epoch should not widen the old JSON shape, got {encoded}"
+    );
     let decoded: TcpRaftTransportEnvelope = serde_json::from_str(&encoded).expect("decode");
+    assert_eq!(decoded.network_epoch, 0);
     assert_eq!(decoded.user_payload, None);
     assert_eq!(decoded.request, bare);
 
@@ -2856,11 +2929,13 @@ fn a_peer_that_sends_no_payload_is_read_as_having_none() {
     // predates both fields.
     let stamped = TcpRaftTransportEnvelope {
         cluster_id: 7,
+        network_epoch: 12,
         user_payload: Some("hold group 9".to_string()),
         request: bare.clone(),
     };
     let stamped_json = serde_json::to_string(&stamped).expect("encode");
     assert!(stamped_json.contains("hold group 9"));
+    assert!(stamped_json.contains("network_epoch"));
     let as_old: TcpRaftTransportRequest =
         serde_json::from_str(&stamped_json).expect("an old peer ignores both extra fields");
     assert_eq!(as_old, bare);

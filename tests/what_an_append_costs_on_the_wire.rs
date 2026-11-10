@@ -107,6 +107,7 @@ fn append(count: u64, payload_len: usize) -> AppendEntriesRequest {
 fn envelope(count: u64, payload_len: usize) -> TcpRaftTransportEnvelope {
     TcpRaftTransportEnvelope {
         cluster_id: 1,
+        network_epoch: 0,
         user_payload: None,
         request: TcpRaftTransportRequest::AppendEntries {
             target: 2,
@@ -257,6 +258,7 @@ fn every_rpc_variant_survives_the_round_trip() {
     for request in &requests {
         let value = TcpRaftTransportEnvelope {
             cluster_id: 7,
+            network_epoch: 11,
             user_payload: Some("hello".to_string()),
             request: request.clone(),
         };
@@ -269,6 +271,7 @@ fn every_rpc_variant_survives_the_round_trip() {
     // another, since a flat batch would not exercise the recursion.
     let batch = TcpRaftTransportEnvelope {
         cluster_id: 7,
+        network_epoch: 11,
         user_payload: None,
         request: TcpRaftTransportRequest::Batch {
             requests: vec![
