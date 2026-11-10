@@ -205,6 +205,28 @@ fn a_caught_up_learner_is_not_a_leadership_transfer_target() {
 }
 
 #[test]
+fn transport_failure_reports_accept_committed_learners() {
+    let mut cluster = Cluster::new();
+    cluster.add_caught_up_learner();
+    let committed = cluster.peers.get(&1).unwrap().commit_index();
+    cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .report_unreachable(4)
+        .unwrap();
+    assert_eq!(cluster.peers.get(&1).unwrap().commit_index(), committed);
+    assert!(cluster.peers.get(&1).unwrap().is_leader());
+    cluster
+        .peers
+        .get_mut(&4)
+        .unwrap()
+        .report_unreachable(1)
+        .unwrap();
+    assert!(!cluster.peers.get(&4).unwrap().is_leader());
+}
+
+#[test]
 fn joint_configuration_requires_both_majorities() {
     let mut c = Cluster::new();
     c.write(1, 1);

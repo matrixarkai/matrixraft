@@ -77,6 +77,68 @@ impl Drop for Directory {
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
 
 #[test]
+fn delivery_failure_reports_release_replication_windows_without_quorum_claims() {
+    let dir = Directory::new();
+    let tuning = PeerTuning {
+        max_inflight_msgs: 1,
+        ..PeerTuning::default()
+    };
+    let mut group: BTreeMap<_, _> = (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(dir.options(id, vec![1, 2, 3]), tuning).unwrap(),
+            )
+        })
+        .collect();
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let committed = group.get(&1).unwrap().commit_index();
+    let leader = group.get_mut(&1).unwrap();
+    leader.propose(vec![10; 64]).unwrap();
+    let lost = leader.process_ready(|_, _| Ok(())).unwrap();
+    assert!(lost.iter().any(|packet| packet.to == 2));
+    assert!(lost.iter().any(|packet| packet.to == 3));
+    leader.propose(vec![20; 64]).unwrap();
+    assert!(
+        leader.process_ready(|_, _| Ok(())).unwrap().is_empty(),
+        "full windows must block another append"
+    );
+    for target in [0, 1, 99] {
+        assert!(leader.report_unreachable(target).is_err());
+    }
+    let bytes = leader.persisted_wal_bytes().unwrap();
+    for target in [2, 3, 2, 3] {
+        leader.report_unreachable(target).unwrap();
+    }
+    assert!(leader.process_ready(|_, _| Ok(())).unwrap().is_empty());
+    assert_eq!(leader.persisted_wal_bytes().unwrap(), bytes);
+    assert_eq!(leader.commit_index(), committed);
+    let last = leader.propose(vec![30; 64]).unwrap();
+    let retry = leader.process_ready(|_, _| Ok(())).unwrap();
+    assert!(retry.iter().any(|packet| packet.to == 2));
+    assert!(retry.iter().any(|packet| packet.to == 3));
+    assert_eq!(
+        leader.commit_index(),
+        committed,
+        "sending is not acknowledgment"
+    );
+    for packet in retry {
+        group
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    pump(&mut group, &mut applied, None);
+    assert_eq!(group.get(&1).unwrap().commit_index(), last.index);
+    assert_eq!(applied.get(&1), applied.get(&2));
+    assert_eq!(applied.get(&2), applied.get(&3));
+    assert_eq!(applied.get(&1).unwrap().last().unwrap().1, vec![30; 64]);
+}
+
+#[test]
 fn leadership_transfer_uses_messages_and_the_new_leader_commits() {
     let dir = Directory::new();
     let mut group = peers(&dir);

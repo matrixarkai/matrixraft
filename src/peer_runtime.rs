@@ -2140,6 +2140,28 @@ impl DurablePeer {
         }
         self.raw.campaign().map_err(invalid)
     }
+    /// Report a failed outbound delivery locally. This can reset optimistic
+    /// replication to probing; it never acknowledges a log entry or a vote.
+    /// Continue normal inputs and Ready processing to produce retry packets.
+    pub fn report_unreachable(&mut self, target: u64) -> Result<(), RaftError> {
+        self.healthy()?;
+        self.membership_recovered()?;
+        let membership = self.membership();
+        if target == self.options.node_id
+            || target == 0
+            || (!membership.voters.contains(&target)
+                && !membership.outgoing_voters.contains(&target)
+                && !membership.learners.contains(&target)
+                && !membership.next_learners.contains(&target))
+        {
+            return Err(invalid(
+                "delivery failure requires another committed member",
+            ));
+        }
+        self.raw.report_unreachable(target);
+        Ok(())
+    }
+
     /// Request transfer to another committed voter. Acceptance is not completion:
     /// process Ready and deliver packets until the target wins its election.
     /// The core catches up the target and expires an incomplete transfer after
@@ -4857,6 +4879,7 @@ mod tests {
             MessageType::MsgSnapshot,
             MessageType::MsgTransferLeader,
             MessageType::MsgTimeoutNow,
+            MessageType::MsgUnreachable,
         ] {
             let message = Message {
                 from: 2,
