@@ -17,6 +17,32 @@ why the crate also carries a compatibility facade and a readiness contract
 shaped for that use. Neither is a requirement: the library stands on its own,
 and a service with nothing to do with TemporalStore can depend on it.
 
+## Related Projects
+
+[TemporalStore](https://github.com/matrixarkai/TemporalStore) serves temporal features and context;
+[MatrixObject](https://github.com/matrixarkai/MatrixObject) provides distributed object storage;
+[MatrixCache](https://github.com/matrixarkai/matrixcache) provides embedded tiered caching;
+[MatrixArk](https://github.com/matrixarkai/matrixark) provides the Python context runtime; and
+[MatrixAdsDemo](https://github.com/matrixarkai/MatrixAdsDemo) demonstrates ads serving.
+Each project is independently usable and Apache-2.0 licensed.
+
+## Choose an Embedding Path
+
+| Need | Entry point |
+|---|---|
+| A locally modeled peer group and compatibility APIs | [Current scope](#current-scope) |
+| Independent durable voters with real packet delivery | [Independent durable peer API](#independent-durable-peer-api) and [integration contract](docs/peer-runtime.md) |
+| Many groups sharing bounded runtime resources | [Multiple Raft groups](#multiple-raft-groups-in-one-process) |
+| Runnable embedding examples | [Examples](#examples) |
+
+Independent voters require the optional `peer-runtime` feature. The host owns transport,
+packet authentication, timers, application state, and exclusive access to each peer.
+Process Ready successfully before sending its returned packets, and acknowledge a write
+only after its committed entry has been applied successfully. Proposal admission is not
+commitment. Bounded asynchronous log reads and background checkpoint capture are opt-in
+host integrations, not automatic latency guarantees; see the integration contract for
+completion handling, persistence ordering, recovery, and membership constraints.
+
 The Cargo crate is named `matrixraft`, and the naming follows from that:
 
 - **Types are unprefixed** — `Storage`, `Message`, `Config`, not
