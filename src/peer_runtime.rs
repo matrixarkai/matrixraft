@@ -2140,6 +2140,32 @@ impl DurablePeer {
         }
         self.raw.campaign().map_err(invalid)
     }
+    /// Request transfer to another committed voter. Acceptance is not completion:
+    /// process Ready and deliver packets until the target wins its election.
+    /// The core catches up the target and expires an incomplete transfer after
+    /// the election timeout. Proposals may be refused while transfer is pending.
+    pub fn transfer_leadership(&mut self, target: u64) -> Result<(), RaftError> {
+        self.healthy()?;
+        self.membership_recovered()?;
+        if !self.is_leader() {
+            return Err(RaftError::NotLeader(self.options.node_id));
+        }
+        let membership = self.membership();
+        if target == self.options.node_id
+            || target == 0
+            || (!membership.voters.contains(&target)
+                && !membership.outgoing_voters.contains(&target))
+            || membership.learners.contains(&target)
+            || membership.next_learners.contains(&target)
+        {
+            return Err(invalid(
+                "leadership transfer requires another committed voter",
+            ));
+        }
+        self.raw.transfer_leader(target);
+        Ok(())
+    }
+
     /// Acceptance allocates a log position; it does not mean the proposal committed.
     pub fn propose(&mut self, payload: Vec<u8>) -> Result<LogId, RaftError> {
         self.healthy()?;
@@ -2542,6 +2568,7 @@ impl DurablePeer {
                 | MessageType::MsgRequestPreVote
                 | MessageType::MsgRequestPreVoteResponse
                 | MessageType::MsgSnapshot
+                | MessageType::MsgTimeoutNow
         );
         if !allowed || message.term == 0 || message.term == u64::MAX || message.index == u64::MAX {
             return Err(invalid("unsupported or malformed peer message"));
@@ -2566,6 +2593,13 @@ impl DurablePeer {
             || (kind != MessageType::MsgAppend && !message.entries.is_empty())
         {
             return Err(invalid("unexpected peer message payload"));
+        }
+        if kind == MessageType::MsgTimeoutNow
+            && (self.leader_id() != Some(message.from) || message.term != self.term())
+        {
+            return Err(invalid(
+                "transfer timeout must come from the current leader and term",
+            ));
         }
         if kind == MessageType::MsgSnapshot {
             let snapshot = message
@@ -4822,6 +4856,7 @@ mod tests {
             MessageType::MsgPropose,
             MessageType::MsgSnapshot,
             MessageType::MsgTransferLeader,
+            MessageType::MsgTimeoutNow,
         ] {
             let message = Message {
                 from: 2,

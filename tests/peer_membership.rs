@@ -192,6 +192,19 @@ fn learner_promotion_and_removal_replay_from_committed_history() {
 }
 
 #[test]
+fn a_caught_up_learner_is_not_a_leadership_transfer_target() {
+    let mut cluster = Cluster::new();
+    cluster.add_caught_up_learner();
+    assert!(cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .transfer_leadership(4)
+        .is_err());
+    assert!(cluster.peers.get(&1).unwrap().is_leader());
+}
+
+#[test]
 fn joint_configuration_requires_both_majorities() {
     let mut c = Cluster::new();
     c.write(1, 1);
