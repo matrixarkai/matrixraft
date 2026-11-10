@@ -77,6 +77,247 @@ impl Drop for Directory {
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
 
 #[test]
+fn bounded_apply_yields_keeps_reads_waiting_and_replays_the_committed_tail() {
+    let dir = Directory::new();
+    let options = dir.options(1, vec![1]);
+    let tuning = PeerTuning {
+        max_apply_bytes: Some(1),
+        ..PeerTuning::default()
+    };
+    let mut peer = DurablePeer::open_with_tuning(options.clone(), tuning).unwrap();
+    peer.campaign().unwrap();
+    while peer.has_ready() {
+        peer.process_ready(|_, _| Ok(())).unwrap();
+    }
+    let mut values: Vec<_> = (0..20u8).map(|value| vec![value; 32]).collect();
+    let ids = peer.propose_batch(values.clone()).unwrap();
+    let last = ids.last().unwrap().index;
+    for _ in 0..2 {
+        let mut count = 0;
+        peer.process_ready(|_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert!(count <= 1, "one large entry still advances a tiny budget");
+    }
+    assert_eq!(peer.commit_index(), last);
+    assert!(peer.applied_index() < last);
+    let token = peer.begin_read().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    assert!(
+        !peer.poll_read(token).unwrap(),
+        "a quorum read must wait for application"
+    );
+    assert!(
+        peer.has_ready(),
+        "an empty packet list is not an idle application"
+    );
+    while peer.applied_index() < last {
+        assert!(!peer.poll_read(token).unwrap());
+        peer.process_ready(|_, _| Ok(())).unwrap();
+    }
+    assert!(peer.poll_read(token).unwrap());
+    let suffix: Vec<_> = (200..204u8).map(|value| vec![value; 32]).collect();
+    let last = peer
+        .propose_batch(suffix.clone())
+        .unwrap()
+        .last()
+        .unwrap()
+        .index;
+    values.extend(suffix);
+    for _ in 0..2 {
+        peer.process_ready(|_, _| Ok(())).unwrap();
+    }
+    assert_eq!(peer.commit_index(), last);
+    assert!(peer.applied_index() < last);
+    drop(peer);
+    let mut peer = DurablePeer::open_with_tuning(options, tuning).unwrap();
+    let mut replay = Vec::new();
+    let mut calls = 0;
+    while peer.has_ready() {
+        let mut count = 0;
+        peer.process_ready(|_, value| {
+            count += 1;
+            if !value.is_empty() {
+                replay.push(value.to_vec());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(count <= 1);
+        calls += 1;
+        assert!(calls < 100);
+    }
+    assert_eq!(replay, values);
+    assert_eq!(peer.applied_index(), last);
+    assert!(calls >= 20);
+}
+
+#[test]
+fn bounded_apply_restores_a_checkpoint_once_before_its_suffix() {
+    let dir = Directory::new();
+    let options = dir.options(1, vec![1]);
+    let mut peer = DurablePeer::open(options.clone()).unwrap();
+    peer.campaign().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    peer.propose(vec![7]).unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    peer.checkpoint(b"saved image".to_vec()).unwrap();
+    let values: Vec<_> = (0..8u8).map(|value| vec![value; 32]).collect();
+    let last = peer
+        .propose_batch(values.clone())
+        .unwrap()
+        .last()
+        .unwrap()
+        .index;
+    peer.process_ready_with_snapshot(|_, _| Ok(()), |_, _| Ok(()))
+        .unwrap();
+    drop(peer);
+    let mut peer = DurablePeer::open_with_tuning(
+        options,
+        PeerTuning {
+            max_apply_bytes: Some(1),
+            ..PeerTuning::default()
+        },
+    )
+    .unwrap();
+    let restored = std::cell::Cell::new(0);
+    let mut applied = Vec::new();
+    let mut calls = 0;
+    while peer.has_ready() {
+        let mut count = 0;
+        peer.process_ready_with_snapshot(
+            |_, value| {
+                assert_eq!(restored.get(), 1);
+                count += 1;
+                applied.push(value.to_vec());
+                Ok(())
+            },
+            |_, image| {
+                assert_eq!(image, b"saved image");
+                restored.set(restored.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(count <= 1);
+        calls += 1;
+        assert!(calls < 100);
+    }
+    assert_eq!(restored.get(), 1);
+    assert_eq!(applied, values);
+    assert_eq!(peer.applied_index(), last);
+}
+
+#[test]
+fn bounded_apply_failure_stops_the_peer_without_consuming_the_failed_entry() {
+    let dir = Directory::new();
+    let options = dir.options(1, vec![1]);
+    let mut peer = DurablePeer::open_with_tuning(
+        options.clone(),
+        PeerTuning {
+            max_apply_bytes: Some(1),
+            ..PeerTuning::default()
+        },
+    )
+    .unwrap();
+    peer.campaign().unwrap();
+    while peer.has_ready() {
+        peer.process_ready(|_, _| Ok(())).unwrap();
+    }
+    let entry = peer.propose(vec![77]).unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    assert!(peer
+        .process_ready(|_, _| Err(RaftError::Storage("application rejected".into())))
+        .is_err());
+    assert!(peer.applied_index() < entry.index);
+    assert!(!peer.has_ready());
+    assert!(peer.propose(vec![88]).is_err());
+    drop(peer);
+    let mut peer = DurablePeer::open(options).unwrap();
+    let mut replay = Vec::new();
+    peer.process_ready(|_, value| {
+        if !value.is_empty() {
+            replay.push(value.to_vec());
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(replay, vec![vec![77]]);
+}
+
+#[test]
+fn bounded_apply_replicates_full_entries_in_order_across_independent_voters() {
+    let dir = Directory::new();
+    let mut group: BTreeMap<_, _> = (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(
+                    dir.options(id, vec![1, 2, 3]),
+                    PeerTuning {
+                        max_apply_bytes: Some(128),
+                        ..PeerTuning::default()
+                    },
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let mut values: Vec<_> = (0..20u8).map(|value| vec![value; 32]).collect();
+    values.insert(7, vec![99; 512]);
+    let positions = group
+        .get_mut(&1)
+        .unwrap()
+        .propose_batch(values.clone())
+        .unwrap();
+    assert!(group[&1].commit_index() < positions.last().unwrap().index);
+    for round in 0..200 {
+        let mut packets = Vec::new();
+        for (id, peer) in &mut group {
+            let mut lengths = Vec::new();
+            packets.extend(
+                peer.process_ready(|log, value| {
+                    lengths.push(value.len());
+                    applied
+                        .entry(*id)
+                        .or_default()
+                        .push((log.index, value.to_vec()));
+                    Ok(())
+                })
+                .unwrap(),
+            );
+            assert!(lengths.iter().sum::<usize>() <= 128 || lengths.len() == 1);
+        }
+        if packets.is_empty() && group.values().all(|peer| !peer.has_ready()) {
+            break;
+        }
+        for packet in packets {
+            group
+                .get_mut(&packet.to)
+                .unwrap()
+                .step(&packet.bytes)
+                .unwrap();
+        }
+        assert!(round < 199, "bounded work must continue to make progress");
+    }
+    for id in 1..=3 {
+        let actual: Vec<_> = applied[&id]
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(_, value)| value.clone())
+            .collect();
+        assert_eq!(actual, values);
+        assert_eq!(group[&id].applied_index(), positions.last().unwrap().index);
+        assert_eq!(applied[&id], applied[&1]);
+    }
+}
+
+#[test]
 fn term_fenced_writes_reject_old_leadership_without_allocating_positions() {
     let dir = Directory::new();
     let mut group = peers(&dir);
@@ -600,6 +841,14 @@ fn peer_tuning_validates_before_creating_storage_and_controls_election_ticks() {
             max_uncommitted_size: 1,
             ..PeerTuning::default()
         },
+        PeerTuning {
+            max_apply_bytes: Some(0),
+            ..PeerTuning::default()
+        },
+        PeerTuning {
+            max_apply_bytes: Some(4 * 1024 * 1024 + 1),
+            ..PeerTuning::default()
+        },
     ] {
         assert!(DurablePeer::open_with_tuning(options.clone(), tuning).is_err());
         assert!(!options.wal_path.exists());
@@ -744,7 +993,7 @@ fn pump(peers: &mut BTreeMap<u64, DurablePeer>, applied: &mut Applied, isolated:
                     .filter(|packet| isolated != Some(id) && isolated != Some(packet.to)),
             );
         }
-        if packets.is_empty() {
+        if packets.is_empty() && peers.values().all(|peer| !peer.has_ready()) {
             return;
         }
         for packet in packets {

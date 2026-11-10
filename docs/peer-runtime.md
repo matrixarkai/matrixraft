@@ -69,6 +69,21 @@ Deliver packets only to their `to` peer. A successful `propose` allocates a log
 position; it does not acknowledge commitment. A serving application acknowledges
 only its matching committed log position after successful application.
 
+For hosts sharing an application worker across groups, set
+`PeerTuning::max_apply_bytes` to `Some(bytes)` with a value in `1..=4194304`.
+Each Ready-processing call then delivers at most one committed-entry batch,
+targeting that many encoded entry bytes. One larger entry is delivered whole to
+ensure progress; checkpoint restore and WAL persistence are not byte-limited by
+this setting. `None` retains the default drain-to-idle behavior.
+After each call, reschedule the peer while `has_ready()` is true, even if no
+packets were returned. That query covers immediately available local Ready work,
+not in-flight host reads or checkpoint transfers, which still need completion
+polling. New commit work exposed by persistence is handled in a later call and
+crosses the same durable-state barrier before application or packet release.
+Reads remain pending until their confirmed index is applied. Membership-enabled
+peers reopening a journal refuse inputs until bounded replay reaches the
+committed index. Reapply the tuning on reopen when bounded scheduling is needed.
+
 Hosts may submit several proposals or already-queued incoming packets on the same
 exclusive peer worker before calling `process_ready`. Bound each batch by count,
 bytes, and elapsed time; do not wait for a batch to fill or starve ticks and Ready
