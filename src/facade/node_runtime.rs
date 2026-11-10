@@ -81,7 +81,6 @@ enum StoredWalRecoveryReport {
     Clean {
         segments_scanned: u64,
         first_segment_id: u64,
-        last_segment_id: u64,
     },
     Detailed(Box<WalRecoveryReport>),
 }
@@ -91,7 +90,7 @@ impl StoredWalRecoveryReport {
         let clean_range = report.retained_range.as_ref().filter(|range| {
             range.first_log_index == 0 && range.last_log_index == 0 && range.record_count == 0
         });
-        if let Some(range) = clean_range.filter(|_| {
+        if let Some(range) = clean_range.filter(|range| {
             report.recovered.is_none()
                 && !report.truncated_corrupt_tail
                 && report.surviving_records == 0
@@ -100,11 +99,15 @@ impl StoredWalRecoveryReport {
                     .checksum_format
                     .as_ref()
                     .is_some_and(wal::matrixraft_wal_checksum_format_is_current)
+                && report
+                    .segments_scanned
+                    .checked_sub(1)
+                    .and_then(|offset| range.first_segment_id.checked_add(offset))
+                    == Some(range.last_segment_id)
         }) {
             return Self::Clean {
                 segments_scanned: report.segments_scanned,
                 first_segment_id: range.first_segment_id,
-                last_segment_id: range.last_segment_id,
             };
         }
         Self::Detailed(Box::new(report))
@@ -115,7 +118,6 @@ impl StoredWalRecoveryReport {
             Self::Clean {
                 segments_scanned,
                 first_segment_id,
-                last_segment_id,
             } => WalRecoveryReport {
                 recovered: None,
                 truncated_corrupt_tail: false,
@@ -127,7 +129,7 @@ impl StoredWalRecoveryReport {
                     first_log_index: 0,
                     last_log_index: 0,
                     first_segment_id: *first_segment_id,
-                    last_segment_id: *last_segment_id,
+                    last_segment_id: first_segment_id + segments_scanned - 1,
                     record_count: 0,
                 }),
             },
@@ -3592,7 +3594,12 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// from 728 to 712 bytes, saving another 128 KiB across 8,192 hosted groups;
 /// groups allocate the values only when one of those events occurs.
 ///
-/// The native measurement with all twenty-one changes is 41 MiB at
+/// Ordinary recovery reports describe a contiguous run of empty WAL segments.
+/// Storing the first segment and count, then deriving the last segment, narrows
+/// `NodeCore` from 712 to 704 bytes, saving another 64 KiB across 8,192 hosted
+/// groups. Reports with any other segment layout retain their complete detail.
+///
+/// The native measurement with all twenty-two changes is 41 MiB at
 /// whole-MiB resolution for 8,192 live groups, or **4 KiB per group**; the
 /// allocation profiles above resolve reductions that RSS rounding does not.
 /// The handler-directory reduction is below that whole-MiB resolution. The
@@ -4325,14 +4332,14 @@ mod runtime_command_queue_tests {
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
-            std::mem::size_of::<NodeCore>() <= 712,
+            std::mem::size_of::<NodeCore>() <= 704,
             "cold runtime state widened NodeCore"
         );
         assert!(
             std::mem::size_of::<PersistentRaftWal>() <= 176,
             "cold WAL state widened"
         );
-        assert!(std::mem::size_of::<StoredWalRecoveryReport>() <= 32);
+        assert!(std::mem::size_of::<StoredWalRecoveryReport>() <= 24);
         assert!(std::mem::size_of::<RuntimeBlockerLog>() <= 8);
         assert!(std::mem::size_of::<RuntimeExecutionCounters>() <= 8);
         assert!(
@@ -4479,6 +4486,16 @@ mod runtime_command_queue_tests {
         let stored = StoredWalRecoveryReport::from_report(clean_report.clone());
         assert!(matches!(stored, StoredWalRecoveryReport::Clean { .. }));
         assert_eq!(stored.to_report(), clean_report);
+
+        let mut noncontiguous_report = clean_report.clone();
+        noncontiguous_report
+            .retained_range
+            .as_mut()
+            .expect("the test report has a retained range")
+            .last_segment_id = 10;
+        let stored = StoredWalRecoveryReport::from_report(noncontiguous_report.clone());
+        assert!(matches!(stored, StoredWalRecoveryReport::Detailed(_)));
+        assert_eq!(stored.to_report(), noncontiguous_report);
 
         let formats = [
             None,
