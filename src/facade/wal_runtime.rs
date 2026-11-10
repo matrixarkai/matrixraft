@@ -1184,6 +1184,14 @@ impl PersistentRaftWal {
         let mut segment = self.segments[position].clone();
         segment.records = survivor;
         write_wal_segment_file(&self.options.dir, &segment)?;
+        if position + 1 == self.segments.len() {
+            // Materialization is this writer's own rewrite, not an external
+            // append. Keep the length guard aligned with the durable result.
+            let length = fs::metadata(wal_segment_path(&self.options.dir, segment.segment_id))
+                .map_err(|err| wal_file_error("failed to read materialized WAL length", &err))?
+                .len();
+            self.expected_active_len = std::num::NonZeroU64::new(length);
+        }
         Ok(())
     }
 
