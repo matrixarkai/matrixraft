@@ -75,6 +75,48 @@ impl Drop for Directory {
     }
 }
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
+
+#[test]
+fn captured_log_reads_pin_a_durable_generation_across_checkpoint_replacement() {
+    let dir = Directory::new();
+    let mut peer = DurablePeer::open(dir.options(1, vec![1])).unwrap();
+    peer.campaign().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    let first = peer.propose(b"first".to_vec()).unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    let mut reader = peer.capture_log_reader().unwrap();
+    let before = peer.persisted_wal_bytes().unwrap();
+    let entries = reader.entries(first.index, first.index + 1, None).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].data.as_slice(), b"first");
+    assert_eq!(
+        reader
+            .entries(first.index, first.index + 1, Some(0))
+            .unwrap(),
+        entries
+    );
+    assert_eq!(peer.persisted_wal_bytes().unwrap(), before);
+    let path = dir.options(1, vec![1]).wal_path;
+    let bytes = std::fs::read(&path).unwrap();
+    let mut damaged = bytes.clone();
+    *damaged.last_mut().unwrap() ^= 1;
+    std::fs::write(&path, &damaged).unwrap();
+    assert!(reader.entries(first.index, first.index + 1, None).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    std::fs::write(&path, bytes).unwrap();
+    let second = peer.propose(b"second".to_vec()).unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    assert!(reader
+        .entries(second.index, second.index + 1, None)
+        .is_err());
+    peer.checkpoint(b"application checkpoint".to_vec()).unwrap();
+    let mut fresh = peer.capture_log_reader().unwrap();
+    assert!(fresh.entries(first.index, first.index + 1, None).is_err());
+    drop(peer);
+    let read = std::thread::spawn(move || reader.entries(first.index, first.index + 1, None));
+    assert_eq!(read.join().unwrap().unwrap(), entries);
+}
+
 fn pump(peers: &mut BTreeMap<u64, DurablePeer>, applied: &mut Applied, isolated: Option<u64>) {
     for _ in 0..100 {
         let mut packets = Vec::new();
