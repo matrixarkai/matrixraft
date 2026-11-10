@@ -2181,6 +2181,63 @@ impl RuntimeTickReason {
     }
 }
 
+#[derive(Debug, Default)]
+struct RuntimeExecutionCounters {
+    values: Option<Box<RuntimeExecutionCounterValues>>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeExecutionCounterValues {
+    pre_vote_executions: u64,
+    campaign_executions: u64,
+    leader_transfer_executions: u64,
+}
+
+impl RuntimeExecutionCounters {
+    fn record_pre_votes(&mut self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let values = self.values.get_or_insert_with(Box::default);
+        values.pre_vote_executions = values.pre_vote_executions.saturating_add(count);
+    }
+
+    fn record_campaigns(&mut self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let values = self.values.get_or_insert_with(Box::default);
+        values.campaign_executions = values.campaign_executions.saturating_add(count);
+    }
+
+    fn record_leader_transfers(&mut self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let values = self.values.get_or_insert_with(Box::default);
+        values.leader_transfer_executions =
+            values.leader_transfer_executions.saturating_add(count);
+    }
+
+    fn pre_vote_executions(&self) -> u64 {
+        self.values
+            .as_ref()
+            .map_or(0, |values| values.pre_vote_executions)
+    }
+
+    fn campaign_executions(&self) -> u64 {
+        self.values
+            .as_ref()
+            .map_or(0, |values| values.campaign_executions)
+    }
+
+    fn leader_transfer_executions(&self) -> u64 {
+        self.values
+            .as_ref()
+            .map_or(0, |values| values.leader_transfer_executions)
+    }
+}
+
 struct NodeCore {
     node_id: NodeId,
     cluster: RaftCluster,
@@ -2194,9 +2251,7 @@ struct NodeCore {
     /// election tick runs. Zero until the first tick, which is what a node that
     /// has not reached an election yet should report.
     effective_election_timeout_ms: u64,
-    pre_vote_executions: u64,
-    campaign_executions: u64,
-    leader_transfer_executions: u64,
+    execution_counters: RuntimeExecutionCounters,
     /// Why the last tick happened. The one-byte enum keeps the fixed set of
     /// values compact; status converts it to the existing public string only
     /// when somebody asks for a report.
@@ -2290,9 +2345,7 @@ impl NodeCore {
     let election_ticks = 0;
     let election_elapsed_ms: u64 = 0;
     let effective_election_timeout_ms: u64 = 0;
-    let pre_vote_executions = 0;
-    let campaign_executions = 0;
-    let leader_transfer_executions = 0_u64;
+    let execution_counters = RuntimeExecutionCounters::default();
     let last_tick_reason = RuntimeTickReason::RuntimeCreated;
     let blocker_log = RuntimeBlockerLog::default();
     let membership_executor = MembershipExecutor::new();
@@ -2312,9 +2365,7 @@ impl NodeCore {
             election_ticks,
             election_elapsed_ms,
             effective_election_timeout_ms,
-            pre_vote_executions,
-            campaign_executions,
-            leader_transfer_executions,
+            execution_counters,
             last_tick_reason,
             blocker_log,
             membership_executor,
@@ -2337,9 +2388,7 @@ impl NodeCore {
             election_ticks,
             election_elapsed_ms,
             effective_election_timeout_ms,
-            pre_vote_executions,
-            campaign_executions,
-            leader_transfer_executions,
+            execution_counters,
             last_tick_reason,
             blocker_log,
             wal,
@@ -2421,8 +2470,7 @@ impl NodeCore {
                     if cluster.leader_transfer_state().is_some() {
                         match cluster.try_complete_leader_transfer() {
                             Ok(true) => {
-                                *leader_transfer_executions =
-                                    leader_transfer_executions.saturating_add(1);
+                                execution_counters.record_leader_transfers(1);
                             }
                             Ok(false) => {
                                 if cluster.tick_leader_transfer() {
@@ -2480,10 +2528,10 @@ impl NodeCore {
                                 .unwrap_or(false)
                             && !cluster.prohibits_election();
                         if lease_expired && local_can_campaign {
-                            *pre_vote_executions += 1;
+                            execution_counters.record_pre_votes(1);
                             match cluster.pre_vote(node_id) {
                                 Ok(vote) if vote.vote_granted => {
-                                    *campaign_executions += 1;
+                                    execution_counters.record_campaigns(1);
                                     let result = record_runtime_result(
                                         "election_tick_campaign",
                                         cluster.campaign(node_id, false),
@@ -2550,9 +2598,7 @@ impl NodeCore {
             election_ticks,
             election_elapsed_ms,
             effective_election_timeout_ms,
-            pre_vote_executions,
-            campaign_executions,
-            leader_transfer_executions,
+            execution_counters,
             last_tick_reason,
             blocker_log,
             membership_executor,
@@ -2736,16 +2782,17 @@ impl NodeCore {
                         leader_lease_valid: cluster.leader_lease_valid,
                         heartbeat_ticks: *heartbeat_ticks,
                         election_ticks: *election_ticks,
-                        pre_vote_executions: *pre_vote_executions,
-                        campaign_executions: *campaign_executions,
-                        leader_transfer_executions: *leader_transfer_executions,
+                        pre_vote_executions: execution_counters.pre_vote_executions(),
+                        campaign_executions: execution_counters.campaign_executions(),
+                        leader_transfer_executions: execution_counters
+                            .leader_transfer_executions(),
                         last_tick_reason: (*last_tick_reason).as_str().to_string(),
                     },
                     peer_runtime: raft_peer_runtime_states(
                         cluster,
                         *election_elapsed_ms,
                         *heartbeat_ticks > 0,
-                        *pre_vote_executions > 0,
+                        execution_counters.pre_vote_executions() > 0,
                     ),
                     fatal_blocker_report: matrixraft_fatal_blocker_report_with_totals(
                         "raft_node_runtime",
@@ -2771,13 +2818,13 @@ impl NodeCore {
                 let message: Message = message.into();
                 let operation_name = runtime_step_operation_name(&message);
                 if matches!(&message, Message::PreVote { .. }) {
-                    *pre_vote_executions += 1;
+                    execution_counters.record_pre_votes(1);
                 }
                 if is_leader_transfer_step_message(&message) {
-                    *leader_transfer_executions = leader_transfer_executions.saturating_add(1);
+                    execution_counters.record_leader_transfers(1);
                 }
                 if matches!(&message, Message::TimeoutNow { .. }) {
-                    *campaign_executions = campaign_executions.saturating_add(1);
+                    execution_counters.record_campaigns(1);
                 }
                 let campaign_message = matches!(
                     &message,
@@ -2786,7 +2833,7 @@ impl NodeCore {
                     }
                 );
                 if campaign_message {
-                    *campaign_executions = campaign_executions.saturating_add(1);
+                    execution_counters.record_campaigns(1);
                 }
                 let fatal_event = match &message {
                     Message::Admin {
@@ -2860,7 +2907,7 @@ impl NodeCore {
                     .map(|step| matches!(step, StepResult::FatalEvent(Some(_))))
                     .unwrap_or(false)
                 {
-                    *leader_transfer_executions = leader_transfer_executions.saturating_add(1);
+                    execution_counters.record_leader_transfers(1);
                 }
                 let _ = reply.send(record_runtime_result(
                     operation_name,
@@ -2870,17 +2917,19 @@ impl NodeCore {
                 ));
             }
             NodeRuntimeOp::StepBatch(messages, reply) => {
-                *pre_vote_executions += messages
-                    .iter()
-                    .filter(|message| matches!(message, Message::PreVote { .. }))
-                    .count() as u64;
-                *leader_transfer_executions = leader_transfer_executions.saturating_add(
+                execution_counters.record_pre_votes(
+                    messages
+                        .iter()
+                        .filter(|message| matches!(message, Message::PreVote { .. }))
+                        .count() as u64,
+                );
+                execution_counters.record_leader_transfers(
                     messages
                         .iter()
                         .filter(|message| is_leader_transfer_step_message(message))
                         .count() as u64,
                 );
-                *campaign_executions = campaign_executions.saturating_add(
+                execution_counters.record_campaigns(
                     messages
                         .iter()
                         .filter(|message| matches!(message, Message::TimeoutNow { .. }))
@@ -2897,7 +2946,7 @@ impl NodeCore {
                         )
                     })
                     .count() as u64;
-                *campaign_executions = campaign_executions.saturating_add(campaign_message_count);
+                execution_counters.record_campaigns(campaign_message_count);
                 // A WAL record describes the log as it stands, so one record
                 // covers every proposal in the batch. Persisting per proposal
                 // made a batch of N cost N fsyncs, and an fsync is essentially
@@ -3538,7 +3587,12 @@ impl DriverMailHandler<()> for PooledGroupWorker {
 /// to 728 bytes, saving another 128 KiB across 8,192 hosted groups while status
 /// keeps the same strings.
 ///
-/// The native measurement with all twenty changes is 41 MiB at
+/// Pre-vote, campaign, and leader-transfer counts stay zero in stable groups.
+/// Keeping their three `u64` values behind one lazy pointer narrows `NodeCore`
+/// from 728 to 712 bytes, saving another 128 KiB across 8,192 hosted groups;
+/// groups allocate the values only when one of those events occurs.
+///
+/// The native measurement with all twenty-one changes is 41 MiB at
 /// whole-MiB resolution for 8,192 live groups, or **4 KiB per group**; the
 /// allocation profiles above resolve reductions that RSS rounding does not.
 /// The handler-directory reduction is below that whole-MiB resolution. The
@@ -4271,7 +4325,7 @@ mod runtime_command_queue_tests {
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
-            std::mem::size_of::<NodeCore>() <= 728,
+            std::mem::size_of::<NodeCore>() <= 712,
             "cold runtime state widened NodeCore"
         );
         assert!(
@@ -4280,6 +4334,7 @@ mod runtime_command_queue_tests {
         );
         assert!(std::mem::size_of::<StoredWalRecoveryReport>() <= 32);
         assert!(std::mem::size_of::<RuntimeBlockerLog>() <= 8);
+        assert!(std::mem::size_of::<RuntimeExecutionCounters>() <= 8);
         assert!(
             std::mem::size_of::<RuntimeStepMessage>() <= 104,
             "the compact command message widened"
@@ -4313,6 +4368,27 @@ mod runtime_command_queue_tests {
         for (reason, expected) in cases {
             assert_eq!(reason.as_str(), expected);
         }
+    }
+
+    #[test]
+    fn execution_counters_allocate_only_after_an_event() {
+        let mut counters = RuntimeExecutionCounters::default();
+        assert!(counters.values.is_none());
+        assert_eq!(counters.pre_vote_executions(), 0);
+        assert_eq!(counters.campaign_executions(), 0);
+        assert_eq!(counters.leader_transfer_executions(), 0);
+
+        counters.record_pre_votes(0);
+        counters.record_campaigns(0);
+        counters.record_leader_transfers(0);
+        assert!(counters.values.is_none());
+
+        counters.record_pre_votes(2);
+        counters.record_campaigns(3);
+        counters.record_leader_transfers(4);
+        assert_eq!(counters.pre_vote_executions(), 2);
+        assert_eq!(counters.campaign_executions(), 3);
+        assert_eq!(counters.leader_transfer_executions(), 4);
     }
 
     #[test]
