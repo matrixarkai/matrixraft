@@ -347,7 +347,8 @@ pub struct PersistentRaftWal {
     /// behind one pointer.
     activity: Option<Box<WalActivityState>>,
     /// How long this writer believes the active segment is, or `None` when it
-    /// has not written to this segment yet.
+    /// has not written to this segment yet. A written frame is never empty, so
+    /// the nonzero option niche keeps this state to one word.
     ///
     /// The append path already stats the file to decide whether to roll, so
     /// comparing that length against what the last append left costs nothing.
@@ -362,7 +363,7 @@ pub struct PersistentRaftWal {
     /// lock, which needs a dependency this crate does not carry. It turns a
     /// silent loss into an error naming both lengths, which is the part that
     /// needs no dependency.
-    expected_active_len: Option<u64>,
+    expected_active_len: Option<std::num::NonZeroU64>,
     /// What the active segment's records already describe, as
     /// (first index, last index, term at the last index). `None` means the
     /// segment is empty, so the next record has to be stored whole.
@@ -965,7 +966,7 @@ impl PersistentRaftWal {
         // The length this writer left behind, if it has written here. A
         // mismatch means the file moved under it -- another writer on the same
         // directory -- and carrying on would silently drop records.
-        if let Some(expected) = self.expected_active_len {
+        if let Some(expected) = self.expected_active_len.map(std::num::NonZeroU64::get) {
             if active_len != expected {
                 return Err(RaftError::Storage(format!(
                     "WAL active segment is {active_len} bytes but this writer left it at {expected}: another writer is using {}",
@@ -1006,7 +1007,7 @@ impl PersistentRaftWal {
         self.expected_active_len = if segment_rolled {
             None
         } else {
-            Some(active_len + record_bytes)
+            std::num::NonZeroU64::new(active_len + record_bytes)
         };
         let mut fsync_elapsed_ms = 0;
         let mut slow_fsync_observed = false;
