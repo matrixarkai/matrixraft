@@ -77,6 +77,93 @@ impl Drop for Directory {
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
 
 #[test]
+fn leadership_transfer_uses_messages_and_the_new_leader_commits() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    group
+        .get_mut(&1)
+        .unwrap()
+        .propose(b"before transfer".to_vec())
+        .unwrap();
+    pump(&mut group, &mut applied, None);
+    let term = group.get(&1).unwrap().term();
+    assert!(group.get_mut(&2).unwrap().transfer_leadership(3).is_err());
+    for target in [0, 1, 99] {
+        assert!(group
+            .get_mut(&1)
+            .unwrap()
+            .transfer_leadership(target)
+            .is_err());
+    }
+    group.get_mut(&1).unwrap().transfer_leadership(2).unwrap();
+    assert!(
+        group.get(&1).unwrap().is_leader(),
+        "acceptance alone cannot transfer leadership"
+    );
+    assert!(!group.get(&2).unwrap().is_leader());
+    pump(&mut group, &mut applied, None);
+    assert!(group.get(&2).unwrap().is_leader());
+    assert!(group.get(&2).unwrap().term() > term);
+    assert!(!group.get(&1).unwrap().is_leader());
+    assert!(group.get_mut(&1).unwrap().propose(vec![9]).is_err());
+    group
+        .get_mut(&2)
+        .unwrap()
+        .propose(b"after transfer".to_vec())
+        .unwrap();
+    pump(&mut group, &mut applied, None);
+    assert_eq!(applied.get(&1), applied.get(&2));
+    assert_eq!(applied.get(&2), applied.get(&3));
+    assert_eq!(
+        applied.get(&2).unwrap().last().unwrap().1,
+        b"after transfer"
+    );
+}
+
+#[test]
+fn lost_transfer_packets_expire_without_forcing_a_new_leader() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+    pump(&mut group, &mut applied, Some(3));
+    assert!(group.get_mut(&1).unwrap().propose(vec![1]).is_err());
+    for _ in 0..12 {
+        group.get_mut(&1).unwrap().tick().unwrap();
+        pump(&mut group, &mut applied, Some(3));
+    }
+    assert!(group.get(&1).unwrap().is_leader());
+    group.get_mut(&1).unwrap().propose(vec![2]).unwrap();
+    pump(&mut group, &mut applied, None);
+    assert_eq!(applied.get(&1), applied.get(&3));
+}
+
+#[test]
+fn leadership_transfer_catches_up_its_target_before_election() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    for value in 0..10u8 {
+        group.get_mut(&1).unwrap().propose(vec![value; 32]).unwrap();
+        pump(&mut group, &mut applied, Some(2));
+    }
+    assert!(group.get(&2).unwrap().applied_index() < group.get(&1).unwrap().commit_index());
+    group.get_mut(&1).unwrap().transfer_leadership(2).unwrap();
+    assert!(!group.get(&2).unwrap().is_leader());
+    pump(&mut group, &mut applied, None);
+    assert!(group.get(&2).unwrap().is_leader());
+    assert_eq!(applied.get(&1), applied.get(&2));
+    assert_eq!(applied.get(&2), applied.get(&3));
+}
+
+#[test]
 fn peer_tuning_validates_before_creating_storage_and_controls_election_ticks() {
     let dir = Directory::new();
     let options = dir.options(1, vec![1, 2, 3]);

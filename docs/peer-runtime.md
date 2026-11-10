@@ -17,6 +17,16 @@ message budget. Election ticks cannot exceed half the platform's maximum `usize`
 Read confirmation continues to use quorum-safe mode even if quorum-based leader
 step-down is disabled.
 
+`transfer_leadership(target)` requests a handoff to another committed voter.
+Only a leader may request it; unknown targets, learners, and the local identity
+are refused. Continue
+Ready processing and packet delivery: acceptance is not a role change. The core
+catches up a lagging target before requesting its election and expires an
+incomplete transfer on the configured election timeout. Proposals can be refused
+while transfer is pending. A received timeout-now request must identify the
+current recognized leader and current term; network transfer commands remain
+unsupported, so only the local host can initiate this operation.
+
 `DurablePeer::campaign`, `tick`, and `step` feed the local consensus state.
 `capture_log_reader` pins the current durable journal generation and its log
 bounds. Its reader can move to another thread and read bounded entry ranges
