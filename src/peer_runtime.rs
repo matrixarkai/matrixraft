@@ -26,6 +26,9 @@ use std::{
 
 #[path = "peer_checkpoint_file.rs"]
 mod checkpoint_file;
+#[path = "peer_log_reader.rs"]
+mod log_reader;
+pub use log_reader::PeerLogReader;
 #[path = "peer_membership.rs"]
 mod membership;
 #[path = "peer_snapshot_stream.rs"]
@@ -1998,6 +2001,20 @@ impl DurablePeer {
     }
     pub fn node_id(&self) -> u64 {
         self.options.node_id
+    }
+    /// Capture the durable journal generation for read work on another thread.
+    pub fn capture_log_reader(&self) -> Result<PeerLogReader, RaftError> {
+        self.healthy()?;
+        Ok(PeerLogReader {
+            file: File::open(&self.options.wal_path).map_err(storage_error)?,
+            length: self.journal.length,
+            first: self.store.first_index().map_err(storage_error)?,
+            last: self.store.last_index().map_err(storage_error)?,
+            group: self.options.group_id,
+            node: self.options.node_id,
+            voters: self.options.voters.clone(),
+            permitted: self.store.permitted.clone(),
+        })
     }
     pub fn leader_id(&self) -> Option<u64> {
         (self.raw.raft.leader_id != 0).then_some(self.raw.raft.leader_id)

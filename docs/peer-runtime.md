@@ -6,6 +6,11 @@ API hosts one voter per instance, backed by a pinned raft-rs core. The existing
 must not be used as evidence that remote peers voted or persisted an entry.
 
 `DurablePeer::campaign`, `tick`, and `step` feed the local consensus state.
+`capture_log_reader` pins the current durable journal generation and its log
+bounds. Its reader can move to another thread and read bounded entry ranges
+without repairing files or sharing the writer cursor. Later appends are excluded;
+checkpoint replacement does not invalidate an already captured generation.
+The caller must still reject obsolete results before using them for replication.
 Call `process_ready` after inputs. It synchronizes protobuf WAL batches before
 returning outgoing protobuf packets or invoking the committed-entry callback.
 Deliver packets only to their `to` peer. A successful `propose` allocates a log
