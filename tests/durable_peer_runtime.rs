@@ -77,6 +77,102 @@ impl Drop for Directory {
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
 
 #[test]
+fn automatic_elections_can_be_suppressed_and_resumed() {
+    let dir = Directory::new();
+    let mut peer = DurablePeer::open_with_tuning(
+        dir.options(1, vec![1]),
+        PeerTuning {
+            election_tick: 3,
+            heartbeat_tick: 1,
+            pre_vote: false,
+            ..PeerTuning::default()
+        },
+    )
+    .unwrap();
+    peer.set_automatic_elections(false).unwrap();
+    for _ in 0..32 {
+        peer.tick().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+    }
+    assert_eq!(peer.term(), 0);
+    assert!(!peer.is_leader());
+    peer.set_automatic_elections(true).unwrap();
+    for _ in 0..8 {
+        peer.tick().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+    }
+    assert!(peer.is_leader());
+    peer.set_automatic_elections(false).unwrap();
+    drop(peer);
+    let mut reopened = DurablePeer::open_with_tuning(
+        dir.options(1, vec![1]),
+        PeerTuning {
+            election_tick: 3,
+            heartbeat_tick: 1,
+            pre_vote: false,
+            ..PeerTuning::default()
+        },
+    )
+    .unwrap();
+    reopened.process_ready(|_, _| Ok(())).unwrap();
+    for _ in 0..8 {
+        reopened.tick().unwrap();
+        reopened.process_ready(|_, _| Ok(())).unwrap();
+    }
+    assert!(
+        reopened.is_leader(),
+        "local suppression must not persist across restart"
+    );
+}
+
+#[test]
+fn a_suppressed_follower_still_votes_and_replicates_for_a_new_leader() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    group
+        .get_mut(&2)
+        .unwrap()
+        .set_automatic_elections(false)
+        .unwrap();
+    for _ in 0..40 {
+        group.get_mut(&2).unwrap().tick().unwrap();
+        group.get_mut(&3).unwrap().tick().unwrap();
+        pump(&mut group, &mut applied, Some(1));
+    }
+    assert!(group.get(&3).unwrap().is_leader());
+    assert!(!group.get(&2).unwrap().is_leader());
+    assert_eq!(group.get(&2).unwrap().leader_id(), Some(3));
+    group
+        .get_mut(&3)
+        .unwrap()
+        .propose(b"replacement leader".to_vec())
+        .unwrap();
+    pump(&mut group, &mut applied, Some(1));
+    assert_eq!(applied.get(&2), applied.get(&3));
+}
+
+#[test]
+fn election_suppression_does_not_stop_leader_quorum_checks() {
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let leader = group.get_mut(&1).unwrap();
+    let term = leader.term();
+    leader.set_automatic_elections(false).unwrap();
+    for _ in 0..25 {
+        leader.tick().unwrap();
+        leader.process_ready(|_, _| Ok(())).unwrap();
+    }
+    assert!(!leader.is_leader());
+    assert_eq!(leader.term(), term);
+}
+
+#[test]
 fn delivery_failure_reports_release_replication_windows_without_quorum_claims() {
     let dir = Directory::new();
     let tuning = PeerTuning {
@@ -143,6 +239,11 @@ fn leadership_transfer_uses_messages_and_the_new_leader_commits() {
     let dir = Directory::new();
     let mut group = peers(&dir);
     let mut applied = Applied::new();
+    group
+        .get_mut(&1)
+        .unwrap()
+        .set_automatic_elections(false)
+        .unwrap();
     group.get_mut(&1).unwrap().campaign().unwrap();
     pump(&mut group, &mut applied, None);
     group
@@ -160,6 +261,11 @@ fn leadership_transfer_uses_messages_and_the_new_leader_commits() {
             .transfer_leadership(target)
             .is_err());
     }
+    group
+        .get_mut(&2)
+        .unwrap()
+        .set_automatic_elections(false)
+        .unwrap();
     group.get_mut(&1).unwrap().transfer_leadership(2).unwrap();
     assert!(
         group.get(&1).unwrap().is_leader(),

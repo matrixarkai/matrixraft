@@ -1950,6 +1950,7 @@ impl PreparedCheckpoint {
 }
 /// One actual Raft peer. Remote votes and append acknowledgments enter only via `step`.
 pub struct DurablePeer {
+    automatic_elections: bool,
     recovering_membership: bool,
     options: PeerOptions,
     raw: RawNode<PeerStorage>,
@@ -2023,6 +2024,7 @@ impl DurablePeer {
         stream.payload_directory = store.payload_directory.clone();
         stream.permitted = store.permitted.clone();
         Ok(Self {
+            automatic_elections: true,
             recovering_membership: !store.permitted.is_empty(),
             options,
             raw,
@@ -2102,7 +2104,16 @@ impl DurablePeer {
     pub fn tick(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
-        self.raw.tick();
+        if !self.automatic_elections && !self.is_leader() {
+            // Advance the follower lease clock without triggering a campaign.
+            // At expiry forget the old leader, but preserve the durable vote.
+            self.raw.raft.election_elapsed = self.raw.raft.election_elapsed.saturating_add(1);
+            if self.raw.raft.pass_election_timeout() {
+                self.raw.raft.become_follower(self.term(), 0);
+            }
+        } else {
+            self.raw.tick();
+        }
         if !self.is_leader() {
             self.snapshot_flights.clear();
         }
@@ -2132,6 +2143,14 @@ impl DurablePeer {
         }
         Ok(())
     }
+    /// Control automatic campaigns locally. Explicit campaigns and transfer
+    /// elections remain available. This policy is not persisted on restart.
+    pub fn set_automatic_elections(&mut self, enabled: bool) -> Result<(), RaftError> {
+        self.healthy()?;
+        self.automatic_elections = enabled;
+        Ok(())
+    }
+
     pub fn campaign(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
