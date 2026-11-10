@@ -117,6 +117,14 @@ impl PeerTuning {
         Ok(config)
     }
 }
+/// Outcome for one committed application entry. Retry must leave the entry
+/// unconsumed; errors remain fatal to the open peer instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyDecision {
+    Applied,
+    Retry,
+}
+
 /// A binary protobuf packet. Delivery must preserve these bytes.
 #[derive(Clone, Debug)]
 pub struct PeerPacket {
@@ -716,6 +724,7 @@ enum SnapshotSource {
     LocalCapture(Arc<checkpoint_file::Blob>),
     Received(Arc<checkpoint_file::Blob>),
 }
+#[cfg(test)]
 fn install(store: &PeerStorage, batch: &WalBatch) -> Result<(), RaftError> {
     install_from(
         store,
@@ -1958,7 +1967,8 @@ impl PreparedCheckpoint {
 }
 /// One actual Raft peer. Remote votes and append acknowledgments enter only via `step`.
 pub struct DurablePeer {
-    bounded_apply: bool,
+    pending_apply: u64,
+    apply_batch_bytes: Option<u64>,
     automatic_elections: bool,
     recovering_membership: bool,
     options: PeerOptions,
@@ -2033,7 +2043,8 @@ impl DurablePeer {
         stream.payload_directory = store.payload_directory.clone();
         stream.permitted = store.permitted.clone();
         Ok(Self {
-            bounded_apply: tuning.max_apply_bytes.is_some(),
+            pending_apply: config.applied,
+            apply_batch_bytes: tuning.max_apply_bytes,
             automatic_elections: true,
             recovering_membership: !store.permitted.is_empty(),
             options,
@@ -2373,7 +2384,7 @@ impl DurablePeer {
     /// Snapshot application state before allowing further application mutations.
     pub fn prepare_checkpoint(&self) -> Result<CheckpointCapture, RaftError> {
         self.healthy()?;
-        if self.raw.has_ready()
+        if self.has_ready()
             || self.pending_read.is_some()
             || self.restore_on_open.is_some()
             || self.applied_index() == 0
@@ -2451,7 +2462,7 @@ impl DurablePeer {
     ) -> Result<(), RaftError> {
         self.healthy()?;
         if data.len() > MAX_CHECKPOINT_BYTES
-            || self.raw.has_ready()
+            || self.has_ready()
             || self.pending_read.is_some()
             || self.restore_on_open.is_some()
             || self.applied_index() == 0
@@ -2871,10 +2882,15 @@ impl DurablePeer {
         }
         Ok(output)
     }
-    /// Whether local Ready processing can advance without new input. This excludes
+    /// Whether local Ready or application work can be attempted. Deferred entries
+    /// keep this true; back off application retries when their resource is unavailable.
+    /// This excludes
     /// in-flight host reads and checkpoint transfers, which still need completion polling.
     pub fn has_ready(&self) -> bool {
-        !self.failed && (self.restore_on_open.is_some() || self.raw.has_ready())
+        !self.failed
+            && (self.restore_on_open.is_some()
+                || self.raw.has_ready()
+                || self.pending_apply > self.applied_index())
     }
 
     /// Persist before returning packets or applying committed entries. Empty payloads
@@ -2921,6 +2937,35 @@ impl DurablePeer {
     pub fn process_ready_with_snapshot_reader(
         &mut self,
         mut apply: impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
+        restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
+    ) -> Result<Vec<PeerPacket>, RaftError> {
+        self.process_ready_retryable_with_snapshot_reader(
+            |id, data| apply(id, data).map(|()| ApplyDecision::Applied),
+            restore,
+        )
+    }
+
+    /// Retry leaves the current entry and its suffix unapplied while durable
+    /// consensus continues. Back off application retries but keep driving ticks,
+    /// packets, and Ready. Successfully applied entries are not retried within this
+    /// instance; reopening still requires a fresh or idempotent application.
+    pub fn process_ready_retryable(
+        &mut self,
+        apply: impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
+    ) -> Result<Vec<PeerPacket>, RaftError> {
+        self.process_ready_retryable_with_snapshot_reader(apply, |_, _, _| {
+            Err(storage_error(
+                "application snapshot restore callback required",
+            ))
+        })
+    }
+
+    /// Retryable entry application with streaming checkpoint restoration.
+    /// A successful restore supersedes deferred entries through its position;
+    /// restore errors remain fatal and cannot request Retry.
+    pub fn process_ready_retryable_with_snapshot_reader(
+        &mut self,
+        mut apply: impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
         mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         self.healthy()?;
@@ -2980,14 +3025,64 @@ impl DurablePeer {
         }
         Ok(())
     }
+    fn apply_waiting(
+        &mut self,
+        entries: Vec<Entry>,
+        apply: &mut impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
+    ) -> Result<bool, RaftError> {
+        if self.pending_apply <= self.applied_index() {
+            return Ok(false);
+        }
+        let low = self.applied_index() + 1;
+        // Deferred work retains only its upper index, not a second payload queue.
+        // The synced storage keeps committed entries until an applied checkpoint.
+        let entries = if entries.first().is_some_and(|entry| entry.index == low) {
+            entries
+        } else {
+            self.store
+                .memory
+                .entries(
+                    low,
+                    self.pending_apply
+                        .checked_add(1)
+                        .ok_or_else(|| storage_error("application index exceeds limit"))?,
+                    self.apply_batch_bytes,
+                    raft_core::GetEntriesContext::empty(false),
+                )
+                .map_err(storage_error)?
+        };
+        let mut applied = self.applied_index();
+        for entry in entries {
+            let index = entry.index;
+            match self.apply_committed(entry, apply) {
+                Ok(ApplyDecision::Applied) => applied = index,
+                other => {
+                    self.raw.advance_apply_to(applied);
+                    return other.map(|_| true);
+                }
+            }
+        }
+        self.raw.advance_apply_to(applied);
+        Ok(false)
+    }
+
     fn process_inner(
         &mut self,
-        apply: &mut impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
+        apply: &mut impl FnMut(LogId, &[u8]) -> Result<ApplyDecision, RaftError>,
         restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<(), RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         let mut output = Vec::new();
-        while self.raw.has_ready() {
+        let mut deferred = false;
+        let mut applied_batch = false;
+        loop {
+            if !self.raw.has_ready() {
+                if !deferred && !applied_batch {
+                    self.apply_waiting(Vec::new(), apply)?;
+                }
+                break;
+            }
             let mut ready = self.raw.ready();
+            let mut restored = None;
             for confirmation in ready.take_read_states() {
                 if let Some(read) = &mut self.pending_read {
                     if confirmation.request_ctx == read.context() {
@@ -3031,6 +3126,7 @@ impl DurablePeer {
                 // payload. Reuse it without scanning it again on the Raft loop.
                 install_received(&self.store, &record, Arc::clone(&snapshot), payload)?;
                 self.restore_payload(&snapshot, restore)?;
+                restored = Some(position.index);
                 self.incoming_payload = None;
             } else if ready.hs().is_some() || !ready.entries().is_empty() {
                 let mut record = batch(&self.options, ready.hs(), &[]);
@@ -3051,35 +3147,26 @@ impl DurablePeer {
             }
             output.extend(self.packets(ready.take_messages())?);
             output.extend(self.packets(ready.take_persisted_messages())?);
-            for entry in ready.take_committed_entries() {
-                self.apply_committed(entry, apply)?;
+            let entries = ready.take_committed_entries();
+            if let Some(entry) = entries.last() {
+                self.pending_apply = self.pending_apply.max(entry.index);
             }
-            if self.bounded_apply {
-                // Persistence above is complete. Defer newly available commit work
-                // to the next Ready instead of pulling a second application batch.
-                let number = ready.number();
-                self.raw.advance_append_async(ready);
-                self.raw.on_persist_ready(number);
-                self.raw.advance_apply();
+            // The journal is synced above. Do not use automatic apply advancement:
+            // a deferred application may trail arbitrarily far behind commitment.
+            let number = ready.number();
+            self.raw.advance_append_async(ready);
+            self.raw.on_persist_ready(number);
+            if let Some(index) = restored {
+                self.pending_apply = self.pending_apply.max(index);
+                self.raw.advance_apply_to(index);
+            }
+            if !deferred {
+                deferred = self.apply_waiting(entries, apply)?;
+                applied_batch = true;
+            }
+            if self.apply_batch_bytes.is_some() {
                 break;
             }
-            let mut light = self.raw.advance(ready);
-            if let Some(commit) = light.commit_index() {
-                let mut hs = self
-                    .store
-                    .initial_state()
-                    .map_err(storage_error)?
-                    .hard_state;
-                hs.commit = commit;
-                let record = batch(&self.options, Some(&hs), &[]);
-                self.journal.append(&record)?;
-                install(&self.store, &record)?;
-            }
-            output.extend(self.packets(light.take_messages())?);
-            for entry in light.take_committed_entries() {
-                self.apply_committed(entry, apply)?;
-            }
-            self.raw.advance_apply();
         }
         Ok(output)
     }
