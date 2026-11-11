@@ -31,6 +31,8 @@ mod log_reader;
 pub use log_reader::PeerLogReader;
 #[path = "peer_async_reads.rs"]
 mod async_reads;
+#[path = "peer_log_cache.rs"]
+mod log_cache;
 pub use async_reads::{PeerLogReadCompletion, PeerLogReadTask};
 #[path = "peer_membership.rs"]
 mod membership;
@@ -73,6 +75,9 @@ pub struct PeerTuning {
     /// Optional encoded-entry byte target for one application batch per Ready call.
     /// A single larger entry is delivered whole. None retains drain-to-idle behavior.
     pub max_apply_bytes: Option<u64>,
+    /// Optional resident-entry high watermark. Eviction does not advance the
+    /// checkpoint or logical log floor; cold entries remain in the journal.
+    pub max_log_cache_bytes: Option<u64>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -85,10 +90,15 @@ impl Default for PeerTuning {
             max_inflight_msgs: 64,
             max_uncommitted_size: 4 * 1024 * 1024,
             max_apply_bytes: None,
+            max_log_cache_bytes: None,
         }
     }
 }
 impl PeerTuning {
+    fn application_read_budget(self) -> Option<u64> {
+        self.max_apply_bytes
+            .or_else(|| self.max_log_cache_bytes.map(|bytes| bytes.min(65536)))
+    }
     fn config(self, id: u64) -> Result<Config, RaftError> {
         if self.election_tick > usize::MAX / 2
             || self.max_size_per_msg == 0
@@ -97,6 +107,9 @@ impl PeerTuning {
             || self
                 .max_apply_bytes
                 .is_some_and(|bytes| bytes == 0 || bytes > 4 * 1024 * 1024)
+            || self
+                .max_log_cache_bytes
+                .is_some_and(|bytes| bytes == 0 || bytes > WAL_LIMIT)
         {
             return Err(invalid("peer tuning exceeds supported bounds"));
         }
@@ -109,7 +122,7 @@ impl PeerTuning {
             max_size_per_msg: self.max_size_per_msg,
             max_inflight_msgs: self.max_inflight_msgs,
             max_uncommitted_size: self.max_uncommitted_size,
-            max_committed_size_per_ready: self.max_apply_bytes.unwrap_or(u64::MAX),
+            max_committed_size_per_ready: self.application_read_budget().unwrap_or(u64::MAX),
             read_only_option: ReadOnlyOption::Safe,
             ..Default::default()
         };
@@ -698,6 +711,7 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
 }
 #[derive(Clone)]
 struct PeerStorage {
+    cache: log_cache::Cache,
     permitted: Vec<u64>,
     memory: MemStorage,
     async_reads: Arc<Mutex<Option<async_reads::State>>>,
@@ -722,12 +736,51 @@ impl Storage for PeerStorage {
         max_size: impl Into<Option<u64>>,
         context: raft_core::GetEntriesContext,
     ) -> raft_core::Result<Vec<Entry>> {
-        async_reads::fetch(self, low, high, max_size.into(), context)
+        let result = async_reads::fetch(self, low, high, max_size.into(), context);
+        if result.is_err() && self.cache.check().is_err() {
+            // Ready generation panics on Storage errors. An empty slice leaves
+            // its committed cursor unchanged; the peer raises the sticky fatal
+            // error before exposing Ready contents or advancing the core.
+            return Ok(Vec::new());
+        }
+        result
     }
     fn term(&self, index: u64) -> raft_core::Result<u64> {
+        if self.cache.enabled() && index < self.memory.first_index()? {
+            let checkpoint = self.checkpoint.lock().unwrap();
+            let floor = checkpoint
+                .as_ref()
+                .map_or(0, |image| image.get_metadata().index);
+            if index < floor {
+                return Err(raft_core::Error::Store(raft_core::StorageError::Compacted));
+            }
+            if index == floor {
+                return Ok(checkpoint
+                    .as_ref()
+                    .map_or(0, |image| image.get_metadata().term));
+            }
+            drop(checkpoint);
+            return self
+                .cache
+                .entries(index, index + 1, None)
+                .map_err(|_| raft_core::Error::Store(raft_core::StorageError::Unavailable))?
+                .first()
+                .map(|entry| entry.term)
+                .ok_or(raft_core::Error::Store(
+                    raft_core::StorageError::Unavailable,
+                ));
+        }
         self.memory.term(index)
     }
     fn first_index(&self) -> raft_core::Result<u64> {
+        if self.cache.enabled() {
+            return Ok(self
+                .checkpoint
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(1, |image| image.get_metadata().index + 1));
+        }
         self.memory.first_index()
     }
     fn last_index(&self) -> raft_core::Result<u64> {
@@ -827,6 +880,7 @@ fn install_recovered_entries(store: &PeerStorage, batch: WalBatch) -> Result<(),
     let last = store.last_index().map_err(storage_error)?;
     let first = store.first_index().unwrap_or(u64::MAX);
     let mut headers = Vec::with_capacity(batch.entries.len());
+    let mut cache_sizes = Vec::new();
     let mut decoded = Entry::default();
     for encoded in &batch.entries {
         merge_entry_reusing_payload_storage(encoded.clone(), &mut decoded)?;
@@ -850,6 +904,9 @@ fn install_recovered_entries(store: &PeerStorage, batch: WalBatch) -> Result<(),
             index: decoded.index,
             term: decoded.term,
         });
+        if store.cache.enabled() {
+            cache_sizes.push((decoded.index, log_cache::charge(&decoded)));
+        }
     }
     if headers
         .windows(2)
@@ -880,15 +937,28 @@ fn install_recovered_entries(store: &PeerStorage, batch: WalBatch) -> Result<(),
         return Err(storage_error("peer WAL hard state is invalid"));
     }
 
+    let cached_first = if store.cache.enabled() {
+        store.memory.first_index().map_err(storage_error)?
+    } else {
+        0
+    };
     let mut core = store.wl();
     for encoded in batch.entries {
         merge_entry_reusing_payload_storage(encoded, &mut decoded)?;
-        core.append(std::slice::from_ref(&decoded))
-            .map_err(storage_error)?;
+        if decoded.index >= cached_first {
+            core.append(std::slice::from_ref(&decoded))
+                .map_err(storage_error)?;
+        }
     }
     if let Some(hs) = hs {
         core.set_hardstate(hs);
     }
+    drop(core);
+    store.cache.account(
+        cache_sizes
+            .into_iter()
+            .filter(|(index, _)| *index >= cached_first),
+    );
     Ok(())
 }
 fn install_local(
@@ -1049,6 +1119,9 @@ fn install_decoded_with_scratch(
         }
         // The core storage keeps only metadata; the application payload stays
         // in the retained checkpoint used by restoration and snapshot serving.
+        if store.cache.enabled() {
+            *store.wl() = Default::default();
+        }
         store
             .wl()
             .apply_snapshot(Snapshot {
@@ -1056,6 +1129,7 @@ fn install_decoded_with_scratch(
                 ..Default::default()
             })
             .map_err(storage_error)?;
+        store.cache.reset();
         *store.checkpoint.lock().unwrap() = Some(snapshot);
         let mut current = store.payload.lock().unwrap();
         if let Some(old) = current.as_ref() {
@@ -1112,11 +1186,26 @@ fn install_decoded_with_scratch(
     {
         return Err(storage_error("peer WAL hard state is invalid"));
     }
+    let cached_first = if store.cache.enabled() {
+        store.memory.first_index().map_err(storage_error)?
+    } else {
+        0
+    };
+    let entries = entries
+        .iter()
+        .position(|entry| entry.index >= cached_first)
+        .map_or(&[][..], |start| &entries[start..]);
     let mut core = store.wl();
     core.append(entries).map_err(storage_error)?;
     if let Some(hs) = hs {
         core.set_hardstate(hs);
     }
+    drop(core);
+    store.cache.account(
+        entries
+            .iter()
+            .map(|entry| (entry.index, log_cache::charge(entry))),
+    );
     Ok(())
 }
 struct Journal {
@@ -1236,6 +1325,7 @@ impl Journal {
                 bytes = wire.try_into_mut().unwrap_or_default();
             }
             offset += 24 + size as u64;
+            store.refresh_cache(options, offset, false)?;
         }
         assembly.finish()?;
         checkpoint_file::cleanup(
@@ -1271,6 +1361,7 @@ impl Journal {
         if offset == 0 {
             journal.append(&batch(options, None, &[]))?;
         }
+        store.refresh_cache(options, journal.length, false)?;
         Ok(journal)
     }
     fn rewrite(
@@ -2019,7 +2110,8 @@ impl PreparedCheckpoint {
 /// One actual Raft peer. Remote votes and append acknowledgments enter only via `step`.
 pub struct DurablePeer {
     pending_apply: u64,
-    apply_batch_bytes: Option<u64>,
+    application_fetch_bytes: Option<u64>,
+    bounded_apply: bool,
     automatic_elections: bool,
     recovering_membership: bool,
     options: PeerOptions,
@@ -2070,6 +2162,7 @@ impl DurablePeer {
         options.voters = unique.into_iter().collect();
         let mut config = tuning.config(options.node_id)?;
         let store = PeerStorage {
+            cache: log_cache::Cache::new(tuning.max_log_cache_bytes),
             permitted,
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
@@ -2096,7 +2189,8 @@ impl DurablePeer {
         stream.permitted = store.permitted.clone();
         Ok(Self {
             pending_apply: config.applied,
-            apply_batch_bytes: tuning.max_apply_bytes,
+            application_fetch_bytes: tuning.application_read_budget(),
+            bounded_apply: tuning.max_apply_bytes.is_some(),
             automatic_elections: true,
             recovering_membership: !store.permitted.is_empty(),
             options,
@@ -2127,7 +2221,7 @@ impl DurablePeer {
                 "peer failed; restart with a fresh application",
             ))
         } else {
-            Ok(())
+            self.store.cache.check()
         }
     }
     pub fn node_id(&self) -> u64 {
@@ -2362,6 +2456,14 @@ impl DurablePeer {
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.options.node_id));
         }
+        if self.store.cache.enabled()
+            && self
+                .store
+                .cache
+                .busy(self.store.memory.rl().hard_state().commit)
+        {
+            return Err(invalid("durable log cache is waiting for commitment"));
+        }
         if payload.is_empty() || payload.len() > 4 * 1024 * 1024 {
             return Err(invalid("peer proposal must contain 1..4 MiB"));
         }
@@ -2371,6 +2473,8 @@ impl DurablePeer {
         if index == before {
             return Err(invalid("peer proposal was not admitted"));
         }
+        let unstable = self.raw.raft.raft_log.unstable_entries();
+        self.store.cache.admit(&unstable[unstable.len() - 1..]);
         Ok(LogId {
             term: self.raw.raft.term,
             index,
@@ -2382,6 +2486,14 @@ impl DurablePeer {
         self.healthy()?;
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.options.node_id));
+        }
+        if self.store.cache.enabled()
+            && self
+                .store
+                .cache
+                .busy(self.store.memory.rl().hard_state().commit)
+        {
+            return Err(invalid("durable log cache is waiting for commitment"));
         }
         if payloads.is_empty() || payloads.len() > 1024 {
             return Err(invalid("peer proposal batch must contain 1..1024 entries"));
@@ -2421,6 +2533,10 @@ impl DurablePeer {
         if self.raw.raft.raft_log.last_index() != last {
             return Err(invalid("peer proposal batch was not admitted"));
         }
+        let unstable = self.raw.raft.raft_log.unstable_entries();
+        self.store
+            .cache
+            .admit(&unstable[unstable.len() - (last - before) as usize..]);
         Ok((before + 1..=last)
             .map(|index| LogId {
                 term: self.raw.raft.term,
@@ -2591,6 +2707,8 @@ impl DurablePeer {
                 }
                 install_local(&self.store, &record, snapshot, payload.clone())?;
                 self.store.wl().set_conf_state(current_configuration);
+                self.store
+                    .refresh_cache(&self.options, self.journal.length, true)?;
                 Ok(())
             });
         if result.is_err() {
@@ -2893,7 +3011,8 @@ impl DurablePeer {
             self.snapshot_flights.remove(&message.from);
             self.stream.completed_send(message.from);
         }
-        self.raw.step(message).map_err(invalid)
+        let result = self.raw.step(message).map_err(invalid);
+        self.store.cache.check().and(result)
     }
     fn packets(&mut self, messages: Vec<Message>) -> Result<Vec<PeerPacket>, RaftError> {
         let mut output = Vec::new();
@@ -2947,6 +3066,7 @@ impl DurablePeer {
     /// in-flight host reads and checkpoint transfers, which still need completion polling.
     pub fn has_ready(&self) -> bool {
         !self.failed
+            && self.store.cache.check().is_ok()
             && (self.pending_restore.is_some()
                 || self.raw.has_ready()
                 || self.pending_apply > self.applied_index())
@@ -3142,6 +3262,7 @@ impl DurablePeer {
             output.extend(self.stream.packets(self.options.group_id)?);
             Ok(output)
         })();
+        let result = self.store.cache.check().and(result);
         if result.is_err() {
             self.failed = true;
         } else if self.pending_restore.is_none() && self.applied_index() >= self.commit_index() {
@@ -3203,14 +3324,12 @@ impl DurablePeer {
             entries
         } else {
             self.store
-                .memory
-                .entries(
+                .entries_sync(
                     low,
                     self.pending_apply
                         .checked_add(1)
                         .ok_or_else(|| storage_error("application index exceeds limit"))?,
-                    self.apply_batch_bytes,
-                    raft_core::GetEntriesContext::empty(false),
+                    self.application_fetch_bytes,
                 )
                 .map_err(storage_error)?
         };
@@ -3265,6 +3384,9 @@ impl DurablePeer {
                 break;
             }
             let mut ready = self.raw.ready();
+            // The Storage adapter retains fatal cold-read errors out of band.
+            // Stop before exposing any of this Ready or advancing the core.
+            self.store.cache.check()?;
             for confirmation in ready.take_read_states() {
                 if let Some(read) = &mut self.pending_read {
                     if confirmation.request_ctx == read.context() {
@@ -3308,6 +3430,8 @@ impl DurablePeer {
                 // Receive finalization already validated and synced this owned
                 // payload. Reuse it without scanning it again on the Raft loop.
                 install_received(&self.store, &record, Arc::clone(&snapshot), payload)?;
+                self.store
+                    .refresh_cache(&self.options, self.journal.length, true)?;
                 self.restore_floor = restore_floor;
                 self.pending_apply = self.pending_apply.max(position.index);
                 self.pending_restore = Some(snapshot);
@@ -3328,6 +3452,8 @@ impl DurablePeer {
                     ready.entries(),
                     ready.hs().cloned(),
                 )?;
+                self.store
+                    .refresh_cache(&self.options, self.journal.length, false)?;
             }
             output.extend(self.packets(ready.take_messages())?);
             output.extend(self.packets(ready.take_persisted_messages())?);
@@ -3340,6 +3466,7 @@ impl DurablePeer {
             let number = ready.number();
             self.raw.advance_append_async(ready);
             self.raw.on_persist_ready(number);
+            self.store.cache.check()?;
             if !restore_attempted && self.pending_restore.is_some() {
                 self.attempt_restore(restore)?;
                 restore_attempted = true;
@@ -3348,7 +3475,7 @@ impl DurablePeer {
                 deferred = self.apply_waiting(entries, apply)?;
                 applied_batch = true;
             }
-            if self.apply_batch_bytes.is_some() {
+            if self.bounded_apply {
                 break;
             }
         }
@@ -3383,6 +3510,7 @@ mod tests {
             wal_path: dir.path().join("peer.wal"),
         };
         let store = PeerStorage {
+            cache: Default::default(),
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
@@ -3448,6 +3576,7 @@ mod tests {
         );
         drop(journal);
         let recovered = PeerStorage {
+            cache: Default::default(),
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
@@ -3489,6 +3618,7 @@ mod tests {
             wal_path: dir.path().join("peer.wal"),
         };
         let store = PeerStorage {
+            cache: Default::default(),
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),

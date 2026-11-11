@@ -17,6 +17,38 @@ message budget. Election ticks cannot exceed half the platform's maximum `usize`
 Read confirmation continues to use quorum-safe mode even if quorum-based leader
 step-down is disabled.
 
+`PeerTuning::max_log_cache_bytes` optionally sets a resident-entry high-water
+target from 1 byte through 512 MiB. `None` retains the existing all-resident
+behavior. Accounting includes entry structs, payloads, contexts, and cache
+bookkeeping, including accepted proposals waiting for Ready persistence. Once the
+target is crossed, durable committed prefixes are evicted
+toward a half-target low watermark. A committed anchor and all uncommitted
+entries remain resident; one oversized anchor may exceed the target. Proposal
+admission waits when resident pressure includes uncommitted entries. Continue
+Ready processing and real packet delivery so commitment can release pressure.
+
+This is not a process-RSS cap: allocation capacity, in-flight inputs, validation
+buffers, checkpoints, and uncommitted bursts are separate. Eviction also runs
+during journal recovery, before application replay. Without an explicit apply
+byte target, cache-enabled committed reads use batches no larger than the smaller
+of 64 KiB and the cache target, with the usual single-oversized-entry exception;
+the default Ready call still drains available work rather than yielding.
+
+Cache eviction does not compact the journal, advance the logical log floor, or
+create a checkpoint. Cold entries and terms are read from the durable journal,
+so lagging replicas can catch up without an application image. Cold reads retain
+the captured-reader integrity checks and scan journal records, trading I/O for
+resident memory. Async read workers can fetch these ranges; already-committed
+prefixes are revalidated by their immutability, current bounds, and peer/term
+identity without rereading them on the peer worker. Uncommitted results still
+require comparison against current entries. Checkpoint publication switches the
+cache reader to the new generation while existing captured readers stay valid.
+The extra cold-reader descriptor is opened only after eviction and released when
+a checkpoint removes the need for it.
+The setting can change on reopen without changing the journal format.
+Cold-read integrity and I/O failures stop the peer rather than silently retrying
+an empty Ready result.
+
 `transfer_leadership(target)` requests a handoff to another committed voter.
 Only a leader may request it; unknown targets, learners, and the local identity
 are refused. Continue

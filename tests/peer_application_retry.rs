@@ -37,6 +37,7 @@ impl Cluster {
                 vec![1, 2, 3, 4],
                 PeerTuning {
                     max_apply_bytes: Some(128),
+                    max_log_cache_bytes: Some(512),
                     ..PeerTuning::default()
                 },
             )
@@ -102,6 +103,11 @@ impl Cluster {
                     peer.step(&packet.bytes).unwrap();
                 }
             }
+            for peer in self.peers.values_mut() {
+                for task in peer.take_log_read_tasks().unwrap() {
+                    peer.complete_log_read(task.execute()).unwrap();
+                }
+            }
         }
     }
     fn propose(&mut self, values: std::ops::RangeInclusive<u8>) -> u64 {
@@ -113,6 +119,123 @@ impl Cluster {
             .last()
             .unwrap()
             .index
+    }
+}
+
+#[test]
+fn a_lagging_voter_catches_up_from_evicted_history_without_a_checkpoint() {
+    let mut cluster = Cluster::new();
+    cluster.propose(1..=32);
+    cluster.drive(None, Some(2));
+    assert_eq!(cluster.values[&2], Vec::<u8>::new());
+    cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .enable_async_log_reads(8)
+        .unwrap();
+    cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .report_unreachable(2)
+        .unwrap();
+    for _ in 0..4 {
+        cluster.peers.get_mut(&1).unwrap().tick().unwrap();
+        cluster.drive(None, None);
+    }
+    assert_eq!(cluster.values[&2], (1..=32).collect::<Vec<_>>());
+    cluster.peers.get_mut(&3).unwrap().force_campaign().unwrap();
+    cluster.drive(None, None);
+    assert!(cluster.peers[&3].is_leader());
+    cluster
+        .peers
+        .get_mut(&3)
+        .unwrap()
+        .propose(vec![99])
+        .unwrap();
+    cluster.drive(None, None);
+    let expected: Vec<_> = (1..=32).chain(std::iter::once(99)).collect();
+    for id in 1..=3 {
+        assert_eq!(cluster.values[&id], expected);
+    }
+}
+
+#[test]
+fn cache_pressure_releases_after_real_commit_and_uncommitted_overwrite_replays_cleanly() {
+    let mut cluster = Cluster::new();
+    cluster.propose(1..=16);
+    cluster.drive(None, None);
+    cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose(vec![200; 4096])
+        .unwrap();
+    cluster.drive(None, Some(1));
+    assert!(cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose(vec![201])
+        .is_err());
+    assert!(cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_batch(vec![vec![201]])
+        .is_err());
+    let mut leader = None;
+    for _ in 0..100 {
+        for id in [2, 3] {
+            cluster.peers.get_mut(&id).unwrap().tick().unwrap();
+        }
+        cluster.drive(None, Some(1));
+        leader = [2, 3].into_iter().find(|id| cluster.peers[id].is_leader());
+        if leader.is_some() {
+            break;
+        }
+    }
+    let leader = leader.unwrap();
+    cluster
+        .peers
+        .get_mut(&leader)
+        .unwrap()
+        .propose(vec![99])
+        .unwrap();
+    cluster.drive(None, Some(1));
+    cluster
+        .peers
+        .get_mut(&leader)
+        .unwrap()
+        .report_unreachable(1)
+        .unwrap();
+    for _ in 0..4 {
+        cluster.peers.get_mut(&leader).unwrap().tick().unwrap();
+        cluster.drive(None, None);
+    }
+    let expected: Vec<_> = (1..=16).chain(std::iter::once(99)).collect();
+    for id in 1..=3 {
+        assert_eq!(cluster.values[&id], expected);
+    }
+    cluster.peers.clear();
+    cluster.values.clear();
+    for id in 1..=3 {
+        let peer = DurablePeer::open_with_membership_and_tuning(
+            cluster.options(id),
+            vec![1, 2, 3, 4],
+            PeerTuning {
+                max_log_cache_bytes: Some(512),
+                max_apply_bytes: Some(128),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        cluster.peers.insert(id, peer);
+    }
+    cluster.drive(None, None);
+    for id in 1..=3 {
+        assert_eq!(cluster.values[&id], expected);
     }
 }
 

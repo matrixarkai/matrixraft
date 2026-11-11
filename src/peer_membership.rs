@@ -148,6 +148,14 @@ impl DurablePeer {
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.node_id()));
         }
+        if self.store.cache.enabled()
+            && self
+                .store
+                .cache
+                .busy(self.store.memory.rl().hard_state().commit)
+        {
+            return Err(invalid("durable log cache is waiting for commitment"));
+        }
         if self.has_ready()
             || self.pending_restore.is_some()
             || self.raw.raft.pending_conf_index > self.applied_index()
@@ -220,6 +228,8 @@ impl DurablePeer {
         if index == before {
             return Err(invalid("configuration proposal was not admitted"));
         }
+        let unstable = self.raw.raft.raft_log.unstable_entries();
+        self.store.cache.admit(&unstable[unstable.len() - 1..]);
         Ok(LogId {
             term: self.term(),
             index,

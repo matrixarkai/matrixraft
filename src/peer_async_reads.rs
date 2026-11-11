@@ -94,6 +94,9 @@ pub(super) fn fetch(
         }
     }
     drop(guard);
+    if store.cache.enabled() {
+        return store.entries_sync(low, high, max);
+    }
     store.memory.entries(low, high, max, context)
 }
 
@@ -165,30 +168,17 @@ impl DurablePeer {
         if term != self.term() || !self.is_leader() {
             return Ok(false);
         }
-        let current = if request.low >= self.store.first_index().map_err(storage_error)?
+        let in_bounds = request.low >= self.store.first_index().map_err(storage_error)?
             && request.high
                 <= self
                     .store
                     .last_index()
                     .map_err(storage_error)?
-                    .saturating_add(1)
-        {
-            self.store
-                .memory
-                .entries(
-                    request.low,
-                    request.high,
-                    request.max,
-                    raft_core::GetEntriesContext::empty(false),
-                )
-                .ok()
-        } else {
-            None
-        };
-        let Some(current) = current else {
+                    .saturating_add(1);
+        if !in_bounds {
             self.raw.on_entries_fetched(request.context);
             return Ok(false);
-        };
+        }
         let entries = match entries {
             Ok(entries) => entries,
             Err(error) => {
@@ -196,7 +186,21 @@ impl DurablePeer {
                 return Err(error);
             }
         };
-        let valid = entries == current;
+        // Eviction never changes a committed prefix. Its worker-validated bytes
+        // remain authoritative while bounds and peer/term identity still match.
+        let immutable = self.store.cache.enabled()
+            && entries
+                .last()
+                .is_some_and(|entry| entry.index <= self.store.memory.rl().hard_state().commit);
+        let valid = immutable
+            || self
+                .store
+                .entries_sync(request.low, request.high, request.max)
+                .is_ok_and(|current| entries == current);
+        if let Err(error) = self.store.cache.check() {
+            self.failed = true;
+            return Err(error);
+        }
         if valid {
             self.store
                 .async_reads
@@ -221,6 +225,48 @@ impl DurablePeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evicted_committed_completion_is_obsolete_after_checkpoint_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let options = PeerOptions {
+            group_id: 17,
+            node_id: 1,
+            voters: vec![1],
+            wal_path: root.path().join("peer.wal"),
+        };
+        let mut peer = DurablePeer::open_with_tuning(
+            options,
+            PeerTuning {
+                max_log_cache_bytes: Some(512),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        for value in 0..16u8 {
+            peer.propose(vec![value; 512]).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+        }
+        let low = 2;
+        let high = peer.commit_index() + 1;
+        assert!(peer.store.memory.first_index().unwrap() > low);
+        peer.enable_async_log_reads(1).unwrap();
+        assert!(fetch(
+            &peer.store,
+            low,
+            high,
+            Some(1024),
+            raft_core::GetEntriesContext::empty(true)
+        )
+        .is_err());
+        let completion = peer.take_log_read_tasks().unwrap().pop().unwrap().execute();
+        peer.checkpoint(vec![8; 16]).unwrap();
+        assert!(!peer.complete_log_read(completion).unwrap());
+        peer.propose(vec![42]).unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+    }
 
     #[test]
     fn outstanding_reads_are_bounded_released_on_drop_and_discarded_after_term_change() {

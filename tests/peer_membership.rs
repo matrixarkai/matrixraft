@@ -12,6 +12,7 @@ struct Cluster {
     peers: BTreeMap<u64, DurablePeer>,
     values: BTreeMap<u64, RefCell<Vec<u64>>>,
     isolated: BTreeSet<u64>,
+    cache_target: Option<u64>,
 }
 
 #[test]
@@ -46,6 +47,41 @@ fn bounded_membership_recovery_refuses_inputs_until_the_committed_tail_is_applie
     assert_eq!(peer.applied_index(), peer.commit_index());
     peer.campaign().unwrap();
 }
+
+#[test]
+fn cached_membership_survives_learner_promotion_joint_changes_and_restart() {
+    let mut cluster = Cluster::new();
+    cluster.cache_target = Some(512);
+    cluster.peers.clear();
+    for id in 1..=3 {
+        cluster.open(id);
+    }
+    cluster.pump();
+    cluster.peers.get_mut(&1).unwrap().campaign().unwrap();
+    cluster.pump();
+    cluster.add_caught_up_learner();
+    for value in 0..24 {
+        cluster.write(1, value);
+    }
+    cluster.change(1, MembershipChange::Promote(4));
+    cluster.change(1, MembershipChange::LeaveJoint);
+    cluster.change(1, MembershipChange::Remove(3));
+    cluster.change(1, MembershipChange::LeaveJoint);
+    cluster.peers.clear();
+    for id in [1, 2, 4] {
+        cluster.open(id);
+    }
+    cluster.pump();
+    for id in [1, 2, 4] {
+        assert_eq!(*cluster.values[&id].borrow(), (0..24).collect::<Vec<_>>());
+        assert_eq!(cluster.peers[&id].membership().voters, vec![1, 2, 4]);
+    }
+    cluster.peers.get_mut(&2).unwrap().campaign().unwrap();
+    cluster.pump();
+    assert!(cluster.peers[&2].is_leader());
+    cluster.write(2, 99);
+}
+
 impl Cluster {
     fn new() -> Self {
         let mut result = Self {
@@ -53,6 +89,7 @@ impl Cluster {
             peers: BTreeMap::new(),
             values: BTreeMap::new(),
             isolated: BTreeSet::new(),
+            cache_target: None,
         };
         for id in 1..=3 {
             result.open(id);
@@ -72,8 +109,15 @@ impl Cluster {
         }
     }
     fn open(&mut self, id: u64) {
-        let peer =
-            DurablePeer::open_with_membership(self.options(id), vec![1, 2, 3, 4, 5]).unwrap();
+        let peer = DurablePeer::open_with_membership_and_tuning(
+            self.options(id),
+            vec![1, 2, 3, 4, 5],
+            PeerTuning {
+                max_log_cache_bytes: self.cache_target,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         self.peers.insert(id, peer);
         self.values.insert(id, RefCell::new(Vec::new()));
     }
