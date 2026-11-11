@@ -426,6 +426,38 @@ compaction remains necessary for a long-running write workload.
 
 ## Application checkpoints and lagging voters
 
+`set_checkpoint_transfer_limiters(send, receive)` attaches independent optional
+`Arc<Mutex<ByteQuotaLimiter>>` budgets. Share the same instance across groups for
+a host-wide budget. Capacities must be at least 1 MiB, the fixed fragment size;
+initial available bytes may be zero. Removing or replacing a limiter is local
+and does not change the WAL format. Reopening a peer restores unlimited transfers
+until the host reattaches its budgets.
+
+The host must refill each shared budget once at its chosen cadence, for example
+with `RateLimiterRefiller`; peer ticks never refill it. Send admission charges
+encoded checkpoint fragment bytes before reading file payloads or producing data
+packets. Receive admission charges fragment bytes before staging or duplicate
+verification I/O, and also covers direct inline snapshots. Failed or retried data
+attempts may consume quota again. This controls transfer payload I/O, not WAL
+writes, finalization scans, application restoration, or bytes already received
+by the host transport.
+
+Direct snapshots larger than the receive bucket accumulate bounded quota credits
+across retries. Only their sender, term, checkpoint index, length, and reserved
+byte count are retained; no application state advances and no payload is kept
+until the whole cost has been reserved. A changed identity or limiter discards
+the old credits without refunding attempted work.
+
+Quota denial defers work without sleeping or advancing the accepted prefix.
+Normal consensus traffic and transfer control packets remain uncharged. Paused
+senders emit bounded metadata-only probes using the acknowledgment envelope;
+receivers answer with their actual staged prefix or validated completion.
+Keep driving ticks and Ready polling even when no application work is ready.
+Long quota pauses preserve partial transfers while their current leader remains
+recognized; a term or role change still discards obsolete sends. Use the current
+runtime at both ends for this keepalive behavior. A send limiter routes even small
+snapshots through the framed path so they cannot bypass admission.
+
 After processing all Ready work, call `checkpoint` on the exclusive application
 worker with a binary snapshot of the exact applied state. The runtime records its
 applied index, term and committed configuration; it retains any persisted uncommitted
@@ -477,7 +509,9 @@ exercising packet loss, duplicates, suffix recovery, and full restart.
 Each peer retains at most one outgoing and one incoming large transfer. Other
 lagging voters remain on the consensus retry path until the outgoing slot is free.
 A sender advances one fragment per acknowledgment and retries after ten local
-ticks. A transfer without progress expires after 100 ticks. A receiver that
+ticks. Without local quota deferral or matching receiver acknowledgments, an
+outgoing transfer expires after 100 ticks. Partial receives expire after 100
+ticks without matching data or keepalive traffic. A receiver that
 restarts requests retransmission from offset zero. Repeated delivery after
 completion does not restore state twice. Transport completion only resumes Raft
 probing: it never advances a follower's matched index or commits a proposal.

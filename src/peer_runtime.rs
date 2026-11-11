@@ -2284,6 +2284,17 @@ impl DurablePeer {
     pub fn checkpoint_receive_pending(&self) -> bool {
         self.stream.finalizing()
     }
+    /// Share host-refilled byte quotas across checkpoint transfers and groups.
+    /// Each capacity must admit a full 1 MiB fragment. None removes a limiter.
+    /// Ticks do not refill these quotas; control packets are never charged.
+    pub fn set_checkpoint_transfer_limiters(
+        &mut self,
+        send: Option<Arc<Mutex<crate::ByteQuotaLimiter>>>,
+        receive: Option<Arc<Mutex<crate::ByteQuotaLimiter>>>,
+    ) -> Result<(), RaftError> {
+        self.healthy()?;
+        self.stream.set_limiters(send, receive)
+    }
     pub fn tick(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
@@ -2897,6 +2908,8 @@ impl DurablePeer {
                     // advances the follower match index or commits an entry.
                     self.raw
                         .report_snapshot(part.from, raft_core::SnapshotStatus::Finish);
+                } else if self.leader_id() == Some(part.from) && self.term() == part.term {
+                    self.stream.receive_probe(&part);
                 }
                 return Ok(());
             }
@@ -2938,7 +2951,7 @@ impl DurablePeer {
         if !canonical {
             return Err(invalid("noncanonical peer message"));
         }
-        self.step_message(message)
+        self.step_message(message, true)
     }
     fn accept_received_checkpoint(&mut self, message: Message) -> Result<(), RaftError> {
         if let Some(payload) = self.stream.received_payload.take() {
@@ -2953,9 +2966,9 @@ impl DurablePeer {
                 ));
             }
         }
-        self.step_message(message)
+        self.step_message(message, false)
     }
-    fn step_message(&mut self, message: Message) -> Result<(), RaftError> {
+    fn step_message(&mut self, message: Message, charge_snapshot: bool) -> Result<(), RaftError> {
         let kind = message.get_msg_type();
         let allowed = matches!(
             kind,
@@ -3009,6 +3022,22 @@ impl DurablePeer {
             validate_snapshot_for(snapshot, &self.options.voters, &self.store.permitted)?;
             if snapshot.get_metadata().term > message.term {
                 return Err(invalid("snapshot term exceeds sender term"));
+            }
+            if charge_snapshot
+                && message.term >= self.term()
+                && snapshot.get_metadata().index > self.commit_index()
+                && !self.stream.admit_inline(&message)?
+            {
+                self.raw
+                    .step(Message {
+                        from: message.from,
+                        to: message.to,
+                        term: message.term,
+                        msg_type: MessageType::MsgHeartbeat as i32,
+                        ..Default::default()
+                    })
+                    .map_err(invalid)?;
+                return self.store.cache.check();
             }
         }
         // Heartbeats carry no entries. A valid leader caps their commit at this
@@ -3097,7 +3126,9 @@ impl DurablePeer {
                     }
                     continue;
                 }
-                if message.get_snapshot().data.len() > INLINE_CHECKPOINT_BYTES {
+                if message.get_snapshot().data.len() > INLINE_CHECKPOINT_BYTES
+                    || self.stream.send_limited()
+                {
                     if !self.stream.start(message)? {
                         self.raw
                             .report_snapshot(to, raft_core::SnapshotStatus::Failure);
@@ -3312,6 +3343,9 @@ impl DurablePeer {
             {
                 self.incoming_payload = None;
             }
+            let term = self.term();
+            let leader = self.is_leader();
+            self.stream.discard_obsolete_send(term, leader);
             output.extend(self.stream.packets(self.options.group_id)?);
             Ok(output)
         })();

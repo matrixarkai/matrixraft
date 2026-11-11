@@ -243,6 +243,11 @@ fn drive(
     panic!("streamed checkpoint exchange did not settle");
 }
 fn exercise(length: u64) {
+    exercise_with_quotas(length, false);
+}
+fn exercise_with_quotas(length: u64, limited: bool) {
+    use matrixraft::{ByteQuotaLimiter, RateLimiter};
+    use std::sync::{Arc, Mutex};
     let _measurement = EXERCISE.lock().unwrap();
     LARGEST.store(0, std::sync::atomic::Ordering::Relaxed);
     DROP_FILE_PACKET.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -276,19 +281,64 @@ fn exercise(length: u64) {
         .unwrap();
     assert!(input.largest <= 65536);
     assert!(std::fs::metadata(&options(1).wal_path).unwrap().len() < 65536);
+    let send = Arc::new(Mutex::new(ByteQuotaLimiter::with_available(1024 * 1024, 0)));
+    let receive = Arc::new(Mutex::new(ByteQuotaLimiter::with_available(1024 * 1024, 0)));
+    if limited {
+        DROP_FILE_PACKET.store(false, std::sync::atomic::Ordering::Relaxed);
+        peers
+            .get_mut(&1)
+            .unwrap()
+            .set_checkpoint_transfer_limiters(Some(Arc::clone(&send)), None)
+            .unwrap();
+        peers
+            .get_mut(&3)
+            .unwrap()
+            .set_checkpoint_transfer_limiters(None, Some(Arc::clone(&receive)))
+            .unwrap();
+        for _ in 0..250 {
+            for peer in peers.values_mut() {
+                peer.tick().unwrap();
+            }
+            drive(&mut peers, &mut states, None);
+        }
+        assert!(peers[&1].is_leader());
+        assert_eq!(states[&3], State::default());
+        assert_eq!(send.lock().unwrap().available_bytes(), 0);
+        let read = peers.get_mut(&1).unwrap().begin_read().unwrap();
+        drive(&mut peers, &mut states, None);
+        assert!(peers.get_mut(&1).unwrap().poll_read(read).unwrap());
+        DROP_FILE_PACKET.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let mut command = length.to_be_bytes().to_vec();
     command.push(7);
     peers.get_mut(&1).unwrap().propose(command).unwrap();
     drive(&mut peers, &mut states, None);
-    for _ in 0..40 {
+    let mut paused_partial = false;
+    for _ in 0..if limited { 80 } else { 40 } {
         if states.get(&3) == Some(&State { length, value: 7 }) {
             break;
+        }
+        if limited {
+            send.lock().unwrap().refill_bytes(1024 * 1024);
+            receive.lock().unwrap().refill_bytes(1024 * 1024);
         }
         for peer in peers.values_mut() {
             peer.tick().unwrap();
         }
         drive(&mut peers, &mut states, None);
+        if limited && !paused_partial && receive.lock().unwrap().available_bytes() == 0 {
+            for _ in 0..250 {
+                for peer in peers.values_mut() {
+                    peer.tick().unwrap();
+                }
+                drive(&mut peers, &mut states, None);
+            }
+            assert!(peers[&1].is_leader());
+            assert_eq!(states[&3], State::default());
+            paused_partial = true;
+        }
     }
+    assert!(!limited || paused_partial);
     for id in 1..=3 {
         assert_eq!(states[&id], State { length, value: 7 });
     }
@@ -323,6 +373,10 @@ fn exercise(length: u64) {
 #[test]
 fn file_checkpoints_transfer_to_lagging_voters_and_recover_the_suffix() {
     exercise(9 * 1024 * 1024);
+}
+#[test]
+fn file_checkpoint_quotas_resume_after_long_pauses_and_recover_the_suffix() {
+    exercise_with_quotas(3 * 1024 * 1024 + 17, true);
 }
 #[test]
 #[ignore = "bounded 272 MiB file capture, transfer and full restart"]
