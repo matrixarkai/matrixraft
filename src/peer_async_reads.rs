@@ -70,6 +70,16 @@ pub(super) fn fetch(
     context: raft_core::GetEntriesContext,
 ) -> raft_core::Result<Vec<Entry>> {
     let mut guard = store.async_reads.lock().unwrap();
+    let journal_read = store.max_disk_replicate_entries.is_some()
+        && context.can_async()
+        && (guard.is_some() || (store.cache.enabled() && low < store.memory.first_index()?));
+    let high = if journal_read {
+        store
+            .max_disk_replicate_entries
+            .map_or(high, |limit| high.min(low.saturating_add(limit as u64)))
+    } else {
+        high
+    };
     if let Some(state) = guard.as_mut() {
         if state
             .ready
@@ -225,6 +235,87 @@ impl DurablePeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn journal_replication_count_budget_preserves_other_readers() {
+        for cache in [None, Some(512)] {
+            for asynchronous in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let mut peer = DurablePeer::open_with_tuning(
+                    PeerOptions {
+                        group_id: 17,
+                        node_id: 1,
+                        voters: vec![1],
+                        wal_path: root.path().join("peer.wal"),
+                    },
+                    PeerTuning {
+                        max_log_cache_bytes: cache,
+                        max_disk_replicate_entries: Some(2),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                peer.campaign().unwrap();
+                peer.process_ready(|_, _| Ok(())).unwrap();
+                for value in 0..16 {
+                    peer.propose(vec![value; 512]).unwrap();
+                    peer.process_ready(|_, _| Ok(())).unwrap();
+                }
+                let low = 2;
+                let high = peer.commit_index() + 1;
+                if cache.is_some() {
+                    assert!(peer.store.memory.first_index().unwrap() > low);
+                }
+                if asynchronous {
+                    peer.enable_async_log_reads(1).unwrap();
+                }
+                for bytes in [None, Some(1)] {
+                    let result = fetch(
+                        &peer.store,
+                        low,
+                        high,
+                        bytes,
+                        raft_core::GetEntriesContext::empty(true),
+                    );
+                    let entries = if asynchronous {
+                        assert!(result.is_err());
+                        let completion =
+                            peer.take_log_read_tasks().unwrap().pop().unwrap().execute();
+                        assert_eq!(completion.request.high, low + 2);
+                        completion.entries.unwrap()
+                    } else {
+                        result.unwrap()
+                    };
+                    let expected = if bytes.is_some() {
+                        1
+                    } else if asynchronous || cache.is_some() {
+                        2
+                    } else {
+                        16
+                    };
+                    assert_eq!(entries.len(), expected);
+                    assert_eq!(entries[0].index, low);
+                }
+                let committed = fetch(
+                    &peer.store,
+                    low,
+                    high,
+                    None,
+                    raft_core::GetEntriesContext::empty(false),
+                )
+                .unwrap();
+                assert_eq!(committed.len(), 16);
+                assert_eq!(
+                    peer.capture_log_reader()
+                        .unwrap()
+                        .entries(low, high, None)
+                        .unwrap(),
+                    committed
+                );
+                assert_eq!(peer.applied_index(), high - 1);
+            }
+        }
+    }
 
     #[test]
     fn evicted_committed_completion_is_obsolete_after_checkpoint_publication() {

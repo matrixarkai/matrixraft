@@ -849,6 +849,14 @@ fn peer_tuning_validates_before_creating_storage_and_controls_election_ticks() {
             max_apply_bytes: Some(4 * 1024 * 1024 + 1),
             ..PeerTuning::default()
         },
+        PeerTuning {
+            max_disk_replicate_entries: Some(0),
+            ..PeerTuning::default()
+        },
+        PeerTuning {
+            max_disk_replicate_entries: Some(65537),
+            ..PeerTuning::default()
+        },
     ] {
         assert!(DurablePeer::open_with_tuning(options.clone(), tuning).is_err());
         assert!(!options.wal_path.exists());
@@ -1075,6 +1083,91 @@ fn durable_read_completions_resume_replication_to_a_lagging_voter() {
     assert_eq!(applied.get(&3), applied.get(&1));
     assert_eq!(applied.get(&3).unwrap().len(), baseline + 20);
 }
+
+#[test]
+fn bounded_journal_reads_resume_until_a_lagging_voter_is_current() {
+    for cache in [None, Some(512)] {
+        for limit in [1, 3] {
+            for asynchronous in [false, true] {
+                let dir = Directory::new();
+                let tuning = PeerTuning {
+                    max_disk_replicate_entries: Some(limit),
+                    max_log_cache_bytes: cache,
+                    ..Default::default()
+                };
+                let mut group: BTreeMap<_, _> = (1..=3)
+                    .map(|id| {
+                        (
+                            id,
+                            DurablePeer::open_with_tuning(dir.options(id, vec![1, 2, 3]), tuning)
+                                .unwrap(),
+                        )
+                    })
+                    .collect();
+                let mut applied = Applied::new();
+                group.get_mut(&1).unwrap().campaign().unwrap();
+                pump(&mut group, &mut applied, None);
+                for value in 0..24u8 {
+                    group
+                        .get_mut(&1)
+                        .unwrap()
+                        .propose(vec![value; 128])
+                        .unwrap();
+                    pump(&mut group, &mut applied, Some(3));
+                }
+                let committed = group.get(&1).unwrap().commit_index();
+                assert!(group.get(&3).unwrap().commit_index() < committed);
+                if asynchronous {
+                    group
+                        .get_mut(&1)
+                        .unwrap()
+                        .enable_async_log_reads(1)
+                        .unwrap();
+                }
+                group.get_mut(&1).unwrap().report_unreachable(3).unwrap();
+                let mut reads = 0;
+                for _ in 0..6 {
+                    group.get_mut(&1).unwrap().tick().unwrap();
+                    reads += pump_async_reads(&mut group, &mut applied);
+                }
+                if asynchronous {
+                    assert!(reads >= 24usize.div_ceil(limit));
+                } else {
+                    assert_eq!(reads, 0);
+                }
+                assert_eq!(group.get(&3).unwrap().commit_index(), committed);
+                assert_eq!(applied.get(&1), applied.get(&3));
+                group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+                for _ in 0..6 {
+                    pump_async_reads(&mut group, &mut applied);
+                }
+                assert!(group.get(&3).unwrap().is_leader());
+                group.get_mut(&3).unwrap().propose(vec![99; 128]).unwrap();
+                pump_async_reads(&mut group, &mut applied);
+                assert_eq!(applied.get(&1), applied.get(&3));
+                let expected = applied.get(&3).unwrap().clone();
+                drop(group);
+                let mut group: BTreeMap<_, _> = (1..=3)
+                    .map(|id| {
+                        (
+                            id,
+                            DurablePeer::open_with_tuning(
+                                dir.options(id, vec![1, 2, 3]),
+                                PeerTuning::default(),
+                            )
+                            .unwrap(),
+                        )
+                    })
+                    .collect();
+                let mut replay = Applied::new();
+                pump(&mut group, &mut replay, None);
+                assert_eq!(replay.get(&1), Some(&expected));
+                assert_eq!(replay.get(&3), Some(&expected));
+            }
+        }
+    }
+}
+
 fn peers(dir: &Directory) -> BTreeMap<u64, DurablePeer> {
     (1..=3)
         .map(|id| {

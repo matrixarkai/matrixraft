@@ -49,6 +49,16 @@ The setting can change on reopen without changing the journal format.
 Cold-read integrity and I/O failures stop the peer rather than silently retrying
 an empty Ready result.
 
+`PeerTuning::max_disk_replicate_entries` optionally bounds one journal-backed
+replication read to 1 through 65,536 entries, in addition to the existing message
+byte budget. This applies both to synchronous cold-cache reads and to host-owned
+async reads (which always read the journal). `None` retains byte-only batching.
+Resident and unstable replication are not count-limited by this setting, nor are
+committed application reads, checkpoint capture, or caller-owned log readers.
+Partial ranges resume through the core's normal acknowledged replication progress;
+the count limit never acknowledges entries or advances a replica's match index.
+It may change on reopen without changing durable data or packet formats.
+
 `transfer_leadership(target)` requests a handoff to another committed voter.
 Only a leader may request it; unknown targets, learners, and the local identity
 are refused. Continue
