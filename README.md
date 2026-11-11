@@ -117,6 +117,23 @@ The Cargo crate is named `matrixraft`, and the naming follows from that:
 
 License: Apache-2.0.
 
+## Deployment and Upgrade Checklist
+
+- Pin the crate revision and select the intended API surface. Independent durable
+  peers require `peer-runtime`; adding the dependency does not start transport.
+- Give each peer exclusive durable storage and a stable identity. Configure
+  authenticated packet delivery, timers, and resource limits in the host.
+- Preserve the order required by the
+  [peer integration contract](docs/peer-runtime.md): process Ready successfully,
+  deliver its returned packets, and acknowledge commands only after successful
+  application of committed entries.
+- Keep application snapshots tied to their capture position. Enabling an applied
+  log-byte threshold requests work; the host still owns capture, scheduling,
+  publication, and retry completion.
+- Review persisted formats and membership handling before upgrading peers. A
+  local multi-group benchmark does not establish network failover latency or the
+  durability of an application's acknowledgement policy.
+
 ## What This Crate Provides
 
 - `SemanticRequirement`
