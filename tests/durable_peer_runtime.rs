@@ -1384,6 +1384,258 @@ fn quorum_reads_wait_for_messages_without_growing_any_wal() {
         );
     }
 }
+
+fn peers_with_read_limit(dir: &Directory, limit: usize) -> BTreeMap<u64, DurablePeer> {
+    (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(
+                    dir.options(id, vec![1, 2, 3]),
+                    PeerTuning {
+                        max_pending_reads: limit,
+                        ..PeerTuning::default()
+                    },
+                )
+                .unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn concurrent_reads_share_a_later_quorum_without_wal_growth() {
+    let dir = Directory::new();
+    let mut peers = peers_with_read_limit(&dir, 1024);
+    let mut applied = Applied::new();
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut peers, &mut applied, None);
+    let files: Vec<_> = (1..=3)
+        .map(|id| std::fs::read(dir.options(id, vec![1, 2, 3]).wal_path).unwrap())
+        .collect();
+    let tokens: Vec<_> = (0..1024)
+        .map(|_| peers.get_mut(&1).unwrap().begin_read().unwrap())
+        .collect();
+    assert!(peers.get_mut(&1).unwrap().begin_read().is_err());
+    let packets = peers
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap();
+    assert_eq!(packets.len(), 2, "one read heartbeat per remote voter");
+    // Deliver only the newest read heartbeat to one remote voter. Its quorum
+    // confirmation must release the older requests as well, without their ACKs.
+    let packet = packets
+        .into_iter()
+        .filter(|packet| packet.to == 2)
+        .find(|packet| {
+            let envelope = TestPacket::decode(packet.bytes.as_slice()).unwrap();
+            let message = raft_core::eraftpb::Message::decode(envelope.message.as_slice()).unwrap();
+            message.get_msg_type() == raft_core::eraftpb::MessageType::MsgHeartbeat
+                && message
+                    .context
+                    .ends_with(&tokens.last().unwrap().to_be_bytes())
+        })
+        .unwrap();
+    peers.get_mut(&2).unwrap().step(&packet.bytes).unwrap();
+    let acknowledgments = peers
+        .get_mut(&2)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap();
+    assert!(!acknowledgments.is_empty());
+    for packet in acknowledgments {
+        peers
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    pump(&mut peers, &mut applied, None);
+    assert!(peers.get_mut(&1).unwrap().begin_read().is_err());
+    for token in tokens.into_iter().rev() {
+        assert!(peers.get_mut(&1).unwrap().poll_read(token).unwrap());
+        assert!(peers.get_mut(&1).unwrap().poll_read(token).is_err());
+    }
+    let token = peers.get_mut(&1).unwrap().begin_read().unwrap();
+    assert!(peers.get_mut(&1).unwrap().cancel_read(token).unwrap());
+    for (id, bytes) in (1..=3).zip(files) {
+        assert_eq!(
+            std::fs::read(dir.options(id, vec![1, 2, 3]).wal_path).unwrap(),
+            bytes
+        );
+    }
+}
+
+#[test]
+fn canceled_and_earlier_read_responses_cannot_confirm_newer_tokens() {
+    let dir = Directory::new();
+    let mut peers = peers_with_read_limit(&dir, 3);
+    let mut applied = Applied::new();
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut peers, &mut applied, None);
+    let first = peers.get_mut(&1).unwrap().begin_read().unwrap();
+    let mut packets = peers
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap();
+    let canceled = peers.get_mut(&1).unwrap().begin_read().unwrap();
+    packets.extend(
+        peers
+            .get_mut(&1)
+            .unwrap()
+            .process_ready(|_, _| Ok(()))
+            .unwrap(),
+    );
+    let tail = peers.get_mut(&1).unwrap().begin_read().unwrap();
+    packets.extend(
+        peers
+            .get_mut(&1)
+            .unwrap()
+            .process_ready(|_, _| Ok(()))
+            .unwrap(),
+    );
+    assert!(peers.get_mut(&1).unwrap().cancel_read(canceled).unwrap());
+    let newer = peers.get_mut(&1).unwrap().begin_read().unwrap();
+    assert!(!peers.get_mut(&1).unwrap().cancel_read(canceled).unwrap());
+    // The old packets have escaped the peer. Replay duplicates as well as the
+    // canceled context; none was sent after the newer token was admitted.
+    for packet in packets {
+        for _ in 0..2 {
+            peers
+                .get_mut(&packet.to)
+                .unwrap()
+                .step(&packet.bytes)
+                .unwrap();
+        }
+    }
+    let mut responses = Vec::new();
+    for id in [2, 3] {
+        responses.extend(
+            peers
+                .get_mut(&id)
+                .unwrap()
+                .process_ready(|_, _| Ok(()))
+                .unwrap(),
+        );
+    }
+    for packet in responses {
+        peers
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    // Process the old confirmations without delivering the new request yet.
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap();
+    assert!(peers.get_mut(&1).unwrap().poll_read(first).unwrap());
+    assert!(peers.get_mut(&1).unwrap().poll_read(tail).unwrap());
+    assert!(peers.get_mut(&1).unwrap().poll_read(canceled).is_err());
+    assert!(!peers.get_mut(&1).unwrap().poll_read(newer).unwrap());
+    for _ in 0..2 {
+        peers.get_mut(&1).unwrap().tick().unwrap();
+    }
+    pump(&mut peers, &mut applied, None);
+    assert!(peers.get_mut(&1).unwrap().poll_read(newer).unwrap());
+    let survivor = peers.get_mut(&1).unwrap().begin_read().unwrap();
+    let tail = peers.get_mut(&1).unwrap().begin_read().unwrap();
+    assert!(peers.get_mut(&1).unwrap().cancel_read(tail).unwrap());
+    pump(&mut peers, &mut applied, None);
+    assert!(peers.get_mut(&1).unwrap().poll_read(survivor).unwrap());
+}
+
+#[test]
+fn concurrent_reads_keep_independent_application_fences_during_retry() {
+    use matrixraft::peer_runtime::ApplyDecision;
+    let dir = Directory::new();
+    let mut peer = DurablePeer::open_with_tuning(
+        dir.options(1, vec![1]),
+        PeerTuning {
+            max_pending_reads: 3,
+            max_apply_bytes: Some(1),
+            max_log_cache_bytes: Some(512),
+            ..PeerTuning::default()
+        },
+    )
+    .unwrap();
+    peer.campaign().unwrap();
+    while peer.has_ready() {
+        peer.process_ready(|_, _| Ok(())).unwrap();
+    }
+    let early = peer.begin_read().unwrap();
+    let last = peer
+        .propose_batch(vec![vec![7; 512]; 16])
+        .unwrap()
+        .last()
+        .unwrap()
+        .index;
+    // Persistence and commitment must advance before a read can fence this tail.
+    for _ in 0..2 {
+        peer.process_ready_retryable(|_, _| Ok(ApplyDecision::Retry))
+            .unwrap();
+    }
+    assert_eq!(peer.commit_index(), last);
+    assert!(peer.applied_index() < last);
+    let late = peer.begin_read().unwrap();
+    let canceled = peer.begin_read().unwrap();
+    peer.process_ready_retryable(|_, _| Ok(ApplyDecision::Retry))
+        .unwrap();
+    assert!(peer.poll_read(early).unwrap());
+    assert!(!peer.poll_read(late).unwrap());
+    assert!(peer.cancel_read(canceled).unwrap());
+    assert!(peer.prepare_checkpoint().is_err());
+    let mut values = Vec::new();
+    for _ in 0..100 {
+        assert!(!peer.poll_read(late).unwrap());
+        peer.process_ready(|_, bytes| {
+            values.push(bytes.to_vec());
+            Ok(())
+        })
+        .unwrap();
+        if peer.applied_index() == last {
+            break;
+        }
+    }
+    assert_eq!(values, vec![vec![7; 512]; 16]);
+    assert!(peer.poll_read(late).unwrap());
+    assert!(peer.prepare_checkpoint().is_ok());
+}
+
+#[test]
+fn a_new_leadership_term_releases_all_old_read_admission() {
+    let dir = Directory::new();
+    let mut peers = peers_with_read_limit(&dir, 4);
+    let mut applied = Applied::new();
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut peers, &mut applied, None);
+    let old: Vec<_> = (0..4)
+        .map(|_| peers.get_mut(&1).unwrap().begin_read().unwrap())
+        .collect();
+    pump(&mut peers, &mut applied, None);
+    peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    pump(&mut peers, &mut applied, None);
+    assert!(peers[&2].is_leader());
+    peers.get_mut(&1).unwrap().force_campaign().unwrap();
+    pump(&mut peers, &mut applied, None);
+    assert!(peers[&1].is_leader());
+    // Starting in the new term must reclaim old slots even if the caller never
+    // polled the obsolete tokens while this peer was a follower.
+    let fresh: Vec<_> = (0..4)
+        .map(|_| peers.get_mut(&1).unwrap().begin_read().unwrap())
+        .collect();
+    for token in old {
+        assert!(peers.get_mut(&1).unwrap().poll_read(token).is_err());
+    }
+    pump(&mut peers, &mut applied, None);
+    for token in fresh {
+        assert!(peers.get_mut(&1).unwrap().poll_read(token).unwrap());
+    }
+}
 #[test]
 fn read_confirmation_is_invalid_after_leadership_changes() {
     let dir = Directory::new();

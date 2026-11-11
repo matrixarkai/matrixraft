@@ -403,8 +403,16 @@ commit index has applied locally. Serve the read immediately on that same
 application worker. Leadership loss, unknown tokens, and failed peers are errors.
 This uses the safe quorum mode, not a clock-based lease.
 
-Only one confirmation may be outstanding. Concurrent application reads may share
-a confirmation if all were admitted before it began. On client timeout, keep
+`PeerTuning::max_pending_reads` bounds outstanding tokens from 1 through 1024;
+the default remains one. Each token has its own quorum and local-application
+fence, and callers may poll or cancel them in any order. Confirmed but unpolled
+tokens still occupy admission slots. With concurrency enabled, Ready keeps the
+newest queued heartbeat per recipient, including its surviving read context,
+rather than sending a heartbeat for each token. A later quorum response may confirm earlier
+requests in consensus order, but an earlier response cannot confirm a request
+admitted afterward. Changing the committed membership invalidates every token.
+Concurrent application reads may also share a token if all were admitted before
+it began. On client timeout, keep
 polling or call `cancel_read(token)`. Cancellation releases the matching core
 request and ready confirmation; a mismatched token cannot cancel a newer read.
 Queued heartbeats retain liveness but lose the canceled context and are coalesced
