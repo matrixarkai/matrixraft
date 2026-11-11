@@ -41,6 +41,24 @@ a proposal, persisting a log entry, committing it, and applying it are distinct 
 
 ## Choose an Embedding Path
 
+### Build the intended runtime
+
+Use Rust 1.89 or newer. From a checkout, these commands check different API
+surfaces:
+
+```bash
+cargo check --locked
+cargo check --locked --features peer-runtime
+```
+
+The default build does not enable independent durable voters. Add the
+`peer-runtime` feature to the embedding application's dependency when using
+`DurablePeer`, and read [the host integration contract](docs/peer-runtime.md)
+before wiring transport or acknowledging client work. This crate does not
+start a network service when it is added as a dependency.
+
+### Choose the API
+
 | Need | Entry point |
 |---|---|
 | A locally modeled peer group and compatibility APIs | [Current scope](#current-scope) |
