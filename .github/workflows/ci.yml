@@ -71,6 +71,7 @@ jobs:
           cargo test --locked --features peer-runtime --test peer_membership
           cargo test --locked --features peer-runtime --test durable_peer_runtime
           cargo test --locked --features peer-runtime --test peer_application_retry
+          cargo test --locked --features peer-runtime --test peer_shutdown
           cargo test --locked --features peer-runtime --test file_peer_checkpoints
           set -o pipefail
           cargo test --locked --features peer-runtime --test file_peer_checkpoints file_checkpoints_above_the_inline_limit_restore_without_full_payload_buffers -- --exact --ignored --nocapture | tee /tmp/file-checkpoint-large.log
