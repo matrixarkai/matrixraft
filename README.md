@@ -17,6 +17,17 @@ why the crate also carries a compatibility facade and a readiness contract
 shaped for that use. Neither is a requirement: the library stands on its own,
 and a service with nothing to do with TemporalStore can depend on it.
 
+## Guide
+
+| Task | Section |
+|---|---|
+| Select local or independent peer APIs | [Embedding paths](#choose-an-embedding-path) |
+| Understand what the host must implement | [Deployment responsibilities](#deployment-responsibilities) |
+| Schedule many groups on shared workers | [Multi-group runtime](#multiple-raft-groups-in-one-process) |
+| Integrate durable voters and application callbacks | [Durable peer API](#independent-durable-peer-api) |
+| Run an embedding example | [Examples](#examples) |
+| Report a consensus-safety vulnerability | [Security](#security) |
+
 ## Related Projects
 
 [TemporalStore](https://github.com/matrixarkai/TemporalStore) serves temporal features and context;
