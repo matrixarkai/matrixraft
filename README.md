@@ -26,6 +26,19 @@ and a service with nothing to do with TemporalStore can depend on it.
 [MatrixAdsDemo](https://github.com/matrixarkai/MatrixAdsDemo) demonstrates ads serving.
 Each project is independently usable and Apache-2.0 licensed.
 
+## Deployment Responsibilities
+
+| MatrixRaft provides | The embedding service provides |
+|---|---|
+| Consensus state, membership transitions, and read coordination | Application commands, state-machine application, and client acknowledgement |
+| Durable peer and checkpoint interfaces | Exclusive storage ownership, application snapshot capture, and recovery wiring |
+| Bounded runtime and scheduling controls | Authenticated transport, packet delivery, timers, and resource budgets |
+
+A cache, object store, or serving engine can embed this crate without introducing a separate
+consensus service. That does not remove the host's persistence and transport obligations.
+Read the independent-peer contract before acknowledging proposals or serving reads; accepting
+a proposal, persisting a log entry, committing it, and applying it are distinct steps.
+
 ## Choose an Embedding Path
 
 | Need | Entry point |
