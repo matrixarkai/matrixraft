@@ -246,7 +246,9 @@ impl DurablePeer {
             self.raw.raft.become_follower(self.term(), 0);
         }
         // A caller must start a new read under the committed configuration.
-        self.pending_read = None;
+        while let Some((&token, _)) = self.pending_reads.first_key_value() {
+            self.cancel_read(token)?;
+        }
         Ok(())
     }
 }

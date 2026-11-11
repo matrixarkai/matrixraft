@@ -17,7 +17,7 @@ use raft_core::{
     Config, RawNode, ReadOnlyOption, StateRole, Storage,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{File, OpenOptions},
     io::{IoSlice, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -78,6 +78,9 @@ pub struct PeerTuning {
     /// Optional resident-entry high watermark. Eviction does not advance the
     /// checkpoint or logical log floor; cold entries remain in the journal.
     pub max_log_cache_bytes: Option<u64>,
+    /// Maximum admitted quorum reads, including confirmations waiting for local
+    /// application or caller polling. The default retains single-read admission.
+    pub max_pending_reads: usize,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -91,6 +94,7 @@ impl Default for PeerTuning {
             max_uncommitted_size: 4 * 1024 * 1024,
             max_apply_bytes: None,
             max_log_cache_bytes: None,
+            max_pending_reads: 1,
         }
     }
 }
@@ -104,6 +108,7 @@ impl PeerTuning {
             || self.max_size_per_msg == 0
             || self.max_size_per_msg > (LIMIT / 2) as u64
             || self.max_inflight_msgs > 65536
+            || !(1..=1024).contains(&self.max_pending_reads)
             || self
                 .max_apply_bytes
                 .is_some_and(|bytes| bytes == 0 || bytes > 4 * 1024 * 1024)
@@ -2120,7 +2125,9 @@ pub struct DurablePeer {
     journal: Journal,
     failed: bool,
     read_sequence: u64,
-    pending_read: Option<PendingRead>,
+    read_limit: usize,
+    pending_reads: BTreeMap<u64, PendingRead>,
+    deferred_reads: VecDeque<u64>,
     pending_restore: Option<Arc<Snapshot>>,
     restore_floor: u64,
     snapshot_flights: BTreeMap<u64, (u64, u64, u8)>,
@@ -2199,7 +2206,9 @@ impl DurablePeer {
             journal,
             failed: false,
             read_sequence: 0,
-            pending_read: None,
+            read_limit: tuning.max_pending_reads,
+            pending_reads: BTreeMap::new(),
+            deferred_reads: VecDeque::new(),
             pending_restore,
             restore_floor: 0,
             snapshot_flights: BTreeMap::new(),
@@ -2560,7 +2569,7 @@ impl DurablePeer {
     pub fn prepare_checkpoint(&self) -> Result<CheckpointCapture, RaftError> {
         self.healthy()?;
         if self.has_ready()
-            || self.pending_read.is_some()
+            || !self.pending_reads.is_empty()
             || self.pending_restore.is_some()
             || self.applied_index() == 0
         {
@@ -2638,7 +2647,7 @@ impl DurablePeer {
         self.healthy()?;
         if data.len() > MAX_CHECKPOINT_BYTES
             || self.has_ready()
-            || self.pending_read.is_some()
+            || !self.pending_reads.is_empty()
             || self.pending_restore.is_some()
             || self.applied_index() == 0
         {
@@ -2717,23 +2726,25 @@ impl DurablePeer {
         result
     }
     /// Start a quorum-confirmed read without appending an application entry.
-    /// Only one read may be outstanding. After a caller timeout, keep polling
-    /// or explicitly cancel the token to release its consensus context.
+    /// Admission is bounded by max_pending_reads, including confirmed tokens.
+    /// After a caller timeout, keep polling or explicitly cancel its token.
     /// The token is local to this open peer and is not a durable identifier.
     pub fn begin_read(&mut self) -> Result<u64, RaftError> {
         self.healthy()?;
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.options.node_id));
         }
+        let term = self.term();
         if self
-            .pending_read
-            .as_ref()
-            .is_some_and(|r| r.term != self.term())
+            .pending_reads
+            .first_key_value()
+            .is_some_and(|(_, read)| read.term != term)
         {
-            self.pending_read = None;
+            self.pending_reads.clear();
+            self.deferred_reads.clear();
         }
-        if self.pending_read.is_some() {
-            return Err(invalid("a peer read is already pending"));
+        if self.pending_reads.len() >= self.read_limit {
+            return Err(invalid("peer read admission limit reached"));
         }
         self.read_sequence = self
             .read_sequence
@@ -2744,24 +2755,50 @@ impl DurablePeer {
             term: self.term(),
             index: None,
         };
-        self.raw.read_index(read.context());
-        self.pending_read = Some(read);
+        self.pending_reads.insert(read.token, read);
+        self.deferred_reads.push_back(self.read_sequence);
+        self.dispatch_deferred_reads()?;
         Ok(self.read_sequence)
     }
-    /// Cancel only the matching local read. False leaves any newer read intact.
+
+    fn dispatch_deferred_reads(&mut self) -> Result<(), RaftError> {
+        if self.deferred_reads.is_empty() || !self.is_leader() {
+            return Ok(());
+        }
+        let term = self.term();
+        if self
+            .raw
+            .raft
+            .raft_log
+            .term(self.raw.raft.raft_log.committed)
+            .map_err(storage_error)?
+            != term
+        {
+            return Ok(());
+        }
+        // The core drops read requests until this term has committed. Keep
+        // their admission order locally until the core can retain them.
+        while let Some(token) = self.deferred_reads.pop_front() {
+            if let Some(read) = self
+                .pending_reads
+                .get(&token)
+                .filter(|read| read.term == term)
+            {
+                self.raw.read_index(read.context());
+            }
+        }
+        Ok(())
+    }
+    /// Cancel only the matching local read. False leaves all other reads intact.
     /// Already delivered packets cannot be recalled; their old contexts cannot
     /// confirm a later token. No application entry or WAL record is appended.
     pub fn cancel_read(&mut self, token: u64) -> Result<bool, RaftError> {
         self.healthy()?;
-        let Some(read) = self
-            .pending_read
-            .as_ref()
-            .filter(|read| read.token == token)
-        else {
+        let Some(read) = self.pending_reads.remove(&token) else {
             return Ok(false);
         };
+        self.deferred_reads.retain(|queued| *queued != token);
         let context = read.context();
-        self.pending_read = None;
         let core = &mut self.raw.raft;
         core.read_only.pending_read_index.remove(context.as_slice());
         core.read_only
@@ -2774,17 +2811,33 @@ impl DurablePeer {
                 message.context.clear();
             }
         }
+        self.coalesce_read_heartbeats(false);
+        Ok(true)
+    }
+
+    fn coalesce_read_heartbeats(&mut self, include_reads: bool) {
         // Preserve liveness and the latest commit position without retaining
-        // one redundant heartbeat per canceled client request.
+        // redundant heartbeats. The core can confirm earlier reads from the
+        // newest context; cancellation alone preserves other live contexts.
         let mut seen = BTreeSet::new();
+        let core = &mut self.raw.raft;
         core.msgs.reverse();
         core.msgs.retain(|message| {
             message.get_msg_type() != MessageType::MsgHeartbeat
-                || !message.context.is_empty()
+                || (!include_reads && !message.context.is_empty())
                 || seen.insert((message.from, message.to, message.term))
         });
         core.msgs.reverse();
-        Ok(true)
+        if include_reads && core.state == StateRole::Leader {
+            if let Some(context) = core.read_only.last_pending_request_ctx() {
+                let term = core.term;
+                for message in &mut core.msgs {
+                    if message.get_msg_type() == MessageType::MsgHeartbeat && message.term == term {
+                        message.context.clone_from(&context);
+                    }
+                }
+            }
+        }
     }
 
     /// True consumes a quorum confirmation whose index has applied locally.
@@ -2793,19 +2846,19 @@ impl DurablePeer {
     pub fn poll_read(&mut self, token: u64) -> Result<bool, RaftError> {
         self.healthy()?;
         let read = self
-            .pending_read
-            .as_ref()
-            .filter(|r| r.token == token)
+            .pending_reads
+            .get(&token)
             .ok_or_else(|| invalid("unknown peer read token"))?;
         if !self.is_leader() || read.term != self.term() {
-            self.pending_read = None;
+            self.pending_reads.clear();
+            self.deferred_reads.clear();
             return Err(RaftError::NotLeader(self.options.node_id));
         }
         if read
             .index
             .is_some_and(|index| index <= self.applied_index())
         {
-            self.pending_read = None;
+            self.pending_reads.remove(&token);
             Ok(true)
         } else {
             Ok(false)
@@ -3374,6 +3427,7 @@ impl DurablePeer {
         let mut applied_batch = false;
         let mut restore_attempted = false;
         loop {
+            self.dispatch_deferred_reads()?;
             if !self.raw.has_ready() {
                 if !restore_attempted {
                     self.attempt_restore(restore)?;
@@ -3383,13 +3437,22 @@ impl DurablePeer {
                 }
                 break;
             }
+            if self.read_limit > 1 && !self.pending_reads.is_empty() {
+                self.coalesce_read_heartbeats(true);
+            }
             let mut ready = self.raw.ready();
             // The Storage adapter retains fatal cold-read errors out of band.
             // Stop before exposing any of this Ready or advancing the core.
             self.store.cache.check()?;
             for confirmation in ready.take_read_states() {
-                if let Some(read) = &mut self.pending_read {
-                    if confirmation.request_ctx == read.context() {
+                let token = confirmation
+                    .request_ctx
+                    .get(8..)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u64::from_be_bytes);
+                if let Some(read) = token.and_then(|token| self.pending_reads.get_mut(&token)) {
+                    if confirmation.request_ctx.get(..8) == Some(read.term.to_be_bytes().as_slice())
+                    {
                         read.index = Some(confirmation.index);
                     }
                 }
@@ -5440,6 +5503,64 @@ mod tests {
         assert!(peer.poll_read(token).unwrap());
         assert!(!peer.cancel_read(token).unwrap());
         assert_eq!(peer.persisted_wal_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn concurrent_read_admission_bounds_core_and_confirmed_state() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut peer = DurablePeer::open_with_tuning(
+            options(directory.path().join("peer.wal")),
+            PeerTuning {
+                max_pending_reads: 1024,
+                ..PeerTuning::default()
+            },
+        )
+        .unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let bytes = peer.persisted_wal_bytes().unwrap();
+        let tokens: Vec<_> = (0..1024).map(|_| peer.begin_read().unwrap()).collect();
+        assert_eq!(peer.raw.raft.ready_read_count(), 1024);
+        assert!(peer.begin_read().is_err());
+        for token in tokens.iter().rev().step_by(2) {
+            assert!(peer.cancel_read(*token).unwrap());
+        }
+        assert_eq!(peer.raw.raft.ready_read_count(), 512);
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        assert_eq!(peer.raw.raft.ready_read_count(), 0);
+        assert_eq!(peer.pending_reads.len(), 512);
+        for _ in 0..512 {
+            peer.begin_read().unwrap();
+        }
+        assert!(peer.begin_read().is_err());
+        assert_eq!(peer.raw.raft.ready_read_count(), 512);
+        while let Some((&token, _)) = peer.pending_reads.first_key_value() {
+            assert!(peer.cancel_read(token).unwrap());
+        }
+        assert_eq!(peer.raw.raft.ready_read_count(), 0);
+        assert_eq!(peer.raw.raft.pending_read_count(), 0);
+        assert!(peer.raw.raft.read_only.read_index_queue.is_empty());
+        assert_eq!(peer.persisted_wal_bytes().unwrap(), bytes);
+    }
+
+    #[test]
+    fn invalid_read_limits_do_not_create_peer_storage() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        for limit in [0, 1025] {
+            let options = options(directory.path().join(format!("peer-{limit}.wal")));
+            assert!(DurablePeer::open_with_tuning(
+                options.clone(),
+                PeerTuning {
+                    max_pending_reads: limit,
+                    ..PeerTuning::default()
+                }
+            )
+            .is_err());
+            assert!(!options.wal_path.exists());
+            assert!(!options.wal_path.with_extension("runtime.lock").exists());
+        }
     }
 
     #[test]

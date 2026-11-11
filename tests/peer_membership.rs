@@ -82,6 +82,36 @@ fn cached_membership_survives_learner_promotion_joint_changes_and_restart() {
     cluster.write(2, 99);
 }
 
+#[test]
+fn committed_membership_releases_all_concurrent_read_tokens() {
+    let mut cluster = Cluster::new();
+    let mut old = Vec::new();
+    for _ in 0..4 {
+        old.push(cluster.peers.get_mut(&1).unwrap().begin_read().unwrap());
+    }
+    assert!(cluster.peers.get_mut(&1).unwrap().begin_read().is_err());
+    // Discard these read heartbeats so the tokens remain unconfirmed. Applying
+    // the configuration must release both local slots and core quorum contexts.
+    cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap();
+    cluster.change(1, MembershipChange::AddLearner(4));
+    for token in old {
+        assert!(cluster.peers.get_mut(&1).unwrap().poll_read(token).is_err());
+    }
+    let fresh: Vec<_> = (0..4)
+        .map(|_| cluster.peers.get_mut(&1).unwrap().begin_read().unwrap())
+        .collect();
+    cluster.pump();
+    for token in fresh {
+        assert!(cluster.peers.get_mut(&1).unwrap().poll_read(token).unwrap());
+    }
+    cluster.write(1, 99);
+}
+
 impl Cluster {
     fn new() -> Self {
         let mut result = Self {
@@ -114,6 +144,7 @@ impl Cluster {
             vec![1, 2, 3, 4, 5],
             PeerTuning {
                 max_log_cache_bytes: self.cache_target,
+                max_pending_reads: 4,
                 ..Default::default()
             },
         )
