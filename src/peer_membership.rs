@@ -245,6 +245,11 @@ impl DurablePeer {
         if !local_voter && self.raw.raft.state != StateRole::Follower {
             self.raw.raft.become_follower(self.term(), 0);
         }
+        let progress = self.raw.raft.prs();
+        self.stream
+            .retain_send_targets(|to| progress.get(to).is_some());
+        self.snapshot_flights
+            .retain(|to, _| progress.get(*to).is_some());
         // A caller must start a new read under the committed configuration.
         while let Some((&token, _)) = self.pending_reads.first_key_value() {
             self.cancel_read(token)?;

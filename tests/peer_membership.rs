@@ -13,6 +13,7 @@ struct Cluster {
     values: BTreeMap<u64, RefCell<Vec<u64>>>,
     isolated: BTreeSet<u64>,
     cache_target: Option<u64>,
+    checkpoint_sends: Option<usize>,
 }
 
 #[test]
@@ -112,6 +113,58 @@ fn committed_membership_releases_all_concurrent_read_tokens() {
     cluster.write(1, 99);
 }
 
+#[test]
+fn removing_a_recipient_releases_its_paused_checkpoint_send() {
+    use matrixraft::{ByteQuotaLimiter, RateLimiter};
+    use std::sync::{Arc, Mutex};
+    let mut cluster = Cluster::new();
+    cluster.checkpoint_sends = Some(2);
+    cluster.peers.clear();
+    for id in 1..=3 {
+        cluster.open(id);
+    }
+    cluster.pump();
+    cluster.peers.get_mut(&1).unwrap().campaign().unwrap();
+    cluster.pump();
+    cluster.add_caught_up_learner();
+    cluster.open(5);
+    cluster.change(1, MembershipChange::AddLearner(5));
+    cluster.isolated.extend([4, 5]);
+    for value in 0..32 {
+        cluster.write(1, value);
+    }
+    cluster.checkpoint(1);
+    let quota = Arc::new(Mutex::new(ByteQuotaLimiter::with_available(1024 * 1024, 0)));
+    cluster
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .set_checkpoint_transfer_limiters(Some(Arc::clone(&quota)), None)
+        .unwrap();
+    cluster.isolated.clear();
+    for _ in 0..4 {
+        cluster.tick();
+    }
+    assert!(cluster.values[&4].borrow().is_empty());
+    assert!(cluster.values[&5].borrow().is_empty());
+    cluster.change(1, MembershipChange::Remove(5));
+    if !cluster.peers[&1].membership().outgoing_voters.is_empty() {
+        cluster.change(1, MembershipChange::LeaveJoint);
+    }
+    quota.lock().unwrap().refill_bytes(1024 * 1024);
+    for _ in 0..20 {
+        cluster.tick();
+        if cluster.values[&4].borrow().len() == 32 {
+            break;
+        }
+    }
+    assert_eq!(*cluster.values[&4].borrow(), (0..32).collect::<Vec<_>>());
+    assert!(
+        cluster.values[&5].borrow().is_empty(),
+        "a removed recipient must not receive its old checkpoint after quota refill"
+    );
+}
+
 impl Cluster {
     fn new() -> Self {
         let mut result = Self {
@@ -120,6 +173,7 @@ impl Cluster {
             values: BTreeMap::new(),
             isolated: BTreeSet::new(),
             cache_target: None,
+            checkpoint_sends: None,
         };
         for id in 1..=3 {
             result.open(id);
@@ -145,6 +199,7 @@ impl Cluster {
             PeerTuning {
                 max_log_cache_bytes: self.cache_target,
                 max_pending_reads: 4,
+                max_checkpoint_sends: self.checkpoint_sends,
                 ..Default::default()
             },
         )

@@ -81,6 +81,9 @@ pub struct PeerTuning {
     /// Maximum admitted quorum reads, including confirmations waiting for local
     /// application or caller polling. The default retains single-read admission.
     pub max_pending_reads: usize,
+    /// Optional simultaneous outgoing checkpoint limit. Some frames every
+    /// snapshot; None retains one bulk sender and the direct small-image path.
+    pub max_checkpoint_sends: Option<usize>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -95,6 +98,7 @@ impl Default for PeerTuning {
             max_apply_bytes: None,
             max_log_cache_bytes: None,
             max_pending_reads: 1,
+            max_checkpoint_sends: None,
         }
     }
 }
@@ -109,6 +113,9 @@ impl PeerTuning {
             || self.max_size_per_msg > (LIMIT / 2) as u64
             || self.max_inflight_msgs > 65536
             || !(1..=1024).contains(&self.max_pending_reads)
+            || self
+                .max_checkpoint_sends
+                .is_some_and(|limit| !(1..=64).contains(&limit))
             || self
                 .max_apply_bytes
                 .is_some_and(|bytes| bytes == 0 || bytes > 4 * 1024 * 1024)
@@ -2194,6 +2201,8 @@ impl DurablePeer {
         );
         stream.payload_directory = store.payload_directory.clone();
         stream.permitted = store.permitted.clone();
+        stream.send_capacity = tuning.max_checkpoint_sends.unwrap_or(1);
+        stream.frame_all_sends = tuning.max_checkpoint_sends.is_some();
         Ok(Self {
             pending_apply: config.applied,
             application_fetch_bytes: tuning.application_read_budget(),
@@ -3128,6 +3137,7 @@ impl DurablePeer {
                 }
                 if message.get_snapshot().data.len() > INLINE_CHECKPOINT_BYTES
                     || self.stream.send_limited()
+                    || self.stream.frame_all_sends
                 {
                     if !self.stream.start(message)? {
                         self.raw
@@ -5594,6 +5604,37 @@ mod tests {
             .is_err());
             assert!(!options.wal_path.exists());
             assert!(!options.wal_path.with_extension("runtime.lock").exists());
+        }
+    }
+
+    #[test]
+    fn checkpoint_send_limits_validate_before_storage_and_configure_framing() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        for limit in [0, 65] {
+            let options = options(root.path().join(format!("bad-{limit}.wal")));
+            assert!(DurablePeer::open_with_tuning(
+                options.clone(),
+                PeerTuning {
+                    max_checkpoint_sends: Some(limit),
+                    ..PeerTuning::default()
+                }
+            )
+            .is_err());
+            assert!(!options.wal_path.exists());
+            assert!(!options.wal_path.with_extension("runtime.lock").exists());
+        }
+        for limit in [1, 64] {
+            let peer = DurablePeer::open_with_tuning(
+                options(root.path().join(format!("good-{limit}.wal"))),
+                PeerTuning {
+                    max_checkpoint_sends: Some(limit),
+                    ..PeerTuning::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(peer.stream.send_capacity, limit);
+            assert!(peer.stream.frame_all_sends);
         }
     }
 

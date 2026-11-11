@@ -263,7 +263,7 @@ struct Sending {
     ticks: u8,
     idle: u8,
     ready: bool,
-    quota_blocked: bool,
+    locally_deferred: bool,
     probe_ready: bool,
 }
 struct Receiving {
@@ -348,9 +348,7 @@ impl Receiving {
         Ok(bytes)
     }
 }
-/// One outgoing and one incoming transfer per local peer bound retained state.
 /// Incoming bytes are staged beside the WAL in an automatically removed file.
-/// Other lagging voters remain in Raft's retry path until the outgoing slot frees.
 struct Finishing {
     identity: Fragment,
     worker: std::thread::JoinHandle<Result<(Message, Arc<checkpoint_file::Blob>), RaftError>>,
@@ -360,14 +358,17 @@ struct InlineCredit {
     reserved: u64,
 }
 
-/// One outgoing and one incoming transfer per local peer bound retained state.
+/// Outgoing transfers have a configured bound; one incoming transfer is retained.
 /// File completion runs on one owned worker while Raft continues processing.
 pub(super) struct Stream {
     pub(super) permitted: Vec<u64>,
     spool_directory: PathBuf,
     pub(super) payload_directory: PathBuf,
     pub(super) received_payload: Option<Arc<checkpoint_file::Blob>>,
-    sending: Option<Sending>,
+    sending: BTreeMap<u64, Sending>,
+    pub(super) send_capacity: usize,
+    pub(super) frame_all_sends: bool,
+    last_data_to: u64,
     receiving: Option<Receiving>,
     finishing: Option<Finishing>,
     #[cfg(test)]
@@ -391,7 +392,10 @@ impl Stream {
             payload_directory: spool_directory.join("file-payloads"),
             received_payload: None,
             spool_directory,
-            sending: None,
+            sending: BTreeMap::new(),
+            send_capacity: 1,
+            frame_all_sends: false,
+            last_data_to: 0,
             receiving: None,
             finishing: None,
             #[cfg(test)]
@@ -502,53 +506,54 @@ impl Stream {
         self.finishing.is_some()
     }
     pub(super) fn sending_to(&self, to: u64) -> bool {
-        self.sending.as_ref().is_some_and(|s| s.identity.to == to)
+        self.sending.contains_key(&to)
     }
     pub(super) fn discard_obsolete_send(&mut self, term: u64, leader: bool) {
-        if self
-            .sending
-            .as_ref()
-            .is_some_and(|s| !leader || s.identity.term != term)
-        {
-            self.sending = None;
-        }
+        self.sending
+            .retain(|_, s| leader && s.identity.term == term);
     }
     pub(super) fn completed_send(&mut self, to: u64) {
-        if self.sending_to(to) {
-            self.sending = None;
-        }
+        self.sending.remove(&to);
+    }
+    pub(super) fn retain_send_targets(&mut self, mut retain: impl FnMut(u64) -> bool) {
+        self.sending.retain(|to, _| retain(*to));
     }
     pub(super) fn start(&mut self, message: Message) -> Result<bool, RaftError> {
-        if let Some(sending) = &self.sending {
-            return Ok(sending.identity.to == message.to
-                && sending.identity.term == message.term
+        if let Some(sending) = self.sending.get(&message.to) {
+            return Ok(sending.identity.term == message.term
                 && sending.identity.index == message.get_snapshot().get_metadata().index);
+        }
+        if self.sending.len() >= self.send_capacity {
+            return Ok(false);
         }
         let bytes = message.encode_to_vec();
         if bytes.len() > SNAPSHOT_ENCODED_LIMIT {
             return Err(invalid("encoded checkpoint exceeds transfer bound"));
         }
-        self.sending = Some(Sending {
-            identity: Fragment {
-                from: message.from,
-                to: message.to,
-                term: message.term,
-                index: message.get_snapshot().get_metadata().index,
-                total: bytes.len() as u64,
-                checksum: digest(&bytes),
+        self.sending.insert(
+            message.to,
+            Sending {
+                identity: Fragment {
+                    from: message.from,
+                    to: message.to,
+                    term: message.term,
+                    index: message.get_snapshot().get_metadata().index,
+                    total: bytes.len() as u64,
+                    checksum: digest(&bytes),
+                    offset: 0,
+                    data: Default::default(),
+                    ack: false,
+                    file_backed: false,
+                },
+                bytes: Source::Memory(bytes.into()),
                 offset: 0,
-                data: Default::default(),
-                ack: false,
-                file_backed: false,
+                ticks: 0,
+                idle: 0,
+                ready: true,
+                locally_deferred: false,
+                probe_ready: true,
             },
-            bytes: Source::Memory(bytes.into()),
-            offset: 0,
-            ticks: 0,
-            idle: 0,
-            ready: true,
-            quota_blocked: false,
-            probe_ready: true,
-        });
+        );
         Ok(true)
     }
     pub(super) fn start_file(
@@ -556,11 +561,13 @@ impl Stream {
         message: Message,
         payload: Arc<checkpoint_file::Blob>,
     ) -> Result<bool, RaftError> {
-        if let Some(sending) = &self.sending {
-            return Ok(sending.identity.to == message.to
-                && sending.identity.term == message.term
+        if let Some(sending) = self.sending.get(&message.to) {
+            return Ok(sending.identity.term == message.term
                 && sending.identity.index == message.get_snapshot().get_metadata().index
                 && sending.identity.file_backed);
+        }
+        if self.sending.len() >= self.send_capacity {
+            return Ok(false);
         }
         if !message.get_snapshot().data.is_empty() {
             return Err(invalid("file transfer includes inline payload"));
@@ -577,27 +584,30 @@ impl Stream {
             reader: payload.reader()?,
             payload: Arc::clone(&payload),
         };
-        self.sending = Some(Sending {
-            identity: Fragment {
-                from: message.from,
-                to: message.to,
-                term: message.term,
-                index: message.get_snapshot().get_metadata().index,
-                total: source.len() as u64,
-                checksum: payload.manifest.checksum,
+        self.sending.insert(
+            message.to,
+            Sending {
+                identity: Fragment {
+                    from: message.from,
+                    to: message.to,
+                    term: message.term,
+                    index: message.get_snapshot().get_metadata().index,
+                    total: source.len() as u64,
+                    checksum: payload.manifest.checksum,
+                    offset: 0,
+                    data: Default::default(),
+                    ack: false,
+                    file_backed: true,
+                },
+                bytes: source,
                 offset: 0,
-                data: Default::default(),
-                ack: false,
-                file_backed: true,
+                ticks: 0,
+                idle: 0,
+                ready: true,
+                locally_deferred: false,
+                probe_ready: true,
             },
-            bytes: source,
-            offset: 0,
-            ticks: 0,
-            idle: 0,
-            ready: true,
-            quota_blocked: false,
-            probe_ready: true,
-        });
+        );
         Ok(true)
     }
     pub(super) fn tick(&mut self, term: u64, leader: bool) {
@@ -608,19 +618,20 @@ impl Stream {
         {
             self.inline_credit = None;
         }
-        if let Some(sending) = &mut self.sending {
+        self.sending.retain(|_, sending| {
             sending.ticks += 1;
-            if !sending.quota_blocked {
+            if !sending.locally_deferred {
                 sending.idle += 1;
             }
             if !leader || sending.identity.term != term || sending.idle >= 100 {
-                self.sending = None;
+                return false;
             } else if sending.ticks >= 10 {
                 sending.ready = true;
                 sending.probe_ready = true;
                 sending.ticks = 0;
             }
-        }
+            true
+        });
         if let Some(receiving) = &mut self.receiving {
             receiving.idle += 1;
             if receiving.identity.term < term || receiving.idle >= 100 {
@@ -635,30 +646,38 @@ impl Stream {
         }
     }
     pub(super) fn acknowledge(&mut self, part: &Fragment) -> bool {
-        let Some(sending) = &mut self.sending else {
+        if !part.ack || !part.data.is_empty() {
+            return false;
+        }
+        let Some(sending) = self.sending.get_mut(&part.from) else {
             return false;
         };
         if !sending.identity.acknowledgment(0).same_stream(part) {
             return false;
         }
         if part.offset == sending.bytes.len() as u64 {
-            self.sending = None;
+            self.sending.remove(&part.from);
             return true;
         }
-        let next = (sending.offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
-        if part.offset == next as u64 {
-            sending.offset = next;
+        if part.offset > sending.offset as u64
+            && part.offset < sending.bytes.len() as u64
+            && part.offset.is_multiple_of(SNAPSHOT_FRAGMENT_BYTES as u64)
+        {
+            // A retried sender can reuse an aligned prefix retained by the
+            // receiver from an earlier attempt with this exact identity.
+            sending.offset = part.offset as usize;
             sending.idle = 0;
             sending.ticks = 0;
             sending.ready = true;
-            sending.quota_blocked = false;
+            sending.locally_deferred = false;
             sending.probe_ready = true;
         } else if part.offset == 0 && sending.offset != 0 {
             // The receiver restarted or discarded an expired partial transfer.
             sending.offset = 0;
+            sending.idle = 0;
             sending.ready = true;
             sending.ticks = 0;
-            sending.quota_blocked = false;
+            sending.locally_deferred = false;
             sending.probe_ready = true;
         } else if part.offset == sending.offset as u64 {
             // A valid receiver may still be waiting for its local write quota.
@@ -839,10 +858,17 @@ impl Stream {
         if let Some(ack) = self.ack.take() {
             parts.push(ack);
         }
-        if let Some(sending) = &mut self.sending {
+        let mut recipients: Vec<_> = self.sending.keys().copied().collect();
+        // Rotate data priority even when a shared quota refills between polls.
+        // Deferred recipients retain their own windows and control traffic.
+        let start = recipients.partition_point(|to| *to <= self.last_data_to);
+        recipients.rotate_left(start);
+        let mut data_sent = false;
+        for to in recipients {
+            let sending = self.sending.get_mut(&to).unwrap();
             if sending.ready {
                 let end = (sending.offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
-                if Self::reserve(&self.send_quota, end - sending.offset)? {
+                if !data_sent && Self::reserve(&self.send_quota, end - sending.offset)? {
                     parts.push(Fragment {
                         offset: sending.offset as u64,
                         data: sending
@@ -851,10 +877,12 @@ impl Stream {
                         ..sending.identity.clone()
                     });
                     sending.ready = false;
-                    sending.quota_blocked = false;
+                    sending.locally_deferred = false;
                     sending.probe_ready = false;
+                    self.last_data_to = to;
+                    data_sent = true;
                 } else {
-                    sending.quota_blocked = true;
+                    sending.locally_deferred = true;
                     if sending.probe_ready {
                         parts.push(Fragment {
                             offset: sending.offset as u64,
@@ -919,6 +947,167 @@ mod tests {
             SNAPSHOT_FRAGMENT_BYTES as u64,
             available,
         )))
+    }
+    fn fanout_message(to: u64) -> Message {
+        let mut image = message();
+        image.to = to;
+        image
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .data
+            .resize(2 * SNAPSHOT_FRAGMENT_BYTES + 17, 13);
+        image
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .metadata
+            .as_mut()
+            .unwrap()
+            .conf_state
+            .as_mut()
+            .unwrap()
+            .voters = vec![1, 2, 3, 4, 5];
+        image
+    }
+
+    #[test]
+    fn concurrent_sends_bound_slots_packets_and_acknowledgment_windows() {
+        let mut sender = Stream::new(std::env::temp_dir());
+        sender.send_capacity = 3;
+        for to in [2, 3, 4] {
+            assert!(sender.start(fanout_message(to)).unwrap());
+        }
+        assert!(!sender.start(fanout_message(5)).unwrap());
+        assert!(sender.start(fanout_message(2)).unwrap());
+        assert_eq!(sender.sending.len(), 3);
+        let mut data_to = Vec::new();
+        for _ in 0..3 {
+            let packets = sender.packets(17).unwrap();
+            let mut data = 0;
+            for packet in packets {
+                let envelope = Packet::decode(packet.bytes.as_slice()).unwrap();
+                let part = Fragment::decode(envelope.message).unwrap();
+                if !part.ack {
+                    assert_eq!(part.offset, 0);
+                    assert_eq!(part.data.len(), SNAPSHOT_FRAGMENT_BYTES);
+                    data_to.push(part.to);
+                    data += 1;
+                } else {
+                    assert!(part.data.is_empty());
+                }
+            }
+            assert_eq!(data, 1);
+        }
+        assert_eq!(data_to, vec![2, 3, 4]);
+        assert!(sender.packets(17).unwrap().is_empty());
+        let ack = sender.sending[&2]
+            .identity
+            .acknowledgment(SNAPSHOT_FRAGMENT_BYTES as u64);
+        assert!(!sender.acknowledge(&ack));
+        assert_eq!(sender.sending[&2].offset, SNAPSHOT_FRAGMENT_BYTES);
+        assert_eq!(sender.sending[&3].offset, 0);
+        assert_eq!(sender.sending[&4].offset, 0);
+        let mut wrong = ack.clone();
+        wrong.from = 3;
+        assert!(!sender.acknowledge(&wrong));
+        assert_eq!(sender.sending[&3].offset, 0);
+        let complete = sender.sending[&2]
+            .identity
+            .acknowledgment(sender.sending[&2].identity.total);
+        assert!(sender.acknowledge(&complete));
+        assert!(sender.sending_to(3) && sender.sending_to(4));
+        assert!(sender.start(fanout_message(5)).unwrap());
+        sender.discard_obsolete_send(5, true);
+        assert!(sender.sending.is_empty());
+    }
+
+    #[test]
+    fn shared_send_quota_rotates_data_priority_across_active_recipients() {
+        let shared = quota(SNAPSHOT_FRAGMENT_BYTES as u64);
+        let mut sender = Stream::new(std::env::temp_dir());
+        sender.send_capacity = 3;
+        sender
+            .set_limiters(Some(Arc::clone(&shared)), None)
+            .unwrap();
+        let mut receivers = BTreeMap::new();
+        for to in [2, 3, 4] {
+            sender.start(fanout_message(to)).unwrap();
+            receivers.insert(to, Stream::default());
+        }
+        let mut order = Vec::new();
+        for _ in 0..6 {
+            shared
+                .lock()
+                .unwrap()
+                .refill_bytes(SNAPSHOT_FRAGMENT_BYTES as u64);
+            let mut data_bytes = 0;
+            for packet in sender.packets(17).unwrap() {
+                let envelope = Packet::decode(packet.bytes.as_slice()).unwrap();
+                let part = Fragment::decode(envelope.message).unwrap();
+                let receiver = receivers.get_mut(&part.to).unwrap();
+                if part.ack {
+                    receiver.receive_probe(&part);
+                } else {
+                    data_bytes += part.data.len();
+                    order.push(part.to);
+                    assert!(receiver.receive(part, &[1, 2, 3, 4, 5]).unwrap().is_none());
+                }
+                assert!(!sender.acknowledge(&fragment(receiver)));
+            }
+            assert_eq!(data_bytes, SNAPSHOT_FRAGMENT_BYTES);
+            assert_eq!(shared.lock().unwrap().available_bytes(), 0);
+        }
+        assert_eq!(order, vec![2, 3, 4, 2, 3, 4]);
+    }
+
+    #[test]
+    fn retried_senders_resume_from_a_retained_cumulative_prefix() {
+        let image = message();
+        let mut sender = Stream::default();
+        let mut receiver = Stream::default();
+        sender.start(image.clone()).unwrap();
+        receiver.receive(fragment(&mut sender), &[1, 2, 3]).unwrap();
+        sender.acknowledge(&fragment(&mut receiver));
+        receiver.receive(fragment(&mut sender), &[1, 2, 3]).unwrap();
+        let _lost_ack = fragment(&mut receiver);
+        for _ in 0..100 {
+            sender.tick(4, true);
+            receiver.tick(4, false);
+            for packet in sender.packets(1).unwrap() {
+                let envelope = Packet::decode(packet.bytes.as_slice()).unwrap();
+                receiver
+                    .receive(Fragment::decode(envelope.message).unwrap(), &[1, 2, 3])
+                    .unwrap();
+                let _lost_ack = fragment(&mut receiver);
+            }
+        }
+        assert!(sender.sending.is_empty());
+        assert_eq!(
+            receiver.receiving.as_ref().unwrap().length,
+            2 * SNAPSHOT_FRAGMENT_BYTES as u64
+        );
+        sender.start(image.clone()).unwrap();
+        receiver.receive(fragment(&mut sender), &[1, 2, 3]).unwrap();
+        let prefix = fragment(&mut receiver);
+        assert_eq!(prefix.offset, 2 * SNAPSHOT_FRAGMENT_BYTES as u64);
+        let mut unaligned = prefix.clone();
+        unaligned.offset += 1;
+        assert!(!sender.acknowledge(&unaligned));
+        assert_eq!(sender.sending[&2].offset, 0);
+        assert!(!sender.acknowledge(&prefix));
+        assert_eq!(sender.sending[&2].offset, 2 * SNAPSHOT_FRAGMENT_BYTES);
+        let mut restored = None;
+        for _ in 0..10 {
+            let next = fragment(&mut sender);
+            assert!(next.offset >= 2 * SNAPSHOT_FRAGMENT_BYTES as u64);
+            restored = receiver.receive(next, &[1, 2, 3]).unwrap();
+            if sender.acknowledge(&fragment(&mut receiver)) {
+                break;
+            }
+        }
+        assert!(sender.sending.is_empty());
+        assert_eq!(restored.unwrap(), image);
     }
     #[test]
     fn checkpoint_quotas_are_shared_and_configuration_is_atomic() {
@@ -1116,7 +1305,7 @@ mod tests {
         }
         assert!((20..=26).contains(&probes));
         assert_eq!(
-            sender.sending.as_ref().unwrap().offset,
+            sender.sending.get(&2).unwrap().offset,
             SNAPSHOT_FRAGMENT_BYTES
         );
         assert_eq!(
@@ -1130,7 +1319,7 @@ mod tests {
         receiver.receive(denied, &[1, 2, 3]).unwrap();
         assert!(!sender.acknowledge(&fragment(&mut receiver)));
         assert_eq!(
-            sender.sending.as_ref().unwrap().offset,
+            sender.sending.get(&2).unwrap().offset,
             SNAPSHOT_FRAGMENT_BYTES
         );
         for _ in 0..2 {
@@ -1153,7 +1342,7 @@ mod tests {
                 assert!(!complete);
             }
         }
-        assert!(sender.sending.is_none());
+        assert!(sender.sending.is_empty());
         assert!(receiver.receiving.is_none());
     }
 
@@ -1167,7 +1356,7 @@ mod tests {
             assert!(fragment(&mut sender).ack);
             sender.discard_obsolete_send(term, leader);
             assert!(sender.packets(1).unwrap().is_empty());
-            assert!(sender.sending.is_none());
+            assert!(sender.sending.is_empty());
         }
     }
     #[test]
@@ -1267,8 +1456,8 @@ mod tests {
         conflicting.from = 3;
         assert!(receiver.receive(conflicting, &[1, 2, 3]).is_err());
         let mut offset = SNAPSHOT_FRAGMENT_BYTES;
-        while offset < sender.sending.as_ref().unwrap().bytes.len() {
-            let sending = sender.sending.as_ref().unwrap();
+        while offset < sender.sending.get(&2).unwrap().bytes.len() {
+            let sending = sender.sending.get(&2).unwrap();
             let end = (offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
             let mut part = Fragment {
                 offset: offset as u64,
@@ -1308,7 +1497,7 @@ mod tests {
         assert!(!stream.sending_to(2));
         assert!(stream.start(other).unwrap());
         stream.tick(5, false);
-        assert!(stream.sending.is_none());
+        assert!(stream.sending.is_empty());
         stream.receive(first, &[1, 2, 3]).unwrap();
         assert!(stream.receiving.is_some());
         stream.tick(5, false);
@@ -1629,7 +1818,7 @@ mod tests {
         let file = &mut receiver.receiving.as_mut().unwrap().file;
         file.seek(SeekFrom::Start(0)).unwrap();
         file.write_all(&[0xff]).unwrap();
-        let sending = sender.sending.as_ref().unwrap();
+        let sending = sender.sending.get(&2).unwrap();
         let mut offset = SNAPSHOT_FRAGMENT_BYTES;
         while offset < sending.bytes.len() {
             let end = (offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
@@ -1846,7 +2035,7 @@ mod file_tests {
         let expected = message.encode_to_vec();
         let mut sender = Stream::new(dir.path().to_path_buf());
         sender.start(message).unwrap();
-        let source = &sender.sending.as_ref().unwrap().bytes;
+        let source = &sender.sending.get(&2).unwrap().bytes;
         let Source::Memory(bytes) = source else {
             panic!("expected memory source")
         };
@@ -1899,7 +2088,7 @@ mod file_tests {
         drop(blob);
         // Removing the pathname proves subsequent reads use the retained handle.
         std::fs::rename(&original, &moved).unwrap();
-        let source = &sender.sending.as_ref().unwrap().bytes;
+        let source = &sender.sending.get(&2).unwrap().bytes;
         let Source::File { prefix, .. } = source else {
             panic!("expected file source")
         };

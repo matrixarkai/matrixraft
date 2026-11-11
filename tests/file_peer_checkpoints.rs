@@ -149,6 +149,13 @@ fn drive(
     states: &mut BTreeMap<u64, State>,
     isolate: Option<u64>,
 ) {
+    drive_isolated(peers, states, isolate.as_slice());
+}
+fn drive_isolated(
+    peers: &mut BTreeMap<u64, DurablePeer>,
+    states: &mut BTreeMap<u64, State>,
+    isolated: &[u64],
+) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut exchanges = 0;
     while exchanges < 2000 {
@@ -196,7 +203,7 @@ fn drive(
             packets.extend(
                 result
                     .into_iter()
-                    .filter(|p| Some(*id) != isolate && Some(p.to) != isolate),
+                    .filter(|p| !isolated.contains(id) && !isolated.contains(&p.to)),
             );
         }
         if packets.is_empty() {
@@ -377,6 +384,115 @@ fn file_checkpoints_transfer_to_lagging_voters_and_recover_the_suffix() {
 #[test]
 fn file_checkpoint_quotas_resume_after_long_pauses_and_recover_the_suffix() {
     exercise_with_quotas(3 * 1024 * 1024 + 17, true);
+}
+
+#[test]
+fn concurrent_file_sends_share_quota_and_pin_captured_images_during_publication() {
+    use matrixraft::{peer_runtime::PeerTuning, ByteQuotaLimiter, RateLimiter};
+    use std::sync::{Arc, Mutex};
+    let _measurement = EXERCISE.lock().unwrap();
+    DROP_FILE_PACKET.store(false, std::sync::atomic::Ordering::Relaxed);
+    let root = tempfile::tempdir().unwrap();
+    let options = |id| PeerOptions {
+        group_id: 71,
+        node_id: id,
+        voters: vec![1, 2, 3, 4, 5],
+        wal_path: root.path().join(format!("{id}.wal")),
+    };
+    let mut peers: BTreeMap<_, _> = (1..=5)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(
+                    options(id),
+                    PeerTuning {
+                        max_checkpoint_sends: Some(2),
+                        ..PeerTuning::default()
+                    },
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let mut states = BTreeMap::new();
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    drive_isolated(&mut peers, &mut states, &[]);
+    let length: u64 = 3 * 1024 * 1024 + 17;
+    let mut command = length.to_be_bytes().to_vec();
+    command.push(5);
+    peers.get_mut(&1).unwrap().propose(command).unwrap();
+    drive_isolated(&mut peers, &mut states, &[4, 5]);
+    let mut input = Generated {
+        remaining: length,
+        value: 5,
+        largest: 0,
+    };
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint_from_reader(&mut input, length)
+        .unwrap();
+    let quota = Arc::new(Mutex::new(ByteQuotaLimiter::new(1024 * 1024)));
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .set_checkpoint_transfer_limiters(Some(Arc::clone(&quota)), None)
+        .unwrap();
+    for _ in 0..20 {
+        for peer in peers.values_mut() {
+            peer.tick().unwrap();
+        }
+        drive_isolated(&mut peers, &mut states, &[]);
+        if quota.lock().unwrap().available_bytes() == 0 {
+            break;
+        }
+    }
+    assert_eq!(quota.lock().unwrap().available_bytes(), 0);
+    assert_eq!(states[&4], State::default());
+    assert_eq!(states[&5], State::default());
+    let mut command = length.to_be_bytes().to_vec();
+    command.push(7);
+    peers.get_mut(&1).unwrap().propose(command).unwrap();
+    drive_isolated(&mut peers, &mut states, &[]);
+    let mut input = Generated {
+        remaining: length,
+        value: 7,
+        largest: 0,
+    };
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint_from_reader(&mut input, length)
+        .unwrap();
+    let payloads = root.path().join("1.wal.payloads");
+    assert_eq!(
+        std::fs::read_dir(&payloads).unwrap().count(),
+        2,
+        "active sends must retain their older captured payload"
+    );
+    for _ in 0..80 {
+        quota.lock().unwrap().refill_bytes(1024 * 1024);
+        for peer in peers.values_mut() {
+            peer.tick().unwrap();
+        }
+        drive_isolated(&mut peers, &mut states, &[]);
+        if states[&4] == (State { length, value: 7 }) && states[&5] == states[&4] {
+            break;
+        }
+    }
+    for id in 1..=5 {
+        assert_eq!(states[&id], State { length, value: 7 });
+    }
+    assert_eq!(std::fs::read_dir(&payloads).unwrap().count(), 1);
+    drop(peers);
+    states.clear();
+    let mut peers: BTreeMap<_, _> = (1..=5)
+        .map(|id| (id, DurablePeer::open(options(id)).unwrap()))
+        .collect();
+    drive_isolated(&mut peers, &mut states, &[]);
+    for id in 1..=5 {
+        assert_eq!(states[&id], State { length, value: 7 });
+    }
 }
 #[test]
 #[ignore = "bounded 272 MiB file capture, transfer and full restart"]
