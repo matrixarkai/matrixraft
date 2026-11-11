@@ -424,6 +424,36 @@ not persistent and must not be reused across peer instances. Confirmations do
 not append entries or WAL records; writes and elections still do, and snapshot
 compaction remains necessary for a long-running write workload.
 
+## Local stop and graceful shutdown
+
+`stop()` closes admission immediately, cancels local read contexts, queued host
+reads, outgoing checkpoints, partial receives, and unsent packets, and makes the
+peer stop advertising leadership. It does not apply pending entries, force a
+commit, remove membership, or truncate an uncommitted suffix. Packets already
+returned to the host cannot be recalled.
+
+`begin_shutdown()` closes admission and returns the current committed index as
+a fixed application fence. Continue Ready processing with the normal application
+and checkpoint-restore callbacks until `poll_shutdown()` returns true. Repeated
+requests keep the original fence. During draining, new inputs, ticks, campaigns,
+proposals, reads, configuration requests, and checkpoint capture are refused;
+Ready processing returns no outbound packets. The drain needs no new quorum
+traffic because its fence is already committed.
+
+Application or restore `Retry` leaves completion pending. A storage or callback
+error is still fatal and cannot be reported as graceful completion. An immediate
+`stop()` may abort draining, in which case polling reports an error unless the
+fence has already applied. `has_ready()` becomes false once stopped, and further
+Ready calls are refused. Shutdown itself is not persisted: after dropping the
+instance, reopen with a fresh or idempotent application and perform normal replay.
+
+Stopping retains exclusive storage ownership. Drop the peer and outstanding
+capture tickets before reopening its storage. A canceled owned file-finalization
+worker remains owned until joined; its uncommitted result is never installed or
+acknowledged. Drop waits for any such worker while retaining the storage lock.
+Host-owned read tasks may finish, but their late completions cannot revive a
+stopped peer or be supplied to a reopened instance.
+
 ## Application checkpoints and lagging voters
 
 `set_checkpoint_transfer_limiters(send, receive)` attaches independent optional

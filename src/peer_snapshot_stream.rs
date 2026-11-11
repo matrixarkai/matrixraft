@@ -502,6 +502,23 @@ impl Stream {
             let _ = finishing.worker.join();
         }
     }
+    pub(super) fn cancel_transfers(&mut self) {
+        self.sending.clear();
+        self.receiving = None;
+        self.received_payload = None;
+        self.completed = None;
+        self.ack = None;
+        self.inline_credit = None;
+        if self
+            .finishing
+            .as_ref()
+            .is_some_and(|f| f.worker.is_finished())
+        {
+            self.finish_shutdown();
+        }
+        // The owned finalization worker is joined by Drop while storage remains
+        // exclusively locked. Its uncommitted result is never installed.
+    }
     pub(super) fn finalizing(&self) -> bool {
         self.finishing.is_some()
     }
@@ -947,6 +964,54 @@ mod tests {
             SNAPSHOT_FRAGMENT_BYTES as u64,
             available,
         )))
+    }
+
+    #[test]
+    fn canceled_file_finalization_remains_owned_and_never_publishes_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = vec![19; 2 * SNAPSHOT_FRAGMENT_BYTES + 17];
+        let payload = checkpoint_file::Blob::capture(
+            &root.path().join("source"),
+            &mut std::io::Cursor::new(&bytes),
+            bytes.len() as u64,
+        )
+        .unwrap();
+        let mut image = message();
+        image.snapshot.as_mut().unwrap().data.clear();
+        let mut sender = Stream::default();
+        sender.start_file(image, payload).unwrap();
+        let mut receiver = Stream::new(root.path().to_path_buf());
+        let (release, gate) = std::sync::mpsc::channel();
+        receiver.finalization_gate = Some(gate);
+        loop {
+            let packet = sender.packets(1).unwrap().pop().unwrap();
+            let envelope = Packet::decode(packet.bytes.as_slice()).unwrap();
+            let part = Fragment::decode(envelope.message).unwrap();
+            let last = part.offset + part.data.len() as u64 == part.total;
+            receiver.receive(part, &[1, 2, 3]).unwrap();
+            if last {
+                break;
+            }
+            let packet = receiver.packets(1).unwrap().pop().unwrap();
+            let envelope = Packet::decode(packet.bytes.as_slice()).unwrap();
+            sender.acknowledge(&Fragment::decode(envelope.message).unwrap());
+        }
+        assert!(receiver.finishing.is_some());
+        receiver.cancel_transfers();
+        assert!(receiver.finishing.is_some());
+        assert!(receiver.packets(1).unwrap().is_empty());
+        release.send(()).unwrap();
+        receiver.finish_shutdown();
+        assert!(receiver.finishing.is_none());
+        assert!(receiver.received_payload.is_none());
+        assert!(receiver.completed.is_none());
+        assert!(receiver.packets(1).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(&receiver.payload_directory)
+                .unwrap()
+                .count(),
+            0
+        );
     }
     fn fanout_message(to: u64) -> Message {
         let mut image = message();
