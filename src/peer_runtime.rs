@@ -17,7 +17,7 @@ use raft_core::{
     Config, RawNode, ReadOnlyOption, StateRole, Storage,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{File, OpenOptions},
     io::{IoSlice, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -2127,6 +2127,7 @@ pub struct DurablePeer {
     read_sequence: u64,
     read_limit: usize,
     pending_reads: BTreeMap<u64, PendingRead>,
+    deferred_reads: VecDeque<u64>,
     pending_restore: Option<Arc<Snapshot>>,
     restore_floor: u64,
     snapshot_flights: BTreeMap<u64, (u64, u64, u8)>,
@@ -2207,6 +2208,7 @@ impl DurablePeer {
             read_sequence: 0,
             read_limit: tuning.max_pending_reads,
             pending_reads: BTreeMap::new(),
+            deferred_reads: VecDeque::new(),
             pending_restore,
             restore_floor: 0,
             snapshot_flights: BTreeMap::new(),
@@ -2739,6 +2741,7 @@ impl DurablePeer {
             .is_some_and(|(_, read)| read.term != term)
         {
             self.pending_reads.clear();
+            self.deferred_reads.clear();
         }
         if self.pending_reads.len() >= self.read_limit {
             return Err(invalid("peer read admission limit reached"));
@@ -2752,9 +2755,39 @@ impl DurablePeer {
             term: self.term(),
             index: None,
         };
-        self.raw.read_index(read.context());
         self.pending_reads.insert(read.token, read);
+        self.deferred_reads.push_back(self.read_sequence);
+        self.dispatch_deferred_reads()?;
         Ok(self.read_sequence)
+    }
+
+    fn dispatch_deferred_reads(&mut self) -> Result<(), RaftError> {
+        if self.deferred_reads.is_empty() || !self.is_leader() {
+            return Ok(());
+        }
+        let term = self.term();
+        if self
+            .raw
+            .raft
+            .raft_log
+            .term(self.raw.raft.raft_log.committed)
+            .map_err(storage_error)?
+            != term
+        {
+            return Ok(());
+        }
+        // The core drops read requests until this term has committed. Keep
+        // their admission order locally until the core can retain them.
+        while let Some(token) = self.deferred_reads.pop_front() {
+            if let Some(read) = self
+                .pending_reads
+                .get(&token)
+                .filter(|read| read.term == term)
+            {
+                self.raw.read_index(read.context());
+            }
+        }
+        Ok(())
     }
     /// Cancel only the matching local read. False leaves all other reads intact.
     /// Already delivered packets cannot be recalled; their old contexts cannot
@@ -2764,6 +2797,7 @@ impl DurablePeer {
         let Some(read) = self.pending_reads.remove(&token) else {
             return Ok(false);
         };
+        self.deferred_reads.retain(|queued| *queued != token);
         let context = read.context();
         let core = &mut self.raw.raft;
         core.read_only.pending_read_index.remove(context.as_slice());
@@ -2817,6 +2851,7 @@ impl DurablePeer {
             .ok_or_else(|| invalid("unknown peer read token"))?;
         if !self.is_leader() || read.term != self.term() {
             self.pending_reads.clear();
+            self.deferred_reads.clear();
             return Err(RaftError::NotLeader(self.options.node_id));
         }
         if read
@@ -3392,6 +3427,7 @@ impl DurablePeer {
         let mut applied_batch = false;
         let mut restore_attempted = false;
         loop {
+            self.dispatch_deferred_reads()?;
             if !self.raw.has_ready() {
                 if !restore_attempted {
                     self.attempt_restore(restore)?;

@@ -1636,6 +1636,69 @@ fn a_new_leadership_term_releases_all_old_read_admission() {
         assert!(peers.get_mut(&1).unwrap().poll_read(token).unwrap());
     }
 }
+
+#[test]
+fn concurrent_reads_admitted_during_election_wait_for_current_term_commitment() {
+    use raft_core::eraftpb::{Message, MessageType};
+    let dir = Directory::new();
+    let mut peers = peers_with_read_limit(&dir, 3);
+    let mut applied = Applied::new();
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    // Deliver votes but not the new leader's entry. Becoming leader is not
+    // sufficient to begin safe read confirmation in the consensus core.
+    for _ in 0..10 {
+        let mut packets = Vec::new();
+        for peer in peers.values_mut() {
+            packets.extend(peer.process_ready(|_, _| Ok(())).unwrap());
+        }
+        for packet in packets {
+            let envelope = TestPacket::decode(packet.bytes.as_slice()).unwrap();
+            let message = Message::decode(envelope.message.as_slice()).unwrap();
+            if message.get_msg_type() != MessageType::MsgAppend {
+                peers
+                    .get_mut(&packet.to)
+                    .unwrap()
+                    .step(&packet.bytes)
+                    .unwrap();
+            }
+        }
+        if peers[&1].is_leader() {
+            break;
+        }
+    }
+    assert!(peers[&1].is_leader());
+    assert_eq!(peers[&1].commit_index(), 0);
+    let mut tokens: Vec<_> = (0..3)
+        .map(|_| peers.get_mut(&1).unwrap().begin_read().unwrap())
+        .collect();
+    assert!(peers.get_mut(&1).unwrap().begin_read().is_err());
+    let canceled = tokens.remove(1);
+    assert!(peers.get_mut(&1).unwrap().cancel_read(canceled).unwrap());
+    tokens.push(peers.get_mut(&1).unwrap().begin_read().unwrap());
+    for token in &tokens {
+        assert!(!peers.get_mut(&1).unwrap().poll_read(*token).unwrap());
+    }
+    let packets = peers
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap();
+    assert!(!packets.is_empty());
+    assert_eq!(peers[&1].commit_index(), 0);
+    for packet in packets {
+        peers
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    pump(&mut peers, &mut applied, None);
+    assert!(peers[&1].commit_index() > 0);
+    assert!(peers.get_mut(&1).unwrap().poll_read(canceled).is_err());
+    for token in tokens {
+        assert!(peers.get_mut(&1).unwrap().poll_read(token).unwrap());
+    }
+}
 #[test]
 fn read_confirmation_is_invalid_after_leadership_changes() {
     let dir = Directory::new();

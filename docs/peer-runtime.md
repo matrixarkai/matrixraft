@@ -405,7 +405,9 @@ This uses the safe quorum mode, not a clock-based lease.
 
 `PeerTuning::max_pending_reads` bounds outstanding tokens from 1 through 1024;
 the default remains one. Each token has its own quorum and local-application
-fence, and callers may poll or cancel them in any order. Confirmed but unpolled
+fence, and callers may poll or cancel them in any order. Requests admitted before
+the leader commits an entry in its new term wait locally, within the same limit,
+then enter quorum confirmation in admission order. Confirmed but unpolled
 tokens still occupy admission slots. With concurrency enabled, Ready keeps the
 newest queued heartbeat per recipient, including its surviving read context,
 rather than sending a heartbeat for each token. A later quorum response may confirm earlier
