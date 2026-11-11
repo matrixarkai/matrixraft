@@ -43,6 +43,16 @@ commitment. Bounded asynchronous log reads and background checkpoint capture are
 host integrations, not automatic latency guarantees; see the integration contract for
 completion handling, persistence ordering, recovery, and membership constraints.
 
+For staged checkpoint capture, set `PeerTuning::checkpoint_after_bytes` to opt
+into an applied-log byte threshold and call `prepare_checkpoint_if_due` after
+Ready processing or on a bounded host timer. The default `None` leaves capture
+manual. Automatic requests coalesce while capture work is outstanding; the host
+still freezes application state at the ticket position, schedules capture, and
+publishes the result. No worker starts implicitly. The threshold is a maintenance
+hint, not a disk-space cap, and final WAL replacement and sync remain synchronous.
+See the [peer integration contract](docs/peer-runtime.md) for accounting, retry,
+restore, and publication rules.
+
 The Cargo crate is named `matrixraft`, and the naming follows from that:
 
 - **Types are unprefixed** — `Storage`, `Message`, `Config`, not
