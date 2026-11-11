@@ -506,13 +506,37 @@ the duplicate receive path is bounded by two payload-sized allocations plus
 bookkeeping. The file-transfer tests enforce this bound for 1 MiB fragments while
 exercising packet loss, duplicates, suffix recovery, and full restart.
 
-Each peer retains at most one outgoing and one incoming large transfer. Other
-lagging voters remain on the consensus retry path until the outgoing slot is free.
-A sender advances one fragment per acknowledgment and retries after ten local
-ticks. Without local quota deferral or matching receiver acknowledgments, an
+`PeerTuning::max_checkpoint_sends` accepts `Some(1)` through `Some(64)` and
+frames all outgoing snapshots under that limit, including small images. `None`
+retains the direct small-image path and one outgoing bulk transfer. Each peer
+still retains only one incoming transfer. Additional lagging voters remain on
+the consensus retry path until an outgoing slot is free.
+
+Outgoing transfers have independent acknowledgment windows, retries, and expiry.
+Ready rotates data priority by recipient and emits at most one 1 MiB data
+fragment across all sends per poll; due metadata probes and acknowledgments
+remain independent. Keep polling on a bounded timer while transfers are in
+flight. Shared send budgets apply to the aggregate, not once per recipient.
+One stalled voter does not prevent another active recipient from advancing.
+Applying a committed membership change drops sends to recipients no longer in
+the consensus progress tracker, including their retained payload handles.
+
+Each active memory-backed send retains its own encoding. File-backed sends
+share captured payload ownership but have independent read handles and metadata;
+publishing a newer checkpoint cannot change bytes already being sent. The old
+payload is released when its last send finishes or expires. Choose a concurrency
+limit that fits the host's memory and descriptor budget, and prefer file-backed
+checkpoints for large fan-out.
+
+A sender advances from an aligned cumulative prefix acknowledgment and retries after ten local
+ticks. Without local admission deferral or matching receiver acknowledgments, an
 outgoing transfer expires after 100 ticks. Partial receives expire after 100
 ticks without matching data or keepalive traffic. A receiver that
-restarts requests retransmission from offset zero. Repeated delivery after
+restarts requests retransmission from offset zero. If only the outgoing attempt
+expires, a retry can use the receiver's retained prefix after its first duplicate
+fragment, without replaying the rest of that prefix. Routing, term, image identity,
+and alignment must match; transport prefixes never advance a Raft match index.
+Repeated delivery after
 completion does not restore state twice. Transport completion only resumes Raft
 probing: it never advances a follower's matched index or commits a proposal.
 Checkpoint acknowledgments leave the runtime only after processing persistence

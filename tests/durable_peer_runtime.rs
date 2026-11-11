@@ -2105,6 +2105,7 @@ struct TransferFault {
     fired: bool,
     duplicate: bool,
     fragments: usize,
+    zero_fragments: usize,
 }
 fn pump_large(
     dir: &Directory,
@@ -2148,6 +2149,13 @@ fn pump_large(
                 assert!(part.data.len() <= 1024 * 1024);
                 if !part.ack {
                     fault.fragments += 1;
+                    if part.offset == 0 {
+                        fault.zero_fragments += 1;
+                    }
+                }
+                if fault.kind == 7 && part.ack && part.from == 4 && part.offset == 2 * 1024 * 1024 {
+                    fault.fired = true;
+                    continue;
                 }
                 if fault.kind == 6 && part.ack && part.offset == part.total {
                     fault.fired = true;
@@ -2211,6 +2219,7 @@ fn checkpoint_quotas_pause_inline_and_framed_transfers_without_stalling_quorum_w
                 fired: false,
                 duplicate: false,
                 fragments: 0,
+                zero_fragments: 0,
             };
             peers.get_mut(&1).unwrap().campaign().unwrap();
             pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
@@ -2306,6 +2315,7 @@ fn paused_checkpoint_quota_cannot_release_payload_after_leadership_changes() {
         fired: false,
         duplicate: false,
         fragments: 0,
+        zero_fragments: 0,
     };
     peers.get_mut(&1).unwrap().campaign().unwrap();
     pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
@@ -2356,6 +2366,7 @@ fn streamed_checkpoints_survive_packet_loss_duplicates_and_receiver_restart() {
             fired: false,
             duplicate: false,
             fragments: 0,
+            zero_fragments: 0,
         };
         peers.get_mut(&1).unwrap().campaign().unwrap();
         pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
@@ -2482,6 +2493,7 @@ fn streamed_checkpoint_slot_serves_multiple_lagging_voters() {
         fired: false,
         duplicate: false,
         fragments: 0,
+        zero_fragments: 0,
     };
     peers.get_mut(&1).unwrap().campaign().unwrap();
     pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
@@ -2516,4 +2528,112 @@ fn streamed_checkpoint_slot_serves_multiple_lagging_voters() {
         assert_eq!(apps[&id].restored, 1);
     }
     assert!(fault.fragments >= 20);
+}
+
+#[test]
+fn parallel_checkpoint_sends_isolate_a_stalled_voter_and_resume_its_staged_prefix() {
+    let dir = Directory::new();
+    let voters = vec![1, 2, 3, 4, 5];
+    let mut peers: BTreeMap<_, _> = voters
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                DurablePeer::open_with_tuning(
+                    dir.options(*id, voters.clone()),
+                    PeerTuning {
+                        max_checkpoint_sends: Some(2),
+                        ..PeerTuning::default()
+                    },
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let mut apps = BTreeMap::new();
+    let mut fault = TransferFault {
+        kind: 7,
+        fired: false,
+        duplicate: false,
+        fragments: 0,
+        zero_fragments: 0,
+    };
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    let mut expected = Vec::new();
+    for value in 1..=3u8 {
+        let bytes = vec![value; 1024 * 1024];
+        peers.get_mut(&1).unwrap().propose(bytes.clone()).unwrap();
+        expected.extend_from_slice(&bytes);
+        pump_large(&dir, &mut peers, &mut apps, &[4, 5], &mut fault);
+    }
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint(expected.clone())
+        .unwrap();
+    for _ in 0..10 {
+        for peer in peers.values_mut() {
+            peer.tick().unwrap();
+        }
+        pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    }
+    assert!(fault.fired);
+    assert_eq!(apps[&4].restored, 0);
+    assert!(apps[&4].bytes.is_empty());
+    assert_eq!(
+        apps[&5].restored, 1,
+        "the other active sender must not wait for voter 4"
+    );
+    assert_eq!(apps[&5].bytes, expected);
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .propose(b"suffix".to_vec())
+        .unwrap();
+    expected.extend_from_slice(b"suffix");
+    let read = peers.get_mut(&1).unwrap().begin_read().unwrap();
+    pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    assert!(peers.get_mut(&1).unwrap().poll_read(read).unwrap());
+    for _ in 0..115 {
+        for peer in peers.values_mut() {
+            peer.tick().unwrap();
+        }
+        pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    }
+    assert!(
+        fault.zero_fragments >= 3,
+        "the expired send must have retried from zero"
+    );
+    assert_eq!(apps[&4].restored, 0);
+    fault.kind = 0;
+    for _ in 0..30 {
+        for peer in peers.values_mut() {
+            peer.tick().unwrap();
+        }
+        pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+        if apps[&4].bytes == expected {
+            break;
+        }
+    }
+    assert_eq!(apps[&4].restored, 1);
+    assert_eq!(apps[&5].restored, 1);
+    for id in 1..=5 {
+        assert_eq!(apps[&id].bytes, expected);
+    }
+    drop(peers);
+    apps.clear();
+    let mut peers: BTreeMap<_, _> = voters
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                DurablePeer::open(dir.options(*id, voters.clone())).unwrap(),
+            )
+        })
+        .collect();
+    pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    for id in 1..=5 {
+        assert_eq!(apps[&id].bytes, expected);
+    }
 }
