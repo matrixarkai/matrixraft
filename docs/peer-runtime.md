@@ -64,10 +64,24 @@ Only a leader may request it; unknown targets, learners, and the local identity
 are refused. Continue
 Ready processing and packet delivery: acceptance is not a role change. The core
 catches up a lagging target before requesting its election and expires an
-incomplete transfer on the configured election timeout. Proposals can be refused
-while transfer is pending. A received timeout-now request must identify the
+incomplete transfer on the configured election timeout by default. Proposals can
+be refused while transfer is pending. A received timeout-now request must identify the
 current recognized leader and current term; network transfer commands remain
 unsupported, so only the local host can initiate this operation.
+
+`PeerTuning::transfer_timeout_tick` optionally supplies an independent handoff
+deadline, from 1 through half the platform's maximum `usize`. `None` preserves the
+core-managed deadline. An explicit deadline can span multiple election intervals;
+heartbeat cadence and quorum checks still run normally. Each host `tick` advances
+the pending handoff once. A repeated request for the same target keeps its original
+deadline; replacing the target starts a new one without restarting the quorum-check
+clock. Expiry releases proposal admission only if this peer still leads; it never
+elects or acknowledges the target. A role
+or term change, local stop, or shutdown cancels the local clock. Neither the clock
+nor the setting is journaled. Packets already returned to the host cannot be
+recalled: an expired handoff is not a promise that a previously contacted target
+will never campaign. Reopening uses the newly supplied tuning and normal election
+and recovery rules.
 
 After an outbound delivery failure, `report_unreachable(target)` reports the
 local transport observation to the core. It can reset a full optimistic append

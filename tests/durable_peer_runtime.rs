@@ -795,6 +795,283 @@ fn lost_transfer_packets_expire_without_forcing_a_new_leader() {
     assert_eq!(applied.get(&1), applied.get(&3));
 }
 
+fn peers_with_handoff_timeout(dir: &Directory, timeout: usize) -> BTreeMap<u64, DurablePeer> {
+    (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(
+                    dir.options(id, vec![1, 2, 3]),
+                    PeerTuning {
+                        transfer_timeout_tick: Some(timeout),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn tick_handoff_leader(
+    group: &mut BTreeMap<u64, DurablePeer>,
+    applied: &mut Applied,
+    isolated: u64,
+) -> usize {
+    group.get_mut(&1).unwrap().tick().unwrap();
+    let packets = group
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|log, payload| {
+            applied
+                .entry(1)
+                .or_default()
+                .push((log.index, payload.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+    let heartbeats = packets
+        .iter()
+        .filter(|packet| {
+            let envelope = TestPacket::decode(packet.bytes.as_slice()).unwrap();
+            let message = raft_core::eraftpb::Message::decode(envelope.message.as_slice()).unwrap();
+            message.get_msg_type() == raft_core::eraftpb::MessageType::MsgHeartbeat
+        })
+        .count();
+    for packet in packets {
+        if packet.to != isolated {
+            group
+                .get_mut(&packet.to)
+                .unwrap()
+                .step(&packet.bytes)
+                .unwrap();
+        }
+    }
+    pump(group, applied, Some(isolated));
+    heartbeats
+}
+
+#[test]
+fn short_handoff_deadlines_do_not_restart_for_repeated_targets() {
+    for deadline in [1, 3, 9] {
+        let dir = Directory::new();
+        let mut group = peers_with_handoff_timeout(&dir, deadline);
+        let mut applied = Applied::new();
+        group.get_mut(&1).unwrap().campaign().unwrap();
+        pump(&mut group, &mut applied, None);
+        let term = group[&1].term();
+        group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+        pump(&mut group, &mut applied, Some(3));
+        for _ in 1..deadline {
+            tick_handoff_leader(&mut group, &mut applied, 3);
+            assert!(group.get_mut(&1).unwrap().propose(vec![1]).is_err());
+            group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+        }
+        tick_handoff_leader(&mut group, &mut applied, 3);
+        assert!(group[&1].is_leader());
+        assert_eq!(group[&1].term(), term);
+        group.get_mut(&1).unwrap().propose(vec![2]).unwrap();
+        pump(&mut group, &mut applied, Some(3));
+        assert_eq!(applied.get(&1), applied.get(&2));
+        group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+        pump(&mut group, &mut applied, Some(3));
+        for _ in 1..deadline {
+            tick_handoff_leader(&mut group, &mut applied, 3);
+            assert!(group.get_mut(&1).unwrap().propose(vec![3]).is_err());
+        }
+        tick_handoff_leader(&mut group, &mut applied, 3);
+        group.get_mut(&1).unwrap().propose(vec![4]).unwrap();
+    }
+}
+
+#[test]
+fn extended_handoff_deadlines_preserve_heartbeat_cadence_and_quorum_checks() {
+    let dir = Directory::new();
+    let mut group = peers_with_handoff_timeout(&dir, 25);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let term = group[&1].term();
+    group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+    pump(&mut group, &mut applied, Some(3));
+    for tick in 1..25 {
+        let heartbeats = tick_handoff_leader(&mut group, &mut applied, 3);
+        assert_eq!(heartbeats, if tick % 2 == 0 { 2 } else { 0 });
+        assert!(group[&1].is_leader());
+        assert_eq!(group[&1].term(), term);
+        assert!(group.get_mut(&1).unwrap().propose(vec![1]).is_err());
+    }
+    let token = group.get_mut(&1).unwrap().begin_read().unwrap();
+    pump(&mut group, &mut applied, Some(3));
+    assert!(group.get_mut(&1).unwrap().poll_read(token).unwrap());
+    tick_handoff_leader(&mut group, &mut applied, 3);
+    group.get_mut(&1).unwrap().propose(vec![2]).unwrap();
+    pump(&mut group, &mut applied, Some(3));
+    assert_eq!(applied.get(&1), applied.get(&2));
+
+    let dir = Directory::new();
+    let mut group = peers_with_handoff_timeout(&dir, 50);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+    group
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap();
+    for tick in 0..20 {
+        let leader = group.get_mut(&1).unwrap();
+        leader
+            .transfer_leadership(if tick % 2 == 0 { 2 } else { 3 })
+            .unwrap();
+        leader.tick().unwrap();
+        leader.process_ready(|_, _| Ok(())).unwrap();
+    }
+    assert!(
+        !group[&1].is_leader(),
+        "the longer handoff must not extend quorum authority"
+    );
+    assert!(matches!(
+        group.get_mut(&1).unwrap().propose(vec![3]),
+        Err(RaftError::NotLeader(_))
+    ));
+}
+
+#[test]
+fn delayed_handoff_catches_up_after_the_first_election_interval() {
+    let dir = Directory::new();
+    let mut group = peers_with_handoff_timeout(&dir, 25);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    for value in 0..12u8 {
+        group.get_mut(&1).unwrap().propose(vec![value; 32]).unwrap();
+        pump(&mut group, &mut applied, Some(3));
+    }
+    let term = group[&1].term();
+    group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+    pump(&mut group, &mut applied, Some(3));
+    for _ in 0..12 {
+        tick_handoff_leader(&mut group, &mut applied, 3);
+    }
+    assert!(group[&1].is_leader());
+    assert!(!group[&3].is_leader());
+    assert!(group[&3].applied_index() < group[&1].commit_index());
+    group.get_mut(&1).unwrap().report_unreachable(3).unwrap();
+    for _ in 0..2 {
+        tick_handoff_leader(&mut group, &mut applied, 0);
+    }
+    assert!(group[&3].is_leader());
+    assert!(group[&3].term() > term);
+    group.get_mut(&3).unwrap().propose(vec![99; 32]).unwrap();
+    pump(&mut group, &mut applied, None);
+    assert_eq!(applied.get(&1), applied.get(&3));
+    group.get_mut(&1).unwrap().force_campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    assert!(group[&1].is_leader());
+    for _ in 0..14 {
+        tick_handoff_leader(&mut group, &mut applied, 0);
+    }
+    group.get_mut(&1).unwrap().propose(vec![100; 32]).unwrap();
+    pump(&mut group, &mut applied, None);
+    group.get_mut(&1).unwrap().transfer_leadership(2).unwrap();
+    pump(&mut group, &mut applied, Some(2));
+    for _ in 0..24 {
+        tick_handoff_leader(&mut group, &mut applied, 2);
+        assert!(group[&1].is_leader());
+        assert!(group.get_mut(&1).unwrap().propose(vec![1]).is_err());
+    }
+    tick_handoff_leader(&mut group, &mut applied, 2);
+    group.get_mut(&1).unwrap().propose(vec![101; 32]).unwrap();
+}
+
+#[test]
+fn replacing_a_handoff_target_resets_only_the_handoff_deadline() {
+    let dir = Directory::new();
+    let mut group = peers_with_handoff_timeout(&dir, 5);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+    pump(&mut group, &mut applied, Some(3));
+    for _ in 0..4 {
+        tick_handoff_leader(&mut group, &mut applied, 3);
+    }
+    group.get_mut(&1).unwrap().transfer_leadership(2).unwrap();
+    pump(&mut group, &mut applied, Some(2));
+    assert!(group.get_mut(&1).unwrap().transfer_leadership(0).is_err());
+    for _ in 0..4 {
+        tick_handoff_leader(&mut group, &mut applied, 2);
+        group.get_mut(&1).unwrap().transfer_leadership(2).unwrap();
+        assert!(group.get_mut(&1).unwrap().propose(vec![1]).is_err());
+    }
+    tick_handoff_leader(&mut group, &mut applied, 2);
+    group.get_mut(&1).unwrap().propose(vec![2]).unwrap();
+    pump(&mut group, &mut applied, Some(2));
+    assert_eq!(applied.get(&1), applied.get(&3));
+}
+
+#[test]
+fn reopening_does_not_restore_an_old_handoff_clock_or_its_tuning() {
+    let dir = Directory::new();
+    let mut group = peers_with_handoff_timeout(&dir, 3);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    group.get_mut(&1).unwrap().propose(vec![42]).unwrap();
+    pump(&mut group, &mut applied, None);
+    let expected = applied.get(&1).unwrap().clone();
+    group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+    pump(&mut group, &mut applied, Some(3));
+    for _ in 0..2 {
+        tick_handoff_leader(&mut group, &mut applied, 3);
+    }
+    group.remove(&1);
+    applied.insert(1, Vec::new());
+    group.insert(1, DurablePeer::open(dir.options(1, vec![1, 2, 3])).unwrap());
+    pump(&mut group, &mut applied, None);
+    assert_eq!(applied.get(&1), Some(&expected));
+    group.get_mut(&1).unwrap().force_campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    group.get_mut(&1).unwrap().propose(vec![43]).unwrap();
+    pump(&mut group, &mut applied, None);
+    group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+    pump(&mut group, &mut applied, Some(3));
+    for _ in 0..9 {
+        tick_handoff_leader(&mut group, &mut applied, 3);
+        assert!(group.get_mut(&1).unwrap().propose(vec![1]).is_err());
+    }
+    tick_handoff_leader(&mut group, &mut applied, 3);
+    group.get_mut(&1).unwrap().propose(vec![44]).unwrap();
+}
+
+#[test]
+fn local_shutdown_cancels_an_extended_handoff() {
+    for graceful in [false, true] {
+        let dir = Directory::new();
+        let mut group = peers_with_handoff_timeout(&dir, 25);
+        let mut applied = Applied::new();
+        group.get_mut(&1).unwrap().campaign().unwrap();
+        pump(&mut group, &mut applied, None);
+        group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+        pump(&mut group, &mut applied, Some(3));
+        let peer = group.get_mut(&1).unwrap();
+        let term = peer.term();
+        if graceful {
+            peer.begin_shutdown().unwrap();
+            assert!(peer.poll_shutdown().unwrap());
+        } else {
+            peer.stop();
+        }
+        assert!(!peer.is_leader());
+        assert_eq!(peer.term(), term);
+        assert!(peer.tick().is_err());
+        assert!(peer.transfer_leadership(2).is_err());
+        assert!(peer.propose(vec![1]).is_err());
+    }
+}
+
 #[test]
 fn leadership_transfer_catches_up_its_target_before_election() {
     let dir = Directory::new();
@@ -855,6 +1132,14 @@ fn peer_tuning_validates_before_creating_storage_and_controls_election_ticks() {
         },
         PeerTuning {
             max_disk_replicate_entries: Some(65537),
+            ..PeerTuning::default()
+        },
+        PeerTuning {
+            transfer_timeout_tick: Some(0),
+            ..PeerTuning::default()
+        },
+        PeerTuning {
+            transfer_timeout_tick: Some(usize::MAX / 2 + 1),
             ..PeerTuning::default()
         },
     ] {

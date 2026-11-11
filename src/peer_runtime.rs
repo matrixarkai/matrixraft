@@ -69,6 +69,9 @@ pub struct PeerOptions {
 pub struct PeerTuning {
     pub election_tick: usize,
     pub heartbeat_tick: usize,
+    /// Optional handoff deadline independent of elections. None retains the
+    /// core-managed election-timeout deadline. Host ticks advance both clocks.
+    pub transfer_timeout_tick: Option<usize>,
     pub pre_vote: bool,
     pub check_quorum: bool,
     pub max_size_per_msg: u64,
@@ -95,6 +98,7 @@ impl Default for PeerTuning {
         Self {
             election_tick: 10,
             heartbeat_tick: 2,
+            transfer_timeout_tick: None,
             pre_vote: true,
             check_quorum: true,
             max_size_per_msg: 1024 * 1024,
@@ -115,6 +119,9 @@ impl PeerTuning {
     }
     fn config(self, id: u64) -> Result<Config, RaftError> {
         if self.election_tick > usize::MAX / 2
+            || self
+                .transfer_timeout_tick
+                .is_some_and(|ticks| ticks == 0 || ticks > usize::MAX / 2)
             || self.max_size_per_msg == 0
             || self.max_size_per_msg > (LIMIT / 2) as u64
             || self.max_inflight_msgs > 65536
@@ -2129,12 +2136,20 @@ impl PreparedCheckpoint {
         self.ticket.position.clone()
     }
 }
+struct TransferClock {
+    term: u64,
+    target: u64,
+    elapsed: usize,
+}
+
 /// One actual Raft peer. Remote votes and append acknowledgments enter only via `step`.
 pub struct DurablePeer {
     pending_apply: u64,
     application_fetch_bytes: Option<u64>,
     bounded_apply: bool,
     automatic_elections: bool,
+    transfer_timeout_tick: Option<usize>,
+    transfer_clock: Option<TransferClock>,
     recovering_membership: bool,
     options: PeerOptions,
     raw: RawNode<PeerStorage>,
@@ -2221,6 +2236,8 @@ impl DurablePeer {
             application_fetch_bytes: tuning.application_read_budget(),
             bounded_apply: tuning.max_apply_bytes.is_some(),
             automatic_elections: true,
+            transfer_timeout_tick: tuning.transfer_timeout_tick,
+            transfer_clock: None,
             recovering_membership: !store.permitted.is_empty(),
             options,
             raw,
@@ -2347,9 +2364,10 @@ impl DurablePeer {
                 self.raw.raft.become_follower(self.term(), 0);
             }
         } else {
-            self.raw.tick();
+            self.tick_consensus();
         }
         if !self.is_leader() {
+            self.transfer_clock = None;
             self.snapshot_flights.clear();
         }
         let term = self.term();
@@ -2377,6 +2395,30 @@ impl DurablePeer {
                 .report_snapshot(id, raft_core::SnapshotStatus::Failure);
         }
         Ok(())
+    }
+    fn tick_consensus(&mut self) {
+        let Some(timeout) = self.transfer_timeout_tick else {
+            self.raw.tick();
+            return;
+        };
+        let clock = self.transfer_clock.take().filter(|clock| {
+            self.is_leader()
+                && clock.term == self.term()
+                && self.raw.raft.lead_transferee == Some(clock.target)
+        });
+        if clock.is_some() {
+            // The core shares its handoff deadline with its quorum clock. Hide
+            // only the handoff target during this synchronous, input-free tick.
+            self.raw.raft.abort_leader_transfer();
+        }
+        self.raw.tick();
+        if let Some(mut clock) = clock {
+            clock.elapsed += 1;
+            if self.is_leader() && clock.term == self.term() && clock.elapsed < timeout {
+                self.raw.raft.lead_transferee = Some(clock.target);
+                self.transfer_clock = Some(clock);
+            }
+        }
     }
     /// Control automatic campaigns locally. Explicit campaigns and transfer
     /// elections remain available. This policy is not persisted on restart.
@@ -2449,8 +2491,9 @@ impl DurablePeer {
 
     /// Request transfer to another committed voter. Acceptance is not completion:
     /// process Ready and deliver packets until the target wins its election.
-    /// The core catches up the target and expires an incomplete transfer after
-    /// the election timeout. Proposals may be refused while transfer is pending.
+    /// The core catches up the target. Incomplete transfers expire after the
+    /// configured handoff timeout, or the core's election timeout by default.
+    /// Proposals may be refused while transfer is pending.
     pub fn transfer_leadership(&mut self, target: u64) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
@@ -2469,7 +2512,25 @@ impl DurablePeer {
                 "leadership transfer requires another committed voter",
             ));
         }
+        let previous = self.raw.raft.lead_transferee;
+        let election_elapsed = self.raw.raft.election_elapsed;
         self.raw.transfer_leader(target);
+        if self.transfer_timeout_tick.is_some() {
+            // A new handoff must not restart the independent quorum-check clock.
+            self.raw.raft.election_elapsed = election_elapsed;
+            if previous != Some(target)
+                || self
+                    .transfer_clock
+                    .as_ref()
+                    .is_none_or(|clock| clock.term != self.term() || clock.target != target)
+            {
+                self.transfer_clock = Some(TransferClock {
+                    term: self.term(),
+                    target,
+                    elapsed: 0,
+                });
+            }
+        }
         Ok(())
     }
 
