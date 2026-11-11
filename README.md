@@ -2250,3 +2250,19 @@ by a pinned raft-rs core, binary protobuf packets, and a synchronized binary WAL
 It does not synthesize remote acknowledgments. See [the integration contract and
 remaining production requirements](docs/peer-runtime.md) before embedding it.
 The existing local cluster facade is unchanged.
+
+### Application progress and checkpoint retries
+
+Independent durable peers support explicit application retry decisions and borrowed
+batch application with consumed-prefix progress. Durable replication may continue while
+application is deferred, but reads and applied positions cannot pass unapplied work.
+Application callbacks must report only the prefix they actually completed; proposal
+acceptance and replication are not application acknowledgements.
+
+Checkpoint restoration can be retried from byte zero using the already synchronized
+image, without another transfer. Suffix application, read completion, and startup recovery
+stay behind successful restoration. Incomplete success and callback errors remain fatal
+where required by the contract. Bounded log reads avoid copying unselected payloads while
+retaining frame, checksum, identity, and wire validation. These APIs do not remove the
+host's transport, persistence-ordering, or recovery responsibilities. See
+[the peer runtime contract](docs/peer-runtime.md) for callback and retry semantics.
