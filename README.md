@@ -134,6 +134,22 @@ License: Apache-2.0.
   local multi-group benchmark does not establish network failover latency or the
   durability of an application's acknowledgement policy.
 
+## Independent Peer Lifecycle
+
+| Stage | Host responsibility |
+|---|---|
+| Open and recover | Give the peer exclusive durable storage and restore application state through the appropriate Ready API before serving clients. |
+| Receive work | Feed packets, timer ticks, and proposals to the peer under exclusive ownership; adding the crate does not run this loop. |
+| Process Ready | Use the Ready variant matching application batching, retry, and checkpoint restoration. Deliver only the packets returned after successful processing. |
+| Acknowledge a write | Wait for successful application of its committed entry. Queue admission and log persistence alone are not client success. |
+| Serve a confirmed read | Wait until its confirmed position is applied locally; do not substitute a role callback for the read fence. |
+| Capture a checkpoint | Freeze application state at the ticket position, bound background work, and report publication or failure through the documented completion path. |
+
+Use the [peer-runtime contract](docs/peer-runtime.md) for the exact ordering,
+retry, and recovery rules. Shared-worker scheduling reduces thread overhead; it
+does not supply application snapshots, authenticated networking, or an external
+service's acknowledgement policy.
+
 ## What This Crate Provides
 
 - `SemanticRequirement`
