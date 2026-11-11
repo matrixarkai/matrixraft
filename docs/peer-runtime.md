@@ -749,6 +749,26 @@ and never claim a worker snapshot includes writes applied after its captured
 position. The application owns snapshot consistency; the runtime cannot verify
 its contents. This API retains the existing file and packet formats.
 
+Set `PeerTuning::checkpoint_after_bytes` to 1 byte through 512 MiB to opt into
+threshold-admitted captures. Call `prepare_checkpoint_if_due` after Ready or on a
+bounded host timer. It returns one capture ticket when enough encoded entry bytes
+have actually applied since the published image and application state is settled.
+Election and membership entries count; uncommitted entries, retried application
+suffixes, WAL headers, and image payload bytes do not. The default `None` keeps
+captures manual. Pending reads or restore work defer admission without failing
+the peer. Stopped or failed peers still reject admission.
+
+Due requests are coalesced across queued tickets, worker ownership, and prepared
+results. Dropping abandoned or failed work allows retry. Publishing releases a
+superseded request even if its prepared handle remains live; publishing an older
+staged image leaves later applied bytes eligible for another capture. Manual
+requests remain independent. A successfully restored received image resets this
+local budget; retained entries replayed afterward rebuild it, including on reopen.
+No counters or policy settings are journaled, and no worker is started implicitly.
+Freeze application state at the ticket position and complete the existing capture
+and installation workflow. This threshold is a maintenance hint, not a disk cap:
+hosts must poll and publish promptly, and the existing WAL bound still applies.
+
 Final WAL replacement and sync remain synchronous and their cost grows with the
 retained log. Snapshot export, serialization, validation and restore may also block
 unless the application explicitly schedules them off its consensus loop. The API

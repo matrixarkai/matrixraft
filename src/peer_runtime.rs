@@ -26,6 +26,8 @@ use std::{
 
 #[path = "peer_checkpoint_file.rs"]
 mod checkpoint_file;
+#[path = "peer_checkpoint_policy.rs"]
+mod checkpoint_policy;
 #[path = "peer_log_reader.rs"]
 mod log_reader;
 pub use log_reader::PeerLogReader;
@@ -92,6 +94,9 @@ pub struct PeerTuning {
     /// Optional simultaneous outgoing checkpoint limit. Some frames every
     /// snapshot; None retains one bulk sender and the direct small-image path.
     pub max_checkpoint_sends: Option<usize>,
+    /// Optional applied encoded-entry byte threshold for due capture requests.
+    /// None keeps captures entirely manual. This is not a journal size cap.
+    pub checkpoint_after_bytes: Option<u64>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -109,6 +114,7 @@ impl Default for PeerTuning {
             max_disk_replicate_entries: None,
             max_pending_reads: 1,
             max_checkpoint_sends: None,
+            checkpoint_after_bytes: None,
         }
     }
 }
@@ -119,6 +125,9 @@ impl PeerTuning {
     }
     fn config(self, id: u64) -> Result<Config, RaftError> {
         if self.election_tick > usize::MAX / 2
+            || self
+                .checkpoint_after_bytes
+                .is_some_and(|bytes| bytes == 0 || bytes > WAL_LIMIT)
             || self
                 .transfer_timeout_tick
                 .is_some_and(|ticks| ticks == 0 || ticks > usize::MAX / 2)
@@ -2107,6 +2116,8 @@ pub struct CheckpointCapture {
     position: LogId,
     directory: PathBuf,
     lock: Arc<File>,
+    applied_bytes: u128,
+    _request: Option<Arc<checkpoint_policy::Request>>,
 }
 impl CheckpointCapture {
     pub fn position(&self) -> LogId {
@@ -2167,6 +2178,7 @@ pub struct DurablePeer {
     snapshot_flights: BTreeMap<u64, (u64, u64, u8)>,
     stream: snapshot_stream::Stream,
     incoming_payload: Option<(LogId, Arc<checkpoint_file::Blob>)>,
+    checkpoint_policy: checkpoint_policy::Policy,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
@@ -2255,6 +2267,7 @@ impl DurablePeer {
             snapshot_flights: BTreeMap::new(),
             stream,
             incoming_payload: None,
+            checkpoint_policy: checkpoint_policy::Policy::new(tuning.checkpoint_after_bytes),
         })
     }
     fn membership_recovered(&self) -> Result<(), RaftError> {
@@ -2701,7 +2714,29 @@ impl DurablePeer {
             },
             directory: self.store.payload_directory.clone(),
             lock: Arc::clone(&self.journal._lock),
+            applied_bytes: self.checkpoint_policy.total(),
+            _request: None,
         })
+    }
+    /// Admit one threshold-triggered capture when application state is settled.
+    /// Poll after Ready or on a bounded host timer. Freeze the application image
+    /// at the ticket's position before moving capture I/O to a worker.
+    /// Dropping failed or abandoned work permits another request. Manual capture
+    /// requests remain independent; no capture worker is started by this call.
+    pub fn prepare_checkpoint_if_due(&mut self) -> Result<Option<CheckpointCapture>, RaftError> {
+        self.healthy()?;
+        if !self.checkpoint_policy.due()
+            || self.has_ready()
+            || !self.pending_reads.is_empty()
+            || self.pending_restore.is_some()
+            || self.recovering_membership
+            || self.applied_index() == 0
+        {
+            return Ok(None);
+        }
+        let mut capture = self.prepare_checkpoint()?;
+        capture._request = Some(self.checkpoint_policy.requested(capture.position.index));
+        Ok(Some(capture))
     }
     /// Publish a worker result while preserving every entry after its position.
     /// Returns false if a newer checkpoint already superseded it. A busy peer
@@ -2728,6 +2763,7 @@ impl DurablePeer {
             Some(Arc::clone(&prepared.payload)),
             id.index,
             Some(prepared.ticket.configuration.clone()),
+            prepared.ticket.applied_bytes,
         )?;
         Ok(true)
     }
@@ -2748,7 +2784,13 @@ impl DurablePeer {
         data: Vec<u8>,
         payload: Option<Arc<checkpoint_file::Blob>>,
     ) -> Result<(), RaftError> {
-        self.checkpoint_payload_at(data, payload, self.applied_index(), None)
+        self.checkpoint_payload_at(
+            data,
+            payload,
+            self.applied_index(),
+            None,
+            self.checkpoint_policy.total(),
+        )
     }
     fn checkpoint_payload_at(
         &mut self,
@@ -2756,6 +2798,7 @@ impl DurablePeer {
         payload: Option<Arc<checkpoint_file::Blob>>,
         index: u64,
         configuration: Option<ConfState>,
+        applied_bytes: u128,
     ) -> Result<(), RaftError> {
         self.healthy()?;
         if data.len() > MAX_CHECKPOINT_BYTES
@@ -2835,6 +2878,8 @@ impl DurablePeer {
             });
         if result.is_err() {
             self.failed = true;
+        } else {
+            self.checkpoint_policy.published(index, applied_bytes);
         }
         result
     }
@@ -3510,6 +3555,7 @@ impl DurablePeer {
         if self.restore_payload(&snapshot, restore)? == RestoreDecision::Restored {
             self.raw.advance_apply_to(snapshot.get_metadata().index);
             self.pending_restore = None;
+            self.checkpoint_policy.restored();
         }
         Ok(())
     }
@@ -3542,6 +3588,7 @@ impl DurablePeer {
             if entries[offset].entry_type != EntryType::EntryNormal as i32 {
                 self.apply_committed_membership(&entries[offset])?;
                 self.raw.advance_apply_to(entries[offset].index);
+                self.checkpoint_policy.charge(&entries[offset..offset + 1]);
                 offset += 1;
                 continue;
             }
@@ -3556,6 +3603,8 @@ impl DurablePeer {
             if progress.consumed > 0 {
                 self.raw
                     .advance_apply_to(entries[offset + progress.consumed - 1].index);
+                self.checkpoint_policy
+                    .charge(&entries[offset..offset + progress.consumed]);
             }
             if let Some(error) = progress.error {
                 return Err(error);

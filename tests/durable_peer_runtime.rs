@@ -1463,6 +1463,58 @@ fn peers(dir: &Directory) -> BTreeMap<u64, DurablePeer> {
         })
         .collect()
 }
+
+fn peers_with_checkpoint_threshold(dir: &Directory) -> BTreeMap<u64, DurablePeer> {
+    (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(
+                    dir.options(id, vec![1, 2, 3]),
+                    PeerTuning {
+                        checkpoint_after_bytes: Some(1),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn due_checkpoint_work_waits_for_received_quorum_acknowledgments() {
+    let dir = Directory::new();
+    let mut group = peers_with_checkpoint_threshold(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let leader = group.get_mut(&1).unwrap();
+    assert!(leader.prepare_checkpoint_if_due().unwrap().is_some());
+    leader.checkpoint(Vec::new()).unwrap();
+    let committed = leader.commit_index();
+    let bytes = leader.persisted_wal_bytes().unwrap();
+    let proposal = leader.propose(vec![7; 64]).unwrap();
+    leader.process_ready(|_, _| Ok(())).unwrap();
+    assert!(leader.persisted_wal_bytes().unwrap() > bytes);
+    assert_eq!(leader.commit_index(), committed);
+    assert!(!leader.has_ready());
+    assert!(leader.prepare_checkpoint_if_due().unwrap().is_none());
+    leader.report_unreachable(2).unwrap();
+    leader.report_unreachable(3).unwrap();
+    for _ in 0..2 {
+        group.get_mut(&1).unwrap().tick().unwrap();
+        pump(&mut group, &mut applied, None);
+    }
+    assert_eq!(group[&1].applied_index(), proposal.index);
+    let capture = group
+        .get_mut(&1)
+        .unwrap()
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .unwrap();
+    assert_eq!(capture.position(), proposal);
+}
 #[test]
 fn proposal_groups_are_bounded_contiguous_and_replayed() {
     let dir = Directory::new();
@@ -2158,6 +2210,139 @@ fn pump_checkpoints(
     isolated: Option<u64>,
 ) {
     pump_checkpoint_packets(peers, apps, isolated, None);
+}
+
+fn pump_capture_policy(
+    peers: &mut BTreeMap<u64, DurablePeer>,
+    apps: &mut BTreeMap<u64, CheckpointApp>,
+    retry_restore: bool,
+) {
+    use matrixraft::peer_runtime::{ApplyDecision, RestoreDecision};
+    for _ in 0..100 {
+        let mut packets = Vec::new();
+        for (&id, peer) in peers.iter_mut() {
+            let app = std::cell::RefCell::new(apps.entry(id).or_default());
+            packets.extend(
+                peer.process_ready_retryable_with_restore(
+                    |_, bytes| {
+                        if !bytes.is_empty() {
+                            app.borrow_mut().value = u64::from_be_bytes(bytes.try_into().unwrap());
+                        }
+                        Ok(ApplyDecision::Applied)
+                    },
+                    |_, reader, length| {
+                        if id == 3 && retry_restore {
+                            return Ok(RestoreDecision::Retry);
+                        }
+                        assert_eq!(length, 8);
+                        let mut bytes = [0; 8];
+                        reader.read_exact(&mut bytes).unwrap();
+                        let mut app = app.borrow_mut();
+                        app.value = u64::from_be_bytes(bytes);
+                        app.restored += 1;
+                        Ok(RestoreDecision::Restored)
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        if packets.is_empty() {
+            return;
+        }
+        for packet in packets {
+            peers
+                .get_mut(&packet.to)
+                .unwrap()
+                .step(&packet.bytes)
+                .unwrap();
+        }
+    }
+    panic!("capture policy packet exchange did not settle");
+}
+
+#[test]
+fn received_checkpoint_restore_resets_due_work_and_rejects_an_old_capture() {
+    let dir = Directory::new();
+    let mut group = peers_with_checkpoint_threshold(&dir);
+    let mut apps = BTreeMap::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump_checkpoints(&mut group, &mut apps, None);
+    let old = group[&3]
+        .prepare_checkpoint()
+        .unwrap()
+        .capture(&mut std::io::Cursor::new(0u64.to_be_bytes()), 8)
+        .unwrap();
+    assert!(group
+        .get_mut(&3)
+        .unwrap()
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .is_some());
+    for value in 1..=8u64 {
+        group
+            .get_mut(&1)
+            .unwrap()
+            .propose(value.to_be_bytes().to_vec())
+            .unwrap();
+        pump_checkpoints(&mut group, &mut apps, Some(3));
+    }
+    let image_index = group[&1].applied_index();
+    group
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint(8u64.to_be_bytes().to_vec())
+        .unwrap();
+    group.get_mut(&1).unwrap().report_unreachable(3).unwrap();
+    for _ in 0..4 {
+        group.get_mut(&1).unwrap().tick().unwrap();
+        pump_capture_policy(&mut group, &mut apps, true);
+    }
+    assert_eq!(group[&3].commit_index(), image_index);
+    assert!(group[&3].applied_index() < image_index);
+    assert_eq!(apps[&3].restored, 0);
+    assert!(group
+        .get_mut(&3)
+        .unwrap()
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .is_none());
+    pump_capture_policy(&mut group, &mut apps, false);
+    assert_eq!(apps[&3].restored, 1);
+    assert_eq!(apps[&3].value, 8);
+    assert_eq!(group[&3].applied_index(), image_index);
+    assert!(group
+        .get_mut(&3)
+        .unwrap()
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .is_none());
+    group
+        .get_mut(&1)
+        .unwrap()
+        .propose(9u64.to_be_bytes().to_vec())
+        .unwrap();
+    pump_capture_policy(&mut group, &mut apps, false);
+    let current = group
+        .get_mut(&3)
+        .unwrap()
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .unwrap();
+    assert!(!group.get_mut(&3).unwrap().install_checkpoint(&old).unwrap());
+    drop(old);
+    assert!(group
+        .get_mut(&3)
+        .unwrap()
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .is_none());
+    drop(current);
+    assert!(group
+        .get_mut(&3)
+        .unwrap()
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .is_some());
 }
 fn pump_checkpoint_packets(
     peers: &mut BTreeMap<u64, DurablePeer>,
