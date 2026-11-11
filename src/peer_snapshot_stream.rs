@@ -2,6 +2,7 @@
 // Copyright 2026 MatrixArkAI
 //! Bounded checkpoint framing for the independent peer runtime.
 use super::*;
+use crate::RateLimiter;
 
 pub(super) struct WalAssembly {
     pending: Option<WalFragments>,
@@ -262,6 +263,8 @@ struct Sending {
     ticks: u8,
     idle: u8,
     ready: bool,
+    quota_blocked: bool,
+    probe_ready: bool,
 }
 struct Receiving {
     identity: Fragment,
@@ -352,6 +355,10 @@ struct Finishing {
     identity: Fragment,
     worker: std::thread::JoinHandle<Result<(Message, Arc<checkpoint_file::Blob>), RaftError>>,
 }
+struct InlineCredit {
+    identity: (u64, u64, u64, u64),
+    reserved: u64,
+}
 
 /// One outgoing and one incoming transfer per local peer bound retained state.
 /// File completion runs on one owned worker while Raft continues processing.
@@ -367,6 +374,9 @@ pub(super) struct Stream {
     finalization_gate: Option<std::sync::mpsc::Receiver<()>>,
     completed: Option<Fragment>,
     ack: Option<Fragment>,
+    send_quota: Option<Arc<Mutex<crate::ByteQuotaLimiter>>>,
+    receive_quota: Option<Arc<Mutex<crate::ByteQuotaLimiter>>>,
+    inline_credit: Option<InlineCredit>,
 }
 #[cfg(test)]
 impl Default for Stream {
@@ -388,7 +398,100 @@ impl Stream {
             finalization_gate: None,
             completed: None,
             ack: None,
+            send_quota: None,
+            receive_quota: None,
+            inline_credit: None,
         }
+    }
+    pub(super) fn set_limiters(
+        &mut self,
+        send: Option<Arc<Mutex<crate::ByteQuotaLimiter>>>,
+        receive: Option<Arc<Mutex<crate::ByteQuotaLimiter>>>,
+    ) -> Result<(), RaftError> {
+        for quota in [&send, &receive].into_iter().flatten() {
+            if quota.lock().map_err(storage_error)?.capacity_bytes()
+                < SNAPSHOT_FRAGMENT_BYTES as u64
+            {
+                return Err(invalid("checkpoint quota capacity must be at least 1 MiB"));
+            }
+        }
+        self.send_quota = send;
+        self.receive_quota = receive;
+        self.inline_credit = None;
+        Ok(())
+    }
+    pub(super) fn send_limited(&self) -> bool {
+        self.send_quota.is_some()
+    }
+    fn reserve(
+        quota: &Option<Arc<Mutex<crate::ByteQuotaLimiter>>>,
+        bytes: usize,
+    ) -> Result<bool, RaftError> {
+        match quota {
+            Some(quota) => Ok(quota
+                .lock()
+                .map_err(storage_error)?
+                .reserve_bytes(bytes as u64)
+                .allowed),
+            None => Ok(true),
+        }
+    }
+    pub(super) fn admit_inline(&mut self, message: &Message) -> Result<bool, RaftError> {
+        let Some(quota) = &self.receive_quota else {
+            return Ok(true);
+        };
+        let total = message.encoded_len() as u64;
+        let identity = (
+            message.from,
+            message.term,
+            message.get_snapshot().get_metadata().index,
+            total,
+        );
+        if !self
+            .inline_credit
+            .as_ref()
+            .is_some_and(|credit| credit.identity == identity)
+        {
+            self.inline_credit = Some(InlineCredit {
+                identity,
+                reserved: 0,
+            });
+        }
+        let credit = self.inline_credit.as_mut().unwrap();
+        // A direct snapshot may exceed the bucket capacity. Retain only quota
+        // credits across retries, never its payload or an application position.
+        credit.reserved += quota
+            .lock()
+            .map_err(storage_error)?
+            .reserve_limited_bytes(total - credit.reserved)
+            .granted_bytes;
+        if credit.reserved == total {
+            self.inline_credit = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+    pub(super) fn receive_probe(&mut self, part: &Fragment) {
+        let offset = if let Some(receiving) = self
+            .receiving
+            .as_mut()
+            .filter(|receiving| receiving.identity.same_stream(part))
+        {
+            receiving.idle = 0;
+            receiving.length
+        } else if self.completed.as_ref().is_some_and(|s| s.same_stream(part)) {
+            part.total
+        } else if self
+            .finishing
+            .as_ref()
+            .is_some_and(|s| s.identity.same_stream(part))
+        {
+            return;
+        } else {
+            0
+        };
+        self.ack = Some(part.acknowledgment(offset));
     }
     pub(super) fn finish_shutdown(&mut self) {
         if let Some(finishing) = self.finishing.take() {
@@ -400,6 +503,15 @@ impl Stream {
     }
     pub(super) fn sending_to(&self, to: u64) -> bool {
         self.sending.as_ref().is_some_and(|s| s.identity.to == to)
+    }
+    pub(super) fn discard_obsolete_send(&mut self, term: u64, leader: bool) {
+        if self
+            .sending
+            .as_ref()
+            .is_some_and(|s| !leader || s.identity.term != term)
+        {
+            self.sending = None;
+        }
     }
     pub(super) fn completed_send(&mut self, to: u64) {
         if self.sending_to(to) {
@@ -434,6 +546,8 @@ impl Stream {
             ticks: 0,
             idle: 0,
             ready: true,
+            quota_blocked: false,
+            probe_ready: true,
         });
         Ok(true)
     }
@@ -481,17 +595,29 @@ impl Stream {
             ticks: 0,
             idle: 0,
             ready: true,
+            quota_blocked: false,
+            probe_ready: true,
         });
         Ok(true)
     }
     pub(super) fn tick(&mut self, term: u64, leader: bool) {
+        if self
+            .inline_credit
+            .as_ref()
+            .is_some_and(|credit| credit.identity.1 < term)
+        {
+            self.inline_credit = None;
+        }
         if let Some(sending) = &mut self.sending {
             sending.ticks += 1;
-            sending.idle += 1;
+            if !sending.quota_blocked {
+                sending.idle += 1;
+            }
             if !leader || sending.identity.term != term || sending.idle >= 100 {
                 self.sending = None;
             } else if sending.ticks >= 10 {
                 sending.ready = true;
+                sending.probe_ready = true;
                 sending.ticks = 0;
             }
         }
@@ -525,11 +651,19 @@ impl Stream {
             sending.idle = 0;
             sending.ticks = 0;
             sending.ready = true;
+            sending.quota_blocked = false;
+            sending.probe_ready = true;
         } else if part.offset == 0 && sending.offset != 0 {
             // The receiver restarted or discarded an expired partial transfer.
             sending.offset = 0;
             sending.ready = true;
             sending.ticks = 0;
+            sending.quota_blocked = false;
+            sending.probe_ready = true;
+        } else if part.offset == sending.offset as u64 {
+            // A valid receiver may still be waiting for its local write quota.
+            // This is transport backpressure, not acknowledgment of new bytes.
+            sending.idle = 0;
         }
         false
     }
@@ -572,6 +706,19 @@ impl Stream {
                 self.ack = Some(part.acknowledgment(0));
                 return Ok(None);
             }
+        }
+        let accepted = if matches {
+            let receiving = self.receiving.as_mut().unwrap();
+            receiving.idle = 0;
+            receiving.length
+        } else {
+            0
+        };
+        if part.offset <= accepted && !Self::reserve(&self.receive_quota, part.data.len())? {
+            self.ack = Some(part.acknowledgment(accepted));
+            return Ok(None);
+        }
+        if !matches {
             // A partial file is expendable transport state, never a checkpoint
             // commit. Its lifetime ends on completion, expiry, error or drop.
             self.ack = None;
@@ -695,14 +842,28 @@ impl Stream {
         if let Some(sending) = &mut self.sending {
             if sending.ready {
                 let end = (sending.offset + SNAPSHOT_FRAGMENT_BYTES).min(sending.bytes.len());
-                parts.push(Fragment {
-                    offset: sending.offset as u64,
-                    data: sending
-                        .bytes
-                        .fragment(sending.offset, end - sending.offset)?,
-                    ..sending.identity.clone()
-                });
-                sending.ready = false;
+                if Self::reserve(&self.send_quota, end - sending.offset)? {
+                    parts.push(Fragment {
+                        offset: sending.offset as u64,
+                        data: sending
+                            .bytes
+                            .fragment(sending.offset, end - sending.offset)?,
+                        ..sending.identity.clone()
+                    });
+                    sending.ready = false;
+                    sending.quota_blocked = false;
+                    sending.probe_ready = false;
+                } else {
+                    sending.quota_blocked = true;
+                    if sending.probe_ready {
+                        parts.push(Fragment {
+                            offset: sending.offset as u64,
+                            ack: true,
+                            ..sending.identity.clone()
+                        });
+                        sending.probe_ready = false;
+                    }
+                }
             }
         }
         parts
@@ -752,6 +913,262 @@ mod tests {
         let packet = Packet::decode(packets[0].bytes.as_slice()).unwrap();
         assert_eq!(packet.version, 2);
         Fragment::decode(packet.message.as_ref()).unwrap()
+    }
+    fn quota(available: u64) -> Arc<Mutex<crate::ByteQuotaLimiter>> {
+        Arc::new(Mutex::new(crate::ByteQuotaLimiter::with_available(
+            SNAPSHOT_FRAGMENT_BYTES as u64,
+            available,
+        )))
+    }
+    #[test]
+    fn checkpoint_quotas_are_shared_and_configuration_is_atomic() {
+        let shared = quota(SNAPSHOT_FRAGMENT_BYTES as u64);
+        let mut first = Stream::default();
+        let mut second = Stream::default();
+        first.set_limiters(Some(Arc::clone(&shared)), None).unwrap();
+        second
+            .set_limiters(Some(Arc::clone(&shared)), None)
+            .unwrap();
+        first.start(message()).unwrap();
+        second.start(message()).unwrap();
+        assert_eq!(fragment(&mut first).data.len(), SNAPSHOT_FRAGMENT_BYTES);
+        let probe = fragment(&mut second);
+        assert!(probe.ack && probe.data.is_empty());
+        assert_eq!(shared.lock().unwrap().available_bytes(), 0);
+        assert!(second.packets(1).unwrap().is_empty());
+        let invalid = Arc::new(Mutex::new(crate::ByteQuotaLimiter::new(1024)));
+        assert!(second.set_limiters(None, Some(invalid)).is_err());
+        assert!(Arc::ptr_eq(second.send_quota.as_ref().unwrap(), &shared));
+        assert!(second.receive_quota.is_none());
+        shared
+            .lock()
+            .unwrap()
+            .refill_bytes(SNAPSHOT_FRAGMENT_BYTES as u64);
+        assert_eq!(fragment(&mut second).data.len(), SNAPSHOT_FRAGMENT_BYTES);
+        assert_eq!(shared.lock().unwrap().available_bytes(), 0);
+        second.set_limiters(None, None).unwrap();
+        assert!(!second.send_limited());
+    }
+
+    #[test]
+    fn denied_receive_quota_precedes_spool_creation_and_duplicate_io() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sender = Stream::default();
+        sender.start(message()).unwrap();
+        let original = fragment(&mut sender);
+        let shared = quota(0);
+        let mut receiver = Stream::new(root.path().join("missing"));
+        receiver
+            .set_limiters(None, Some(Arc::clone(&shared)))
+            .unwrap();
+        receiver.receive(original.clone(), &[1, 2, 3]).unwrap();
+        assert!(receiver.receiving.is_none());
+        assert_eq!(fragment(&mut receiver).offset, 0);
+        receiver.spool_directory = root.path().to_path_buf();
+        shared
+            .lock()
+            .unwrap()
+            .refill_bytes(SNAPSHOT_FRAGMENT_BYTES as u64);
+        receiver.receive(original.clone(), &[1, 2, 3]).unwrap();
+        assert_eq!(
+            receiver.receiving.as_ref().unwrap().length,
+            SNAPSHOT_FRAGMENT_BYTES as u64
+        );
+        let mut conflicting = original;
+        conflicting.corrupt_byte(17);
+        receiver.receive(conflicting.clone(), &[1, 2, 3]).unwrap();
+        assert_eq!(
+            fragment(&mut receiver).offset,
+            SNAPSHOT_FRAGMENT_BYTES as u64
+        );
+        shared
+            .lock()
+            .unwrap()
+            .refill_bytes(SNAPSHOT_FRAGMENT_BYTES as u64);
+        assert!(receiver.receive(conflicting, &[1, 2, 3]).is_err());
+        assert_eq!(
+            receiver.receiving.as_ref().unwrap().length,
+            SNAPSHOT_FRAGMENT_BYTES as u64
+        );
+    }
+
+    #[test]
+    fn inline_snapshot_credits_are_bounded_and_reset_by_identity_or_policy_changes() {
+        let shared = quota(SNAPSHOT_FRAGMENT_BYTES as u64);
+        let mut receiver = Stream::default();
+        receiver
+            .set_limiters(None, Some(Arc::clone(&shared)))
+            .unwrap();
+        let mut image = message();
+        image
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .data
+            .resize(2 * SNAPSHOT_FRAGMENT_BYTES + 17, 13);
+        assert!(!receiver.admit_inline(&image).unwrap());
+        assert_eq!(
+            receiver.inline_credit.as_ref().unwrap().reserved,
+            SNAPSHOT_FRAGMENT_BYTES as u64
+        );
+        image
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .metadata
+            .as_mut()
+            .unwrap()
+            .index += 1;
+        assert!(!receiver.admit_inline(&image).unwrap());
+        assert_eq!(receiver.inline_credit.as_ref().unwrap().reserved, 0);
+        for _ in 0..2 {
+            shared
+                .lock()
+                .unwrap()
+                .refill_bytes(SNAPSHOT_FRAGMENT_BYTES as u64);
+            assert!(!receiver.admit_inline(&image).unwrap());
+        }
+        shared
+            .lock()
+            .unwrap()
+            .refill_bytes(SNAPSHOT_FRAGMENT_BYTES as u64);
+        assert!(receiver.admit_inline(&image).unwrap());
+        assert!(receiver.inline_credit.is_none());
+        assert!(!receiver.admit_inline(&image).unwrap());
+        receiver.tick(5, false);
+        assert!(receiver.inline_credit.is_none());
+        receiver.admit_inline(&image).unwrap();
+        receiver.set_limiters(None, None).unwrap();
+        assert!(receiver.inline_credit.is_none());
+        assert!(receiver.admit_inline(&image).unwrap());
+    }
+
+    #[test]
+    fn exhausted_send_quota_does_not_read_file_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = vec![31; 2 * SNAPSHOT_FRAGMENT_BYTES];
+        let payload = checkpoint_file::Blob::capture(
+            root.path(),
+            &mut std::io::Cursor::new(&bytes),
+            bytes.len() as u64,
+        )
+        .unwrap();
+        let path = root.path().join(&payload.manifest.name);
+        let mut image = message();
+        image.snapshot.as_mut().unwrap().data.clear();
+        let shared = quota(0);
+        let mut sender = Stream::default();
+        sender
+            .set_limiters(Some(Arc::clone(&shared)), None)
+            .unwrap();
+        sender.start_file(image, payload).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        let packets = sender.packets(1).unwrap();
+        assert_eq!(packets.len(), 1);
+        assert!(packets[0].bytes.len() < 256);
+        shared
+            .lock()
+            .unwrap()
+            .refill_bytes(SNAPSHOT_FRAGMENT_BYTES as u64);
+        assert!(sender.packets(1).is_err());
+    }
+
+    #[test]
+    fn quota_pauses_keep_partial_transfers_alive_without_advancing_unwritten_bytes() {
+        let mut image = message();
+        image
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .data
+            .resize(2 * SNAPSHOT_FRAGMENT_BYTES + 17, 13);
+        let send = quota(SNAPSHOT_FRAGMENT_BYTES as u64);
+        let receive = quota(SNAPSHOT_FRAGMENT_BYTES as u64);
+        let mut sender = Stream::default();
+        let mut receiver = Stream::default();
+        sender.set_limiters(Some(Arc::clone(&send)), None).unwrap();
+        receiver
+            .set_limiters(None, Some(Arc::clone(&receive)))
+            .unwrap();
+        sender.start(image.clone()).unwrap();
+        assert!(receiver
+            .receive(fragment(&mut sender), &[1, 2, 3])
+            .unwrap()
+            .is_none());
+        assert!(!sender.acknowledge(&fragment(&mut receiver)));
+        let mut probes = 0;
+        for _ in 0..250 {
+            sender.tick(4, true);
+            receiver.tick(4, false);
+            for packet in sender.packets(1).unwrap() {
+                let envelope = Packet::decode(packet.bytes.as_slice()).unwrap();
+                let part = Fragment::decode(envelope.message).unwrap();
+                assert!(part.ack && part.data.is_empty());
+                probes += 1;
+                receiver.receive_probe(&part);
+                assert!(!sender.acknowledge(&fragment(&mut receiver)));
+            }
+        }
+        assert!((20..=26).contains(&probes));
+        assert_eq!(
+            sender.sending.as_ref().unwrap().offset,
+            SNAPSHOT_FRAGMENT_BYTES
+        );
+        assert_eq!(
+            receiver.receiving.as_ref().unwrap().length,
+            SNAPSHOT_FRAGMENT_BYTES as u64
+        );
+        send.lock()
+            .unwrap()
+            .refill_bytes(SNAPSHOT_FRAGMENT_BYTES as u64);
+        let denied = fragment(&mut sender);
+        receiver.receive(denied, &[1, 2, 3]).unwrap();
+        assert!(!sender.acknowledge(&fragment(&mut receiver)));
+        assert_eq!(
+            sender.sending.as_ref().unwrap().offset,
+            SNAPSHOT_FRAGMENT_BYTES
+        );
+        for _ in 0..2 {
+            send.lock()
+                .unwrap()
+                .refill_bytes(SNAPSHOT_FRAGMENT_BYTES as u64);
+            receive
+                .lock()
+                .unwrap()
+                .refill_bytes(SNAPSHOT_FRAGMENT_BYTES as u64);
+            for _ in 0..10 {
+                sender.tick(4, true);
+            }
+            let result = receiver.receive(fragment(&mut sender), &[1, 2, 3]).unwrap();
+            let complete = sender.acknowledge(&fragment(&mut receiver));
+            if let Some(restored) = result {
+                assert_eq!(restored, image);
+                assert!(complete);
+            } else {
+                assert!(!complete);
+            }
+        }
+        assert!(sender.sending.is_none());
+        assert!(receiver.receiving.is_none());
+    }
+
+    #[test]
+    fn quota_waits_do_not_survive_obsolete_leadership() {
+        for (term, leader) in [(5, true), (4, false)] {
+            let shared = quota(0);
+            let mut sender = Stream::default();
+            sender.set_limiters(Some(shared), None).unwrap();
+            sender.start(message()).unwrap();
+            assert!(fragment(&mut sender).ack);
+            sender.discard_obsolete_send(term, leader);
+            assert!(sender.packets(1).unwrap().is_empty());
+            assert!(sender.sending.is_none());
+        }
     }
     #[test]
     fn fragment_metadata_and_direct_envelopes_preserve_wire_bytes() {

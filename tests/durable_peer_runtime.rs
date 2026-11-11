@@ -2196,6 +2196,155 @@ fn pump_large(
     }
     panic!("large checkpoint exchange did not settle");
 }
+
+#[test]
+fn checkpoint_quotas_pause_inline_and_framed_transfers_without_stalling_quorum_work() {
+    use matrixraft::{ByteQuotaLimiter, RateLimiter};
+    use std::sync::{Arc, Mutex};
+    for (limit_send, limit_receive) in [(true, false), (false, true), (true, true)] {
+        for length in [64, 2 * 1024 * 1024 + 17] {
+            let dir = Directory::new();
+            let mut peers = peers(&dir);
+            let mut apps = BTreeMap::new();
+            let mut fault = TransferFault {
+                kind: 0,
+                fired: false,
+                duplicate: false,
+                fragments: 0,
+            };
+            peers.get_mut(&1).unwrap().campaign().unwrap();
+            pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+            let mut expected = vec![31; length];
+            peers
+                .get_mut(&1)
+                .unwrap()
+                .propose(expected.clone())
+                .unwrap();
+            pump_large(&dir, &mut peers, &mut apps, &[3], &mut fault);
+            peers
+                .get_mut(&1)
+                .unwrap()
+                .checkpoint(expected.clone())
+                .unwrap();
+            let send = Arc::new(Mutex::new(ByteQuotaLimiter::with_available(1024 * 1024, 0)));
+            let receive = Arc::new(Mutex::new(ByteQuotaLimiter::with_available(1024 * 1024, 0)));
+            peers
+                .get_mut(&1)
+                .unwrap()
+                .set_checkpoint_transfer_limiters(limit_send.then(|| Arc::clone(&send)), None)
+                .unwrap();
+            peers
+                .get_mut(&3)
+                .unwrap()
+                .set_checkpoint_transfer_limiters(None, limit_receive.then(|| Arc::clone(&receive)))
+                .unwrap();
+            for _ in 0..250 {
+                for peer in peers.values_mut() {
+                    peer.tick().unwrap();
+                }
+                pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+            }
+            assert!(peers[&1].is_leader());
+            assert_eq!(apps[&3].restored, 0);
+            assert!(apps[&3].bytes.is_empty());
+            assert_eq!(send.lock().unwrap().available_bytes(), 0);
+            assert_eq!(receive.lock().unwrap().available_bytes(), 0);
+            if limit_send {
+                assert_eq!(
+                    fault.fragments, 0,
+                    "no checkpoint payload without send quota"
+                );
+            }
+            let read = peers.get_mut(&1).unwrap().begin_read().unwrap();
+            pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+            assert!(peers.get_mut(&1).unwrap().poll_read(read).unwrap());
+            peers
+                .get_mut(&1)
+                .unwrap()
+                .propose(b"suffix".to_vec())
+                .unwrap();
+            expected.extend_from_slice(b"suffix");
+            pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+            assert_eq!(apps[&1].bytes, expected);
+            assert_eq!(apps[&2].bytes, expected);
+            assert!(apps[&3].bytes.is_empty());
+            for _ in 0..60 {
+                send.lock().unwrap().refill_bytes(1024 * 1024);
+                receive.lock().unwrap().refill_bytes(1024 * 1024);
+                for peer in peers.values_mut() {
+                    peer.tick().unwrap();
+                }
+                pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+                if apps[&3].bytes == expected {
+                    break;
+                }
+            }
+            assert_eq!(apps[&3].restored, 1, "send={limit_send} receive={limit_receive} length={length} fragments={} applied={} commit={} leader={:?}", fault.fragments, peers[&3].applied_index(), peers[&3].commit_index(), peers[&1].leader_id());
+            for id in 1..=3 {
+                assert_eq!(apps[&id].bytes, expected);
+            }
+            drop(peers);
+            apps.clear();
+            let mut peers = self::peers(&dir);
+            pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+            for id in 1..=3 {
+                assert_eq!(apps[&id].bytes, expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn paused_checkpoint_quota_cannot_release_payload_after_leadership_changes() {
+    use matrixraft::{ByteQuotaLimiter, RateLimiter};
+    use std::sync::{Arc, Mutex};
+    let dir = Directory::new();
+    let mut peers = peers(&dir);
+    let mut apps = BTreeMap::new();
+    let mut fault = TransferFault {
+        kind: 0,
+        fired: false,
+        duplicate: false,
+        fragments: 0,
+    };
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    let expected = vec![7; 64];
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .propose(expected.clone())
+        .unwrap();
+    pump_large(&dir, &mut peers, &mut apps, &[3], &mut fault);
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint(expected.clone())
+        .unwrap();
+    let shared = Arc::new(Mutex::new(ByteQuotaLimiter::with_available(1024 * 1024, 0)));
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .set_checkpoint_transfer_limiters(Some(Arc::clone(&shared)), None)
+        .unwrap();
+    for _ in 0..4 {
+        peers.get_mut(&1).unwrap().tick().unwrap();
+        pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    }
+    assert!(apps[&3].bytes.is_empty());
+    peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    assert!(peers[&2].is_leader());
+    shared.lock().unwrap().refill_bytes(1024 * 1024);
+    // Do not tick the old leader: Ready processing itself must discard its
+    // obsolete transfer before a newly available quota can release old bytes.
+    pump_large(&dir, &mut peers, &mut apps, &[], &mut fault);
+    assert_eq!(shared.lock().unwrap().available_bytes(), 1024 * 1024);
+    for id in 1..=3 {
+        assert_eq!(apps[&id].bytes, expected);
+    }
+}
+
 #[test]
 fn streamed_checkpoints_survive_packet_loss_duplicates_and_receiver_restart() {
     for kind in 0..=6 {
