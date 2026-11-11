@@ -812,6 +812,21 @@ is refused. A leader removed from both voter sets steps down and refuses writes
 and campaigns. Every applied configuration invalidates outstanding read tokens;
 start a fresh quorum-confirmed read under the new membership.
 
+`propose_membership_auto(change)` offers the same admission and catch-up checks
+but lets the elected leader append the joint exit automatically. Promotion and
+voter removal still pass through both-majority joint consensus; adding or removing
+a learner remains a single configuration entry. The returned position identifies
+the initial change, not its final exit. Continue ticking, Ready processing, and
+real packet delivery. First wait for the returned position to apply, then verify
+the requested membership with no outgoing voters; an empty outgoing set before
+the initial entry applies does not acknowledge this request. While joint,
+`membership().auto_leave` distinguishes automatic completion from a manual exit.
+Automatic completion survives a new leader, journal replay, and checkpoints taken
+during the transition. It can remain pending indefinitely without both majorities;
+an elapsed host timeout never manufactures a vote. The existing manual API remains
+unchanged. Upgrade every peer and recovery reader before opting in: older runtimes
+reject automatic transition entries and automatic joint checkpoint metadata.
+
 Checkpoint metadata preserves both voter sets and learners. Recovery applies
 retained configuration entries in order, including after an older staged capture.
 Tests exercise both-majority partitions, learner catch-up, leader removal,
