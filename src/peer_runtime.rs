@@ -80,6 +80,9 @@ pub struct PeerTuning {
     /// Optional resident-entry high watermark. Eviction does not advance the
     /// checkpoint or logical log floor; cold entries remain in the journal.
     pub max_log_cache_bytes: Option<u64>,
+    /// Optional entry-count bound for journal-backed replication reads. Resident
+    /// replication and committed application batches retain their own budgets.
+    pub max_disk_replicate_entries: Option<usize>,
     /// Maximum admitted quorum reads, including confirmations waiting for local
     /// application or caller polling. The default retains single-read admission.
     pub max_pending_reads: usize,
@@ -99,6 +102,7 @@ impl Default for PeerTuning {
             max_uncommitted_size: 4 * 1024 * 1024,
             max_apply_bytes: None,
             max_log_cache_bytes: None,
+            max_disk_replicate_entries: None,
             max_pending_reads: 1,
             max_checkpoint_sends: None,
         }
@@ -115,6 +119,9 @@ impl PeerTuning {
             || self.max_size_per_msg > (LIMIT / 2) as u64
             || self.max_inflight_msgs > 65536
             || !(1..=1024).contains(&self.max_pending_reads)
+            || self
+                .max_disk_replicate_entries
+                .is_some_and(|limit| !(1..=65536).contains(&limit))
             || self
                 .max_checkpoint_sends
                 .is_some_and(|limit| !(1..=64).contains(&limit))
@@ -726,6 +733,7 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
 #[derive(Clone)]
 struct PeerStorage {
     cache: log_cache::Cache,
+    max_disk_replicate_entries: Option<usize>,
     permitted: Vec<u64>,
     memory: MemStorage,
     async_reads: Arc<Mutex<Option<async_reads::State>>>,
@@ -2181,6 +2189,7 @@ impl DurablePeer {
         let mut config = tuning.config(options.node_id)?;
         let store = PeerStorage {
             cache: log_cache::Cache::new(tuning.max_log_cache_bytes),
+            max_disk_replicate_entries: tuning.max_disk_replicate_entries,
             permitted,
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
@@ -3658,6 +3667,7 @@ mod tests {
         };
         let store = PeerStorage {
             cache: Default::default(),
+            max_disk_replicate_entries: None,
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
@@ -3724,6 +3734,7 @@ mod tests {
         drop(journal);
         let recovered = PeerStorage {
             cache: Default::default(),
+            max_disk_replicate_entries: None,
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
@@ -3766,6 +3777,7 @@ mod tests {
         };
         let store = PeerStorage {
             cache: Default::default(),
+            max_disk_replicate_entries: None,
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
