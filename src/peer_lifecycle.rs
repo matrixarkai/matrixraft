@@ -64,6 +64,7 @@ impl DurablePeer {
     }
     fn cancel_local_requests(&mut self) {
         self.raw.raft.become_follower(self.term(), 0);
+        self.transfer_clock = None;
         self.pending_reads.clear();
         self.deferred_reads.clear();
         self.raw.raft.read_only.pending_read_index.clear();
