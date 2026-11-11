@@ -2251,6 +2251,24 @@ It does not synthesize remote acknowledgments. See [the integration contract and
 remaining production requirements](docs/peer-runtime.md) before embedding it.
 The existing local cluster facade is unchanged.
 
+### Durable peer integration choices
+
+| Need | Available control | Host responsibility |
+|---|---|---|
+| Bound resident log entries | `PeerTuning::max_log_cache_bytes` | Budget other allocations separately; a committed anchor and uncommitted work can exceed the target |
+| Bound cold replication reads | `PeerTuning::max_disk_replicate_entries` | Continue acknowledged delivery; the entry-count limit supplements the byte budget and does not limit every read path |
+| Complete voter changes automatically | `propose_membership_auto` | Drive ticks, Ready, and packets; wait for the initial position to apply and the final membership with no outgoing voters |
+| Give leadership transfer its own deadline | `PeerTuning::transfer_timeout_tick` | Treat admission and timeout as local state, not proof that another peer became leader |
+| Drain committed application work | `begin_shutdown` and `poll_shutdown` | Drain Ready and application callbacks to the fixed committed fence; no new quorum traffic is needed, and membership is unchanged |
+
+Automatic voter changes still require both old and new majorities during joint
+consensus. They can remain pending without quorum, and older readers cannot
+recover automatic-transition records: upgrade all peers and recovery readers
+before opting in. Local stop is separate from a cluster membership change, and
+a log-cache target is not a process memory cap. See the
+[peer runtime contract](docs/peer-runtime.md) for defaults, limits, recovery,
+manual membership transitions, and immediate-stop behavior.
+
 ### Application progress and checkpoint retries
 
 Independent durable peers support explicit application retry decisions and borrowed
