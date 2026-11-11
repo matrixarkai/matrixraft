@@ -34,6 +34,8 @@ mod async_reads;
 #[path = "peer_log_cache.rs"]
 mod log_cache;
 pub use async_reads::{PeerLogReadCompletion, PeerLogReadTask};
+#[path = "peer_lifecycle.rs"]
+mod lifecycle;
 #[path = "peer_membership.rs"]
 mod membership;
 #[path = "peer_snapshot_stream.rs"]
@@ -2131,6 +2133,8 @@ pub struct DurablePeer {
     store: PeerStorage,
     journal: Journal,
     failed: bool,
+    stopped: bool,
+    drain_through: Option<u64>,
     read_sequence: u64,
     read_limit: usize,
     pending_reads: BTreeMap<u64, PendingRead>,
@@ -2214,6 +2218,8 @@ impl DurablePeer {
             store,
             journal,
             failed: false,
+            stopped: false,
+            drain_through: None,
             read_sequence: 0,
             read_limit: tuning.max_pending_reads,
             pending_reads: BTreeMap::new(),
@@ -2234,6 +2240,20 @@ impl DurablePeer {
         Ok(())
     }
     fn healthy(&self) -> Result<(), RaftError> {
+        self.storage_healthy()?;
+        if self.stopped || self.drain_through.is_some() {
+            return Err(invalid("peer admission is closed for shutdown"));
+        }
+        Ok(())
+    }
+    fn processing_allowed(&self) -> Result<(), RaftError> {
+        self.storage_healthy()?;
+        if self.stopped {
+            return Err(invalid("peer is stopped"));
+        }
+        Ok(())
+    }
+    fn storage_healthy(&self) -> Result<(), RaftError> {
         if self.failed {
             Err(storage_error(
                 "peer failed; restart with a fresh application",
@@ -2286,12 +2306,15 @@ impl DurablePeer {
         Ok(self.journal.length)
     }
     pub fn is_leader(&self) -> bool {
-        !self.failed && self.raw.raft.state == StateRole::Leader
+        !self.failed
+            && !self.stopped
+            && self.drain_through.is_none()
+            && self.raw.raft.state == StateRole::Leader
     }
     /// True while an incoming file checkpoint is being finalized or awaits polling.
     /// Continue processing Ready on a bounded timer even if no packets arrive.
     pub fn checkpoint_receive_pending(&self) -> bool {
-        self.stream.finalizing()
+        !self.stopped && self.drain_through.is_none() && self.stream.finalizing()
     }
     /// Share host-refilled byte quotas across checkpoint transfers and groups.
     /// Each capacity must admit a full 1 MiB fragment. None removes a limiter.
@@ -3106,6 +3129,9 @@ impl DurablePeer {
         self.store.cache.check().and(result)
     }
     fn packets(&mut self, messages: Vec<Message>) -> Result<Vec<PeerPacket>, RaftError> {
+        if self.drain_through.is_some() {
+            return Ok(Vec::new());
+        }
         let mut output = Vec::new();
         for message in messages {
             let to = message.to;
@@ -3160,6 +3186,7 @@ impl DurablePeer {
     /// in-flight host reads and checkpoint transfers, which still need completion polling.
     pub fn has_ready(&self) -> bool {
         !self.failed
+            && !self.stopped
             && self.store.cache.check().is_ok()
             && (self.pending_restore.is_some()
                 || self.raw.has_ready()
@@ -3174,7 +3201,7 @@ impl DurablePeer {
         &mut self,
         mut apply: impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
-        self.healthy()?;
+        self.processing_allowed()?;
         self.process_ready_with_snapshot(&mut apply, |_, _| {
             Err(storage_error(
                 "application snapshot restore callback required",
@@ -3335,14 +3362,17 @@ impl DurablePeer {
         mut apply: impl FnMut(&[Entry]) -> ApplyProgress,
         mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
-        self.healthy()?;
+        self.processing_allowed()?;
         let result = (|| {
             // Invalid incoming transfer bytes are rejected just like step errors.
             // They must not poison an otherwise healthy voter. A failed worker
             // drops its payload and sends no completion acknowledgment.
-            if let Ok(Some(message)) = self.stream.poll_finished(self.term(), &self.options.voters)
-            {
-                self.accept_received_checkpoint(message)?;
+            if self.drain_through.is_none() {
+                if let Ok(Some(message)) =
+                    self.stream.poll_finished(self.term(), &self.options.voters)
+                {
+                    self.accept_received_checkpoint(message)?;
+                }
             }
             let mut output = self.process_inner(&mut apply, &mut restore)?;
             // Raft may advance through matching entries without installing the received image.
@@ -3356,7 +3386,11 @@ impl DurablePeer {
             let term = self.term();
             let leader = self.is_leader();
             self.stream.discard_obsolete_send(term, leader);
-            output.extend(self.stream.packets(self.options.group_id)?);
+            if self.drain_through.is_none() {
+                output.extend(self.stream.packets(self.options.group_id)?);
+            } else {
+                output.clear();
+            }
             Ok(output)
         })();
         let result = self.store.cache.check().and(result);
@@ -3364,6 +3398,9 @@ impl DurablePeer {
             self.failed = true;
         } else if self.pending_restore.is_none() && self.applied_index() >= self.commit_index() {
             self.recovering_membership = false;
+        }
+        if result.is_ok() {
+            self.finish_drain();
         }
         result
     }
@@ -3471,6 +3508,9 @@ impl DurablePeer {
         let mut applied_batch = false;
         let mut restore_attempted = false;
         loop {
+            if self.drain_complete() {
+                break;
+            }
             self.dispatch_deferred_reads()?;
             if !self.raw.has_ready() {
                 if !restore_attempted {
@@ -5636,6 +5676,47 @@ mod tests {
             assert_eq!(peer.stream.send_capacity, limit);
             assert!(peer.stream.frame_all_sends);
         }
+    }
+
+    #[test]
+    fn stopping_cancels_read_contexts_and_rejects_late_host_completions() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let opts = options(root.path().join("peer.wal"));
+        let mut peer = DurablePeer::open(opts.clone()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let token = peer.begin_read().unwrap();
+        assert_eq!(peer.raw.raft.ready_read_count(), 1);
+        peer.enable_async_log_reads(2).unwrap();
+        for _ in 0..2 {
+            assert!(async_reads::fetch(
+                &peer.store,
+                1,
+                peer.commit_index() + 1,
+                None,
+                raft_core::GetEntriesContext::empty(true)
+            )
+            .is_err());
+        }
+        let mut tasks = peer.take_log_read_tasks().unwrap();
+        assert_eq!(tasks.len(), 2);
+        peer.stop();
+        assert!(peer.pending_reads.is_empty());
+        assert!(peer.deferred_reads.is_empty());
+        assert_eq!(peer.raw.raft.ready_read_count(), 0);
+        assert_eq!(peer.raw.raft.pending_read_count(), 0);
+        assert!(peer.raw.raft.msgs.is_empty());
+        assert!(peer.store.async_reads.lock().unwrap().is_none());
+        assert!(peer.poll_read(token).is_err());
+        assert!(peer
+            .complete_log_read(tasks.pop().unwrap().execute())
+            .is_err());
+        drop(peer);
+        let mut peer = DurablePeer::open(opts).unwrap();
+        assert!(peer
+            .complete_log_read(tasks.pop().unwrap().execute())
+            .is_err());
     }
 
     #[test]
