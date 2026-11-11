@@ -710,7 +710,25 @@ fn automatic_self_removal_steps_down_only_after_the_exit_commits() {
     c.write(1, 11);
     c.add_caught_up_learner();
     c.automatic_change(1, MembershipChange::Promote(4));
-    c.automatic_change(1, MembershipChange::Remove(1));
+    let removal = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_auto(MembershipChange::Remove(1))
+        .unwrap();
+    c.hold_after = Some(removal.index);
+    for _ in 0..3 {
+        c.tick();
+    }
+    assert!(c.peers[&1].is_leader());
+    assert_eq!(c.peers[&1].membership().voters, vec![2, 3, 4]);
+    assert_eq!(c.peers[&1].membership().outgoing_voters, vec![1, 2, 3, 4]);
+    assert!(c.peers[&1].membership().auto_leave);
+    assert_eq!(c.peers[&1].commit_index(), removal.index);
+    c.hold_after = None;
+    for _ in 0..3 {
+        c.tick();
+    }
     assert!(!c.peers[&1].is_leader());
     assert!(c.peers[&1].membership().outgoing_voters.is_empty());
     assert!(c.peers.get_mut(&1).unwrap().propose(vec![1]).is_err());
