@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 MatrixArkAI
 #![cfg(feature = "peer-runtime")]
-use matrixraft::peer_runtime::{DurablePeer, PeerOptions};
+use matrixraft::peer_runtime::{
+    ApplyDecision, DurablePeer, MembershipChange, PeerOptions, PeerTuning,
+};
+use prost::Message as _;
 use std::{
     cell::Cell,
     io::{self, Read},
@@ -34,6 +37,234 @@ fn apply(peer: &mut DurablePeer, value: u8) {
     })
     .unwrap();
     assert!(seen);
+}
+
+fn due_peer(options: PeerOptions, limit: u64) -> DurablePeer {
+    let mut peer = DurablePeer::open_with_tuning(
+        options,
+        PeerTuning {
+            checkpoint_after_bytes: Some(limit),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    peer.campaign().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    peer
+}
+
+#[test]
+fn due_captures_validate_thresholds_and_count_the_exact_replayed_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = options(dir.path(), "peer.wal");
+    for limit in [0, 512 * 1024 * 1024 + 1] {
+        assert!(DurablePeer::open_with_tuning(
+            opts.clone(),
+            PeerTuning {
+                checkpoint_after_bytes: Some(limit),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        assert!(!opts.wal_path.exists());
+        assert!(!opts.wal_path.with_extension("runtime.lock").exists());
+    }
+    let mut peer = elected(opts.clone());
+    apply(&mut peer, 7);
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    let bytes: u64 = peer
+        .capture_log_reader()
+        .unwrap()
+        .entries(1, peer.applied_index() + 1, None)
+        .unwrap()
+        .iter()
+        .map(|entry| entry.encoded_len() as u64)
+        .sum();
+    drop(peer);
+    for limit in [bytes + 1, bytes] {
+        let mut peer = DurablePeer::open_with_tuning(
+            opts.clone(),
+            PeerTuning {
+                checkpoint_after_bytes: Some(limit),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        assert_eq!(
+            peer.prepare_checkpoint_if_due().unwrap().is_some(),
+            limit == bytes
+        );
+    }
+}
+
+#[test]
+fn due_capture_requests_coalesce_and_failed_or_dropped_work_is_retryable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut peer = due_peer(options(dir.path(), "peer.wal"), 1);
+    apply(&mut peer, 7);
+    let ticket = peer.prepare_checkpoint_if_due().unwrap().unwrap();
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    drop(ticket);
+    let ticket = peer.prepare_checkpoint_if_due().unwrap().unwrap();
+    assert!(ticket.capture(&mut io::Cursor::new([7]), 2).is_err());
+    let prepared = peer
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .unwrap()
+        .capture(&mut io::Cursor::new([7]), 1)
+        .unwrap();
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    drop(prepared);
+    let ticket = peer.prepare_checkpoint_if_due().unwrap().unwrap();
+    let (resume, wait) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        wait.recv().unwrap();
+        ticket.capture(&mut io::Cursor::new([7]), 1).unwrap()
+    });
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    resume.send(()).unwrap();
+    let prepared = worker.join().unwrap();
+    assert!(peer.install_checkpoint(&prepared).unwrap());
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    apply(&mut peer, 9);
+    let next = peer.prepare_checkpoint_if_due().unwrap().unwrap();
+    assert!(next.position().index > prepared.position().index);
+}
+
+#[test]
+fn an_older_due_capture_keeps_later_applied_bytes_pending_after_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = options(dir.path(), "peer.wal");
+    let mut peer = due_peer(opts.clone(), 1);
+    apply(&mut peer, 7);
+    let prepared = peer
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .unwrap()
+        .capture(&mut io::Cursor::new([7]), 1)
+        .unwrap();
+    apply(&mut peer, 9);
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    assert!(peer.install_checkpoint(&prepared).unwrap());
+    let next = peer.prepare_checkpoint_if_due().unwrap().unwrap();
+    assert_eq!(next.position().index, peer.applied_index());
+    assert!(!peer.install_checkpoint(&prepared).unwrap());
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    drop(next);
+    drop(prepared);
+    drop(peer);
+    let mut peer = DurablePeer::open_with_tuning(
+        opts,
+        PeerTuning {
+            checkpoint_after_bytes: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let state = Cell::new(0);
+    peer.process_ready_with_snapshot_reader(
+        |_, bytes| {
+            if !bytes.is_empty() {
+                state.set(bytes[0]);
+            }
+            Ok(())
+        },
+        |_, reader, _| {
+            let mut byte = [0];
+            reader.read_exact(&mut byte).unwrap();
+            state.set(byte[0]);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(state.get(), 9);
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_some());
+}
+
+#[test]
+fn manual_publication_supersedes_due_work_without_canceling_a_newer_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut peer = due_peer(options(dir.path(), "peer.wal"), 1);
+    apply(&mut peer, 7);
+    let old = peer
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .unwrap()
+        .capture(&mut io::Cursor::new([7]), 1)
+        .unwrap();
+    apply(&mut peer, 9);
+    peer.checkpoint(vec![9]).unwrap();
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    apply(&mut peer, 11);
+    let current = peer.prepare_checkpoint_if_due().unwrap().unwrap();
+    assert!(!peer.install_checkpoint(&old).unwrap());
+    drop(old);
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    drop(current);
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_some());
+}
+
+#[test]
+fn retrying_application_and_unpolled_reads_defer_due_work_without_extra_charges() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = options(dir.path(), "peer.wal");
+    let mut peer = due_peer(opts.clone(), 1);
+    peer.checkpoint(Vec::new()).unwrap();
+    let position = peer.propose(vec![7]).unwrap();
+    for _ in 0..3 {
+        peer.process_ready_retryable(|_, _| Ok(ApplyDecision::Retry))
+            .unwrap();
+        assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    }
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    assert_eq!(peer.applied_index(), position.index);
+    let read = peer.begin_read().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+    assert!(peer.poll_read(read).unwrap());
+    let prepared = peer
+        .prepare_checkpoint_if_due()
+        .unwrap()
+        .unwrap()
+        .capture(&mut io::Cursor::new([7]), 1)
+        .unwrap();
+    assert!(peer.install_checkpoint(&prepared).unwrap());
+    assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+}
+
+#[test]
+fn applied_membership_entries_also_trigger_due_captures() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut peer = DurablePeer::open_with_membership_and_tuning(
+        options(dir.path(), "peer.wal"),
+        vec![1, 2],
+        PeerTuning {
+            checkpoint_after_bytes: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    peer.campaign().unwrap();
+    while peer.has_ready() {
+        peer.process_ready(|_, _| Ok(())).unwrap();
+    }
+    for operation in [MembershipChange::AddLearner(2), MembershipChange::Remove(2)] {
+        peer.checkpoint(Vec::new()).unwrap();
+        assert!(peer.prepare_checkpoint_if_due().unwrap().is_none());
+        let position = peer.propose_membership_auto(operation).unwrap();
+        while peer.has_ready() {
+            peer.process_ready(|_, payload| {
+                assert!(payload.is_empty());
+                Ok(())
+            })
+            .unwrap();
+        }
+        let ticket = peer.prepare_checkpoint_if_due().unwrap().unwrap();
+        assert_eq!(ticket.position(), position);
+    }
 }
 #[test]
 fn background_capture_preserves_writes_committed_after_its_position() {
