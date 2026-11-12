@@ -50,6 +50,12 @@ to the peer lifecycle or provide a network transport.
 
 ## Guide
 
+When sizing a deployment, distinguish proposal admission, durable replication,
+commitment, and application latency. Record voter count, command size, group count,
+storage sync policy, and transport conditions. A local multi-group scheduling
+result does not measure network quorum latency; include the host's state-machine
+work and snapshot traffic when evaluating the service that embeds this crate.
+
 | Task | Section |
 |---|---|
 | Select local or independent peer APIs | [Embedding paths](#choose-an-embedding-path) |
