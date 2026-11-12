@@ -2387,6 +2387,14 @@ a log-cache target is not a process memory cap. See the
 [peer runtime contract](docs/peer-runtime.md) for defaults, limits, recovery,
 manual membership transitions, and immediate-stop behavior.
 
+Reducing `max_log_cache_bytes` evicts resident committed prefixes; it does not
+compact the durable journal or create an application checkpoint. Cold replication
+can then read and validate journal records, trading resident memory for I/O.
+Captured readers retain their journal generation across checkpoint replacement.
+Budget both retained readers and background work: a cache target is neither a
+disk-retention policy nor a process memory cap. See the
+[durable peer storage contract](docs/peer-runtime.md) before tuning these limits.
+
 ### Application progress and checkpoint retries
 
 Independent durable peers support explicit application retry decisions and borrowed
