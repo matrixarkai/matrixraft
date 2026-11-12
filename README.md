@@ -87,8 +87,14 @@ a proposal, persisting a log entry, committing it, and applying it are distinct 
 
 ### Build the intended runtime
 
-Use Rust 1.89 or newer. From a checkout, these commands check different API
-surfaces:
+Use Rust 1.89 or newer. Check out the public source first:
+
+```bash
+git clone https://github.com/matrixarkai/matrixraft.git
+cd matrixraft
+```
+
+From that checkout, these commands check different API surfaces:
 
 ```bash
 cargo check --locked
