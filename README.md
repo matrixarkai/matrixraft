@@ -19,6 +19,12 @@ and a service with nothing to do with TemporalStore can depend on it.
 
 ## Getting Help
 
+**On this page:** [Embedding paths](#choose-an-embedding-path) |
+[Host responsibilities](#deployment-responsibilities) |
+[Multi-group runtime](#multiple-raft-groups-in-one-process) |
+[Durable peers](#independent-durable-peer-api) | [Examples](#examples) |
+[Contributing](#contributing).
+
 Search [public issues](https://github.com/matrixarkai/matrixraft/issues) before
 opening a report. Include the revision, Rust version, enabled features, peer API,
 voter/learner topology, storage implementation, and the host's Ready-processing
