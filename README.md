@@ -29,6 +29,19 @@ Use synthetic commands and remove transport credentials and private certificates
 Follow the [security policy](SECURITY.md) for sensitive reports, not a public issue.
 For code or documentation changes, start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Implementation entry points
+
+| Area | Start reading |
+|---|---|
+| Independent durable peers and Ready processing | [Peer runtime](src/peer_runtime.rs) |
+| Peer checkpoint persistence | [Checkpoint files](src/peer_checkpoint_file.rs) |
+| Peer membership operations | [Membership implementation](src/peer_membership.rs) |
+
+Start with the peer runtime when embedding independent nodes. Its documented contract
+requires the host to process Ready output, deliver packets, and restore application
+state during recovery. Implementing a storage trait alone does not connect a service
+to the peer lifecycle or provide a network transport.
+
 ## Guide
 
 | Task | Section |
