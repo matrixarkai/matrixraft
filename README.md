@@ -102,6 +102,13 @@ ticks or packet delivery. Confirmed reads wait for their index to be applied;
 replication acknowledgement alone does not authorize client success. See the
 [peer lifecycle contract](docs/peer-runtime.md) before choosing these budgets.
 
+Recovery has the same application fence. An incoming checkpoint awaiting
+application restoration blocks suffix application and application-dependent
+reads, while durable replication can continue. A fresh application reopening a
+checkpoint reports an applied index of zero until restoration succeeds. Do not
+advertise read readiness from leader status or a persisted checkpoint alone;
+continue the host's restoration and Ready-processing lifecycle first.
+
 ## Choose an Embedding Path
 
 ### Build the intended runtime
