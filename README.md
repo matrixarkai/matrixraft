@@ -89,6 +89,19 @@ consensus service. That does not remove the host's persistence and transport obl
 Read the independent-peer contract before acknowledging proposals or serving reads; accepting
 a proposal, persisting a log entry, committing it, and applying it are distinct steps.
 
+### Keep consensus progressing under application backpressure
+
+Independent peers can bound committed application work with
+`PeerTuning::max_apply_bytes`. Continue scheduling Ready processing while
+`has_ready()` is true, even when a call produces no outgoing packets. Host reads
+and checkpoint transfers also require their own completion polling.
+
+With `process_ready_retryable`, an application returning `ApplyDecision::Retry`
+must leave the entry unconsumed. Back off application retries without stopping
+ticks or packet delivery. Confirmed reads wait for their index to be applied;
+replication acknowledgement alone does not authorize client success. See the
+[peer lifecycle contract](docs/peer-runtime.md) before choosing these budgets.
+
 ## Choose an Embedding Path
 
 ### Build the intended runtime
