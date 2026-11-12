@@ -42,12 +42,20 @@ For code or documentation changes, start with [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Related Projects
 
-[TemporalStore](https://github.com/matrixarkai/TemporalStore) serves temporal features and context;
-[MatrixObject](https://github.com/matrixarkai/MatrixObject) provides distributed object storage;
-[MatrixCache](https://github.com/matrixarkai/matrixcache) provides embedded tiered caching;
-[MatrixArk](https://github.com/matrixarkai/matrixark) provides the Python context runtime; and
-[MatrixAdsDemo](https://github.com/matrixarkai/MatrixAdsDemo) demonstrates ads serving.
-Each project is independently usable and Apache-2.0 licensed.
+All six projects are independently usable under Apache-2.0. Choose by workload
+and execution model; adding MatrixRaft does not start a consensus network service.
+
+| Project | Use it for | Execution model |
+|---|---|---|
+| **MatrixRaft (this repository)** | Consensus inside a service | Embedded library; the host supplies transport and state-machine application. |
+| [TemporalStore](https://github.com/matrixarkai/TemporalStore) | Temporal features, sequences, and context serving | Serving engine with its own endpoints, persistence, and replication settings. |
+| [MatrixObject](https://github.com/matrixarkai/MatrixObject) | Distributed object storage | Object API with separately configured metadata and replica services. |
+| [MatrixCache](https://github.com/matrixarkai/matrixcache) | Tiered caching inside a Rust application | Embedded library; the application owns authoritative data and network requests. |
+| [MatrixArk](https://github.com/matrixarkai/matrixark) | Context ingestion, retrieval, and feedback | Python runtime with explicitly configured storage and model providers. |
+| [MatrixAdsDemo](https://github.com/matrixarkai/MatrixAdsDemo) | Exploring an ads retrieval and auction pipeline | Standalone generated-data demonstration, not a consensus availability test. |
+
+For a new consensus integration, select an [embedding path](#choose-an-embedding-path)
+and implement the [host responsibilities](#deployment-responsibilities) before acknowledging writes.
 
 ## Deployment Responsibilities
 
