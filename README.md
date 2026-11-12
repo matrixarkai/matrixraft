@@ -17,6 +17,18 @@ why the crate also carries a compatibility facade and a readiness contract
 shaped for that use. Neither is a requirement: the library stands on its own,
 and a service with nothing to do with TemporalStore can depend on it.
 
+## Getting Help
+
+Search [public issues](https://github.com/matrixarkai/matrixraft/issues) before
+opening a report. Include the revision, Rust version, enabled features, peer API,
+voter/learner topology, storage implementation, and the host's Ready-processing
+sequence. Distinguish proposal admission, persistence, commitment, and application;
+for reads, describe how the host waits for the required applied index.
+
+Use synthetic commands and remove transport credentials and private certificates.
+Follow the [security policy](SECURITY.md) for sensitive reports, not a public issue.
+For code or documentation changes, start with [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Guide
 
 | Task | Section |
