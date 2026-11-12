@@ -109,6 +109,15 @@ checkpoint reports an applied index of zero until restoration succeeds. Do not
 advertise read readiness from leader status or a persisted checkpoint alone;
 continue the host's restoration and Ready-processing lifecycle first.
 
+For a quorum-confirmed read, call `begin_read`, keep processing Ready and
+delivering packets, then wait for `poll_read` to return true. That consumes the
+token after current-term quorum confirmation and local application; serve the
+read immediately on the same application worker. A committed membership change
+invalidates outstanding tokens. On client timeout, continue polling or use
+`cancel_read(token)` so the token does not keep an admission slot occupied.
+Tokens are local to a peer instance and must not survive reopen. See
+[read coordination](docs/peer-runtime.md) for bounded concurrency and cancellation.
+
 ## Choose an Embedding Path
 
 ### Build the intended runtime
