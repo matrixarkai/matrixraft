@@ -2601,6 +2601,48 @@ impl DurablePeer {
         Ok(())
     }
 
+    /// The committed voter a leadership transfer would hand over to with the least catch-up:
+    /// the one whose log the leader knows to match furthest, among voters it has heard from
+    /// recently. Ties go to the lowest node id, so the choice is deterministic. `None` when this
+    /// peer is not the leader or no other voter has been heard from. Learners and the leader
+    /// itself are never candidates.
+    pub fn closest_follower(&self) -> Option<u64> {
+        if self.healthy().is_err() || !self.is_leader() {
+            return None;
+        }
+        let membership = self.membership();
+        let progress = self.raw.raft.prs();
+        membership
+            .voters
+            .iter()
+            .copied()
+            .filter(|id| {
+                *id != self.options.node_id
+                    && !membership.learners.contains(id)
+                    && !membership.next_learners.contains(id)
+            })
+            .filter_map(|id| progress.get(id).map(|p| (id, p)))
+            .filter(|(_, p)| p.recent_active)
+            .max_by_key(|(id, p)| (p.matched, std::cmp::Reverse(*id)))
+            .map(|(id, _)| id)
+    }
+
+    /// Request transfer to the voter `closest_follower` names, and return it. Everything
+    /// `transfer_leadership` says about acceptance, completion and timeouts applies. Refused when
+    /// there is no such voter, rather than falling back to a voter that has not been heard from.
+    pub fn transfer_leadership_to_closest(&mut self) -> Result<u64, RaftError> {
+        self.healthy()?;
+        self.membership_recovered()?;
+        if !self.is_leader() {
+            return Err(RaftError::NotLeader(self.options.node_id));
+        }
+        let target = self
+            .closest_follower()
+            .ok_or_else(|| invalid("no recently active voter to transfer leadership to"))?;
+        self.transfer_leadership(target)?;
+        Ok(target)
+    }
+
     fn require_proposal_term(&self, expected_term: u64) -> Result<(), RaftError> {
         self.healthy()?;
         if !self.is_leader() {
@@ -5799,6 +5841,112 @@ mod tests {
             "three writes must cost three barriers"
         );
         assert!(peer.persisted_wal_records().unwrap() - records >= 3);
+    }
+
+    /// Elect node 1 leader of a three-voter group by granting its votes from node 2.
+    fn elected_leader(path: PathBuf) -> DurablePeer {
+        let mut config = options(path);
+        config.voters = vec![1, 2, 3];
+        let mut peer = DurablePeer::open(config).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        for kind in [
+            MessageType::MsgRequestPreVoteResponse,
+            MessageType::MsgRequestVoteResponse,
+        ] {
+            let term =
+                peer.raw.raft.term + u64::from(kind == MessageType::MsgRequestPreVoteResponse);
+            let grant = Message {
+                msg_type: kind.into(),
+                from: 2,
+                to: 1,
+                term,
+                ..Default::default()
+            };
+            peer.step(&encode_packet(1, &grant).unwrap()).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            if peer.raw.raft.state == raft_core::StateRole::Leader {
+                return peer;
+            }
+        }
+        panic!("node 1 must win the election");
+    }
+
+    /// Acknowledge, as `from`, the leader's log up to `index`.
+    fn acknowledge(peer: &mut DurablePeer, from: u64, index: u64) {
+        let ack = Message {
+            msg_type: MessageType::MsgAppendResponse.into(),
+            from,
+            to: 1,
+            term: peer.raw.raft.term,
+            index,
+            ..Default::default()
+        };
+        peer.step(&encode_packet(1, &ack).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_closest_follower_is_the_one_matched_furthest() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut peer = elected_leader(directory.path().join("peer.wal"));
+        let first = peer.raw.raft.raft_log.last_index();
+
+        // A vote does not count as activity: the leader has heard from nobody since it won, so
+        // there is no voter it knows to be reachable and the answer is none.
+        assert_eq!(peer.closest_follower(), None);
+
+        acknowledge(&mut peer, 3, first);
+        assert_eq!(
+            peer.closest_follower(),
+            Some(3),
+            "node 3 is the only voter heard from"
+        );
+
+        peer.propose(vec![1; 16]).unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let second = peer.raw.raft.raft_log.last_index();
+        assert!(second > first);
+
+        // Both are heard from now, node 3 further along: the higher id wins on its match.
+        acknowledge(&mut peer, 3, second);
+        acknowledge(&mut peer, 2, first);
+        assert_eq!(
+            peer.closest_follower(),
+            Some(3),
+            "node 3 has matched {second}, node 2 only {first}"
+        );
+
+        // Equally matched voters tie to the lowest node id.
+        acknowledge(&mut peer, 2, second);
+        assert_eq!(peer.closest_follower(), Some(2));
+    }
+
+    #[test]
+    fn transfer_to_the_closest_follower_names_it_and_refuses_when_there_is_none() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut peer = elected_leader(directory.path().join("peer.wal"));
+        let last = peer.raw.raft.raft_log.last_index();
+        acknowledge(&mut peer, 3, last);
+        assert_eq!(peer.transfer_leadership_to_closest().unwrap(), 3);
+        assert_eq!(peer.raw.raft.lead_transferee, Some(3));
+
+        // A follower, and a lone voter, have nobody to hand over to.
+        let alone = tempfile::tempdir().unwrap();
+        let mut single = DurablePeer::open(options(alone.path().join("peer.wal"))).unwrap();
+        single.campaign().unwrap();
+        single.process_ready(|_, _| Ok(())).unwrap();
+        assert!(single.is_leader());
+        assert_eq!(single.closest_follower(), None);
+        assert!(single.transfer_leadership_to_closest().is_err());
+
+        let other = tempfile::tempdir().unwrap();
+        let mut config = options(other.path().join("peer.wal"));
+        config.voters = vec![1, 2, 3];
+        let mut follower = DurablePeer::open(config).unwrap();
+        assert_eq!(follower.closest_follower(), None);
+        assert!(follower.transfer_leadership_to_closest().is_err());
     }
 
     /// The control for the test above: a term or a vote still costs its barrier.
