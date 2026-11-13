@@ -1726,6 +1726,18 @@ impl Journal {
         self.barriers = self.barriers.saturating_add(1);
         self.file.sync_all().map_err(storage_error)
     }
+    /// Writes a record and leaves it for the next barrier to make durable.
+    ///
+    /// Only a record that can be lost without losing anything acknowledged may use this. A commit
+    /// watermark is such a record: it names how much of the log a quorum had already made durable,
+    /// so it can only trail the entries, and a restart that finds it behind commits the difference
+    /// again under the next leader. The entries it refers to were each fsynced before the watermark
+    /// moved, which is what an acknowledgment rests on.
+    ///
+    /// A term or a vote must not come through here. Losing one of those can let a peer vote twice.
+    fn append_unsynced(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
+        self.write_record(batch)
+    }
     // Only rewrite may defer durability until the entire replacement is written.
     fn write_record(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
         self.write_record_into(batch, &mut Vec::new())
@@ -3709,8 +3721,20 @@ impl DurablePeer {
                     .initial_state()
                     .map_err(storage_error)?
                     .hard_state;
-                self.journal
-                    .append_decoded_ready(&mut record, ready.entries(), &previous)?;
+                // A Ready that moves only the commit index follows entries that are already synced,
+                // so it takes no barrier of its own. Costing one made every write pay two fsyncs,
+                // the second to persist a number a restart recomputes. Any term or vote change,
+                // and any Ready carrying entries, still syncs.
+                let commit_only = ready.entries().is_empty()
+                    && ready
+                        .hs()
+                        .is_some_and(|hs| hs.term == previous.term && hs.vote == previous.vote);
+                if commit_only {
+                    self.journal.append_unsynced(&record)?;
+                } else {
+                    self.journal
+                        .append_decoded_ready(&mut record, ready.entries(), &previous)?;
+                }
                 install_decoded(
                     &self.store,
                     &record,
@@ -5585,6 +5609,145 @@ mod tests {
             assert!(restored.pending_restore.is_none());
             assert_eq!(retained.data.len(), length);
         }
+    }
+
+    /// A write used to cost two durability barriers: one for the entry and a second for a record
+    /// holding only the new commit index. A barrier is the expensive part of an append, so the
+    /// second one halved the write rate for no durability, because the commit index is recomputed
+    /// by whoever leads after a restart.
+    ///
+    /// The watermark is still written -- recovery still reads it when it survives -- so this
+    /// asserts both halves: one barrier, and at least two records.
+    #[test]
+    fn a_commit_advance_is_written_without_a_barrier_of_its_own() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut peer = DurablePeer::open(options(directory.path().join("peer.wal"))).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+
+        let barriers = peer.journal.barriers;
+        let records = peer.journal.records;
+        let applied = peer.applied_index();
+        peer.propose(vec![7; 256]).unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+
+        assert_eq!(
+            peer.applied_index(),
+            applied + 1,
+            "the write must have committed and applied for this to measure a commit"
+        );
+        assert_eq!(
+            peer.journal.barriers - barriers,
+            1,
+            "one write should cost one barrier, not one for the entry and one for the commit"
+        );
+        assert!(
+            peer.journal.records - records >= 2,
+            "the commit watermark must still be written, only without its own barrier"
+        );
+    }
+
+    /// The control for the test above: a term or a vote still costs its barrier.
+    ///
+    /// Granting a vote moves the term and the vote and nothing else, so its Ready carries a hard
+    /// state and no entries -- the same shape as a commit advance. Only the fields that changed
+    /// tell them apart, and losing a vote can let a peer vote twice.
+    #[test]
+    fn a_granted_vote_still_costs_a_barrier() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = options(directory.path().join("peer.wal"));
+        config.voters = vec![1, 2, 3];
+        let mut peer = DurablePeer::open(config).unwrap();
+        let before = peer.store.initial_state().unwrap().hard_state;
+
+        let request = Message {
+            msg_type: MessageType::MsgRequestVote.into(),
+            from: 2,
+            to: 1,
+            term: before.term + 1,
+            ..Default::default()
+        };
+        peer.step(&encode_packet(1, &request).unwrap()).unwrap();
+        let barriers = peer.journal.barriers;
+        peer.process_ready(|_, _| Ok(())).unwrap();
+
+        let after = peer.store.initial_state().unwrap().hard_state;
+        assert_eq!(
+            after.vote, 2,
+            "the vote must have been granted for this to measure one"
+        );
+        assert_eq!(after.term, before.term + 1);
+        assert_eq!(
+            peer.journal.barriers - barriers,
+            1,
+            "a granted vote moves the term and the vote, so it must be synced"
+        );
+    }
+
+    /// Losing the commit watermark loses no acknowledged entry.
+    ///
+    /// The unsynced record is the last thing in the file, so cutting the file back to the start of
+    /// the last record is exactly what a crash before the next barrier leaves. Every entry must
+    /// still be there, and the group must commit and apply each one once, in order, under the next
+    /// leader.
+    #[test]
+    fn a_lost_commit_watermark_loses_no_acknowledged_entry() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let payloads: Vec<Vec<u8>> = (1..=3u8).map(|n| vec![n; 100 + n as usize]).collect();
+
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        for payload in &payloads {
+            peer.propose(payload.clone()).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+        }
+        let committed = peer.commit_index();
+        drop(peer);
+
+        // Walk the records to find where the last one starts, then cut the file there.
+        let bytes = std::fs::read(&config.wal_path).unwrap();
+        let (mut at, mut last) = (0usize, 0usize);
+        while at + 24 <= bytes.len() {
+            last = at;
+            let size = u32::from_be_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            at += 24 + size;
+        }
+        assert_eq!(
+            at,
+            bytes.len(),
+            "the walk must land exactly on the end of the file"
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&config.wal_path)
+            .unwrap()
+            .set_len(last as u64)
+            .unwrap();
+
+        let mut peer = DurablePeer::open(config).unwrap();
+        assert!(
+            peer.commit_index() < committed,
+            "cutting the last record must have lost a commit watermark ({} vs {committed})",
+            peer.commit_index()
+        );
+        peer.campaign().unwrap();
+        let mut applied = Vec::new();
+        peer.process_ready(|_, data| {
+            if !data.is_empty() {
+                applied.push(data.to_vec());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            applied, payloads,
+            "every acknowledged entry must be applied exactly once, in order"
+        );
     }
 
     #[test]
