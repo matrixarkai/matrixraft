@@ -554,6 +554,9 @@ fn exact_batch_encoding(batch: &WalBatch, bytes: &[u8], output: &mut Vec<u8>) ->
         return false;
     }
     prost::encoding::uint64::encode_packed(12, &batch.permitted, &mut *output);
+    if batch.flushed_index != 0 {
+        prost::encoding::uint64::encode(13, &batch.flushed_index, &mut *output);
+    }
     consume(&mut input, output) && input.is_empty()
 }
 
@@ -695,6 +698,10 @@ struct WalBatch {
     payload_manifest: Vec<u8>,
     #[prost(uint64, repeated, packed = "true", tag = "12")]
     permitted: Vec<u64>,
+    /// How far the host's durable application has flushed, so a restart need not deliver entries
+    /// at or below it again. Zero when absent. Only ever written by `set_flushed_index`.
+    #[prost(uint64, tag = "13")]
+    flushed_index: u64,
 }
 fn invalid(s: impl ToString) -> RaftError {
     RaftError::InvalidRequest(s.to_string())
@@ -744,6 +751,7 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         snapshot_digest: 0,
         payload_manifest: Vec::new(),
         permitted: Vec::new(),
+        flushed_index: 0,
     }
 }
 #[derive(Clone)]
@@ -1257,6 +1265,8 @@ struct Journal {
     /// that quietly returns to a barrier per entry fails instead of merely getting slower.
     barriers: u64,
     records: u64,
+    /// The highest flushed index any record in this WAL reports; see `set_flushed_index`.
+    flushed_index: u64,
     permitted: Vec<u64>,
     file: File,
     _lock: Arc<File>,
@@ -1298,6 +1308,7 @@ impl Journal {
         let mut assembly = snapshot_stream::WalAssembly::new(length);
         let mut bytes = prost::bytes::BytesMut::new();
         let mut validation = Vec::new();
+        let mut flushed_index = 0u64;
         while offset < length {
             let remaining = length - offset;
             if remaining < 24 {
@@ -1348,6 +1359,7 @@ impl Journal {
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
             }
+            flushed_index = flushed_index.max(record.flushed_index);
             if record.version == 2 {
                 drop(wire);
                 if let Some(record) = assembly.accept(record, offset, &mut validation)? {
@@ -1395,6 +1407,7 @@ impl Journal {
             length: offset,
             barriers: 0,
             records: 0,
+            flushed_index,
         };
         if offset == 0 {
             journal.append(&batch(options, None, &[]))?;
@@ -1428,6 +1441,7 @@ impl Journal {
             _lock: Arc::clone(&self._lock),
             barriers: 0,
             records: 0,
+            flushed_index: self.flushed_index,
         };
         let mut record_buffer = Vec::new();
         let mut floor_state = hs.clone();
@@ -1499,6 +1513,13 @@ impl Journal {
         }
         // No replacement record is observable until publication. Flush the
         // complete image and retained suffix once, before replacing the live WAL.
+        // A floor the host reported must survive the replacement: it is what lets a restart skip
+        // entries the application already holds, and the old file is about to disappear.
+        if self.flushed_index != 0 {
+            let mut floor = batch(options, None, &[]);
+            floor.flushed_index = self.flushed_index;
+            replacement.write_record_into(&floor, &mut record_buffer)?;
+        }
         #[cfg(test)]
         checkpoint_crash_point("before_sync");
         replacement.file.sync_all().map_err(storage_error)?;
@@ -2246,9 +2267,18 @@ impl DurablePeer {
         };
         let journal = Journal::open(&options, &store)?;
         let pending_restore = store.checkpoint.lock().unwrap().clone();
-        config.applied = pending_restore
+        let snapshot_index = pending_restore
             .as_ref()
             .map_or(0, |s| s.get_metadata().index);
+        // Entries a durable application reported flushed are not delivered again. The floor is
+        // clamped to the recovered commit index: raft requires applied <= committed, and a commit
+        // watermark that did not survive only means a few entries are delivered once more.
+        let commit = store
+            .initial_state()
+            .map_err(storage_error)?
+            .hard_state
+            .commit;
+        config.applied = snapshot_index.max(journal.flushed_index.min(commit));
         let logger = slog::Logger::root(slog::Discard, slog::o!());
         let raw = RawNode::new(&config, store.clone(), &logger).map_err(invalid)?;
         let mut stream = snapshot_stream::Stream::new(
@@ -2379,6 +2409,49 @@ impl DurablePeer {
     pub fn persisted_wal_bytes(&self) -> Result<u64, RaftError> {
         self.healthy()?;
         Ok(self.journal.length)
+    }
+    /// Tell the peer that the application has durably flushed everything up to `index`, so a
+    /// restart delivers only the entries after it instead of replaying the whole log.
+    ///
+    /// Call this only once the application's own state is durable through `index`: after a
+    /// reopen the entries at or below it are NOT delivered again, so an application that has not
+    /// flushed them would lose them. `index` cannot exceed `applied_index()`, and a value at or
+    /// below the one already recorded is a no-op. Recording one writes a record and costs one
+    /// durability barrier, so report it occasionally rather than per entry. The value survives
+    /// checkpoints. A restart delivers entries above the greater of the floor and the latest
+    /// checkpoint, never beyond the recovered commit index.
+    ///
+    /// Refused on a peer with durable membership: it rebuilds its configuration by replaying
+    /// committed entries, which a floor would skip.
+    pub fn set_flushed_index(&mut self, index: u64) -> Result<(), RaftError> {
+        self.healthy()?;
+        self.membership_recovered()?;
+        if !self.store.permitted.is_empty() {
+            return Err(invalid(
+                "a flushed-index floor is not supported with durable membership",
+            ));
+        }
+        if index > self.applied_index() {
+            return Err(invalid("flushed index is beyond what has been applied"));
+        }
+        if index <= self.journal.flushed_index {
+            return Ok(());
+        }
+        let mut record = batch(&self.options, None, &[]);
+        record.flushed_index = index;
+        if let Err(error) = self.journal.append(&record) {
+            self.failed = true;
+            return Err(error);
+        }
+        self.journal.flushed_index = index;
+        self.store
+            .refresh_cache(&self.options, self.journal.length, false)?;
+        Ok(())
+    }
+    /// The flushed index recorded by `set_flushed_index`, or zero.
+    pub fn flushed_index(&self) -> Result<u64, RaftError> {
+        self.healthy()?;
+        Ok(self.journal.flushed_index)
     }
     /// Durability barriers (`fsync`s of the WAL) this peer has issued since it was opened.
     ///
@@ -4172,6 +4245,7 @@ mod tests {
             snapshot_digest: 47,
             payload_manifest: vec![53; 96],
             permitted: vec![1, 2, 3, 4],
+            flushed_index: 0,
         };
         let bytes = record.encode_to_vec();
         let mut validation = Vec::new();
@@ -4193,8 +4267,9 @@ mod tests {
             &mut validation,
         ));
 
+        // Field 14 is not defined. (13 is `flushed_index`, so a varint 1 on it is a valid record.)
         let mut extra_field = bytes;
-        extra_field.extend_from_slice(&[0x68, 0x01]);
+        extra_field.extend_from_slice(&[0x70, 0x01]);
         let decoded = WalBatch::decode(extra_field.as_slice()).unwrap();
         assert!(!exact_batch_encoding(
             &decoded,
@@ -5947,6 +6022,136 @@ mod tests {
         let mut follower = DurablePeer::open(config).unwrap();
         assert_eq!(follower.closest_follower(), None);
         assert!(follower.transfer_leadership_to_closest().is_err());
+    }
+
+    /// Write `count` payloads through a single-voter peer and return their log indexes. The
+    /// leader's own no-op takes index 1, so payload `n` (counting from 1) has index `n + 1`.
+    fn write_payloads(config: &PeerOptions, count: u8) -> Vec<Vec<u8>> {
+        let payloads: Vec<Vec<u8>> = (1..=count).map(|n| vec![n; 64]).collect();
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        for payload in &payloads {
+            peer.propose(payload.clone()).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+        }
+        payloads
+    }
+
+    /// An application with a durable state machine reports how far it has flushed, and a restart
+    /// does not deliver those entries again. Without the floor every committed entry replays.
+    #[test]
+    fn a_restart_does_not_deliver_entries_at_or_below_the_flushed_index() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let payloads = write_payloads(&config, 5);
+
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        // Replay everything once, as an application with no durable state would see it.
+        let mut every = Vec::new();
+        peer.campaign().unwrap();
+        peer.process_ready(|id, data| {
+            if !data.is_empty() {
+                every.push((id.index, data.to_vec()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            every
+                .iter()
+                .map(|(_, data)| data.clone())
+                .collect::<Vec<_>>(),
+            payloads,
+            "with no floor every payload is delivered again"
+        );
+        // The application flushed through the third payload, which has index 4.
+        let floor = every[2].0;
+        assert_eq!(floor, 4);
+        peer.set_flushed_index(floor).unwrap();
+        assert_eq!(peer.flushed_index().unwrap(), floor);
+        drop(peer);
+
+        let mut peer = DurablePeer::open(config).unwrap();
+        assert_eq!(
+            peer.applied_index(),
+            floor,
+            "the peer must reopen with the floor already applied"
+        );
+        let mut delivered = Vec::new();
+        peer.campaign().unwrap();
+        peer.process_ready(|id, data| {
+            if !data.is_empty() {
+                delivered.push((id.index, data.to_vec()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            delivered,
+            every[3..].to_vec(),
+            "only the entries after the floor are delivered, and each exactly once"
+        );
+    }
+
+    #[test]
+    fn the_flushed_index_cannot_pass_what_was_applied_and_never_moves_back() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        write_payloads(&config, 3);
+        let mut peer = DurablePeer::open(config).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let applied = peer.applied_index();
+
+        assert!(
+            peer.set_flushed_index(applied + 1).is_err(),
+            "the application cannot have flushed what it was never given"
+        );
+        assert_eq!(peer.flushed_index().unwrap(), 0);
+
+        let barriers = peer.persisted_wal_barriers().unwrap();
+        peer.set_flushed_index(3).unwrap();
+        assert_eq!(
+            peer.persisted_wal_barriers().unwrap() - barriers,
+            1,
+            "recording a floor costs exactly one barrier"
+        );
+        for index in [3, 2, 0] {
+            peer.set_flushed_index(index).unwrap();
+            assert_eq!(peer.flushed_index().unwrap(), 3, "a lower value is ignored");
+        }
+        assert_eq!(
+            peer.persisted_wal_barriers().unwrap() - barriers,
+            1,
+            "a value at or below the floor writes nothing"
+        );
+    }
+
+    /// A checkpoint replaces the WAL file. The floor lives only in that file, so the replacement
+    /// must carry it or a restart would quietly replay entries the application already holds.
+    #[test]
+    fn the_flushed_index_survives_a_checkpoint_rewrite() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        write_payloads(&config, 3);
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        peer.set_flushed_index(3).unwrap();
+        peer.checkpoint(vec![7; 8]).unwrap();
+        assert_eq!(peer.flushed_index().unwrap(), 3);
+        drop(peer);
+
+        let peer = DurablePeer::open(config).unwrap();
+        assert_eq!(
+            peer.flushed_index().unwrap(),
+            3,
+            "the replacement WAL must still report the floor after a reopen"
+        );
     }
 
     /// The control for the test above: a term or a vote still costs its barrier.
