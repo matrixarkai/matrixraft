@@ -155,6 +155,11 @@ impl PeerStorage {
         length: u64,
         replaced: bool,
     ) -> Result<(), RaftError> {
+        if replaced {
+            // The journal file was replaced. Readers captured earlier keep reading the old file, so
+            // they keep its index; everything from here on gets a fresh one.
+            *self.log_index.lock().unwrap() = Default::default();
+        }
         let Some(configured) = &self.cache.configured else {
             return Ok(());
         };
@@ -198,6 +203,7 @@ impl PeerStorage {
                 node: options.node_id,
                 voters: options.voters.clone(),
                 permitted: self.permitted.clone(),
+                index: self.current_log_index(),
             });
         } else if let Some(reader) = state.reader.as_mut() {
             reader.length = length;

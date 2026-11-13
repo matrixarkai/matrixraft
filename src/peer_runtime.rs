@@ -764,6 +764,16 @@ struct PeerStorage {
     checkpoint: Arc<Mutex<Option<Arc<Snapshot>>>>,
     payload_directory: PathBuf,
     payload: Arc<Mutex<Option<Arc<checkpoint_file::Blob>>>>,
+    /// What the current journal generation holds, shared by every cold reader of it. The outer
+    /// cell names the current generation's index: a checkpoint swaps in a fresh one, and a reader
+    /// captured earlier keeps the index of the file it is still reading.
+    log_index: Arc<Mutex<Arc<Mutex<log_reader::LogIndex>>>>,
+}
+impl PeerStorage {
+    /// The index for the journal generation that is current now.
+    fn current_log_index(&self) -> Arc<Mutex<log_reader::LogIndex>> {
+        Arc::clone(&self.log_index.lock().unwrap())
+    }
 }
 impl std::ops::Deref for PeerStorage {
     type Target = MemStorage;
@@ -2264,6 +2274,7 @@ impl DurablePeer {
             checkpoint: Arc::new(Mutex::new(None)),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
+            log_index: Default::default(),
         };
         let journal = Journal::open(&options, &store)?;
         let pending_restore = store.checkpoint.lock().unwrap().clone();
@@ -2367,6 +2378,7 @@ impl DurablePeer {
             node: self.options.node_id,
             voters: self.options.voters.clone(),
             permitted: self.store.permitted.clone(),
+            index: self.store.current_log_index(),
         })
     }
     pub fn leader_id(&self) -> Option<u64> {
@@ -3971,6 +3983,7 @@ mod tests {
             checkpoint: Arc::new(Mutex::new(None)),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
+            log_index: Default::default(),
         };
         let mut journal = Journal::open(&options, &store).unwrap();
         // `open` writes a bootstrap record under its own barrier, so measure deltas from here.
@@ -4038,6 +4051,7 @@ mod tests {
             checkpoint: Arc::new(Mutex::new(None)),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
+            log_index: Default::default(),
         };
         let _reopened = Journal::open(&options, &recovered).unwrap();
         assert_eq!(
@@ -4081,6 +4095,7 @@ mod tests {
             checkpoint: Arc::new(Mutex::new(None)),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
+            log_index: Default::default(),
         };
         let mut journal = Journal::open(&options, &store).unwrap();
         // `open` writes a bootstrap record under its own barrier, so measure the delta from here

@@ -1250,7 +1250,17 @@ fn captured_log_reads_pin_a_durable_generation_across_checkpoint_replacement() {
     let mut damaged = bytes.clone();
     *damaged.last_mut().unwrap() ^= 1;
     std::fs::write(&path, &damaged).unwrap();
-    assert!(reader.entries(first.index, first.index + 1, None).is_err());
+    // The damaged record is the last one, not the one that holds `first`. A read verifies the
+    // records it touches, so it is still served; an explicit verification sees damage anywhere in
+    // the captured journal.
+    assert_eq!(
+        reader
+            .entries(first.index, first.index + 1, None)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(reader.verify().is_err());
     assert_eq!(std::fs::read(&path).unwrap(), damaged);
     std::fs::write(&path, bytes).unwrap();
     let second = peer.propose(b"second".to_vec()).unwrap();

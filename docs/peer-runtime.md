@@ -36,9 +36,12 @@ the default Ready call still drains available work rather than yielding.
 
 Cache eviction does not compact the journal, advance the logical log floor, or
 create a checkpoint. Cold entries and terms are read from the durable journal,
-so lagging replicas can catch up without an application image. Cold reads retain
-the captured-reader integrity checks and scan journal records, trading I/O for
-resident memory. Async read workers can fetch these ranges; already-committed
+so lagging replicas can catch up without an application image. A cold read goes to the journal records that hold its range through an in-memory
+index of the current journal file, so its cost follows the range, not the size of the
+journal. Each record is validated in full, including every entry's wire fields and its
+checksum, the first time it is indexed and again whenever a read touches it. Damage
+to a record that no read has touched since is not seen by reads; `PeerLogReader::verify`
+re-validates a whole captured journal on demand, and reopening always does. Async read workers can fetch these ranges; already-committed
 prefixes are revalidated by their immutability, current bounds, and peer/term
 identity without rereading them on the peer worker. Uncommitted results still
 require comparison against current entries. Checkpoint publication switches the
@@ -118,9 +121,8 @@ without repairing files or sharing the writer cursor. Later appends are excluded
 checkpoint replacement does not invalidate an already captured generation.
 Range reads reuse a record buffer and decode entry byte fields as borrowed views,
 materializing only entries selected by the requested range and byte budget.
-Every captured record is still scanned and validated, including unselected entry
-wire fields and checksums outside the selected range. This reduces allocation,
-not the number of journal bytes read. The returned budget still includes its
+Once the journal is indexed, records the range does not need are not read at all; the
+first read after a record is written validates it in full. The returned budget still includes its
 crossing entry so that an oversized entry can make progress.
 The caller must still reject obsolete results before using them for replication.
 `enable_async_log_reads(capacity)` opts replication into bounded host-executed
