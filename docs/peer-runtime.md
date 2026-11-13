@@ -782,6 +782,27 @@ retained log. Snapshot export, serialization, validation and restore may also bl
 unless the application explicitly schedules them off its consensus loop. The API
 alone does not change an application's threading or latency guarantees.
 
+## Skipping replay of entries the application already holds
+
+A restart normally delivers every committed entry after the latest checkpoint again,
+so the application must be fresh or idempotent. An application whose state is itself
+durable can narrow that. After it has flushed its own state through log index `n`,
+call `set_flushed_index(n)`. The peer records `n` in its WAL with one durability
+barrier, and a later reopen starts with `n` already applied: only entries after the
+greater of `n` and the latest checkpoint are delivered, and never beyond the
+recovered commit index. `flushed_index()` reports the recorded value.
+
+Call it only once the application really is durable through `n`: after a reopen the
+entries at or below it are not delivered again, so an application that had not
+flushed them would lose them. `n` cannot exceed `applied_index()`, a value at or below
+the recorded one is a no-op, and a checkpoint carries the value into its replacement
+WAL. Report it occasionally rather than per entry, since each new value costs a
+barrier.
+
+A peer with durable membership refuses it: that peer rebuilds its configuration by
+replaying committed entries, which a floor would skip. The floor shortens replay;
+it does not trim the WAL, which still grows until a checkpoint replaces it.
+
 ## Reading the fsync cost
 
 `persisted_wal_barriers()` is the number of durability barriers (`fsync`s of the
