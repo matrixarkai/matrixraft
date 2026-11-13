@@ -167,7 +167,11 @@ fn the_same_calls_cost_several_times_more_when_the_groups_are_scattered() {
         "every arm must have measured something: ordered {spread:.1} ns, scattered {scattered:.1} ns, control {hammered:.1} ns"
     );
 
-    const TOO_BUSY_NS: f64 = 300.0;
+    // A quiet box reads the control at 50-60 ns. The margin is asserted only when the control is
+    // within about 2.5x of that. The cutoff used to be 300 ns, which let a loaded runner assert a
+    // 1.15x margin it could not resolve: four CI runs failed with the control at 211.3, 214.1,
+    // 232.4 and 298.3 ns, reading the two orders within 1.08x of each other.
+    const TOO_BUSY_NS: f64 = 150.0;
     if hammered <= TOO_BUSY_NS {
         assert!(
             scattered > spread,
