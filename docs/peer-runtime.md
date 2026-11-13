@@ -69,6 +69,12 @@ be refused while transfer is pending. A received timeout-now request must identi
 current recognized leader and current term; network transfer commands remain
 unsupported, so only the local host can initiate this operation.
 
+`closest_follower()` names the committed voter a handoff would catch up least: the one
+the leader knows to match furthest among voters it has heard from since it won, ties to
+the lowest node id, or `None` when this peer is not the leader or has heard from nobody.
+`transfer_leadership_to_closest()` transfers to it and returns it, and is refused rather
+than falling back to a voter that may be down.
+
 `PeerTuning::transfer_timeout_tick` optionally supplies an independent handoff
 deadline, from 1 through half the platform's maximum `usize`. `None` preserves the
 core-managed deadline. An explicit deadline can span multiple election intervals;
