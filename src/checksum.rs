@@ -250,14 +250,71 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
-fn crc32c_extend(crc: u32, data: &[u8]) -> u32 {
-    let mut value = !crc;
-    for byte in data {
-        value ^= *byte as u32;
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(value & 1);
-            value = (value >> 1) ^ (0x82f6_3b78 & mask);
+/// Eight 256-entry tables, built at compile time.
+///
+/// `CRC32C_TABLES[0]` is the usual byte-at-a-time table. `CRC32C_TABLES[k]` is what a byte
+/// becomes after `k` more zero bytes have been shifted through, which is what lets eight input
+/// bytes be folded in with eight lookups and no dependency between them.
+static CRC32C_TABLES: [[u32; 256]; 8] = crc32c_tables();
+
+const fn crc32c_tables() -> [[u32; 256]; 8] {
+    /// 0x1EDC_6F41 bit-reversed, the form a right-shifting implementation needs.
+    const POLYNOMIAL: u32 = 0x82f6_3b78;
+    let mut tables = [[0u32; 256]; 8];
+    let mut index = 0;
+    while index < 256 {
+        let mut value = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            value = if value & 1 == 1 {
+                (value >> 1) ^ POLYNOMIAL
+            } else {
+                value >> 1
+            };
+            bit += 1;
         }
+        tables[0][index] = value;
+        index += 1;
+    }
+    let mut index = 0;
+    while index < 256 {
+        let mut value = tables[0][index];
+        let mut table = 1;
+        while table < 8 {
+            value = tables[0][(value & 0xff) as usize] ^ (value >> 8);
+            tables[table][index] = value;
+            table += 1;
+        }
+        index += 1;
+    }
+    tables
+}
+
+/// Continues a CRC-32C over more bytes: `crc32c_extend(crc32c_extend(0, a), b)` is the CRC of
+/// `a` followed by `b`.
+///
+/// The crate forbids `unsafe`, which rules out the hardware instruction, so this folds eight
+/// bytes per step through [`CRC32C_TABLES`]. The loop it replaced did eight shifts per byte.
+/// The streaming checksum of a whole file and the frame check of the binary WAL format
+/// (`wal_binary`) both come through here.
+pub(crate) fn crc32c_extend(crc: u32, data: &[u8]) -> u32 {
+    let tables = &CRC32C_TABLES;
+    let mut value = !crc;
+    let (blocks, tail) = data.as_chunks::<8>();
+    for block in blocks {
+        let low = u32::from_le_bytes([block[0], block[1], block[2], block[3]]) ^ value;
+        let high = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+        value = tables[7][(low & 0xff) as usize]
+            ^ tables[6][((low >> 8) & 0xff) as usize]
+            ^ tables[5][((low >> 16) & 0xff) as usize]
+            ^ tables[4][(low >> 24) as usize]
+            ^ tables[3][(high & 0xff) as usize]
+            ^ tables[2][((high >> 8) & 0xff) as usize]
+            ^ tables[1][((high >> 16) & 0xff) as usize]
+            ^ tables[0][(high >> 24) as usize];
+    }
+    for byte in tail {
+        value = tables[0][((value ^ u32::from(*byte)) & 0xff) as usize] ^ (value >> 8);
     }
     !value
 }
@@ -320,4 +377,147 @@ fn fmix32(mut hash: u32) -> u32 {
     hash = hash.wrapping_mul(0xc2b2_ae35);
     hash ^= hash >> 16;
     hash
+}
+
+#[cfg(test)]
+mod crc32c_tests {
+    use super::*;
+
+    /// The loop this module used to run, kept as an independent reference. It shares no code with
+    /// the table-driven version, so agreement is evidence about the tables and not about a
+    /// helper both of them call.
+    fn bitwise(crc: u32, data: &[u8]) -> u32 {
+        let mut value = !crc;
+        for byte in data {
+            value ^= u32::from(*byte);
+            for _ in 0..8 {
+                let mask = 0u32.wrapping_sub(value & 1);
+                value = (value >> 1) ^ (0x82f6_3b78 & mask);
+            }
+        }
+        !value
+    }
+
+    /// Deterministic bytes that are not periodic in 8, so a table indexed wrongly at one
+    /// position cannot hide behind repetition.
+    fn bytes(length: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// The published check value of CRC-32C, and the one for the other common CRC-32. The second
+    /// assertion is the guard: a polynomial that is wrong in a plausible way still hashes.
+    #[test]
+    fn the_published_check_value_holds() {
+        assert_eq!(matrixraft_crc32c(b"123456789"), 0xE306_9283);
+        assert_ne!(matrixraft_crc32c(b"123456789"), 0xCBF4_3926);
+        assert_eq!(matrixraft_crc32c(b""), 0);
+    }
+
+    /// Every length from empty to well past three blocks, at every alignment of the tail, against
+    /// the reference. Lengths 0..8 never enter the block loop and 8..16 enter it once, so both
+    /// halves of the function are held on their own as well as together.
+    #[test]
+    fn it_agrees_with_the_bitwise_reference_at_every_length() {
+        for length in 0..=300usize {
+            let data = bytes(length, 0x9E37_79B9_7F4A_7C15 ^ length as u64);
+            assert_eq!(
+                crc32c_extend(0, &data),
+                bitwise(0, &data),
+                "disagreed at length {length}"
+            );
+        }
+    }
+
+    /// Splitting the input anywhere and continuing gives the same CRC as doing it in one go.
+    /// This is what lets a record be checksummed piece by piece as it is written.
+    #[test]
+    fn extending_across_any_split_matches_one_pass() {
+        let data = bytes(173, 0xDEAD_BEEF_CAFE_F00D);
+        let whole = crc32c_extend(0, &data);
+        for split in 0..=data.len() {
+            let (head, tail) = data.split_at(split);
+            assert_eq!(
+                crc32c_extend(crc32c_extend(0, head), tail),
+                whole,
+                "split at {split}"
+            );
+        }
+        // Three pieces, with the seams on and off an eight-byte boundary.
+        for (a, b) in [(7, 20), (8, 16), (1, 2), (64, 65), (100, 172)] {
+            let value = crc32c_extend(
+                crc32c_extend(crc32c_extend(0, &data[..a]), &data[a..b]),
+                &data[b..],
+            );
+            assert_eq!(value, whole, "seams at {a} and {b}");
+        }
+    }
+
+    /// One flipped bit anywhere changes the CRC. A table with one wrong entry still passes the
+    /// agreement test at most lengths, because a wrong entry is only read for particular byte
+    /// values; walking every position and bit makes a bad entry hard to miss.
+    #[test]
+    fn a_single_flipped_bit_always_changes_the_crc() {
+        let data = bytes(61, 0x0123_4567_89AB_CDEF);
+        let clean = crc32c_extend(0, &data);
+        for position in 0..data.len() {
+            for bit in 0..8 {
+                let mut damaged = data.clone();
+                damaged[position] ^= 1 << bit;
+                assert_ne!(
+                    crc32c_extend(0, &damaged),
+                    clean,
+                    "byte {position} bit {bit}"
+                );
+            }
+        }
+    }
+
+    /// Every one of the 2048 table entries is read by some input. All 256 byte values at all 8
+    /// positions inside a block, each compared with the reference, so an entry that is wrong but
+    /// never reached by the random-looking inputs above is still caught.
+    #[test]
+    fn every_table_entry_is_exercised() {
+        for position in 0..8usize {
+            for value in 0..=255u8 {
+                let mut block = [0u8; 16];
+                block[position] = value;
+                assert_eq!(
+                    crc32c_extend(0, &block),
+                    bitwise(0, &block),
+                    "byte value {value} at position {position}"
+                );
+            }
+        }
+    }
+
+    /// Prints the rate. Not a pass/fail test, because a threshold on a shared box would only
+    /// measure the box.
+    #[test]
+    #[ignore = "reports a rate; run with --ignored --nocapture"]
+    fn throughput_against_the_bitwise_reference() {
+        let data = bytes(8 * 1024 * 1024, 0x5151_5151_5151_5151);
+        let time = |f: &dyn Fn(&[u8]) -> u32| {
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..4 {
+                sink ^= f(std::hint::black_box(&data));
+            }
+            std::hint::black_box(sink);
+            (4 * data.len()) as f64 / start.elapsed().as_secs_f64() / 1e6
+        };
+        let fast = time(&|d| crc32c_extend(0, d));
+        let slow = time(&|d| bitwise(0, d));
+        println!(
+            "CRC32C table-driven {fast:.0} MB/s, bitwise {slow:.0} MB/s, {:.1}x",
+            fast / slow
+        );
+    }
 }

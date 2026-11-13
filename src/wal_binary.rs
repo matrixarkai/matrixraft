@@ -858,27 +858,16 @@ impl FrameDigest {
 ///
 /// Hand-rolled for the same reason the base64 in `wal.rs` is: this crate adds
 /// no dependency, and a gating licence-and-advisory check makes taking one for
-/// thirty lines a poor trade. Bit-at-a-time rather than table-driven, because
-/// the table is the part that is easy to get silently wrong and a WAL record is
-/// tens to thousands of bytes. Pinned against the PUBLISHED check value rather
-/// than against its own output, since a hand-rolled CRC that is wrong still
-/// looks like a hash.
+/// thirty lines a poor trade. It is the table-driven implementation in
+/// `checksum`, shared with the whole-file checksums, so there is one copy of the
+/// polynomial to get wrong. It used to be bit-at-a-time on the grounds that the
+/// table is the part that is easy to get silently wrong; that is answered by
+/// pinning it, not by avoiding it -- against the PUBLISHED check value rather
+/// than against its own output, and against an independent bit-at-a-time
+/// reference at every length and every table entry, since a hand-rolled CRC that
+/// is wrong still looks like a hash.
 pub(crate) fn crc32c(bytes: &[u8]) -> u32 {
-    /// 0x1EDC_6F41 bit-reversed, which is the form a right-shifting
-    /// implementation needs.
-    const POLYNOMIAL: u32 = 0x82F6_3B78;
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ POLYNOMIAL
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
+    crate::checksum::crc32c_extend(0, bytes)
 }
 
 /// FNV-1a-32, which `MRWB` segments carry.
