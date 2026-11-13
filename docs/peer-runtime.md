@@ -126,7 +126,9 @@ does not itself acknowledge or emit durable network packets. The capacity covers
 queued work, running work, and unconsumed completions; dropping work releases its
 slot. The default remains synchronous storage reads.
 Call `process_ready` after inputs. It synchronizes protobuf WAL batches before
-returning outgoing protobuf packets or invoking the committed-entry callback.
+returning outgoing protobuf packets or invoking the committed-entry callback; the
+one exception is a leader's append and heartbeat packets when an early packet sink
+is installed (see below).
 Deliver packets only to their `to` peer. A successful `propose` allocates a log
 position; it does not acknowledge commitment. A serving application acknowledges
 only its matching committed log position after successful application.
@@ -773,6 +775,25 @@ Final WAL replacement and sync remain synchronous and their cost grows with the
 retained log. Snapshot export, serialization, validation and restore may also block
 unless the application explicitly schedules them off its consensus loop. The API
 alone does not change an application's threading or latency guarantees.
+
+## Sending a leader's packets before its fsync
+
+A leader's append and heartbeat packets do not depend on its own copy of the
+Ready being durable: the core counts the leader's entry toward a quorum only after
+`process_ready` reports it persisted. `DurablePeer::set_early_packet_sink` installs
+a sink that receives those packets as soon as the Ready is taken, before the
+journal write and fsync, so replication to the followers overlaps the leader's own
+fsync instead of waiting behind it.
+
+Every packet that depends on the Ready being durable is still returned by
+`process_ready` after the sync: every packet a non-leader produces, and every
+acknowledgment. A packet given to the sink is not also returned. With no sink
+installed every packet is returned after the sync, as before.
+
+The sink runs on the thread that drives `process_ready` and must not block on it. If
+it returns an error the peer stops like any other persistence failure. A leader
+that crashes after sending but before syncing has only sent entries it never
+counted, so the followers' copies are the ones the next leader reconciles.
 
 ## Heartbeat commit bounds
 
