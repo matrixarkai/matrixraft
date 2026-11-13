@@ -2165,8 +2165,12 @@ struct TransferClock {
     elapsed: usize,
 }
 
+/// Receives a leader's outbound packets before the Ready that produced them is durable.
+pub type EarlyPacketSink = Box<dyn FnMut(Vec<PeerPacket>) -> Result<(), RaftError> + Send>;
+
 /// One actual Raft peer. Remote votes and append acknowledgments enter only via `step`.
 pub struct DurablePeer {
+    early_sink: Option<EarlyPacketSink>,
     pending_apply: u64,
     application_fetch_bytes: Option<u64>,
     bounded_apply: bool,
@@ -2258,6 +2262,7 @@ impl DurablePeer {
         Ok(Self {
             pending_apply: config.applied,
             application_fetch_bytes: tuning.application_read_budget(),
+            early_sink: None,
             bounded_apply: tuning.max_apply_bytes.is_some(),
             automatic_elections: true,
             transfer_timeout_tick: tuning.transfer_timeout_tick,
@@ -2335,6 +2340,21 @@ impl DurablePeer {
     }
     pub fn term(&self) -> u64 {
         self.raw.raft.term
+    }
+    /// Install a sink that receives a leader's append and heartbeat packets as soon as the Ready
+    /// that produced them is taken, before its journal write and fsync.
+    ///
+    /// A leader may send these early because its own copy only counts toward a quorum once it is
+    /// durable, and the core counts it only after `process_ready` reports it persisted (Raft thesis
+    /// 10.2.1). Sending them first lets replication to the followers overlap the leader's fsync
+    /// instead of waiting behind it. Packets that depend on this Ready being durable -- every
+    /// non-leader packet, and every acknowledgment -- are still returned by `process_ready` after
+    /// the sync. With no sink installed every packet is returned after the sync, as before.
+    ///
+    /// The sink runs on the thread driving `process_ready` and must not block on it. If it fails,
+    /// this peer stops like any other persistence failure.
+    pub fn set_early_packet_sink(&mut self, sink: Option<EarlyPacketSink>) {
+        self.early_sink = sink;
     }
     pub fn commit_index(&self) -> u64 {
         self.raw.raft.raft_log.committed
@@ -3672,6 +3692,12 @@ impl DurablePeer {
                     }
                 }
             }
+            let mut early = self.packets(ready.take_messages())?;
+            if !early.is_empty() && ready.snapshot().is_empty() {
+                if let Some(sink) = self.early_sink.as_mut() {
+                    sink(std::mem::take(&mut early))?;
+                }
+            }
             if !ready.snapshot().is_empty() {
                 let restore_floor = self.applied_index();
                 let snapshot = Arc::new(ready.snapshot().clone());
@@ -3745,7 +3771,7 @@ impl DurablePeer {
                 self.store
                     .refresh_cache(&self.options, self.journal.length, false)?;
             }
-            output.extend(self.packets(ready.take_messages())?);
+            output.extend(early);
             output.extend(self.packets(ready.take_persisted_messages())?);
             let entries = ready.take_committed_entries();
             if let Some(entry) = entries.last() {
@@ -5645,6 +5671,85 @@ mod tests {
         assert!(
             peer.journal.records - records >= 2,
             "the commit watermark must still be written, only without its own barrier"
+        );
+    }
+
+    /// A leader's append packets leave before its own journal write, so replication overlaps its
+    /// fsync. The Ready that wins the election carries the leader's first entry and the packets
+    /// that replicate it. The sink is told the WAL length at the moment it is called: it must still
+    /// be the length from before that Ready, because the entry is not written yet.
+    #[test]
+    fn a_leaders_append_packets_leave_before_its_journal_is_synced() {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = options(directory.path().join("peer.wal"));
+        config.voters = vec![1, 2, 3];
+        let wal = config.wal_path.clone();
+        let length = |path: &std::path::Path| std::fs::metadata(path).unwrap().len();
+        let mut peer = DurablePeer::open(config).unwrap();
+
+        // (WAL length when the sink ran, WAL length just before the Ready it belongs to, packets)
+        let seen = Arc::new(Mutex::new(Vec::<(u64, u64, usize)>::new()));
+        let before = Arc::new(AtomicU64::new(0));
+        let (log, mark, path) = (Arc::clone(&seen), Arc::clone(&before), wal.clone());
+        peer.set_early_packet_sink(Some(Box::new(move |packets| {
+            let now = std::fs::metadata(&path).unwrap().len();
+            log.lock()
+                .unwrap()
+                .push((now, mark.load(AtomicOrdering::SeqCst), packets.len()));
+            Ok(())
+        })));
+
+        before.store(length(&wal), AtomicOrdering::SeqCst);
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let mut won_after = None;
+        for kind in [
+            MessageType::MsgRequestPreVoteResponse,
+            MessageType::MsgRequestVoteResponse,
+        ] {
+            // Read the term fresh: a pre-vote asks for the next term, and once it is granted the
+            // candidate is in that term for the real vote.
+            let term =
+                peer.raw.raft.term + u64::from(kind == MessageType::MsgRequestPreVoteResponse);
+            let grant = Message {
+                msg_type: kind.into(),
+                from: 2,
+                to: 1,
+                term,
+                ..Default::default()
+            };
+            peer.step(&encode_packet(1, &grant).unwrap()).unwrap();
+            before.store(length(&wal), AtomicOrdering::SeqCst);
+            let returned = peer.process_ready(|_, _| Ok(())).unwrap();
+            if peer.raw.raft.state == raft_core::StateRole::Leader {
+                won_after = Some(returned);
+                break;
+            }
+        }
+        let returned = won_after.expect("the peer must have won an election to measure a leader");
+        let after = length(&wal);
+
+        let seen = seen.lock().unwrap();
+        assert!(
+            !seen.is_empty() && seen.iter().all(|(_, _, packets)| *packets > 0),
+            "the leader's append packets must reach the sink"
+        );
+        for (now, ready_start, _) in seen.iter() {
+            assert_eq!(
+                now, ready_start,
+                "the packets must leave before the journal write: the WAL was {now} long when they                  were sent and {ready_start} before the Ready"
+            );
+        }
+        assert!(
+            after > before.load(AtomicOrdering::SeqCst),
+            "the winning Ready must have persisted the leader's first entry"
+        );
+        assert!(
+            returned.is_empty(),
+            "a packet given to the sink must not also be returned"
         );
     }
 
