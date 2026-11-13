@@ -1507,7 +1507,11 @@ impl Journal {
         // The replacement inode is synced and locked before it becomes the WAL.
         // The stable runtime lock excludes openers across the inode replacement.
         std::fs::rename(&temporary, &options.wal_path).map_err(storage_error)?;
+        // The replacement was synced above, which is one more barrier, and the count is of the
+        // peer's lifetime, so it carries over instead of restarting with the new file.
+        let barriers = self.barriers.saturating_add(1);
         *self = replacement;
+        self.barriers = barriers;
         #[cfg(test)]
         checkpoint_crash_point("after_publish");
         #[cfg(unix)]
@@ -2375,6 +2379,24 @@ impl DurablePeer {
     pub fn persisted_wal_bytes(&self) -> Result<u64, RaftError> {
         self.healthy()?;
         Ok(self.journal.length)
+    }
+    /// Durability barriers (`fsync`s of the WAL) this peer has issued since it was opened.
+    ///
+    /// A write costs one barrier however many records it needs, so this is the number to watch
+    /// for fsync cost: it should grow by one per Ready that carries entries or changes the term
+    /// or vote, and not at all for a Ready that only advances the commit index. A checkpoint
+    /// replaces the WAL file and counts the replacement's sync as one more, so the value never
+    /// goes backwards. Not persisted: a reopened peer starts again from zero. A failed peer
+    /// refuses the value, as `persisted_wal_bytes` does.
+    pub fn persisted_wal_barriers(&self) -> Result<u64, RaftError> {
+        self.healthy()?;
+        Ok(self.journal.barriers)
+    }
+    /// Records written to the current WAL file since it was opened or last replaced by a
+    /// checkpoint, which rewrites the file and starts the count again.
+    pub fn persisted_wal_records(&self) -> Result<u64, RaftError> {
+        self.healthy()?;
+        Ok(self.journal.records)
     }
     pub fn is_leader(&self) -> bool {
         !self.failed
@@ -5753,6 +5775,32 @@ mod tests {
         );
     }
 
+    /// The public counters are what a host reads to see its own fsync cost.
+    #[test]
+    fn the_peer_reports_one_barrier_for_a_write() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut peer = DurablePeer::open(options(directory.path().join("peer.wal"))).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let (barriers, records) = (
+            peer.persisted_wal_barriers().unwrap(),
+            peer.persisted_wal_records().unwrap(),
+        );
+        assert!(barriers > 0, "opening and electing must have synced");
+
+        for _ in 0..3 {
+            peer.propose(vec![9; 128]).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+        }
+        assert_eq!(
+            peer.persisted_wal_barriers().unwrap() - barriers,
+            3,
+            "three writes must cost three barriers"
+        );
+        assert!(peer.persisted_wal_records().unwrap() - records >= 3);
+    }
+
     /// The control for the test above: a term or a vote still costs its barrier.
     ///
     /// Granting a vote moves the term and the vote and nothing else, so its Ready carries a hard
@@ -5875,9 +5923,14 @@ mod tests {
         peer.process_ready(|_, _| Ok(())).unwrap();
         let appended = check(&peer);
         assert!(appended > empty);
+        let barriers = peer.persisted_wal_barriers().unwrap();
         peer.checkpoint(vec![7; 8]).unwrap();
         let compacted = check(&peer);
         assert!(compacted < appended);
+        assert!(
+            peer.persisted_wal_barriers().unwrap() > barriers,
+            "a checkpoint syncs its replacement and the count must not go backwards"
+        );
         drop(peer);
         // Recovery discards an incomplete trailing frame before reporting size.
         OpenOptions::new()
@@ -5910,6 +5963,8 @@ mod tests {
             .is_err());
         assert_eq!(applied, 0);
         assert!(peer.persisted_wal_bytes().is_err());
+        assert!(peer.persisted_wal_barriers().is_err());
+        assert!(peer.persisted_wal_records().is_err());
         assert!(peer.tick().is_err());
         assert!(!peer.is_leader());
         drop(peer);

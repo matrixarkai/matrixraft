@@ -776,6 +776,18 @@ retained log. Snapshot export, serialization, validation and restore may also bl
 unless the application explicitly schedules them off its consensus loop. The API
 alone does not change an application's threading or latency guarantees.
 
+## Reading the fsync cost
+
+`persisted_wal_barriers()` is the number of durability barriers (`fsync`s of the
+WAL) the peer has issued since it was opened, and `persisted_wal_records()` the
+number of records written to the current WAL file. A write costs one barrier
+however many records it needs, so the first is the figure to watch: it grows by one
+per Ready that carries entries or changes the term or vote, and not at all for a
+Ready that only advances the commit index. A checkpoint replaces the WAL file; it
+counts the replacement's sync as one more barrier, so the barrier count never goes
+backwards, while the record count starts again with the new file. Neither value is
+persisted, and a failed peer refuses both, as `persisted_wal_bytes()` does.
+
 ## Sending a leader's packets before its fsync
 
 A leader's append and heartbeat packets do not depend on its own copy of the
