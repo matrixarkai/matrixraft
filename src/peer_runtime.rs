@@ -107,6 +107,13 @@ pub struct PeerTuning {
     /// Optional applied encoded-entry byte threshold for due capture requests.
     /// None keeps captures entirely manual. This is not a journal size cap.
     pub checkpoint_after_bytes: Option<u64>,
+    /// Optional WAL preallocation chunk, 4 KiB through 512 MiB. When set, the journal reserves
+    /// disk blocks ahead of its end in chunks of at least this size, so appends write into space
+    /// that is already allocated. The file length stays the logical length of the log, so
+    /// recovery is unchanged. The reserved space is disk the file holds beyond its length until
+    /// the WAL is replaced by a checkpoint, per open peer. Linux only; ignored elsewhere, and a
+    /// filesystem that cannot reserve space is tolerated. None, the default, reserves nothing.
+    pub wal_preallocate_bytes: Option<u64>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -125,6 +132,7 @@ impl Default for PeerTuning {
             max_pending_reads: 1,
             max_checkpoint_sends: None,
             checkpoint_after_bytes: None,
+            wal_preallocate_bytes: None,
         }
     }
 }
@@ -157,6 +165,9 @@ impl PeerTuning {
             || self
                 .max_log_cache_bytes
                 .is_some_and(|bytes| bytes == 0 || bytes > WAL_LIMIT)
+            || self
+                .wal_preallocate_bytes
+                .is_some_and(|bytes| !(4096..=WAL_LIMIT).contains(&bytes))
         {
             return Err(invalid("peer tuning exceeds supported bounds"));
         }
@@ -1327,6 +1338,12 @@ struct Journal {
     records: u64,
     /// The highest flushed index any record in this WAL reports; see `set_flushed_index`.
     flushed_index: u64,
+    /// End of the disk space reserved ahead of the log, and the chunk to reserve at a time; zero
+    /// chunk means no preallocation. See `PeerTuning::wal_preallocate_bytes`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    reserved: u64,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    reserve_chunk: u64,
     permitted: Vec<u64>,
     file: File,
     _lock: Arc<File>,
@@ -1468,6 +1485,8 @@ impl Journal {
             barriers: 0,
             records: 0,
             flushed_index,
+            reserved: 0,
+            reserve_chunk: 0,
         };
         if offset == 0 {
             journal.append(&batch(options, None, &[]))?;
@@ -1502,6 +1521,8 @@ impl Journal {
             barriers: 0,
             records: 0,
             flushed_index: self.flushed_index,
+            reserved: 0,
+            reserve_chunk: self.reserve_chunk,
         };
         let mut record_buffer = Vec::new();
         let mut floor_state = hs.clone();
@@ -1697,6 +1718,7 @@ impl Journal {
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
+        self.reserve(bytes);
         if !prefix.hard_state.is_empty() {
             self.write_record(&prefix)?;
         }
@@ -1785,6 +1807,7 @@ impl Journal {
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
+        self.reserve(bytes);
         if !prefix.hard_state.is_empty() {
             self.write_record(&prefix)?;
         }
@@ -1805,6 +1828,29 @@ impl Journal {
         }
         self.barriers = self.barriers.saturating_add(1);
         self.file.sync_all().map_err(storage_error)
+    }
+    /// Reserve disk blocks ahead of the end of the log, without changing the file's length, so the
+    /// next appends write into space that is already allocated. Best effort: a filesystem that
+    /// cannot reserve space only loses the benefit. Called with the bytes about to be written.
+    fn reserve(&mut self, extra: u64) {
+        #[cfg(target_os = "linux")]
+        if self.reserve_chunk != 0 {
+            let end = self.length.saturating_add(extra);
+            if end > self.reserved {
+                let start = self.reserved.max(self.length);
+                let size = end.saturating_sub(start).max(self.reserve_chunk);
+                let _ = rustix::fs::fallocate(
+                    &self.file,
+                    rustix::fs::FallocateFlags::KEEP_SIZE,
+                    start,
+                    size,
+                );
+                // Even a refusal is remembered, so an unsupported filesystem is asked once.
+                self.reserved = start.saturating_add(size);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = extra;
     }
     fn append(&mut self, batch: &WalBatch) -> Result<(), RaftError> {
         self.write_record(batch)?;
@@ -1879,6 +1925,7 @@ impl Journal {
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
+        self.reserve(24 + size as u64);
         let mut checksum = digest(&metadata[..prefix_len]);
         checksum = digest_extend(checksum, &batch.snapshot);
         checksum = digest_extend(checksum, &metadata[prefix_len..]);
@@ -1927,6 +1974,7 @@ impl Journal {
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
+        self.reserve(24 + size as u64);
         record.clear();
         record.reserve_exact(24 + size);
         record.extend_from_slice(MAGIC);
@@ -1999,6 +2047,7 @@ impl Journal {
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
+        self.reserve(24 + size as u64);
 
         let mut checksum = digest(&metadata[..prefix_len]);
         for ((start, end), entry) in fields.iter().zip(&batch.entries) {
@@ -2129,6 +2178,7 @@ impl Journal {
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
+        self.reserve(24 + size as u64);
 
         let mut checksum = digest(&metadata[..prefix_len]);
         for (field, entry) in fields.iter().zip(entries) {
@@ -2327,7 +2377,8 @@ impl DurablePeer {
             log_index: Default::default(),
             snapshot_wanted: Default::default(),
         };
-        let journal = Journal::open(&options, &store)?;
+        let mut journal = Journal::open(&options, &store)?;
+        journal.reserve_chunk = tuning.wal_preallocate_bytes.unwrap_or(0);
         let checkpoint = store.checkpoint.lock().unwrap().clone();
         let snapshot_index = checkpoint.as_ref().map_or(0, |s| s.get_metadata().index);
         // A deferred snapshot stands for state the application already holds durably, so there is
@@ -6459,6 +6510,91 @@ mod tests {
             peer.checkpoint(vec![8; 4]).is_err(),
             "a real checkpoint is not replaced again at the same index"
         );
+    }
+
+    /// Preallocation reserves disk blocks beyond the end of the log and leaves the file's length
+    /// alone, so recovery, `persisted_wal_bytes` and everything keyed to the length are unchanged.
+    #[test]
+    fn preallocation_reserves_disk_ahead_of_the_log_without_changing_its_length() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let tuning = PeerTuning {
+            wal_preallocate_bytes: Some(1 << 20),
+            ..PeerTuning::default()
+        };
+        let mut peer = DurablePeer::open_with_tuning(config.clone(), tuning).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let payloads: Vec<Vec<u8>> = (0..20u8).map(|n| vec![n; 200]).collect();
+        for payload in &payloads {
+            peer.propose(payload.clone()).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+        }
+        let length = std::fs::metadata(&config.wal_path).unwrap().len();
+        assert_eq!(
+            peer.persisted_wal_bytes().unwrap(),
+            length,
+            "the file's length must stay the logical length of the log"
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // A filesystem that cannot reserve space only loses the benefit, so the allocation is
+            // asserted only where a reservation is accepted.
+            let probe = std::fs::File::create(directory.path().join("probe")).unwrap();
+            let supported =
+                rustix::fs::fallocate(&probe, rustix::fs::FallocateFlags::KEEP_SIZE, 0, 4096)
+                    .is_ok();
+            if supported {
+                let allocated = std::fs::metadata(&config.wal_path).unwrap().blocks() * 512;
+                assert!(
+                    allocated >= (1 << 20),
+                    "the log holds {length} bytes but only {allocated} are allocated"
+                );
+            }
+        }
+
+        drop(peer);
+        let mut peer = DurablePeer::open(config).unwrap();
+        let mut delivered = Vec::new();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, data| {
+            if !data.is_empty() {
+                delivered.push(data.to_vec());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(delivered, payloads, "a preallocated WAL recovers exactly");
+    }
+
+    #[test]
+    fn a_preallocation_size_outside_its_bounds_is_refused() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for bytes in [0u64, 1, 4095, WAL_LIMIT + 1] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let tuning = PeerTuning {
+                wal_preallocate_bytes: Some(bytes),
+                ..PeerTuning::default()
+            };
+            assert!(
+                DurablePeer::open_with_tuning(config, tuning).is_err(),
+                "{bytes} bytes must be refused"
+            );
+        }
+        for bytes in [4096u64, 1 << 20, WAL_LIMIT] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let tuning = PeerTuning {
+                wal_preallocate_bytes: Some(bytes),
+                ..PeerTuning::default()
+            };
+            DurablePeer::open_with_tuning(config, tuning)
+                .unwrap_or_else(|error| panic!("{bytes} bytes must be accepted: {error:?}"));
+        }
     }
 
     /// The control for the test above: a term or a vote still costs its barrier.

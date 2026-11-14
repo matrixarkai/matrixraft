@@ -832,6 +832,23 @@ recognised by `is_deferred_snapshot` and `DEFERRED_SNAPSHOT`:
 A trim does not count toward the byte policy that schedules checkpoints, and it does not
 answer a waiting follower; only a real checkpoint does.
 
+## Reserving disk ahead of the log (opt-in, Linux)
+
+`PeerTuning::wal_preallocate_bytes` (4 KiB through 512 MiB, default `None`) makes the
+journal call `fallocate` with `KEEP_SIZE` ahead of its logical end, in chunks of at
+least that size, so appends write into blocks that are already allocated. The file's
+length stays the logical length of the log, so recovery, `persisted_wal_bytes()` and
+the WAL bound are unchanged, and a filesystem that cannot reserve space only loses the
+benefit. The reserved space is disk the file holds beyond its length, per open peer,
+until a checkpoint replaces the WAL; on other platforms the setting is ignored.
+
+Measure it before turning it on. On the one disk this was tried on, ext4 on a virtual
+disk, 256-byte single-voter writes at 8 interleaved rounds showed no gain: the median
+write took 2.78 ms with the setting off, 2.97 ms with 1 MiB and 2.90 ms with 16 MiB,
+inside the noise of a shared machine. Appends still extend the file's length, so each
+`fsync` still has to commit that change. A filesystem or device where allocating blocks
+is the expensive part may behave differently.
+
 ## Persisting many groups on one host
 
 Every `DurablePeer` owns its own WAL file and issues its own durability barrier per
