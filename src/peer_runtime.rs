@@ -54,6 +54,16 @@ const SNAPSHOT_ENCODED_LIMIT: usize = MAX_CHECKPOINT_BYTES + 64 * 1024;
 const SNAPSHOT_FRAGMENT_BYTES: usize = 1024 * 1024;
 const WAL_LIMIT: u64 = 512 * 1024 * 1024;
 const MAGIC: &[u8; 4] = b"MRPW";
+/// The data of a snapshot that records where the log now begins but carries no application state.
+///
+/// `DurablePeer::trim_log_to` writes one when the application already holds the state of the
+/// entries it drops. The peer never serves it to a lagging follower and never hands it to a restore
+/// callback; see `trim_log_to`.
+pub const DEFERRED_SNAPSHOT: &[u8] = b"matrixraft-deferred-snapshot-v1";
+/// Whether `data` is the marker a log trim leaves in place of an application snapshot.
+pub fn is_deferred_snapshot(data: &[u8]) -> bool {
+    data == DEFERRED_SNAPSHOT
+}
 
 /// Static identity and bootstrap voters. These options must match on every reopen.
 #[derive(Clone, Debug)]
@@ -764,6 +774,8 @@ struct PeerStorage {
     checkpoint: Arc<Mutex<Option<Arc<Snapshot>>>>,
     payload_directory: PathBuf,
     payload: Arc<Mutex<Option<Arc<checkpoint_file::Blob>>>>,
+    /// Raised when a follower needed a snapshot and only a deferred one existed.
+    snapshot_wanted: Arc<std::sync::atomic::AtomicBool>,
     /// What the current journal generation holds, shared by every cold reader of it. The outer
     /// cell names the current generation's index: a checkpoint swaps in a fresh one, and a reader
     /// captured earlier keeps the index of the file it is still reading.
@@ -843,9 +855,20 @@ impl Storage for PeerStorage {
         self.memory.last_index()
     }
     fn snapshot(&self, request_index: u64, _to: u64) -> raft_core::Result<Snapshot> {
-        self.checkpoint
-            .lock()
-            .unwrap()
+        let checkpoint = self.checkpoint.lock().unwrap();
+        if checkpoint
+            .as_ref()
+            .is_some_and(|snapshot| is_deferred_snapshot(&snapshot.data))
+        {
+            // The log below this point is gone and no application image replaces it yet. Say so,
+            // so the host can produce a checkpoint; the follower waits for the next attempt.
+            self.snapshot_wanted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Err(raft_core::Error::Store(
+                raft_core::StorageError::SnapshotTemporarilyUnavailable,
+            ));
+        }
+        checkpoint
             .as_ref()
             .filter(|snapshot| snapshot.get_metadata().index >= request_index)
             .map(|snapshot| snapshot.as_ref().clone())
@@ -881,6 +904,8 @@ fn validate_snapshot_for(
 }
 enum SnapshotSource {
     Journal,
+    /// A deferred snapshot written by a log trim: local, like a capture, but with no payload.
+    Trim,
     LocalCapture(Arc<checkpoint_file::Blob>),
     Received(Arc<checkpoint_file::Blob>),
 }
@@ -1026,7 +1051,16 @@ fn install_local(
     install_from(
         store,
         batch,
-        captured.map_or(SnapshotSource::Journal, SnapshotSource::LocalCapture),
+        captured.map_or_else(
+            || {
+                if is_deferred_snapshot(&snapshot.data) {
+                    SnapshotSource::Trim
+                } else {
+                    SnapshotSource::Journal
+                }
+            },
+            SnapshotSource::LocalCapture,
+        ),
         Some(snapshot),
         false,
         &mut Vec::new(),
@@ -1109,9 +1143,12 @@ fn install_decoded_with_scratch(
 ) -> Result<(), RaftError> {
     // A validated incoming payload does not authorize local compaction rules.
     // It still must not replace state below the durable commit position.
-    let local_capture = matches!(&source, SnapshotSource::LocalCapture(_));
+    let local_capture = matches!(
+        &source,
+        SnapshotSource::LocalCapture(_) | SnapshotSource::Trim
+    );
     let captured = match source {
-        SnapshotSource::Journal => None,
+        SnapshotSource::Journal | SnapshotSource::Trim => None,
         SnapshotSource::LocalCapture(payload) | SnapshotSource::Received(payload) => Some(payload),
     };
     for entry in entries
@@ -1175,7 +1212,20 @@ fn install_decoded_with_scratch(
         }
         // The core storage keeps only metadata; the application payload stays
         // in the retained checkpoint used by restoration and snapshot serving.
-        if store.cache.enabled() {
+        // The core storage refuses a snapshot that is not newer than the one it holds, so a real
+        // checkpoint taking the place of a deferred one at the same index starts it afresh, as a
+        // cache-enabled peer does for every checkpoint.
+        let replaces_marker = store
+            .checkpoint
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|old| {
+                is_deferred_snapshot(&old.data)
+                    && !is_deferred_snapshot(&snapshot.data)
+                    && old.get_metadata().index == snapshot.get_metadata().index
+            });
+        if store.cache.enabled() || replaces_marker {
             *store.wl() = Default::default();
         }
         store
@@ -2275,12 +2325,14 @@ impl DurablePeer {
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
+            snapshot_wanted: Default::default(),
         };
         let journal = Journal::open(&options, &store)?;
-        let pending_restore = store.checkpoint.lock().unwrap().clone();
-        let snapshot_index = pending_restore
-            .as_ref()
-            .map_or(0, |s| s.get_metadata().index);
+        let checkpoint = store.checkpoint.lock().unwrap().clone();
+        let snapshot_index = checkpoint.as_ref().map_or(0, |s| s.get_metadata().index);
+        // A deferred snapshot stands for state the application already holds durably, so there is
+        // nothing to restore: the peer opens with it applied and never calls the restore callback.
+        let pending_restore = checkpoint.filter(|s| !is_deferred_snapshot(&s.data));
         // Entries a durable application reported flushed are not delivered again. The floor is
         // clamped to the recovered commit index: raft requires applied <= committed, and a commit
         // watermark that did not survive only means a few entries are delivered once more.
@@ -2421,6 +2473,54 @@ impl DurablePeer {
     pub fn persisted_wal_bytes(&self) -> Result<u64, RaftError> {
         self.healthy()?;
         Ok(self.journal.length)
+    }
+    /// Drop the log at and below `index`, leaving a marker snapshot in its place, so the WAL stops
+    /// growing with entries the application no longer needs.
+    ///
+    /// `index` cannot exceed the flushed index (`set_flushed_index`): the application must already
+    /// hold the state of every entry it drops. The WAL is rewritten with a deferred snapshot at
+    /// `index`, the entries after it, the hard state and the floor, so the cost follows the
+    /// entries kept, not the log dropped. Asking for an index below the log's current start is a
+    /// no-op. Refused on a peer with durable membership, which rebuilds its configuration by
+    /// replaying committed entries.
+    ///
+    /// What replaces the dropped log is not an application image, so this is for applications
+    /// whose own state is durable. A follower that needs entries below `index` cannot be served
+    /// from the log, and the peer has no image to send it: `snapshot_wanted()` turns true, and the
+    /// host answers it by calling `checkpoint` with real application state, which replaces the
+    /// marker and lets the follower catch up. Until it does the follower waits. A reopen does not
+    /// call the restore callback for the marker, because the application already holds that state.
+    pub fn trim_log_to(&mut self, index: u64) -> Result<(), RaftError> {
+        self.healthy()?;
+        self.membership_recovered()?;
+        if !self.store.permitted.is_empty() {
+            return Err(invalid(
+                "a log trim is not supported with durable membership",
+            ));
+        }
+        if index > self.journal.flushed_index {
+            return Err(invalid(
+                "trim index is beyond what the application reported flushed",
+            ));
+        }
+        let first = self.store.first_index().map_err(storage_error)?;
+        if index < first {
+            return Ok(());
+        }
+        self.checkpoint_payload_at(
+            DEFERRED_SNAPSHOT.to_vec(),
+            None,
+            index,
+            None,
+            self.checkpoint_policy.total(),
+        )
+    }
+    /// Whether a follower has needed a snapshot since the log was trimmed and no application image
+    /// has replaced the marker. When true, call `checkpoint` with the application's state.
+    pub fn snapshot_wanted(&self) -> bool {
+        self.store
+            .snapshot_wanted
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
     /// Tell the peer that the application has durably flushed everything up to `index`, so a
     /// restart delivers only the entries after it instead of replaying the whole log.
@@ -3008,20 +3108,38 @@ impl DurablePeer {
             }),
         });
         validate_snapshot_for(&snapshot, &self.options.voters, &self.store.permitted)?;
+        let deferred = is_deferred_snapshot(&snapshot.data);
         let first = self.store.first_index().map_err(storage_error)?;
-        if index < first {
+        // A real checkpoint may take the place of a deferred one at the same index: both stand for
+        // the log up to it, and this is how the host answers `snapshot_wanted()`.
+        let replaces_marker = !deferred
+            && first.checked_sub(1) == Some(index)
+            && self
+                .store
+                .checkpoint
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|snapshot| is_deferred_snapshot(&snapshot.data));
+        if index < first && !replaces_marker {
             return Err(invalid("applied state is already checkpointed"));
         }
         let last = self.store.last_index().map_err(storage_error)?;
-        let suffix = self
-            .store
-            .entries(
-                index + 1,
-                last + 1,
-                None,
-                raft_core::GetEntriesContext::empty(false),
-            )
-            .map_err(storage_error)?;
+        // Nothing follows the checkpoint when it is at the last index. Asking the core storage for
+        // that empty range is not safe once it holds no entries at all: it reads the first entry
+        // before looking at the range.
+        let suffix = if index >= last {
+            Vec::new()
+        } else {
+            self.store
+                .entries(
+                    index + 1,
+                    last + 1,
+                    None,
+                    raft_core::GetEntriesContext::empty(false),
+                )
+                .map_err(storage_error)?
+        };
         let hs = self
             .store
             .initial_state()
@@ -3059,8 +3177,13 @@ impl DurablePeer {
             });
         if result.is_err() {
             self.failed = true;
-        } else {
+        } else if !deferred {
+            // A trim is not an application image, so it neither resets the byte policy that
+            // schedules real checkpoints nor answers a follower that is waiting for one.
             self.checkpoint_policy.published(index, applied_bytes);
+            self.store
+                .snapshot_wanted
+                .store(false, std::sync::atomic::Ordering::Relaxed);
         }
         result
     }
@@ -3984,6 +4107,7 @@ mod tests {
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
+            snapshot_wanted: Default::default(),
         };
         let mut journal = Journal::open(&options, &store).unwrap();
         // `open` writes a bootstrap record under its own barrier, so measure deltas from here.
@@ -4052,6 +4176,7 @@ mod tests {
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
+            snapshot_wanted: Default::default(),
         };
         let _reopened = Journal::open(&options, &recovered).unwrap();
         assert_eq!(
@@ -4096,6 +4221,7 @@ mod tests {
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
+            snapshot_wanted: Default::default(),
         };
         let mut journal = Journal::open(&options, &store).unwrap();
         // `open` writes a bootstrap record under its own barrier, so measure the delta from here
@@ -6166,6 +6292,172 @@ mod tests {
             peer.flushed_index().unwrap(),
             3,
             "the replacement WAL must still report the floor after a reopen"
+        );
+    }
+
+    /// Make a single-voter peer the leader and write `count` 128-byte payloads. Payload `n`
+    /// (counting from zero) lands at log index `n + 2`: the leader's own no-op takes index 1.
+    fn leader_with_payloads(config: &PeerOptions, count: usize) -> (DurablePeer, Vec<Vec<u8>>) {
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let payloads: Vec<Vec<u8>> = (0..count).map(|i| vec![(i % 251) as u8; 128]).collect();
+        for chunk in payloads.chunks(50) {
+            peer.propose_batch(chunk.to_vec()).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+        }
+        (peer, payloads)
+    }
+
+    /// A trim drops the log the application no longer needs, so the WAL stops growing with it, and
+    /// a restart resumes above the floor without handing the application anything to restore.
+    #[test]
+    fn a_trim_drops_the_log_below_the_flushed_index_and_a_restart_resumes_above_it() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let (mut peer, payloads) = leader_with_payloads(&config, 200);
+        let applied = peer.applied_index();
+        assert_eq!(applied, 201, "200 payloads after the leader's no-op");
+        let floor = applied - 10;
+        peer.set_flushed_index(floor).unwrap();
+        let before = peer.persisted_wal_bytes().unwrap();
+        assert_eq!(
+            peer.store.first_index().unwrap(),
+            1,
+            "nothing is trimmed yet"
+        );
+
+        peer.trim_log_to(floor).unwrap();
+        let after = peer.persisted_wal_bytes().unwrap();
+        assert!(
+            after * 4 < before,
+            "the WAL must shrink with the dropped log: {before} bytes -> {after}"
+        );
+        assert_eq!(peer.store.first_index().unwrap(), floor + 1);
+        drop(peer);
+
+        let mut peer = DurablePeer::open(config).unwrap();
+        assert_eq!(
+            peer.applied_index(),
+            floor,
+            "a trimmed peer reopens with the floor applied"
+        );
+        let (mut restored, mut delivered) = (0, Vec::new());
+        peer.campaign().unwrap();
+        peer.process_ready_with_snapshot(
+            |id, data| {
+                if !data.is_empty() {
+                    delivered.push((id.index, data.to_vec()));
+                }
+                Ok(())
+            },
+            |_, _| {
+                restored += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(restored, 0, "the marker is never handed to the application");
+        assert!(delivered.iter().all(|(index, _)| *index > floor));
+        assert_eq!(
+            delivered
+                .into_iter()
+                .map(|(_, data)| data)
+                .collect::<Vec<_>>(),
+            payloads[payloads.len() - 10..].to_vec(),
+            "exactly the entries after the floor are delivered, once each"
+        );
+    }
+
+    #[test]
+    fn a_trim_is_refused_past_the_flushed_index_and_ignored_below_the_log_start() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let (mut peer, _) = leader_with_payloads(&config, 60);
+        assert!(
+            peer.trim_log_to(1).is_err(),
+            "with no floor reported nothing may be dropped"
+        );
+        peer.set_flushed_index(40).unwrap();
+        assert!(
+            peer.trim_log_to(41).is_err(),
+            "the application has not reported entry 41 flushed"
+        );
+        peer.trim_log_to(40).unwrap();
+        assert_eq!(peer.store.first_index().unwrap(), 41);
+
+        let (bytes, barriers) = (
+            peer.persisted_wal_bytes().unwrap(),
+            peer.persisted_wal_barriers().unwrap(),
+        );
+        for index in [40, 10, 1, 0] {
+            peer.trim_log_to(index).unwrap();
+        }
+        assert_eq!(
+            peer.persisted_wal_bytes().unwrap(),
+            bytes,
+            "no-ops write nothing"
+        );
+        assert_eq!(peer.persisted_wal_barriers().unwrap(), barriers);
+        assert_eq!(peer.store.first_index().unwrap(), 41);
+    }
+
+    /// The marker stands for state the application holds, not for an image a follower could
+    /// restore, so it is never served. The host is told, and a real checkpoint answers it.
+    #[test]
+    fn a_follower_is_not_given_the_marker_and_a_real_checkpoint_answers_the_request() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let (mut peer, _) = leader_with_payloads(&config, 60);
+        peer.set_flushed_index(40).unwrap();
+        assert!(!peer.snapshot_wanted());
+        peer.trim_log_to(40).unwrap();
+        assert!(
+            !peer.snapshot_wanted(),
+            "nobody has asked for a snapshot yet, so nothing is wanted"
+        );
+
+        assert!(matches!(
+            peer.store.snapshot(0, 2),
+            Err(raft_core::Error::Store(
+                raft_core::StorageError::SnapshotTemporarilyUnavailable
+            ))
+        ));
+        assert!(
+            peer.snapshot_wanted(),
+            "the refusal asks the host for an image"
+        );
+
+        peer.checkpoint(vec![9; 4]).unwrap();
+        assert!(
+            !peer.snapshot_wanted(),
+            "a real checkpoint answers the request"
+        );
+        assert_eq!(peer.store.snapshot(0, 2).unwrap().data, vec![9; 4]);
+    }
+
+    /// The host often trims at its current applied index and then answers the request for an image
+    /// at that same index, so a real checkpoint must be able to replace the marker there.
+    #[test]
+    fn a_real_checkpoint_replaces_the_marker_at_the_same_index() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let (mut peer, _) = leader_with_payloads(&config, 60);
+        let applied = peer.applied_index();
+        peer.set_flushed_index(applied).unwrap();
+        peer.trim_log_to(applied).unwrap();
+        assert_eq!(peer.store.first_index().unwrap(), applied + 1);
+
+        peer.checkpoint(vec![7; 4]).unwrap();
+        assert_eq!(peer.store.snapshot(0, 2).unwrap().data, vec![7; 4]);
+        assert_eq!(peer.store.first_index().unwrap(), applied + 1);
+        assert!(
+            peer.checkpoint(vec![8; 4]).is_err(),
+            "a real checkpoint is not replaced again at the same index"
         );
     }
 

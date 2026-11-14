@@ -805,6 +805,33 @@ A peer with durable membership refuses it: that peer rebuilds its configuration 
 replaying committed entries, which a floor would skip. The floor shortens replay;
 it does not trim the WAL, which still grows until a checkpoint replaces it.
 
+## Trimming the log below the flushed index
+
+`set_flushed_index(n)` shortens replay but the WAL still holds every entry until a
+checkpoint replaces it. An application whose own state is durable can also drop that
+log with `trim_log_to(n)`, where `n` is at or below the flushed index: the WAL is
+rewritten with a marker snapshot at `n`, the entries after it, the hard state and the
+floor, so the cost follows the entries kept, not the log dropped. A value below the log's
+current start is a no-op, a value past the flushed index is refused, and a peer with
+durable membership refuses it, as it does `set_flushed_index`.
+
+The marker is not an application image. It records where the log now begins, and it is
+recognised by `is_deferred_snapshot` and `DEFERRED_SNAPSHOT`:
+
+- A reopen starts with the marker's index applied and never calls the restore callback
+  for it, because the application already holds that state. Applications without a
+  durable state machine must not use the trim.
+- The peer never serves it. A follower that needs entries below `n` cannot be given them
+  from the log, and the peer has no image to send, so it waits and `snapshot_wanted()`
+  turns true.
+- The host answers `snapshot_wanted()` by calling `checkpoint` with its application
+  state, at its applied index. That replaces the marker, including at the marker's own
+  index, and the follower then catches up through the usual snapshot transfer. Until the
+  host does, the follower stays behind.
+
+A trim does not count toward the byte policy that schedules checkpoints, and it does not
+answer a waiting follower; only a real checkpoint does.
+
 ## Persisting many groups on one host
 
 Every `DurablePeer` owns its own WAL file and issues its own durability barrier per
