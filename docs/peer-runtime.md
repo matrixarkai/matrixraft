@@ -805,6 +805,38 @@ A peer with durable membership refuses it: that peer rebuilds its configuration 
 replaying committed entries, which a floor would skip. The floor shortens replay;
 it does not trim the WAL, which still grows until a checkpoint replaces it.
 
+## Persisting many groups on one host
+
+Every `DurablePeer` owns its own WAL file and issues its own durability barrier per
+Ready that needs one, so a host running many groups pays one `fsync` per group per
+round. How the host drives those groups matters far more than the number of files.
+
+A micro-benchmark of the filesystem call alone (not of `DurablePeer` end to end)
+measured the cost of making one 340-byte record per group durable, per round, on one
+ext4 disk with 16 CPUs, median of six interleaved repetitions:
+
+| groups | one thread, one file each | one thread per file | one shared file, one `fsync` |
+| --- | --- | --- | --- |
+| 1 | 2.9 ms | 2.9 ms | 2.8 ms |
+| 4 | 11.3 ms | 3.4 ms | 3.1 ms |
+| 16 | 70.3 ms | 10.8 ms | 4.9 ms |
+| 64 | 271 ms | 14.1 ms | 5.3 ms |
+
+One thread working through the groups in turn is linear in the group count, about
+4 ms per group here. Giving each group's `process_ready` its own thread brought 64
+groups from 271 ms to 14 ms, because the filesystem coalesces concurrent `fsync`s of
+different files into one journal commit. Sharing a single WAL file across groups, which
+this library does not do, added a further 2.6x at 64 groups and about 1.1x at four or
+fewer. A `DurablePeer` is `Send` and independent of every other peer, so a host can run
+`process_ready` for different groups on different threads with no library support;
+each peer still needs one thread at a time, because `process_ready` takes `&mut self`.
+
+Treat the figures as a shape rather than a promise. They come from one disk, a
+filesystem that coalesces concurrent `fsync`s (others, and some devices, may not), the
+`fsync` call alone with no consensus work or contention, and a machine shared with
+other builds. Measure your own storage with `persisted_wal_barriers()` and wall-clock
+time around `process_ready` before relying on the ratios.
+
 ## Reading the fsync cost
 
 `persisted_wal_barriers()` is the number of durability barriers (`fsync`s of the
