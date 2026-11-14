@@ -2462,6 +2462,85 @@ fn checkpoint_catches_up_a_lagging_voter_and_all_peers_recover() {
     assert_eq!(apps[&1].restored, 1);
     assert_eq!(apps[&3].restored, 1);
 }
+/// A leader whose application is durable trims its log. A voter that was cut off and needs entries
+/// the log no longer holds must not be handed the marker as application state. It waits, the host
+/// is told, and once the host supplies a real checkpoint the voter catches up.
+#[test]
+fn a_trimmed_log_holds_a_lagging_voter_until_the_host_supplies_a_checkpoint() {
+    let dir = Directory::new();
+    let mut peers = peers(&dir);
+    let mut apps = BTreeMap::new();
+    peers.get_mut(&1).unwrap().campaign().unwrap();
+    pump_checkpoints(&mut peers, &mut apps, None);
+    for value in 1u64..=32 {
+        peers
+            .get_mut(&1)
+            .unwrap()
+            .propose(value.to_be_bytes().to_vec())
+            .unwrap();
+        pump_checkpoints(&mut peers, &mut apps, Some(3));
+    }
+    assert_eq!(apps[&1].value, 32);
+    assert_eq!(apps[&3].value, 0, "voter 3 was cut off for every write");
+
+    // The leader's application is durable through everything it applied, so it drops that log.
+    let path = dir.options(1, vec![1, 2, 3]).wal_path;
+    let before = std::fs::metadata(&path).unwrap().len();
+    let leader = peers.get_mut(&1).unwrap();
+    let applied = leader.applied_index();
+    leader.set_flushed_index(applied).unwrap();
+    leader.trim_log_to(applied).unwrap();
+    assert!(
+        std::fs::metadata(&path).unwrap().len() < before,
+        "the trim must shrink the WAL"
+    );
+    assert!(!leader.snapshot_wanted(), "nobody has needed an image yet");
+
+    // Voter 3 reconnects. It needs entries the leader no longer has, and the leader has no
+    // application image to send: it must wait, and the host must be asked for one.
+    for _ in 0..10 {
+        peers.get_mut(&1).unwrap().tick().unwrap();
+        pump_checkpoints(&mut peers, &mut apps, None);
+    }
+    assert_eq!(
+        apps[&3].value, 0,
+        "the marker must never reach a follower as application state"
+    );
+    assert_eq!(apps[&3].restored, 0);
+    assert!(
+        peers[&1].snapshot_wanted(),
+        "the leader must ask the host for a real checkpoint"
+    );
+
+    // The host answers with its application state at the same index, and voter 3 catches up.
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .checkpoint(32u64.to_be_bytes().to_vec())
+        .unwrap();
+    assert!(!peers[&1].snapshot_wanted());
+    for _ in 0..10 {
+        peers.get_mut(&1).unwrap().tick().unwrap();
+        pump_checkpoints(&mut peers, &mut apps, None);
+    }
+    assert_eq!(apps[&3].value, 32);
+    assert_eq!(apps[&3].restored, 1);
+
+    // Everyone keeps replicating, and the whole group recovers from a restart.
+    peers
+        .get_mut(&1)
+        .unwrap()
+        .propose(33u64.to_be_bytes().to_vec())
+        .unwrap();
+    pump_checkpoints(&mut peers, &mut apps, None);
+    for _ in 0..3 {
+        peers.get_mut(&1).unwrap().tick().unwrap();
+        pump_checkpoints(&mut peers, &mut apps, None);
+    }
+    for id in 1..=3 {
+        assert_eq!(apps[&id].value, 33, "voter {id}");
+    }
+}
 #[test]
 fn checkpoint_preserves_an_uncommitted_suffix_without_applying_it_on_restart() {
     let dir = Directory::new();
