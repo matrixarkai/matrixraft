@@ -14,7 +14,7 @@ documentation = "https://docs.rs/matrixraft"
 exclude = ["/scripts", "/.github"]
 
 [features]
-peer-runtime = ["dep:raft-core", "dep:slog", "dep:fs2", "dep:tempfile"]
+peer-runtime = ["dep:raft-core", "dep:slog", "dep:fs2", "dep:tempfile", "dep:rustix"]
 
 [dependencies]
 raft-core = { package = "raft", git = "https://github.com/tikv/raft-rs", rev = "ad13f3d90780f53aea2488c6a4b76c0d334bf136", optional = true, default-features = false, features = ["prost-codec"] }
@@ -30,6 +30,10 @@ tempfile = { version = "3.27.0", optional = true }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Safe `fallocate` for WAL preallocation. Already in the dependency tree through `tempfile`.
+rustix = { version = "1", optional = true, default-features = false, features = ["fs", "std"] }
 
 [package.metadata.docs.rs]
 all-features = true
