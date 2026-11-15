@@ -30,7 +30,7 @@ mod checkpoint_file;
 mod checkpoint_policy;
 #[path = "peer_log_reader.rs"]
 mod log_reader;
-pub use log_reader::PeerLogReader;
+pub use log_reader::{PeerLogReader, ScrubStep};
 #[path = "peer_async_reads.rs"]
 mod async_reads;
 #[path = "peer_log_cache.rs"]
@@ -7357,6 +7357,81 @@ mod tests {
         }
         ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
         println!("median off/on ratio {:.2}", ratios[ratios.len() / 2]);
+    }
+
+    /// Group commit: a write costs one barrier, a batch of writes that shares a Ready costs one
+    /// barrier, and a commit advance costs none, in the zero-tail layout exactly as in the
+    /// original. The zero fill syncs only when it extends the file, never per write.
+    #[test]
+    fn both_layouts_cost_one_barrier_per_ready_whatever_it_carries() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for tuning in [PeerTuning::default(), zero_tuning()] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let mut peer = DurablePeer::open_with_tuning(config, tuning).unwrap();
+            peer.campaign().unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            let start = peer.persisted_wal_barriers().unwrap();
+            for i in 0..3u8 {
+                peer.propose(vec![i; 64]).unwrap();
+                peer.process_ready(|_, _| Ok(())).unwrap();
+            }
+            assert_eq!(
+                peer.persisted_wal_barriers().unwrap() - start,
+                3,
+                "three writes must cost three barriers"
+            );
+            let before = peer.persisted_wal_barriers().unwrap();
+            let batch: Vec<Vec<u8>> = (0..200u8).map(|i| vec![i; 64]).collect();
+            peer.propose_batch(batch).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            assert_eq!(
+                peer.persisted_wal_barriers().unwrap() - before,
+                1,
+                "200 entries in one Ready must share one barrier"
+            );
+        }
+    }
+
+    /// A scrub walks sealed records in bounded steps, finds damage reads would not, and stops at
+    /// the log's own end in a zero-tail journal, never walking its zero fill.
+    #[test]
+    fn a_scrub_walks_in_bounded_steps_and_finds_damage_in_both_layouts() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for tuning in [PeerTuning::default(), zero_tuning()] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let mut peer = DurablePeer::open_with_tuning(config.clone(), tuning).unwrap();
+            peer.campaign().unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            for i in 0..50u8 {
+                peer.propose(vec![i; 300]).unwrap();
+                peer.process_ready(|_, _| Ok(())).unwrap();
+            }
+            let logical = peer.persisted_wal_bytes().unwrap();
+            let mut reader = peer.capture_log_reader().unwrap();
+            let (mut at, mut steps) = (0, 0);
+            loop {
+                let step = reader.scrub_step(at, 1000).unwrap();
+                assert!(step.next > at, "a step must make progress");
+                assert!(step.next - at < 1000 + 1024, "a step overshoots by one record at most");
+                at = step.next;
+                steps += 1;
+                if step.done {
+                    break;
+                }
+            }
+            assert_eq!(at, logical, "the scrub covers the log and not the file");
+            assert!(steps > 10);
+            assert_eq!(reader.scrub(1 << 30).unwrap(), logical);
+            // Damage a record no read has touched since.
+            let mut bytes = std::fs::read(&config.wal_path).unwrap();
+            bytes[(logical / 2) as usize] ^= 1;
+            std::fs::write(&config.wal_path, &bytes).unwrap();
+            let mut damaged = peer.capture_log_reader().unwrap();
+            assert!(damaged.scrub(1 << 30).is_err(), "damage went unnoticed");
+            assert!(damaged.scrub_step(logical + 1, 10).is_err());
+        }
     }
 
     #[test]
