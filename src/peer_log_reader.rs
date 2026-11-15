@@ -207,18 +207,28 @@ impl PeerLogReader {
             }
             let mut header = [0; 24];
             input.read_exact(&mut header).map_err(storage_error)?;
-            if &header[..4] != MAGIC
-                || digest(&header[..8]) != u64::from_be_bytes(header[8..16].try_into().unwrap())
-            {
+            let tail = match &header[..4] {
+                magic if magic == MAGIC => 0u64,
+                magic if magic == MAGIC_ZERO_TAIL => 1,
+                _ => return Err(storage_error("captured peer log header checksum mismatch")),
+            };
+            if digest(&header[..8]) != u64::from_be_bytes(header[8..16].try_into().unwrap()) {
                 return Err(storage_error("captured peer log header checksum mismatch"));
             }
             let size = u32::from_be_bytes(header[4..8].try_into().unwrap()) as usize;
-            if size == 0 || size > LIMIT || size as u64 > remaining - 24 {
+            if size == 0 || size > LIMIT || size as u64 + tail > remaining - 24 {
                 return Err(storage_error("invalid captured peer log record size"));
             }
             bytes.resize(size, 0);
             input.read_exact(&mut bytes).map_err(storage_error)?;
-            remaining -= 24 + size as u64;
+            remaining -= 24 + size as u64 + tail;
+            if tail == 1 {
+                let mut last = [0u8; 1];
+                input.read_exact(&mut last).map_err(storage_error)?;
+                if last[0] != 0 && last[0] != FRAME_END {
+                    return Err(storage_error("captured peer log frame terminator damaged"));
+                }
+            }
             if digest(&bytes) != u64::from_be_bytes(header[16..24].try_into().unwrap()) {
                 return Err(storage_error("captured peer log payload checksum mismatch"));
             }
@@ -294,18 +304,28 @@ impl PeerLogReader {
         }
         let mut header = [0; 24];
         input.read_exact(&mut header).map_err(storage_error)?;
-        if &header[..4] != MAGIC
-            || digest(&header[..8]) != u64::from_be_bytes(header[8..16].try_into().unwrap())
-        {
+        let tail = match &header[..4] {
+            magic if magic == MAGIC => 0u64,
+            magic if magic == MAGIC_ZERO_TAIL => 1,
+            _ => return Err(storage_error("captured peer log header checksum mismatch")),
+        };
+        if digest(&header[..8]) != u64::from_be_bytes(header[8..16].try_into().unwrap()) {
             return Err(storage_error("captured peer log header checksum mismatch"));
         }
         let size = u32::from_be_bytes(header[4..8].try_into().unwrap()) as usize;
-        if size == 0 || size > LIMIT || size as u64 > *remaining - 24 {
+        if size == 0 || size > LIMIT || size as u64 + tail > *remaining - 24 {
             return Err(storage_error("invalid captured peer log record size"));
         }
         bytes.resize(size, 0);
         input.read_exact(bytes).map_err(storage_error)?;
-        *remaining -= 24 + size as u64;
+        *remaining -= 24 + size as u64 + tail;
+        if tail == 1 {
+            let mut last = [0u8; 1];
+            input.read_exact(&mut last).map_err(storage_error)?;
+            if last[0] != 0 && last[0] != FRAME_END {
+                return Err(storage_error("captured peer log frame terminator damaged"));
+            }
+        }
         if digest(bytes) != u64::from_be_bytes(header[16..24].try_into().unwrap()) {
             return Err(storage_error("captured peer log payload checksum mismatch"));
         }
@@ -325,7 +345,7 @@ impl PeerLogReader {
                 "captured peer log identity or encoding mismatch",
             ));
         }
-        Ok((record, wire, size))
+        Ok((record, wire, size + tail as usize))
     }
 
     /// Validate and index every record this reader can see that the index has not yet covered.
