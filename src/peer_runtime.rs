@@ -7300,6 +7300,65 @@ mod tests {
             assert!(result.is_err(), "{bytes}");
         }
     }
+    /// Per-write latency of a single voter with and without the zero-tail layout, interleaved in
+    /// both orders. Run with `--ignored --nocapture`; prints microseconds per write and the file
+    /// length against the log length.
+    #[test]
+    #[ignore]
+    fn zero_fill_write_latency_ab() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let rounds: usize = std::env::var("AB_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+        let writes: usize = std::env::var("AB_WRITES").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+        let run = |zero: bool| -> (f64, u64, u64) {
+            let directory = tempfile::tempdir_in(std::env::var("AB_DIR").unwrap_or("/tmp".into())).unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let tuning = if zero {
+                PeerTuning {
+                    wal_zero_fill_bytes: Some(32 << 20),
+                    ..PeerTuning::default()
+                }
+            } else {
+                PeerTuning::default()
+            };
+            let mut peer = DurablePeer::open_with_tuning(config.clone(), tuning).unwrap();
+            peer.campaign().unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            // The first write pays the fill; it is outside the timing.
+            peer.propose(vec![0; 256]).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            let mut times = Vec::with_capacity(writes);
+            for i in 0..writes {
+                let start = std::time::Instant::now();
+                peer.propose(vec![(i % 251) as u8; 256]).unwrap();
+                peer.process_ready(|_, _| Ok(())).unwrap();
+                times.push(start.elapsed().as_secs_f64() * 1e6);
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (
+                times[times.len() / 2],
+                peer.persisted_wal_bytes().unwrap(),
+                std::fs::metadata(&config.wal_path).unwrap().len(),
+            )
+        };
+        let mut ratios = Vec::new();
+        for round in 0..rounds {
+            let (off, on) = if round % 2 == 0 {
+                let off = run(false);
+                (off, run(true))
+            } else {
+                let on = run(true);
+                (run(false), on)
+            };
+            println!(
+                "round {round}: off {:.0} us (log {} file {}) on {:.0} us (log {} file {}) ratio {:.2}",
+                off.0, off.1, off.2, on.0, on.1, on.2, off.0 / on.0
+            );
+            ratios.push(off.0 / on.0);
+        }
+        ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("median off/on ratio {:.2}", ratios[ratios.len() / 2]);
+    }
+
     #[test]
     fn canceling_ready_reads_releases_core_confirmations() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();
