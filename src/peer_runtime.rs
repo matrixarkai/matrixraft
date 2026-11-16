@@ -1622,6 +1622,8 @@ impl Journal {
             zero_chunk,
             physical: length,
         };
+        // Fill the first chunk now, while the peer is not serving, so no request waits on it.
+        journal.prefill()?;
         if offset == 0 {
             journal.append(&batch(options, None, &[]))?;
         }
@@ -1981,6 +1983,19 @@ impl Journal {
     }
     fn frame(&self, size: usize) -> u64 {
         self.overhead() + size as u64
+    }
+    /// Zero-fill one chunk ahead of the log if the file does not already hold that much, so the
+    /// fill is paid when the journal opens and not by a write. A later refill, once a chunk of log
+    /// has been written, is still paid by the write that needs it.
+    fn prefill(&mut self) -> Result<(), RaftError> {
+        if self.chain && self.zero_chunk != 0 {
+            let target = self.length.saturating_add(self.zero_chunk);
+            if target > self.physical {
+                zero_range(&self.file, self.physical, target)?;
+                self.physical = target;
+            }
+        }
+        Ok(())
     }
     /// Make room for `extra` more bytes of log. A zero-tail journal fills the file with zeros ahead
     /// of the log, so appends overwrite space that already exists and no append changes the
