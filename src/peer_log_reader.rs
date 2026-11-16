@@ -314,7 +314,9 @@ impl PeerLogReader {
             voters: &self.voters,
             permitted: &self.permitted,
         };
-        self.file.seek(SeekFrom::Start(from)).map_err(storage_error)?;
+        self.file
+            .seek(SeekFrom::Start(from))
+            .map_err(storage_error)?;
         let mut remaining = self.length - from;
         let mut input = (&mut self.file).take(remaining);
         let mut at = from;

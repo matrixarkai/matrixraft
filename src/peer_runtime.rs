@@ -1355,7 +1355,8 @@ fn zero_scan(file: &mut File, from: u64, to: u64) -> Result<u64, RaftError> {
     let mut last = from;
     while at < to {
         let want = ((to - at) as usize).min(buffer.len());
-        file.read_exact(&mut buffer[..want]).map_err(storage_error)?;
+        file.read_exact(&mut buffer[..want])
+            .map_err(storage_error)?;
         if let Some(position) = buffer[..want].iter().rposition(|byte| *byte != 0) {
             last = at + position as u64 + 1;
         }
@@ -1373,7 +1374,8 @@ fn zero_range(file: &File, from: u64, to: u64) -> Result<(), RaftError> {
         let mut at = from;
         while at < to {
             let want = ((to - at) as usize).min(zeros.len());
-            file.write_all_at(&zeros[..want], at).map_err(storage_error)?;
+            file.write_all_at(&zeros[..want], at)
+                .map_err(storage_error)?;
             at += want as u64;
         }
         file.sync_data().map_err(storage_error)
@@ -1381,7 +1383,9 @@ fn zero_range(file: &File, from: u64, to: u64) -> Result<(), RaftError> {
     #[cfg(not(unix))]
     {
         let _ = (file, from, to);
-        Err(storage_error("zero-filled WAL preallocation needs a unix file"))
+        Err(storage_error(
+            "zero-filled WAL preallocation needs a unix file",
+        ))
     }
 }
 struct Journal {
@@ -1459,7 +1463,13 @@ impl Journal {
             chain = &first == MAGIC_ZERO_TAIL;
         }
         // The file of a zero-tail journal is longer than its log, by at most one fill chunk.
-        if length > if chain { WAL_LIMIT.saturating_mul(2) } else { WAL_LIMIT } {
+        if length
+            > if chain {
+                WAL_LIMIT.saturating_mul(2)
+            } else {
+                WAL_LIMIT
+            }
+        {
             return Err(storage_error("peer WAL exceeds size limit"));
         }
         let expected_magic = if chain { MAGIC_ZERO_TAIL } else { MAGIC };
@@ -7021,10 +7031,7 @@ mod tests {
     }
 
     /// Reopen as a single voter and return every non-empty payload the application is handed.
-    fn recover_payloads(
-        config: &PeerOptions,
-        campaign: bool,
-    ) -> Result<Vec<Vec<u8>>, RaftError> {
+    fn recover_payloads(config: &PeerOptions, campaign: bool) -> Result<Vec<Vec<u8>>, RaftError> {
         let mut peer = DurablePeer::open_with_tuning(config.clone(), zero_tuning())?;
         if campaign {
             peer.campaign()?;
@@ -7042,9 +7049,7 @@ mod tests {
     /// A zero-tail peer with `acked` payloads written and acknowledged, then one more write whose
     /// bytes are returned separately: `(config, acknowledged, logical end before the last write,
     /// logical end after it, file image after it)`.
-    fn zero_tail_fixture(
-        label: &str,
-    ) -> (PeerOptions, Vec<Vec<u8>>, u64, u64, Vec<u8>) {
+    fn zero_tail_fixture(label: &str) -> (PeerOptions, Vec<Vec<u8>>, u64, u64, Vec<u8>) {
         let config = options(path(label));
         let mut peer = DurablePeer::open_with_tuning(config.clone(), zero_tuning()).unwrap();
         peer.campaign().unwrap();
@@ -7075,7 +7080,10 @@ mod tests {
     fn a_zero_tail_journal_recovers_every_acknowledged_record_after_a_crash_at_any_byte() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();
         let (config, acked, before, after, full) = zero_tail_fixture("zt-cut");
-        assert!(full.len() as u64 > after, "the file must be longer than the log");
+        assert!(
+            full.len() as u64 > after,
+            "the file must be longer than the log"
+        );
         for cut in before..after {
             let mut image = full.clone();
             image[cut as usize..].fill(0);
@@ -7093,7 +7101,11 @@ mod tests {
             std::fs::write(&config.wal_path, &image).unwrap();
             let recovered = recover_payloads(&config, true)
                 .unwrap_or_else(|error| panic!("cut {cut}: campaign refused: {error:?}"));
-            assert_eq!(&recovered[..acked.len()], &acked[..], "cut {cut}: acknowledged lost");
+            assert_eq!(
+                &recovered[..acked.len()],
+                &acked[..],
+                "cut {cut}: acknowledged lost"
+            );
             assert!(
                 recovered.len() <= acked.len() + 1
                     && recovered[acked.len()..].iter().all(|p| p == b"new value"),
@@ -7109,7 +7121,11 @@ mod tests {
             drop(peer);
             let again = recover_payloads(&config, false)
                 .unwrap_or_else(|error| panic!("cut {cut}: reopen after writing: {error:?}"));
-            assert_eq!(&again[..acked.len()], &acked[..], "cut {cut}: acknowledged lost later");
+            assert_eq!(
+                &again[..acked.len()],
+                &acked[..],
+                "cut {cut}: acknowledged lost later"
+            );
             assert_eq!(again.last().unwrap(), b"after", "cut {cut}");
         }
         remove_wal(&config);
@@ -7130,7 +7146,11 @@ mod tests {
                 DurablePeer::open_with_tuning(config.clone(), zero_tuning()).is_err(),
                 "byte {index} of {after}: damage to an acknowledged record was accepted"
             );
-            assert_eq!(std::fs::read(&config.wal_path).unwrap(), damaged, "byte {index}");
+            assert_eq!(
+                std::fs::read(&config.wal_path).unwrap(),
+                damaged,
+                "byte {index}"
+            );
         }
         // Every byte of the acknowledged log set to zero in turn, as a zeroed sector would be.
         for start in (24..after as usize).step_by(7) {
@@ -7191,18 +7211,33 @@ mod tests {
         for payload in &payloads[1..] {
             peer.propose(payload.clone()).unwrap();
             peer.process_ready(|_, _| Ok(())).unwrap();
-            assert_eq!(file_length(&config), physical, "an append changed the file length");
+            assert_eq!(
+                file_length(&config),
+                physical,
+                "an append changed the file length"
+            );
         }
         let logical = peer.persisted_wal_bytes().unwrap();
-        assert!(logical < physical, "the logical length must not be the file length");
+        assert!(
+            logical < physical,
+            "the logical length must not be the file length"
+        );
         let sync_free_barriers = peer.journal.barriers;
         assert!(sync_free_barriers > 0);
         drop(peer);
-        assert_eq!(file_length(&config), physical, "a clean close changed the file length");
+        assert_eq!(
+            file_length(&config),
+            physical,
+            "a clean close changed the file length"
+        );
         // Without the switch: the layout is read from the file.
         let mut peer = DurablePeer::open(config.clone()).unwrap();
         assert_eq!(peer.persisted_wal_bytes().unwrap(), logical);
-        assert_eq!(file_length(&config), physical, "an open truncated the zero tail");
+        assert_eq!(
+            file_length(&config),
+            physical,
+            "an open truncated the zero tail"
+        );
         let mut delivered = Vec::new();
         peer.campaign().unwrap();
         peer.process_ready(|_, data| {
@@ -7244,7 +7279,10 @@ mod tests {
         drop(peer);
         assert_eq!(&std::fs::read(&config.wal_path).unwrap()[..4], MAGIC);
         assert_ne!(MAGIC, MAGIC_ZERO_TAIL);
-        assert_ne!(FRAME_END, 0, "a zero terminator could not tell a cut write from a whole one");
+        assert_ne!(
+            FRAME_END, 0,
+            "a zero terminator could not tell a cut write from a whole one"
+        );
     }
 
     /// A trim rewrites the WAL: the replacement is a zero-tail journal of the log kept, its logical
@@ -7270,7 +7308,10 @@ mod tests {
         assert!(after * 4 < before, "{before} -> {after}");
         let physical = std::fs::metadata(&config.wal_path).unwrap().len();
         assert!(physical > after, "the replacement is a zero-tail journal");
-        assert_eq!(&std::fs::read(&config.wal_path).unwrap()[..4], MAGIC_ZERO_TAIL);
+        assert_eq!(
+            &std::fs::read(&config.wal_path).unwrap()[..4],
+            MAGIC_ZERO_TAIL
+        );
         peer.propose(b"later".to_vec()).unwrap();
         peer.process_ready(|_, _| Ok(())).unwrap();
         let end = peer.persisted_wal_bytes().unwrap();
@@ -7291,7 +7332,8 @@ mod tests {
         let mut last = 0usize;
         while (offset as u64) < after {
             last = offset;
-            let size = u32::from_be_bytes(image[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            let size =
+                u32::from_be_bytes(image[offset + 4..offset + 8].try_into().unwrap()) as usize;
             offset += 24 + size + 1;
         }
         image[last..last + 4].copy_from_slice(MAGIC);
@@ -7322,10 +7364,17 @@ mod tests {
     #[ignore]
     fn zero_fill_write_latency_ab() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();
-        let rounds: usize = std::env::var("AB_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
-        let writes: usize = std::env::var("AB_WRITES").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+        let rounds: usize = std::env::var("AB_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+        let writes: usize = std::env::var("AB_WRITES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(400);
         let run = |zero: bool| -> (f64, u64, u64) {
-            let directory = tempfile::tempdir_in(std::env::var("AB_DIR").unwrap_or("/tmp".into())).unwrap();
+            let directory =
+                tempfile::tempdir_in(std::env::var("AB_DIR").unwrap_or("/tmp".into())).unwrap();
             let config = options(directory.path().join("peer.wal"));
             let tuning = if zero {
                 PeerTuning {
@@ -7429,7 +7478,10 @@ mod tests {
             loop {
                 let step = reader.scrub_step(at, 1000).unwrap();
                 assert!(step.next > at, "a step must make progress");
-                assert!(step.next - at < 1000 + 1024, "a step overshoots by one record at most");
+                assert!(
+                    step.next - at < 1000 + 1024,
+                    "a step overshoots by one record at most"
+                );
                 at = step.next;
                 steps += 1;
                 if step.done {
