@@ -30,7 +30,7 @@ mod checkpoint_file;
 mod checkpoint_policy;
 #[path = "peer_log_reader.rs"]
 mod log_reader;
-pub use log_reader::PeerLogReader;
+pub use log_reader::{PeerLogReader, ScrubStep};
 #[path = "peer_async_reads.rs"]
 mod async_reads;
 #[path = "peer_log_cache.rs"]
@@ -54,6 +54,14 @@ const SNAPSHOT_ENCODED_LIMIT: usize = MAX_CHECKPOINT_BYTES + 64 * 1024;
 const SNAPSHOT_FRAGMENT_BYTES: usize = 1024 * 1024;
 const WAL_LIMIT: u64 = 512 * 1024 * 1024;
 const MAGIC: &[u8; 4] = b"MRPW";
+/// Frame magic of a journal laid out for zero-filled preallocation. Its frames end in one
+/// `FRAME_END` byte after the payload, which is what lets recovery tell a write that was cut short
+/// from a record that was damaged after it was acknowledged. A reader that does not know this magic
+/// refuses the file at its first header.
+const MAGIC_ZERO_TAIL: &[u8; 4] = b"MRPZ";
+/// Last byte of every frame in a zero-tail journal. Never zero, so a frame whose last byte is zero
+/// was not written to its end.
+const FRAME_END: u8 = 0xA5;
 /// The data of a snapshot that records where the log now begins but carries no application state.
 ///
 /// `DurablePeer::trim_log_to` writes one when the application already holds the state of the
@@ -114,6 +122,16 @@ pub struct PeerTuning {
     /// the WAL is replaced by a checkpoint, per open peer. Linux only; ignored elsewhere, and a
     /// filesystem that cannot reserve space is tolerated. None, the default, reserves nothing.
     pub wal_preallocate_bytes: Option<u64>,
+    /// Optional zero-filled WAL preallocation chunk, 4 KiB through 512 MiB. When set, a WAL the
+    /// peer creates (a new one, or the replacement written by a checkpoint) is laid out as a
+    /// zero-tail journal: the file is filled with zeros ahead of the log in chunks of at least this
+    /// size and appends overwrite in place, so no append grows the file. The file is then longer
+    /// than the log; `persisted_wal_bytes` stays the log's length. Recovery stops at the first
+    /// all-zero header and drops a final record only when its last byte is zero and nothing but
+    /// zeros follows, which only a write cut short can leave. A journal written without this
+    /// setting is read as before and keeps its layout until a checkpoint replaces it. None, the
+    /// default, writes the original layout.
+    pub wal_zero_fill_bytes: Option<u64>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -133,6 +151,7 @@ impl Default for PeerTuning {
             max_checkpoint_sends: None,
             checkpoint_after_bytes: None,
             wal_preallocate_bytes: None,
+            wal_zero_fill_bytes: None,
         }
     }
 }
@@ -167,6 +186,9 @@ impl PeerTuning {
                 .is_some_and(|bytes| bytes == 0 || bytes > WAL_LIMIT)
             || self
                 .wal_preallocate_bytes
+                .is_some_and(|bytes| !(4096..=WAL_LIMIT).contains(&bytes))
+            || self
+                .wal_zero_fill_bytes
                 .is_some_and(|bytes| !(4096..=WAL_LIMIT).contains(&bytes))
         {
             return Err(invalid("peer tuning exceeds supported bounds"));
@@ -1325,6 +1347,47 @@ fn install_decoded_with_scratch(
     );
     Ok(())
 }
+/// One past the last nonzero byte in `[from, to)` of the file, or `from` when all of it is zero.
+fn zero_scan(file: &mut File, from: u64, to: u64) -> Result<u64, RaftError> {
+    file.seek(SeekFrom::Start(from)).map_err(storage_error)?;
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut at = from;
+    let mut last = from;
+    while at < to {
+        let want = ((to - at) as usize).min(buffer.len());
+        file.read_exact(&mut buffer[..want])
+            .map_err(storage_error)?;
+        if let Some(position) = buffer[..want].iter().rposition(|byte| *byte != 0) {
+            last = at + position as u64 + 1;
+        }
+        at += want as u64;
+    }
+    Ok(last)
+}
+/// Write zeros over `[from, to)`, extending the file if it ends earlier, and make them durable
+/// before anything relies on them. The file cursor does not move.
+fn zero_range(file: &File, from: u64, to: u64) -> Result<(), RaftError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        let zeros = vec![0u8; 1 << 20];
+        let mut at = from;
+        while at < to {
+            let want = ((to - at) as usize).min(zeros.len());
+            file.write_all_at(&zeros[..want], at)
+                .map_err(storage_error)?;
+            at += want as u64;
+        }
+        file.sync_data().map_err(storage_error)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, from, to);
+        Err(storage_error(
+            "zero-filled WAL preallocation needs a unix file",
+        ))
+    }
+}
 struct Journal {
     /// Durability barriers this journal has issued, and records it has written.
     ///
@@ -1347,10 +1410,22 @@ struct Journal {
     permitted: Vec<u64>,
     file: File,
     _lock: Arc<File>,
+    /// The LOGICAL length of the log: where the next record goes. In a zero-tail journal the
+    /// file is longer than this, and nothing keyed to the log's size may use the file's length.
     length: u64,
+    /// True when the file is a zero-tail journal (`MAGIC_ZERO_TAIL` frames).
+    chain: bool,
+    /// Zero-fill chunk for a zero-tail journal; zero fills nothing ahead.
+    zero_chunk: u64,
+    /// How far the file has been filled with zeros or written, in a zero-tail journal.
+    physical: u64,
 }
 impl Journal {
-    fn open(options: &PeerOptions, store: &PeerStorage) -> Result<Self, RaftError> {
+    fn open(
+        options: &PeerOptions,
+        store: &PeerStorage,
+        zero_chunk: u64,
+    ) -> Result<Self, RaftError> {
         let path = &options.wal_path;
         let lock_path = path.with_extension("runtime.lock");
         let lock_existed = lock_path.exists();
@@ -1378,9 +1453,27 @@ impl Journal {
         if existed && length == 0 {
             return Err(storage_error("existing peer WAL is empty"));
         }
-        if length > WAL_LIMIT {
+        // A new file takes the layout the host asked for; an existing one keeps the layout its own
+        // first frame names, whatever the setting is now.
+        let mut chain = zero_chunk != 0 && !existed;
+        if existed && length >= 4 {
+            let mut first = [0u8; 4];
+            file.read_exact(&mut first).map_err(storage_error)?;
+            file.seek(SeekFrom::Start(0)).map_err(storage_error)?;
+            chain = &first == MAGIC_ZERO_TAIL;
+        }
+        // The file of a zero-tail journal is longer than its log, by at most one fill chunk.
+        if length
+            > if chain {
+                WAL_LIMIT.saturating_mul(2)
+            } else {
+                WAL_LIMIT
+            }
+        {
             return Err(storage_error("peer WAL exceeds size limit"));
         }
+        let expected_magic = if chain { MAGIC_ZERO_TAIL } else { MAGIC };
+        let tail_bytes = u64::from(chain);
         let mut offset = 0;
         let mut assembly = snapshot_stream::WalAssembly::new(length);
         let mut bytes = prost::bytes::BytesMut::new();
@@ -1395,23 +1488,41 @@ impl Journal {
                 let mut tail = vec![0; remaining as usize];
                 file.read_exact(&mut tail).map_err(storage_error)?;
                 let prefix = tail.len().min(4);
-                if tail[..prefix] != MAGIC[..prefix] {
+                let zeros = chain && tail.iter().all(|byte| *byte == 0);
+                if !zeros && tail[..prefix] != expected_magic[..prefix] {
                     return Err(storage_error("damaged peer WAL tail"));
                 }
                 break;
             }
             let mut header = [0; 24];
             file.read_exact(&mut header).map_err(storage_error)?;
-            if &header[..4] != MAGIC
+            if chain && header == [0u8; 24] {
+                // The end of the log. Zeros are all that may follow it: a nonzero byte further on
+                // is a record the log cannot reach, which is damage, not an unwritten tail.
+                if offset == 0 {
+                    return Err(storage_error("incomplete initial peer WAL record"));
+                }
+                if zero_scan(&mut file, offset + 24, length)? != offset + 24 {
+                    return Err(storage_error("peer WAL has data beyond its end"));
+                }
+                break;
+            }
+            if &header[..4] != expected_magic
                 || digest(&header[..8]) != u64::from_be_bytes(header[8..16].try_into().unwrap())
             {
+                // A header cut short has only zeros after it. A header damaged after its record
+                // was acknowledged has that record's payload and terminator after it.
+                if chain && offset != 0 && zero_scan(&mut file, offset + 24, length)? == offset + 24
+                {
+                    break;
+                }
                 return Err(storage_error("peer WAL header checksum mismatch"));
             }
             let size = u32::from_be_bytes(header[4..8].try_into().unwrap()) as usize;
             if size == 0 || size > LIMIT {
                 return Err(storage_error("peer WAL record exceeds size limit"));
             }
-            if remaining - 24 < size as u64 {
+            if remaining - 24 < size as u64 + tail_bytes {
                 if offset == 0 {
                     return Err(storage_error("incomplete initial peer WAL payload"));
                 }
@@ -1419,8 +1530,28 @@ impl Journal {
             }
             bytes.resize(size, 0);
             file.read_exact(&mut bytes).map_err(storage_error)?;
+            let mut terminator = FRAME_END;
+            if chain {
+                let mut last = [0u8; 1];
+                file.read_exact(&mut last).map_err(storage_error)?;
+                terminator = last[0];
+            }
             if digest(&bytes) != u64::from_be_bytes(header[16..24].try_into().unwrap()) {
+                // Cut short: the last byte of the frame was never written, and nothing was
+                // written after it. A frame whose last byte is present, or that has anything
+                // after it, was written in full and then damaged.
+                let end = offset + 24 + size as u64 + 1;
+                if chain
+                    && offset != 0
+                    && terminator == 0
+                    && zero_scan(&mut file, end, length)? == end
+                {
+                    break;
+                }
                 return Err(storage_error("peer WAL payload checksum mismatch"));
+            }
+            if chain && terminator != 0 && terminator != FRAME_END {
+                return Err(storage_error("peer WAL frame terminator damaged"));
             }
             let wire = bytes.freeze();
             let record = WalBatch::decode(wire.clone()).map_err(storage_error)?;
@@ -1451,7 +1582,7 @@ impl Journal {
                 // next record in that case instead of making recovery depend on reuse.
                 bytes = wire.try_into_mut().unwrap_or_default();
             }
-            offset += 24 + size as u64;
+            offset += 24 + size as u64 + tail_bytes;
             store.refresh_cache(options, offset, false)?;
         }
         assembly.finish()?;
@@ -1464,10 +1595,20 @@ impl Journal {
                 .as_ref()
                 .map(|b| b.manifest.name.as_str()),
         )?;
-        if offset != length {
-            file.set_len(offset).map_err(storage_error)?;
+        if chain {
+            // Whatever a cut-short write left past the log is zeroed, so the next record is
+            // not followed by the rest of the one that was lost.
+            let residue = zero_scan(&mut file, offset, length)?;
+            if residue > offset {
+                zero_range(&file, offset, residue)?;
+            }
+            file.seek(SeekFrom::Start(offset)).map_err(storage_error)?;
+        } else {
+            if offset != length {
+                file.set_len(offset).map_err(storage_error)?;
+            }
+            file.seek(SeekFrom::End(0)).map_err(storage_error)?;
         }
-        file.seek(SeekFrom::End(0)).map_err(storage_error)?;
         file.sync_all().map_err(storage_error)?;
         #[cfg(unix)]
         File::open(
@@ -1487,7 +1628,12 @@ impl Journal {
             flushed_index,
             reserved: 0,
             reserve_chunk: 0,
+            chain,
+            zero_chunk,
+            physical: length,
         };
+        // Fill the first chunk now, while the peer is not serving, so no request waits on it.
+        journal.prefill()?;
         if offset == 0 {
             journal.append(&batch(options, None, &[]))?;
         }
@@ -1523,6 +1669,9 @@ impl Journal {
             flushed_index: self.flushed_index,
             reserved: 0,
             reserve_chunk: self.reserve_chunk,
+            chain: self.zero_chunk != 0,
+            zero_chunk: self.zero_chunk,
+            physical: 0,
         };
         let mut record_buffer = Vec::new();
         let mut floor_state = hs.clone();
@@ -1701,16 +1850,17 @@ impl Journal {
         if record.hard_state != prefix.hard_state {
             final_state.hard_state.clone_from(&record.hard_state);
         }
+        let overhead = self.overhead();
         let mut bytes = spans
             .iter()
-            .map(|(_, _, size)| 24 + *size as u64)
+            .map(|(_, _, size)| overhead + *size as u64)
             .sum::<u64>();
         for state in [&prefix, &final_state] {
             if !state.hard_state.is_empty() {
                 if state.encoded_len() > LIMIT {
                     return Err(storage_error("peer WAL hard state exceeds record bound"));
                 }
-                bytes = bytes.saturating_add(24 + state.encoded_len() as u64);
+                bytes = bytes.saturating_add(overhead + state.encoded_len() as u64);
             }
         }
         if self.length.saturating_add(bytes) > WAL_LIMIT {
@@ -1718,7 +1868,7 @@ impl Journal {
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
-        self.reserve(bytes);
+        self.reserve(bytes)?;
         if !prefix.hard_state.is_empty() {
             self.write_record(&prefix)?;
         }
@@ -1789,16 +1939,17 @@ impl Journal {
         if record.hard_state != prefix.hard_state {
             final_state.hard_state = record.hard_state.clone();
         }
+        let overhead = self.overhead();
         let mut bytes = spans
             .iter()
-            .map(|(_, _, size)| 24 + *size as u64)
+            .map(|(_, _, size)| overhead + *size as u64)
             .sum::<u64>();
         for state in [&prefix, &final_state] {
             if !state.hard_state.is_empty() {
                 if state.encoded_len() > LIMIT {
                     return Err(storage_error("peer WAL hard state exceeds record bound"));
                 }
-                bytes = bytes.saturating_add(24 + state.encoded_len() as u64);
+                bytes = bytes.saturating_add(overhead + state.encoded_len() as u64);
             }
         }
         // Refuse a bound violation before writing even a valid prefix.
@@ -1807,7 +1958,7 @@ impl Journal {
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
-        self.reserve(bytes);
+        self.reserve(bytes)?;
         if !prefix.hard_state.is_empty() {
             self.write_record(&prefix)?;
         }
@@ -1829,10 +1980,57 @@ impl Journal {
         self.barriers = self.barriers.saturating_add(1);
         self.file.sync_all().map_err(storage_error)
     }
-    /// Reserve disk blocks ahead of the end of the log, without changing the file's length, so the
+    fn magic(&self) -> &'static [u8; 4] {
+        if self.chain {
+            MAGIC_ZERO_TAIL
+        } else {
+            MAGIC
+        }
+    }
+    /// Bytes a frame adds around its payload.
+    fn overhead(&self) -> u64 {
+        24 + u64::from(self.chain)
+    }
+    fn frame(&self, size: usize) -> u64 {
+        self.overhead() + size as u64
+    }
+    /// Zero-fill one chunk ahead of the log if the file does not already hold that much, so the
+    /// fill is paid when the journal opens and not by a write. A later refill, once a chunk of log
+    /// has been written, is still paid by the write that needs it.
+    fn prefill(&mut self) -> Result<(), RaftError> {
+        if self.chain && self.zero_chunk != 0 {
+            let target = self.length.saturating_add(self.zero_chunk);
+            if target > self.physical {
+                zero_range(&self.file, self.physical, target)?;
+                self.physical = target;
+            }
+        }
+        Ok(())
+    }
+    /// Make room for `extra` more bytes of log. A zero-tail journal fills the file with zeros ahead
+    /// of the log, so appends overwrite space that already exists and no append changes the
+    /// file length; the original layout reserves disk blocks without changing the length. Called
+    /// with the bytes about to be written.
+    fn reserve(&mut self, extra: u64) -> Result<(), RaftError> {
+        if self.chain {
+            self.physical = self.physical.max(self.length);
+            let end = self.length.saturating_add(extra);
+            if self.zero_chunk != 0 && end > self.physical {
+                let target = self
+                    .physical
+                    .saturating_add(end.saturating_sub(self.physical).max(self.zero_chunk));
+                zero_range(&self.file, self.physical, target)?;
+                self.physical = target;
+            }
+            return Ok(());
+        }
+        self.reserve_blocks(extra);
+        Ok(())
+    }
+    /// Reserve disk blocks ahead of the end of the log, without changing the file length, so the
     /// next appends write into space that is already allocated. Best effort: a filesystem that
     /// cannot reserve space only loses the benefit. Called with the bytes about to be written.
-    fn reserve(&mut self, extra: u64) {
+    fn reserve_blocks(&mut self, extra: u64) {
         #[cfg(target_os = "linux")]
         if self.reserve_chunk != 0 {
             let end = self.length.saturating_add(extra);
@@ -1920,17 +2118,17 @@ impl Journal {
         if size > LIMIT {
             return Err(storage_error("peer WAL record exceeds size bound"));
         }
-        if self.length.saturating_add(24 + size as u64) > WAL_LIMIT {
+        if self.length.saturating_add(self.frame(size)) > WAL_LIMIT {
             return Err(storage_error(
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
-        self.reserve(24 + size as u64);
+        self.reserve(self.frame(size))?;
         let mut checksum = digest(&metadata[..prefix_len]);
         checksum = digest_extend(checksum, &batch.snapshot);
         checksum = digest_extend(checksum, &metadata[prefix_len..]);
         let mut header = [0u8; 24];
-        header[..4].copy_from_slice(MAGIC);
+        header[..4].copy_from_slice(self.magic());
         header[4..8].copy_from_slice(&(size as u32).to_be_bytes());
         let header_checksum = digest(&header[..8]).to_be_bytes();
         header[8..16].copy_from_slice(&header_checksum);
@@ -1945,7 +2143,10 @@ impl Journal {
         self.file
             .write_all(&metadata[prefix_len..])
             .map_err(storage_error)?;
-        self.length += 24 + size as u64;
+        if self.chain {
+            self.file.write_all(&[FRAME_END]).map_err(storage_error)?;
+        }
+        self.length += self.frame(size);
         self.records = self.records.saturating_add(1);
         Ok(())
     }
@@ -1969,15 +2170,15 @@ impl Journal {
         if size > LIMIT {
             return Err(storage_error("peer WAL record exceeds size bound"));
         }
-        if self.length.saturating_add(24 + size as u64) > WAL_LIMIT {
+        if self.length.saturating_add(self.frame(size)) > WAL_LIMIT {
             return Err(storage_error(
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
-        self.reserve(24 + size as u64);
+        self.reserve(self.frame(size))?;
         record.clear();
-        record.reserve_exact(24 + size);
-        record.extend_from_slice(MAGIC);
+        record.reserve_exact(24 + size + 1);
+        record.extend_from_slice(self.magic());
         record.extend_from_slice(&(size as u32).to_be_bytes());
         record.extend_from_slice(&digest(record).to_be_bytes());
         // Encode directly after the frame header to avoid a second payload buffer.
@@ -1985,6 +2186,9 @@ impl Journal {
         batch.encode(&mut *record).map_err(storage_error)?;
         let checksum = digest(&record[24..]).to_be_bytes();
         record[16..24].copy_from_slice(&checksum);
+        if self.chain {
+            record.push(FRAME_END);
+        }
         self.file.write_all(record).map_err(storage_error)?;
         self.length += record.len() as u64;
         self.records = self.records.saturating_add(1);
@@ -2042,12 +2246,12 @@ impl Journal {
         if size > LIMIT {
             return Err(storage_error("peer WAL record exceeds size bound"));
         }
-        if self.length.saturating_add(24 + size as u64) > WAL_LIMIT {
+        if self.length.saturating_add(self.frame(size)) > WAL_LIMIT {
             return Err(storage_error(
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
-        self.reserve(24 + size as u64);
+        self.reserve(self.frame(size))?;
 
         let mut checksum = digest(&metadata[..prefix_len]);
         for ((start, end), entry) in fields.iter().zip(&batch.entries) {
@@ -2056,7 +2260,7 @@ impl Journal {
         }
         checksum = digest_extend(checksum, &metadata[suffix_start..]);
         let mut header = [0u8; 24];
-        header[..4].copy_from_slice(MAGIC);
+        header[..4].copy_from_slice(self.magic());
         header[4..8].copy_from_slice(&(size as u32).to_be_bytes());
         let header_checksum = digest(&header[..8]).to_be_bytes();
         header[8..16].copy_from_slice(&header_checksum);
@@ -2074,10 +2278,13 @@ impl Journal {
         if suffix_start != metadata.len() {
             slices.push(IoSlice::new(&metadata[suffix_start..]));
         }
+        if self.chain {
+            slices.push(IoSlice::new(&[FRAME_END]));
+        }
         for chunk in slices.chunks_mut(64) {
             write_all_vectored(&mut self.file, chunk).map_err(storage_error)?;
         }
-        self.length += 24 + size as u64;
+        self.length += self.frame(size);
         self.records = self.records.saturating_add(1);
         Ok(())
     }
@@ -2173,12 +2380,12 @@ impl Journal {
         if size > LIMIT {
             return Err(storage_error("peer WAL record exceeds size bound"));
         }
-        if self.length.saturating_add(24 + size as u64) > WAL_LIMIT {
+        if self.length.saturating_add(self.frame(size)) > WAL_LIMIT {
             return Err(storage_error(
                 "peer WAL capacity reached; checkpoint support is required",
             ));
         }
-        self.reserve(24 + size as u64);
+        self.reserve(self.frame(size))?;
 
         let mut checksum = digest(&metadata[..prefix_len]);
         for (field, entry) in fields.iter().zip(entries) {
@@ -2195,7 +2402,7 @@ impl Journal {
         }
         checksum = digest_extend(checksum, &metadata[suffix_start..]);
         let mut header = [0u8; 24];
-        header[..4].copy_from_slice(MAGIC);
+        header[..4].copy_from_slice(self.magic());
         header[4..8].copy_from_slice(&(size as u32).to_be_bytes());
         let header_checksum = digest(&header[..8]).to_be_bytes();
         header[8..16].copy_from_slice(&header_checksum);
@@ -2225,10 +2432,13 @@ impl Journal {
         if suffix_start != metadata.len() {
             slices.push(IoSlice::new(&metadata[suffix_start..]));
         }
+        if self.chain {
+            slices.push(IoSlice::new(&[FRAME_END]));
+        }
         for chunk in slices.chunks_mut(64) {
             write_all_vectored(&mut self.file, chunk).map_err(storage_error)?;
         }
-        self.length += 24 + size as u64;
+        self.length += self.frame(size);
         self.records = self.records.saturating_add(1);
         Ok(())
     }
@@ -2377,7 +2587,7 @@ impl DurablePeer {
             log_index: Default::default(),
             snapshot_wanted: Default::default(),
         };
-        let mut journal = Journal::open(&options, &store)?;
+        let mut journal = Journal::open(&options, &store, tuning.wal_zero_fill_bytes.unwrap_or(0))?;
         journal.reserve_chunk = tuning.wal_preallocate_bytes.unwrap_or(0);
         let checkpoint = store.checkpoint.lock().unwrap().clone();
         let snapshot_index = checkpoint.as_ref().map_or(0, |s| s.get_metadata().index);
@@ -4160,7 +4370,7 @@ mod tests {
             log_index: Default::default(),
             snapshot_wanted: Default::default(),
         };
-        let mut journal = Journal::open(&options, &store).unwrap();
+        let mut journal = Journal::open(&options, &store, 0).unwrap();
         // `open` writes a bootstrap record under its own barrier, so measure deltas from here.
         let barriers_before = journal.barriers;
         let records_before = journal.records;
@@ -4229,7 +4439,7 @@ mod tests {
             log_index: Default::default(),
             snapshot_wanted: Default::default(),
         };
-        let _reopened = Journal::open(&options, &recovered).unwrap();
+        let _reopened = Journal::open(&options, &recovered, 0).unwrap();
         assert_eq!(
             recovered
                 .entries(
@@ -4274,7 +4484,7 @@ mod tests {
             log_index: Default::default(),
             snapshot_wanted: Default::default(),
         };
-        let mut journal = Journal::open(&options, &store).unwrap();
+        let mut journal = Journal::open(&options, &store, 0).unwrap();
         // `open` writes a bootstrap record under its own barrier, so measure the delta from here
         // rather than the totals.
         let barriers_before = journal.barriers;
@@ -6807,6 +7017,490 @@ mod tests {
         std::fs::remove_file(path.with_extension("runtime.lock")).unwrap();
         std::fs::remove_file(path).unwrap();
     }
+    // ---- zero-tail journal (`wal_zero_fill_bytes`) ----
+    //
+    // Every oracle below is what was ACKNOWLEDGED, never what the file holds: an acknowledged
+    // record must come back, a record that was cut short must not, and damage to an acknowledged
+    // record must refuse the open instead of being dropped as if it were a cut.
+
+    fn zero_tuning() -> PeerTuning {
+        PeerTuning {
+            wal_zero_fill_bytes: Some(1 << 16),
+            ..PeerTuning::default()
+        }
+    }
+
+    /// Reopen as a single voter and return every non-empty payload the application is handed.
+    fn recover_payloads(config: &PeerOptions, campaign: bool) -> Result<Vec<Vec<u8>>, RaftError> {
+        let mut peer = DurablePeer::open_with_tuning(config.clone(), zero_tuning())?;
+        if campaign {
+            peer.campaign()?;
+        }
+        let mut delivered = Vec::new();
+        peer.process_ready(|_, data| {
+            if !data.is_empty() {
+                delivered.push(data.to_vec());
+            }
+            Ok(())
+        })?;
+        Ok(delivered)
+    }
+
+    /// A zero-tail peer with `acked` payloads written and acknowledged, then one more write whose
+    /// bytes are returned separately: `(config, acknowledged, logical end before the last write,
+    /// logical end after it, file image after it)`.
+    fn zero_tail_fixture(label: &str) -> (PeerOptions, Vec<Vec<u8>>, u64, u64, Vec<u8>) {
+        let config = options(path(label));
+        let mut peer = DurablePeer::open_with_tuning(config.clone(), zero_tuning()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let acked: Vec<Vec<u8>> = (0..3u8).map(|n| vec![n + 1; 100]).collect();
+        for payload in &acked {
+            peer.propose(payload.clone()).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+        }
+        let before = peer.persisted_wal_bytes().unwrap();
+        peer.propose(b"new value".to_vec()).unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let after = peer.persisted_wal_bytes().unwrap();
+        drop(peer);
+        let image = std::fs::read(&config.wal_path).unwrap();
+        (config, acked, before, after, image)
+    }
+
+    fn remove_wal(config: &PeerOptions) {
+        let _ = std::fs::remove_file(config.wal_path.with_extension("runtime.lock"));
+        let _ = std::fs::remove_file(&config.wal_path);
+    }
+
+    /// A crash at every byte of the last write, simulated as the prefix that reached the file
+    /// followed by the zeros that were there before. Every acknowledged record must come back,
+    /// nothing partial may, and the log must go on from where it stopped.
+    #[test]
+    fn a_zero_tail_journal_recovers_every_acknowledged_record_after_a_crash_at_any_byte() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let (config, acked, before, after, full) = zero_tail_fixture("zt-cut");
+        assert!(
+            full.len() as u64 > after,
+            "the file must be longer than the log"
+        );
+        for cut in before..after {
+            let mut image = full.clone();
+            image[cut as usize..].fill(0);
+            std::fs::write(&config.wal_path, &image).unwrap();
+            let seen = recover_payloads(&config, false)
+                .unwrap_or_else(|error| panic!("cut {cut}: a cut-short write refused: {error:?}"));
+            // The last byte of the last record is its terminator: without it the record is not
+            // whole, so it may be absent; every earlier cut must not deliver the new value.
+            if cut < after - 1 {
+                assert!(
+                    seen.iter().all(|payload| payload != b"new value"),
+                    "cut {cut}: a partial record was delivered"
+                );
+            }
+            std::fs::write(&config.wal_path, &image).unwrap();
+            let recovered = recover_payloads(&config, true)
+                .unwrap_or_else(|error| panic!("cut {cut}: campaign refused: {error:?}"));
+            assert_eq!(
+                &recovered[..acked.len()],
+                &acked[..],
+                "cut {cut}: acknowledged lost"
+            );
+            assert!(
+                recovered.len() <= acked.len() + 1
+                    && recovered[acked.len()..].iter().all(|p| p == b"new value"),
+                "cut {cut}: {} payloads",
+                recovered.len()
+            );
+            // Writing on after the recovery must not be followed by the rest of the lost record.
+            let mut peer = DurablePeer::open_with_tuning(config.clone(), zero_tuning()).unwrap();
+            peer.campaign().unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            peer.propose(b"after".to_vec()).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            drop(peer);
+            let again = recover_payloads(&config, false)
+                .unwrap_or_else(|error| panic!("cut {cut}: reopen after writing: {error:?}"));
+            assert_eq!(
+                &again[..acked.len()],
+                &acked[..],
+                "cut {cut}: acknowledged lost later"
+            );
+            assert_eq!(again.last().unwrap(), b"after", "cut {cut}");
+        }
+        remove_wal(&config);
+    }
+
+    /// A flipped byte anywhere in an acknowledged record, with only zeros after the last of them,
+    /// is damage and must refuse the open. This is the arm a "bad last record followed by zeros
+    /// is a torn write" rule turns red: it would drop the record and open.
+    #[test]
+    fn damage_to_an_acknowledged_record_in_a_zero_tail_journal_is_never_dropped() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let (config, _acked, _before, after, full) = zero_tail_fixture("zt-flip");
+        for index in 0..after as usize {
+            let mut damaged = full.clone();
+            damaged[index] ^= 1;
+            std::fs::write(&config.wal_path, &damaged).unwrap();
+            assert!(
+                DurablePeer::open_with_tuning(config.clone(), zero_tuning()).is_err(),
+                "byte {index} of {after}: damage to an acknowledged record was accepted"
+            );
+            assert_eq!(
+                std::fs::read(&config.wal_path).unwrap(),
+                damaged,
+                "byte {index}"
+            );
+        }
+        // Every byte of the acknowledged log set to zero in turn, as a zeroed sector would be.
+        for start in (24..after as usize).step_by(7) {
+            let mut damaged = full.clone();
+            let end = (start + 16).min(after as usize);
+            damaged[start..end].fill(0);
+            if damaged == full {
+                continue;
+            }
+            std::fs::write(&config.wal_path, &damaged).unwrap();
+            let result = DurablePeer::open_with_tuning(config.clone(), zero_tuning());
+            if let Ok(peer) = result {
+                // The only legal acceptance is a zeroed range that reaches the log's own end.
+                assert!(
+                    end as u64 == after,
+                    "zeroed bytes {start}..{end} of {after} were accepted"
+                );
+                drop(peer);
+            }
+        }
+        remove_wal(&config);
+    }
+
+    /// Nonzero bytes past the end of the log, or a hole of zeros before later records, are not an
+    /// unwritten tail.
+    #[test]
+    fn bytes_beyond_the_end_of_a_zero_tail_journal_refuse_the_open() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let (config, _acked, _before, after, full) = zero_tail_fixture("zt-beyond");
+        for offset in [after + 24, after + 4096, full.len() as u64 - 1] {
+            let mut damaged = full.clone();
+            damaged[offset as usize] = 1;
+            std::fs::write(&config.wal_path, &damaged).unwrap();
+            assert!(
+                DurablePeer::open_with_tuning(config.clone(), zero_tuning()).is_err(),
+                "a stray byte at {offset} was accepted"
+            );
+        }
+        remove_wal(&config);
+    }
+
+    /// A clean shutdown reopens with every record, the file keeps its zero tail, appends do not
+    /// change the file length, and the switch is not needed to read the file back.
+    #[test]
+    fn a_zero_tail_journal_reopens_after_a_clean_shutdown_and_appends_do_not_grow_the_file() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let mut peer = DurablePeer::open_with_tuning(config.clone(), zero_tuning()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let payloads: Vec<Vec<u8>> = (0..40u8).map(|n| vec![n; 200]).collect();
+        let file_length = |config: &PeerOptions| std::fs::metadata(&config.wal_path).unwrap().len();
+        peer.propose(payloads[0].clone()).unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let physical = file_length(&config);
+        assert!(physical >= 1 << 16);
+        for payload in &payloads[1..] {
+            peer.propose(payload.clone()).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            assert_eq!(
+                file_length(&config),
+                physical,
+                "an append changed the file length"
+            );
+        }
+        let logical = peer.persisted_wal_bytes().unwrap();
+        assert!(
+            logical < physical,
+            "the logical length must not be the file length"
+        );
+        let sync_free_barriers = peer.journal.barriers;
+        assert!(sync_free_barriers > 0);
+        drop(peer);
+        assert_eq!(
+            file_length(&config),
+            physical,
+            "a clean close changed the file length"
+        );
+        // Without the switch: the layout is read from the file.
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        assert_eq!(peer.persisted_wal_bytes().unwrap(), logical);
+        assert_eq!(
+            file_length(&config),
+            physical,
+            "an open truncated the zero tail"
+        );
+        let mut delivered = Vec::new();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, data| {
+            if !data.is_empty() {
+                delivered.push(data.to_vec());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(delivered, payloads);
+    }
+
+    /// The default layout is untouched: no terminator, the file is the log, and a file that is not
+    /// a zero-tail journal keeps its layout when the switch is on.
+    #[test]
+    fn the_original_layout_is_unchanged_and_keeps_its_layout_when_the_switch_turns_on() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let mut peer = DurablePeer::open(config.clone()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        peer.propose(b"one".to_vec()).unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let logical = peer.persisted_wal_bytes().unwrap();
+        assert_eq!(logical, std::fs::metadata(&config.wal_path).unwrap().len());
+        drop(peer);
+        assert_eq!(&std::fs::read(&config.wal_path).unwrap()[..4], MAGIC);
+        let mut peer = DurablePeer::open_with_tuning(config.clone(), zero_tuning()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        peer.propose(b"two".to_vec()).unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        assert_eq!(
+            peer.persisted_wal_bytes().unwrap(),
+            std::fs::metadata(&config.wal_path).unwrap().len(),
+            "an original-layout file must stay the log's length"
+        );
+        drop(peer);
+        assert_eq!(&std::fs::read(&config.wal_path).unwrap()[..4], MAGIC);
+        assert_ne!(MAGIC, MAGIC_ZERO_TAIL);
+        assert_ne!(
+            FRAME_END, 0,
+            "a zero terminator could not tell a cut write from a whole one"
+        );
+    }
+
+    /// A trim rewrites the WAL: the replacement is a zero-tail journal of the log kept, its logical
+    /// length is what `persisted_wal_bytes` reports, and a restart finds the same floor.
+    #[test]
+    fn a_trim_of_a_zero_tail_journal_agrees_with_the_logical_length() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config = options(directory.path().join("peer.wal"));
+        let mut peer = DurablePeer::open_with_tuning(config.clone(), zero_tuning()).unwrap();
+        peer.campaign().unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let payloads: Vec<Vec<u8>> = (0..200usize).map(|i| vec![(i % 251) as u8; 128]).collect();
+        for chunk in payloads.chunks(50) {
+            peer.propose_batch(chunk.to_vec()).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+        }
+        let floor = peer.applied_index() - 10;
+        peer.set_flushed_index(floor).unwrap();
+        let before = peer.persisted_wal_bytes().unwrap();
+        peer.trim_log_to(floor).unwrap();
+        let after = peer.persisted_wal_bytes().unwrap();
+        assert!(after * 4 < before, "{before} -> {after}");
+        let physical = std::fs::metadata(&config.wal_path).unwrap().len();
+        assert!(physical > after, "the replacement is a zero-tail journal");
+        assert_eq!(
+            &std::fs::read(&config.wal_path).unwrap()[..4],
+            MAGIC_ZERO_TAIL
+        );
+        peer.propose(b"later".to_vec()).unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        let end = peer.persisted_wal_bytes().unwrap();
+        drop(peer);
+        let peer = DurablePeer::open_with_tuning(config.clone(), zero_tuning()).unwrap();
+        assert_eq!(peer.applied_index(), floor);
+        assert_eq!(peer.persisted_wal_bytes().unwrap(), end);
+    }
+
+    /// A file that mixes the two layouts is refused, not read as either.
+    #[test]
+    fn a_frame_of_the_other_layout_inside_a_journal_is_refused() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let (config, _acked, _before, after, full) = zero_tail_fixture("zt-mix");
+        // Rewrite the magic of the last record only.
+        let mut image = full.clone();
+        let mut offset = 0usize;
+        let mut last = 0usize;
+        while (offset as u64) < after {
+            last = offset;
+            let size =
+                u32::from_be_bytes(image[offset + 4..offset + 8].try_into().unwrap()) as usize;
+            offset += 24 + size + 1;
+        }
+        image[last..last + 4].copy_from_slice(MAGIC);
+        std::fs::write(&config.wal_path, &image).unwrap();
+        assert!(DurablePeer::open_with_tuning(config.clone(), zero_tuning()).is_err());
+        remove_wal(&config);
+    }
+
+    #[test]
+    fn a_zero_fill_size_outside_its_bounds_is_refused() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for bytes in [0u64, 1, 4095, WAL_LIMIT + 1] {
+            let directory = tempfile::tempdir().unwrap();
+            let result = DurablePeer::open_with_tuning(
+                options(directory.path().join("peer.wal")),
+                PeerTuning {
+                    wal_zero_fill_bytes: Some(bytes),
+                    ..PeerTuning::default()
+                },
+            );
+            assert!(result.is_err(), "{bytes}");
+        }
+    }
+    /// Per-write latency of a single voter with and without the zero-tail layout, interleaved in
+    /// both orders. Run with `--ignored --nocapture`; prints microseconds per write and the file
+    /// length against the log length.
+    #[test]
+    #[ignore]
+    fn zero_fill_write_latency_ab() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        let rounds: usize = std::env::var("AB_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+        let writes: usize = std::env::var("AB_WRITES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(400);
+        let run = |zero: bool| -> (f64, u64, u64) {
+            let directory =
+                tempfile::tempdir_in(std::env::var("AB_DIR").unwrap_or("/tmp".into())).unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let tuning = if zero {
+                PeerTuning {
+                    wal_zero_fill_bytes: Some(32 << 20),
+                    ..PeerTuning::default()
+                }
+            } else {
+                PeerTuning::default()
+            };
+            let mut peer = DurablePeer::open_with_tuning(config.clone(), tuning).unwrap();
+            peer.campaign().unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            // The first write pays the fill; it is outside the timing.
+            peer.propose(vec![0; 256]).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            let mut times = Vec::with_capacity(writes);
+            for i in 0..writes {
+                let start = std::time::Instant::now();
+                peer.propose(vec![(i % 251) as u8; 256]).unwrap();
+                peer.process_ready(|_, _| Ok(())).unwrap();
+                times.push(start.elapsed().as_secs_f64() * 1e6);
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (
+                times[times.len() / 2],
+                peer.persisted_wal_bytes().unwrap(),
+                std::fs::metadata(&config.wal_path).unwrap().len(),
+            )
+        };
+        let mut ratios = Vec::new();
+        for round in 0..rounds {
+            let (off, on) = if round % 2 == 0 {
+                let off = run(false);
+                (off, run(true))
+            } else {
+                let on = run(true);
+                (run(false), on)
+            };
+            println!(
+                "round {round}: off {:.0} us (log {} file {}) on {:.0} us (log {} file {}) ratio {:.2}",
+                off.0, off.1, off.2, on.0, on.1, on.2, off.0 / on.0
+            );
+            ratios.push(off.0 / on.0);
+        }
+        ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!("median off/on ratio {:.2}", ratios[ratios.len() / 2]);
+    }
+
+    /// Group commit: a write costs one barrier, a batch of writes that shares a Ready costs one
+    /// barrier, and a commit advance costs none, in the zero-tail layout exactly as in the
+    /// original. The zero fill syncs only when it extends the file, never per write.
+    #[test]
+    fn both_layouts_cost_one_barrier_per_ready_whatever_it_carries() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for tuning in [PeerTuning::default(), zero_tuning()] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let mut peer = DurablePeer::open_with_tuning(config, tuning).unwrap();
+            peer.campaign().unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            let start = peer.persisted_wal_barriers().unwrap();
+            for i in 0..3u8 {
+                peer.propose(vec![i; 64]).unwrap();
+                peer.process_ready(|_, _| Ok(())).unwrap();
+            }
+            assert_eq!(
+                peer.persisted_wal_barriers().unwrap() - start,
+                3,
+                "three writes must cost three barriers"
+            );
+            let before = peer.persisted_wal_barriers().unwrap();
+            let batch: Vec<Vec<u8>> = (0..200u8).map(|i| vec![i; 64]).collect();
+            peer.propose_batch(batch).unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            assert_eq!(
+                peer.persisted_wal_barriers().unwrap() - before,
+                1,
+                "200 entries in one Ready must share one barrier"
+            );
+        }
+    }
+
+    /// A scrub walks sealed records in bounded steps, finds damage reads would not, and stops at
+    /// the log's own end in a zero-tail journal, never walking its zero fill.
+    #[test]
+    fn a_scrub_walks_in_bounded_steps_and_finds_damage_in_both_layouts() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for tuning in [PeerTuning::default(), zero_tuning()] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let mut peer = DurablePeer::open_with_tuning(config.clone(), tuning).unwrap();
+            peer.campaign().unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            for i in 0..50u8 {
+                peer.propose(vec![i; 300]).unwrap();
+                peer.process_ready(|_, _| Ok(())).unwrap();
+            }
+            let logical = peer.persisted_wal_bytes().unwrap();
+            let mut reader = peer.capture_log_reader().unwrap();
+            let (mut at, mut steps) = (0, 0);
+            loop {
+                let step = reader.scrub_step(at, 1000).unwrap();
+                assert!(step.next > at, "a step must make progress");
+                assert!(
+                    step.next - at < 1000 + 1024,
+                    "a step overshoots by one record at most"
+                );
+                at = step.next;
+                steps += 1;
+                if step.done {
+                    break;
+                }
+            }
+            assert_eq!(at, logical, "the scrub covers the log and not the file");
+            assert!(steps > 10);
+            assert_eq!(reader.scrub(1 << 30).unwrap(), logical);
+            // Damage a record no read has touched since.
+            let mut bytes = std::fs::read(&config.wal_path).unwrap();
+            bytes[(logical / 2) as usize] ^= 1;
+            std::fs::write(&config.wal_path, &bytes).unwrap();
+            let mut damaged = peer.capture_log_reader().unwrap();
+            assert!(damaged.scrub(1 << 30).is_err(), "damage went unnoticed");
+            assert!(damaged.scrub_step(logical + 1, 10).is_err());
+        }
+    }
+
     #[test]
     fn canceling_ready_reads_releases_core_confirmations() {
         let _fixture = PROCESS_FIXTURE.read().unwrap();

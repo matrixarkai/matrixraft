@@ -207,18 +207,28 @@ impl PeerLogReader {
             }
             let mut header = [0; 24];
             input.read_exact(&mut header).map_err(storage_error)?;
-            if &header[..4] != MAGIC
-                || digest(&header[..8]) != u64::from_be_bytes(header[8..16].try_into().unwrap())
-            {
+            let tail = match &header[..4] {
+                magic if magic == MAGIC => 0u64,
+                magic if magic == MAGIC_ZERO_TAIL => 1,
+                _ => return Err(storage_error("captured peer log header checksum mismatch")),
+            };
+            if digest(&header[..8]) != u64::from_be_bytes(header[8..16].try_into().unwrap()) {
                 return Err(storage_error("captured peer log header checksum mismatch"));
             }
             let size = u32::from_be_bytes(header[4..8].try_into().unwrap()) as usize;
-            if size == 0 || size > LIMIT || size as u64 > remaining - 24 {
+            if size == 0 || size > LIMIT || size as u64 + tail > remaining - 24 {
                 return Err(storage_error("invalid captured peer log record size"));
             }
             bytes.resize(size, 0);
             input.read_exact(&mut bytes).map_err(storage_error)?;
-            remaining -= 24 + size as u64;
+            remaining -= 24 + size as u64 + tail;
+            if tail == 1 {
+                let mut last = [0u8; 1];
+                input.read_exact(&mut last).map_err(storage_error)?;
+                if last[0] != 0 && last[0] != FRAME_END {
+                    return Err(storage_error("captured peer log frame terminator damaged"));
+                }
+            }
             if digest(&bytes) != u64::from_be_bytes(header[16..24].try_into().unwrap()) {
                 return Err(storage_error("captured peer log payload checksum mismatch"));
             }
@@ -278,6 +288,85 @@ impl PeerLogReader {
     }
 }
 
+/// Where a scrub stands: `next` is the offset to pass to the following step, always a record
+/// boundary, and `done` is true once the captured journal has been walked to its end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrubStep {
+    pub next: u64,
+    pub total: u64,
+    pub done: bool,
+}
+
+impl PeerLogReader {
+    /// Validate records from `from` (zero, or the `next` of a previous step) until at least
+    /// `max_bytes` have been read or the captured journal ends. Each record is checked in full:
+    /// its header, payload digest, terminator and identity, and every entry in it decodes. Nothing
+    /// is cached or indexed, so this finds damage that reads, which touch only the records they
+    /// need, do not. It never changes the journal, and a host runs it off the write path, at a
+    /// pace of its own choosing; see `scrub` for a throttled walk.
+    pub fn scrub_step(&mut self, from: u64, max_bytes: u64) -> Result<ScrubStep, RaftError> {
+        if from > self.length {
+            return Err(storage_error("scrub position is past the captured journal"));
+        }
+        let identity = Identity {
+            group: self.group,
+            node: self.node,
+            voters: &self.voters,
+            permitted: &self.permitted,
+        };
+        self.file
+            .seek(SeekFrom::Start(from))
+            .map_err(storage_error)?;
+        let mut remaining = self.length - from;
+        let mut input = (&mut self.file).take(remaining);
+        let mut at = from;
+        let mut validation = Vec::new();
+        let mut bytes = prost::bytes::BytesMut::new();
+        while remaining > 0 && at - from < max_bytes.max(1) {
+            let before = remaining;
+            let (mut record, wire, _) = Self::read_record(
+                &identity,
+                &mut input,
+                &mut remaining,
+                &mut bytes,
+                &mut validation,
+            )?;
+            for encoded in std::mem::take(&mut record.entries) {
+                EntryView::decode(encoded).map_err(storage_error)?;
+            }
+            drop(record);
+            at += before - remaining;
+            bytes = wire.try_into_mut().unwrap_or_default();
+        }
+        Ok(ScrubStep {
+            next: at,
+            total: self.length,
+            done: at == self.length,
+        })
+    }
+
+    /// Walk the whole captured journal at about `bytes_per_second`, in 256 KiB reads, sleeping
+    /// between them so the walk stays a background load. Returns the bytes validated, or the first
+    /// damage found. Off unless a host calls it.
+    pub fn scrub(&mut self, bytes_per_second: u64) -> Result<u64, RaftError> {
+        const READ: u64 = 256 * 1024;
+        let rate = bytes_per_second.max(1);
+        let started = std::time::Instant::now();
+        let mut at = 0;
+        loop {
+            let step = self.scrub_step(at, READ)?;
+            at = step.next;
+            if step.done {
+                return Ok(at);
+            }
+            let due = std::time::Duration::from_secs_f64(at as f64 / rate as f64);
+            if let Some(wait) = due.checked_sub(started.elapsed()) {
+                std::thread::sleep(wait);
+            }
+        }
+    }
+}
+
 impl PeerLogReader {
     /// Read and fully validate the next record. `remaining` counts the captured bytes not yet
     /// consumed. Returns the record, its wire bytes (so the caller can recycle the buffer) and its
@@ -294,18 +383,28 @@ impl PeerLogReader {
         }
         let mut header = [0; 24];
         input.read_exact(&mut header).map_err(storage_error)?;
-        if &header[..4] != MAGIC
-            || digest(&header[..8]) != u64::from_be_bytes(header[8..16].try_into().unwrap())
-        {
+        let tail = match &header[..4] {
+            magic if magic == MAGIC => 0u64,
+            magic if magic == MAGIC_ZERO_TAIL => 1,
+            _ => return Err(storage_error("captured peer log header checksum mismatch")),
+        };
+        if digest(&header[..8]) != u64::from_be_bytes(header[8..16].try_into().unwrap()) {
             return Err(storage_error("captured peer log header checksum mismatch"));
         }
         let size = u32::from_be_bytes(header[4..8].try_into().unwrap()) as usize;
-        if size == 0 || size > LIMIT || size as u64 > *remaining - 24 {
+        if size == 0 || size > LIMIT || size as u64 + tail > *remaining - 24 {
             return Err(storage_error("invalid captured peer log record size"));
         }
         bytes.resize(size, 0);
         input.read_exact(bytes).map_err(storage_error)?;
-        *remaining -= 24 + size as u64;
+        *remaining -= 24 + size as u64 + tail;
+        if tail == 1 {
+            let mut last = [0u8; 1];
+            input.read_exact(&mut last).map_err(storage_error)?;
+            if last[0] != 0 && last[0] != FRAME_END {
+                return Err(storage_error("captured peer log frame terminator damaged"));
+            }
+        }
         if digest(bytes) != u64::from_be_bytes(header[16..24].try_into().unwrap()) {
             return Err(storage_error("captured peer log payload checksum mismatch"));
         }
@@ -325,7 +424,7 @@ impl PeerLogReader {
                 "captured peer log identity or encoding mismatch",
             ));
         }
-        Ok((record, wire, size))
+        Ok((record, wire, size + tail as usize))
     }
 
     /// Validate and index every record this reader can see that the index has not yet covered.
