@@ -7,6 +7,7 @@ impl DurablePeer {
     /// Committed entries may remain unapplied. Drop this instance before reopening.
     /// Already returned packets and host-owned tasks cannot be recalled.
     pub fn stop(&mut self) {
+        self.finish_campaign_receipts(PeerCampaignStatus::Stopped);
         self.finish_proposal_receipts(PeerProposalStatus::Stopped);
         self.cancel_local_requests();
         self.incoming_payload = None;
@@ -40,6 +41,7 @@ impl DurablePeer {
             return Err(invalid("peer is already stopped"));
         }
         let fence = self.commit_index();
+        self.finish_campaign_receipts(PeerCampaignStatus::Stopped);
         self.cancel_local_requests();
         self.drain_through = Some(fence);
         self.service_proposal_receipts();

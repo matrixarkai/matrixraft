@@ -29,10 +29,13 @@ mod append_reorder;
 #[path = "peer_apply_pipeline.rs"]
 mod apply_pipeline;
 pub use apply_pipeline::{PeerApplyCompletion, PeerApplyTask};
+#[path = "peer_campaign_receipts.rs"]
+mod campaign_receipts;
 #[path = "peer_checkpoint_file.rs"]
 mod checkpoint_file;
 #[path = "peer_checkpoint_policy.rs"]
 mod checkpoint_policy;
+pub use campaign_receipts::{PeerCampaignReceipt, PeerCampaignStatus};
 #[path = "peer_commands.rs"]
 mod commands;
 #[path = "peer_flushed_membership.rs"]
@@ -165,6 +168,9 @@ pub struct PeerTuning {
     /// Opt-in outstanding proposal receipt limit, 1 through 65536. None disables
     /// tracked proposal admission without changing ordinary proposals.
     pub max_pending_proposal_receipts: Option<usize>,
+    /// Opt-in outstanding campaign receipt limit, 1 through 65536. None disables
+    /// tracked campaign admission without changing ordinary election behavior.
+    pub max_pending_campaign_receipts: Option<usize>,
     /// Optional response-silence window for retention and closest-follower selection.
     /// None retains every replica for retention and the core's handoff activity test.
     pub replica_inactivity_tick: Option<usize>,
@@ -192,6 +198,7 @@ impl Default for PeerTuning {
             max_inflight_apply_tasks: None,
             startup_election_delay: None,
             max_pending_proposal_receipts: None,
+            max_pending_campaign_receipts: None,
             replica_inactivity_tick: None,
         }
     }
@@ -210,6 +217,9 @@ impl PeerTuning {
                 .is_some_and(|ticks| ticks == 0 || ticks > usize::MAX / 2)
             || self
                 .max_pending_proposal_receipts
+                .is_some_and(|limit| !(1..=65536).contains(&limit))
+            || self
+                .max_pending_campaign_receipts
                 .is_some_and(|limit| !(1..=65536).contains(&limit))
             || self
                 .max_inflight_apply_tasks
@@ -2684,11 +2694,13 @@ pub struct DurablePeer {
     apply_pipeline: Option<apply_pipeline::Pipeline>,
     startup_hold: startup_hold::Hold,
     proposal_receipts: Option<Box<proposal_receipts::Tracker>>,
+    campaign_receipts: Option<Box<campaign_receipts::Tracker>>,
     replica_contacts: Option<Box<replica_retention::Window>>,
     command_commit_synced: u64,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
+        self.finish_campaign_receipts(PeerCampaignStatus::Stopped);
         self.finish_proposal_receipts(PeerProposalStatus::Stopped);
         // Retain the journal's exclusive storage lock until all receive I/O ends.
         self.stream.finish_shutdown();
@@ -2820,6 +2832,9 @@ impl DurablePeer {
             proposal_receipts: tuning
                 .max_pending_proposal_receipts
                 .map(|limit| Box::new(proposal_receipts::Tracker::new(limit))),
+            campaign_receipts: tuning
+                .max_pending_campaign_receipts
+                .map(|limit| Box::new(campaign_receipts::Tracker::new(limit))),
             pending_reads: BTreeMap::new(),
             deferred_reads: VecDeque::new(),
             pending_restore,
@@ -3091,7 +3106,10 @@ impl DurablePeer {
         self.stream.set_limiters(send, receive)
     }
     pub fn tick(&mut self) -> Result<(), RaftError> {
-        self.healthy()?;
+        if let Err(error) = self.healthy() {
+            self.service_campaign_receipts(false);
+            return Err(error);
+        }
         self.membership_recovered()?;
         self.tick_replica_contacts();
         self.expire_read_deadlines()?;
@@ -3150,6 +3168,7 @@ impl DurablePeer {
         self.service_apply_pipeline()?;
         self.service_proposal_receipts();
         self.align_replica_contacts();
+        self.service_campaign_receipts(false);
         Ok(())
     }
     fn tick_consensus(&mut self) {
@@ -4191,6 +4210,7 @@ impl DurablePeer {
                 self.incoming_promotions = Some((position, policy));
             }
         }
+        self.service_campaign_receipts(false);
         self.store.cache.check()
     }
     fn packets(&mut self, messages: Vec<Message>) -> Result<Vec<PeerPacket>, RaftError> {
@@ -4280,7 +4300,8 @@ impl DurablePeer {
                 })
                 || self.append_reorder.due()
                 || self.read_deadline_due()
-                || self.proposal_receipts_due())
+                || self.proposal_receipts_due()
+                || self.campaign_receipts_due())
     }
 
     /// Persist before returning packets or applying committed entries. Empty payloads
@@ -4291,7 +4312,10 @@ impl DurablePeer {
         &mut self,
         mut apply: impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
-        self.processing_allowed()?;
+        if let Err(error) = self.processing_allowed() {
+            self.service_campaign_receipts(false);
+            return Err(error);
+        }
         self.process_ready_with_snapshot(&mut apply, |_, _| {
             Err(storage_error(
                 "application snapshot restore callback required",
@@ -4462,7 +4486,11 @@ impl DurablePeer {
         mut apply: impl FnMut(&[Entry]) -> ApplyProgress,
         mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
-        self.processing_allowed()?;
+        if let Err(error) = self.processing_allowed() {
+            self.service_campaign_receipts(false);
+            return Err(error);
+        }
+        self.service_campaign_receipts(false);
         let result = (|| {
             self.service_apply_pipeline()?;
             self.service_append_window()?;
@@ -4515,6 +4543,7 @@ impl DurablePeer {
             self.recovering_membership = false;
         }
         self.service_proposal_receipts();
+        self.service_campaign_receipts(result.is_ok());
         self.align_replica_contacts();
         if result.is_ok() {
             self.finish_drain();
@@ -4798,6 +4827,7 @@ impl DurablePeer {
             self.raw.advance_append_async(ready);
             self.raw.on_persist_ready(number);
             self.store.cache.check()?;
+            self.service_campaign_receipts(true);
             self.apply_async_consensus(&entries)?;
             if !restore_attempted && self.pending_restore.is_some() {
                 self.attempt_restore(restore)?;

@@ -79,6 +79,120 @@ impl Drop for Directory {
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
 
 #[test]
+fn tracked_campaigns_require_real_votes_and_keep_wins_distinct_from_current_leadership() {
+    use matrixraft::peer_runtime::PeerCampaignStatus;
+    let dir = Directory::new();
+    let tuning = PeerTuning {
+        max_pending_campaign_receipts: Some(4),
+        ..Default::default()
+    };
+    let mut group: BTreeMap<_, _> = (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(dir.options(id, vec![1, 2, 3]), tuning).unwrap(),
+            )
+        })
+        .collect();
+    let first = group.get_mut(&1).unwrap().campaign_tracked(None).unwrap();
+    let second = group.get_mut(&1).unwrap().campaign_tracked(None).unwrap();
+    let mut applied = Applied::new();
+    pump(&mut group, &mut applied, Some(1));
+    assert_eq!(first.status(), PeerCampaignStatus::Pending);
+    assert_eq!(second.status(), PeerCampaignStatus::Pending);
+    assert!(!group[&1].is_leader());
+    for _ in 0..40 {
+        group.get_mut(&1).unwrap().tick().unwrap();
+        pump(&mut group, &mut applied, None);
+        if group[&1].is_leader() {
+            break;
+        }
+    }
+    assert!(group[&1].is_leader());
+    let first_win = PeerCampaignStatus::Elected {
+        term: group[&1].term(),
+    };
+    assert_eq!(first.status(), first_win);
+    assert_eq!(second.status(), first_win);
+    let challenger = group
+        .get_mut(&2)
+        .unwrap()
+        .force_campaign_tracked(None)
+        .unwrap();
+    pump(&mut group, &mut applied, Some(1));
+    assert!(group[&2].is_leader());
+    let next_win = PeerCampaignStatus::Elected {
+        term: group[&2].term(),
+    };
+    assert_eq!(challenger.status(), next_win);
+    let losing = group.get_mut(&3).unwrap().campaign_tracked(None).unwrap();
+    assert_eq!(losing.status(), PeerCampaignStatus::Pending);
+    for _ in 0..2 {
+        group.get_mut(&2).unwrap().tick().unwrap();
+    }
+    pump(&mut group, &mut applied, None);
+    assert_eq!(losing.status(), PeerCampaignStatus::Lost);
+    assert!(!group[&1].is_leader());
+    assert_eq!(first.status(), first_win);
+    assert_eq!(challenger.status(), next_win);
+    let PeerCampaignStatus::Elected { term } = challenger.status() else {
+        panic!("campaign did not win");
+    };
+    let position = group
+        .get_mut(&2)
+        .unwrap()
+        .propose_in_term(term, vec![89])
+        .unwrap();
+    pump(&mut group, &mut applied, None);
+    assert!(group[&2].applied_index() >= position.index);
+}
+
+#[test]
+fn timed_out_campaign_receipts_are_not_revived_by_late_real_votes_or_reopen() {
+    use matrixraft::peer_runtime::PeerCampaignStatus;
+    use std::time::Duration;
+    let dir = Directory::new();
+    let tuning = PeerTuning {
+        max_pending_campaign_receipts: Some(1),
+        pre_vote: false,
+        ..Default::default()
+    };
+    let mut group: BTreeMap<_, _> = (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(dir.options(id, vec![1, 2, 3]), tuning).unwrap(),
+            )
+        })
+        .collect();
+    let expired = group
+        .get_mut(&1)
+        .unwrap()
+        .campaign_tracked(Some(Duration::from_millis(1)))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(
+        group.get_mut(&1).unwrap().poll_campaign(&expired).unwrap(),
+        PeerCampaignStatus::TimedOut
+    );
+    let next = group.get_mut(&1).unwrap().campaign_tracked(None).unwrap();
+    let mut applied = Applied::new();
+    pump(&mut group, &mut applied, None);
+    let won = PeerCampaignStatus::Elected {
+        term: group[&1].term(),
+    };
+    assert_eq!(next.status(), won);
+    assert_eq!(expired.status(), PeerCampaignStatus::TimedOut);
+    drop(group);
+    let mut reopened =
+        DurablePeer::open_with_tuning(dir.options(1, vec![1, 2, 3]), tuning).unwrap();
+    assert!(reopened.poll_campaign(&expired).is_err());
+    assert!(reopened.poll_campaign(&next).is_err());
+    assert_eq!(next.status(), won);
+    assert_eq!(expired.status(), PeerCampaignStatus::TimedOut);
+}
+
+#[test]
 fn durable_commands_replicate_with_real_quorums_and_survive_a_new_leader() {
     use matrixraft::peer_runtime::{PeerProposalOptions, PeerProposalStatus};
     #[derive(Clone, PartialEq, prost::Message)]

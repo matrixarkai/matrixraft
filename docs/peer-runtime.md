@@ -17,6 +17,31 @@ message budget. Election ticks cannot exceed half the platform's maximum `usize`
 Read confirmation continues to use quorum-safe mode even if quorum-based leader
 step-down is disabled.
 
+`PeerTuning::max_pending_campaign_receipts` optionally admits 1 through 65,536
+campaign completions. `None` disables the receipt APIs without changing ordinary
+election behavior. `campaign_tracked` and `force_campaign_tracked` return a
+`PeerCampaignReceipt`; several admitted waiters can observe the same local win.
+Forced campaigns retain the existing voter-eligibility and already-campaigning
+checks. Refused requests do not consume a receipt slot or trigger an election.
+
+`Elected { term }` is published after actual quorum voting and durable Ready
+processing, before application callbacks or host-owned application work finish.
+An already established, durable leader can complete inline without another write.
+The result records an election event, not a leadership lease, a read confirmation,
+or application completion. A subsequent loss of leadership or application failure
+does not rewrite that event. Use the returned term with term-fenced proposals,
+which still check current leadership at admission.
+
+A positive optional timeout bounds local waiting; `None` waits until a win,
+loss, stop, or failure. Timeouts do not cancel consensus activity. Host ticks,
+Ready processing, receipt polling, and new admissions service waiting requests.
+Expired deadlines make the peer Ready, but live elections still need real packet
+delivery and host ticks. `Lost`, `TimedOut`, `Stopped`, and `Failed` are retained
+terminal outcomes, and late votes cannot revive a completed receipt. Dropping a
+receipt releases its waiting slot at the next service point. Receipts neither
+persist across restart nor retain the storage lock, and polling one on another
+peer or a later open is rejected. No packet or journal format change is required.
+
 `propose_with_options` and `propose_batch_with_options` accept
 `PeerProposalOptions`. `expected_term` optionally fences admission to one exact
 leadership term. `durable_command` syncs the journaled commit position before a
