@@ -619,8 +619,20 @@ impl DurablePeer {
         payload: Vec<u8>,
         timeout: Option<Duration>,
     ) -> Result<PeerProposalReceipt, RaftError> {
+        self.propose_tracked_with_options(PeerProposalOptions::default(), payload, timeout)
+    }
+    /// Track a command or a term-fenced proposal through ordered application.
+    pub fn propose_tracked_with_options(
+        &mut self,
+        options: PeerProposalOptions,
+        payload: Vec<u8>,
+        timeout: Option<Duration>,
+    ) -> Result<PeerProposalReceipt, RaftError> {
+        if let Some(term) = options.expected_term {
+            self.require_proposal_term(term)?;
+        }
         let deadline = self.admit_proposal_receipts(1, timeout)?;
-        let position = self.propose(payload)?;
+        let position = self.propose_with_options(options, payload)?;
         Ok(self.register_proposal_receipt(position, deadline))
     }
     /// Fence tracked admission to the caller's expected leadership term.
@@ -640,8 +652,20 @@ impl DurablePeer {
         payloads: Vec<Vec<u8>>,
         timeout: Option<Duration>,
     ) -> Result<Vec<PeerProposalReceipt>, RaftError> {
+        self.propose_batch_tracked_with_options(PeerProposalOptions::default(), payloads, timeout)
+    }
+    /// Track a bounded batch under one command policy and optional term fence.
+    pub fn propose_batch_tracked_with_options(
+        &mut self,
+        options: PeerProposalOptions,
+        payloads: Vec<Vec<u8>>,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<PeerProposalReceipt>, RaftError> {
+        if let Some(term) = options.expected_term {
+            self.require_proposal_term(term)?;
+        }
         let deadline = self.admit_proposal_receipts(payloads.len(), timeout)?;
-        let positions = self.propose_batch(payloads)?;
+        let positions = self.propose_batch_with_options(options, payloads)?;
         Ok(positions
             .into_iter()
             .map(|position| self.register_proposal_receipt(position, deadline))

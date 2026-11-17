@@ -17,6 +17,24 @@ message budget. Election ticks cannot exceed half the platform's maximum `usize`
 Read confirmation continues to use quorum-safe mode even if quorum-based leader
 step-down is disabled.
 
+`propose_with_options` and `propose_batch_with_options` accept
+`PeerProposalOptions`. `expected_term` optionally fences admission to one exact
+leadership term. `durable_command` syncs the journaled commit position before a
+command reaches a synchronous callback or becomes a host-owned application task.
+`ApplicationEntry::is_command` identifies these entries in application batches.
+The corresponding `propose_tracked_with_options` and
+`propose_batch_tracked_with_options` retain the ordinary receipt limits, deadlines,
+and ordered completion rules. Acceptance alone is still not a commit acknowledgment.
+
+Commands retain the same payload and batch bounds as ordinary proposals. Their
+durability requirement survives replication, deferred application, cache eviction,
+restart, and checkpoint suffix rewrites. Repeated application attempts covered by
+an already synced commit position do not add another barrier. Ordinary proposals
+retain the existing commit-only barrier savings. Upgrade every peer and recovery
+binary before admitting commands: command-bearing append packets use version 7,
+and affected journal records carry an additional required format field. Earlier
+readers reject these formats rather than silently ignore the durability contract.
+
 `PeerTuning::max_log_cache_bytes` optionally sets a resident-entry high-water
 target from 1 byte through 512 MiB. `None` retains the existing all-resident
 behavior. Accounting includes entry structs, payloads, contexts, and cache

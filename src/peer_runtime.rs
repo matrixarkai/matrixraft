@@ -33,8 +33,11 @@ pub use apply_pipeline::{PeerApplyCompletion, PeerApplyTask};
 mod checkpoint_file;
 #[path = "peer_checkpoint_policy.rs"]
 mod checkpoint_policy;
+#[path = "peer_commands.rs"]
+mod commands;
 #[path = "peer_flushed_membership.rs"]
 mod flushed_membership;
+pub use commands::PeerProposalOptions;
 #[path = "peer_read_deadlines.rs"]
 mod read_deadlines;
 #[path = "peer_replica_retention.rs"]
@@ -283,6 +286,8 @@ pub enum RestoreDecision {
 pub struct ApplicationEntry<'a> {
     pub position: LogId,
     pub payload: &'a [u8],
+    /// The committed position was synced before this entry became available.
+    pub is_command: bool,
 }
 
 /// A contiguous run of application entries that never crosses a membership change.
@@ -298,6 +303,7 @@ fn application_entry(entry: &Entry) -> ApplicationEntry<'_> {
             index: entry.index,
         },
         payload: &entry.data,
+        is_command: commands::is_command(entry),
     }
 }
 impl<'a> ApplicationBatch<'a> {
@@ -658,6 +664,9 @@ fn exact_batch_encoding(batch: &WalBatch, bytes: &[u8], output: &mut Vec<u8>) ->
     if !batch.flushed_membership.is_empty() {
         prost::encoding::bytes::encode(15, &batch.flushed_membership, &mut *output);
     }
+    if batch.durable_commands {
+        prost::encoding::bool::encode(16, &true, &mut *output);
+    }
     consume(&mut input, output) && input.is_empty()
 }
 
@@ -807,6 +816,9 @@ struct WalBatch {
     promotion_policy: Vec<u8>,
     #[prost(bytes = "vec", tag = "15")]
     flushed_membership: Vec<u8>,
+    /// Announces command semantics to readers with an exact-encoding fence.
+    #[prost(bool, tag = "16")]
+    durable_commands: bool,
 }
 fn invalid(s: impl ToString) -> RaftError {
     RaftError::InvalidRequest(s.to_string())
@@ -859,6 +871,7 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         flushed_index: 0,
         promotion_policy: Vec::new(),
         flushed_membership: Vec::new(),
+        durable_commands: entries.iter().any(commands::is_command),
     }
 }
 #[derive(Clone)]
@@ -1068,6 +1081,11 @@ fn install_recovered_entries(store: &PeerStorage, batch: WalBatch) -> Result<(),
     let mut decoded = Entry::default();
     for encoded in &batch.entries {
         merge_entry_reusing_payload_storage(encoded.clone(), &mut decoded)?;
+        if !batch.durable_commands && commands::is_command(&decoded) {
+            return Err(storage_error(
+                "command entries require an extended journal record",
+            ));
+        }
         if decoded.entry_type != EntryType::EntryNormal as i32 {
             membership::decode_change(&decoded, &store.permitted).map_err(storage_error)?;
         }
@@ -1254,6 +1272,11 @@ fn install_decoded_with_scratch(
         SnapshotSource::Journal | SnapshotSource::Trim => None,
         SnapshotSource::LocalCapture(payload) | SnapshotSource::Received(payload) => Some(payload),
     };
+    if !batch.durable_commands && entries.iter().any(commands::is_command) {
+        return Err(storage_error(
+            "command entries require an extended journal record",
+        ));
+    }
     for entry in entries
         .iter()
         .filter(|e| e.entry_type != EntryType::EntryNormal as i32)
@@ -1810,6 +1833,7 @@ impl Journal {
         // A single larger entry keeps the existing per-record size limit.
         let mut suffix = batch(options, None, &[]);
         suffix.permitted.clone_from(&self.permitted);
+        suffix.durable_commands = entries.iter().any(commands::is_command);
         let overhead = suffix.encoded_len();
         let mut size = overhead;
         for entry in entries {
@@ -1883,6 +1907,7 @@ impl Journal {
         entries: &[Entry],
         previous: &HardState,
     ) -> Result<(), RaftError> {
+        record.durable_commands = entries.iter().any(commands::is_command);
         if entries.is_empty() {
             return self.append(record);
         }
@@ -1915,6 +1940,7 @@ impl Journal {
             node: record.node,
             voters: record.voters.clone(),
             permitted: self.permitted.clone(),
+            durable_commands: record.durable_commands,
             ..Default::default()
         };
         let overhead = envelope.encoded_len();
@@ -2003,6 +2029,7 @@ impl Journal {
             node: record.node,
             voters: record.voters.clone(),
             permitted: self.permitted.clone(),
+            durable_commands: record.durable_commands,
             ..Default::default()
         };
         let overhead = envelope.encoded_len();
@@ -2212,6 +2239,9 @@ impl Journal {
         if !batch.promotion_policy.is_empty() {
             prost::encoding::bytes::encode(14, &batch.promotion_policy, &mut *metadata);
         }
+        if batch.durable_commands {
+            prost::encoding::bool::encode(16, &true, &mut *metadata);
+        }
 
         let size = metadata.len() + batch.snapshot.len();
         if size > LIMIT {
@@ -2335,6 +2365,9 @@ impl Journal {
         }
         let suffix_start = metadata.len();
         prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
+        if batch.durable_commands {
+            prost::encoding::bool::encode(16, &true, &mut *metadata);
+        }
         let size = batch
             .entries
             .iter()
@@ -2469,6 +2502,9 @@ impl Journal {
         }
         let suffix_start = metadata.len();
         prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
+        if batch.durable_commands {
+            prost::encoding::bool::encode(16, &true, &mut *metadata);
+        }
         let size = entries.iter().try_fold(metadata.len(), |size, entry| {
             size.checked_add(entry.data.len())
                 .and_then(|size| size.checked_add(entry.context.len()))
@@ -2649,6 +2685,7 @@ pub struct DurablePeer {
     startup_hold: startup_hold::Hold,
     proposal_receipts: Option<Box<proposal_receipts::Tracker>>,
     replica_contacts: Option<Box<replica_retention::Window>>,
+    command_commit_synced: u64,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
@@ -2759,6 +2796,7 @@ impl DurablePeer {
         stream.frame_all_sends = tuning.max_checkpoint_sends.is_some();
         Ok(Self {
             pending_apply: config.applied,
+            command_commit_synced: commit,
             application_fetch_bytes: tuning.application_read_budget(),
             early_sink: None,
             bounded_apply: tuning.max_apply_bytes.is_some(),
@@ -3347,6 +3385,18 @@ impl DurablePeer {
 
     /// Acceptance allocates a log position; it does not mean the proposal committed.
     pub fn propose(&mut self, payload: Vec<u8>) -> Result<LogId, RaftError> {
+        self.propose_with_options(PeerProposalOptions::default(), payload)
+    }
+    /// Admit a value with an optional term fence and durable command semantics.
+    /// Acceptance still allocates a position; it is not a commit acknowledgment.
+    pub fn propose_with_options(
+        &mut self,
+        options: PeerProposalOptions,
+        payload: Vec<u8>,
+    ) -> Result<LogId, RaftError> {
+        if let Some(term) = options.expected_term {
+            self.require_proposal_term(term)?;
+        }
         self.healthy()?;
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.options.node_id));
@@ -3363,7 +3413,9 @@ impl DurablePeer {
             return Err(invalid("peer proposal must contain 1..4 MiB"));
         }
         let before = self.raw.raft.raft_log.last_index();
-        self.raw.propose(Vec::new(), payload).map_err(invalid)?;
+        self.raw
+            .propose(options.context(), payload)
+            .map_err(invalid)?;
         let index = self.raw.raft.raft_log.last_index();
         if index == before {
             return Err(invalid("peer proposal was not admitted"));
@@ -3378,6 +3430,17 @@ impl DurablePeer {
     /// Submit up to 1024 nonempty values, totaling at most 4 MiB, in one core proposal.
     /// Returned positions are contiguous admissions, not commit acknowledgments.
     pub fn propose_batch(&mut self, payloads: Vec<Vec<u8>>) -> Result<Vec<LogId>, RaftError> {
+        self.propose_batch_with_options(PeerProposalOptions::default(), payloads)
+    }
+    /// Admit one bounded batch under the same term and command settings.
+    pub fn propose_batch_with_options(
+        &mut self,
+        options: PeerProposalOptions,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<LogId>, RaftError> {
+        if let Some(term) = options.expected_term {
+            self.require_proposal_term(term)?;
+        }
         self.healthy()?;
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.options.node_id));
@@ -3413,6 +3476,7 @@ impl DurablePeer {
             .into_iter()
             .map(|data| Entry {
                 data,
+                context: options.context(),
                 ..Default::default()
             })
             .collect();
@@ -3826,7 +3890,7 @@ impl DurablePeer {
         }
         let (version, group, original_message) = decode_canonical_packet(bytes)
             .ok_or_else(|| invalid("invalid peer packet encoding"))?;
-        if !matches!(version, 1..=6) || group != self.options.group_id {
+        if !matches!(version, 1..=7) || group != self.options.group_id {
             return Err(invalid("peer packet identity or encoding mismatch"));
         }
         if matches!(version, 2 | 3 | 5 | 6) {
@@ -3901,6 +3965,9 @@ impl DurablePeer {
         };
         if !canonical {
             return Err(invalid("noncanonical peer message"));
+        }
+        if (version == 7) != message.entries.iter().any(commands::is_command) {
+            return Err(invalid("command entries require an extended append packet"));
         }
         if version == 4
             && (message.get_msg_type() != MessageType::MsgSnapshot || message.context.is_empty())
@@ -4174,7 +4241,9 @@ impl DurablePeer {
             }
             output.push(PeerPacket {
                 to,
-                bytes: if message.get_msg_type() == MessageType::MsgSnapshot
+                bytes: if message.entries.iter().any(commands::is_command) {
+                    encode_envelope(7, self.options.group_id, &message)?
+                } else if message.get_msg_type() == MessageType::MsgSnapshot
                     && !message.context.is_empty()
                 {
                     encode_envelope(4, self.options.group_id, &message)?
@@ -4544,6 +4613,7 @@ impl DurablePeer {
                 .iter()
                 .position(|entry| entry.entry_type != EntryType::EntryNormal as i32)
                 .map_or(entries.len(), |length| offset + length);
+            self.sync_application_commands(&entries[offset..end])?;
             let progress = apply(&entries[offset..end]);
             if progress.consumed > end - offset {
                 return Err(invalid("application consumed beyond the supplied batch"));
@@ -4669,6 +4739,7 @@ impl DurablePeer {
                 // Receive finalization already validated and synced this owned
                 // payload. Reuse it without scanning it again on the Raft loop.
                 install_received(&self.store, &record, Arc::clone(&snapshot), payload)?;
+                self.command_commit_synced = self.command_commit_synced.max(hs.commit);
                 self.automatic_learners = automatic_learners;
                 self.store
                     .refresh_cache(&self.options, self.journal.length, true)?;
@@ -4707,6 +4778,11 @@ impl DurablePeer {
                     ready.entries(),
                     ready.hs().cloned(),
                 )?;
+                if !commit_only {
+                    self.command_commit_synced = self
+                        .command_commit_synced
+                        .max(ready.hs().unwrap_or(&previous).commit);
+                }
                 self.store
                     .refresh_cache(&self.options, self.journal.length, false)?;
             }
@@ -5060,6 +5136,7 @@ mod tests {
             flushed_membership: vec![4, 5, 6],
             permitted: vec![1, 2, 3, 4],
             flushed_index: 0,
+            durable_commands: true,
         };
         let bytes = record.encode_to_vec();
         let mut validation = Vec::new();

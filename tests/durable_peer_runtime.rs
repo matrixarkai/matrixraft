@@ -79,6 +79,145 @@ impl Drop for Directory {
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
 
 #[test]
+fn durable_commands_replicate_with_real_quorums_and_survive_a_new_leader() {
+    use matrixraft::peer_runtime::{PeerProposalOptions, PeerProposalStatus};
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct Version {
+        #[prost(uint32, tag = "1")]
+        version: u32,
+    }
+    type Values = BTreeMap<u64, Vec<(Vec<u8>, bool)>>;
+    fn exchange(
+        peers: &mut BTreeMap<u64, DurablePeer>,
+        values: &mut Values,
+        isolated: Option<u64>,
+    ) -> bool {
+        let mut extended = false;
+        for _ in 0..100 {
+            let mut packets = Vec::new();
+            for (&id, peer) in peers.iter_mut() {
+                let output = peer
+                    .process_ready_batch(|batch| {
+                        for entry in batch.iter().filter(|entry| !entry.payload.is_empty()) {
+                            values
+                                .entry(id)
+                                .or_default()
+                                .push((entry.payload.to_vec(), entry.is_command));
+                        }
+                        Ok(batch.len())
+                    })
+                    .unwrap();
+                for packet in output {
+                    extended |= Version::decode(packet.bytes.as_slice()).unwrap().version == 7;
+                    if isolated != Some(id) && isolated != Some(packet.to) {
+                        packets.push(packet);
+                    }
+                }
+            }
+            if packets.is_empty() && peers.values().all(|peer| !peer.has_ready()) {
+                return extended;
+            }
+            for packet in packets {
+                peers
+                    .get_mut(&packet.to)
+                    .unwrap()
+                    .step(&packet.bytes)
+                    .unwrap();
+            }
+        }
+        panic!("command replication did not settle");
+    }
+    let dir = Directory::new();
+    let tuning = PeerTuning {
+        max_pending_proposal_receipts: Some(8),
+        max_log_cache_bytes: Some(1024),
+        ..Default::default()
+    };
+    let mut group: BTreeMap<_, _> = (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(dir.options(id, vec![1, 2, 3]), tuning).unwrap(),
+            )
+        })
+        .collect();
+    let mut values = Values::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    exchange(&mut group, &mut values, None);
+    let term = group[&1].term();
+    let command = PeerProposalOptions {
+        expected_term: Some(term),
+        durable_command: true,
+    };
+    let receipts = group
+        .get_mut(&1)
+        .unwrap()
+        .propose_batch_tracked_with_options(command, vec![vec![71; 4096], vec![72; 4096]], None)
+        .unwrap();
+    assert!(exchange(&mut group, &mut values, Some(1)));
+    assert!(receipts
+        .iter()
+        .all(|receipt| receipt.status() == PeerProposalStatus::Pending));
+    assert!(values.values().all(Vec::is_empty));
+    for _ in 0..2 {
+        group.get_mut(&1).unwrap().tick().unwrap();
+    }
+    assert!(exchange(&mut group, &mut values, None));
+    assert!(receipts
+        .iter()
+        .all(|receipt| receipt.status() == PeerProposalStatus::Applied));
+    group.get_mut(&1).unwrap().propose(vec![73]).unwrap();
+    exchange(&mut group, &mut values, None);
+    group.get_mut(&2).unwrap().force_campaign().unwrap();
+    exchange(&mut group, &mut values, None);
+    assert!(group[&2].is_leader());
+    let next = group
+        .get_mut(&2)
+        .unwrap()
+        .propose_tracked_with_options(
+            PeerProposalOptions {
+                durable_command: true,
+                ..Default::default()
+            },
+            vec![74],
+            None,
+        )
+        .unwrap();
+    assert!(exchange(&mut group, &mut values, None));
+    for _ in 0..2 {
+        group.get_mut(&2).unwrap().tick().unwrap();
+    }
+    exchange(&mut group, &mut values, None);
+    assert_eq!(next.status(), PeerProposalStatus::Applied);
+    let expected = vec![
+        (vec![71; 4096], true),
+        (vec![72; 4096], true),
+        (vec![73], false),
+        (vec![74], true),
+    ];
+    for id in 1..=3 {
+        assert_eq!(values[&id], expected);
+    }
+    drop(group);
+    for id in 1..=3 {
+        let mut peer =
+            DurablePeer::open_with_tuning(dir.options(id, vec![1, 2, 3]), tuning).unwrap();
+        let mut recovered = Vec::new();
+        peer.process_ready_batch(|batch| {
+            recovered.extend(
+                batch
+                    .iter()
+                    .filter(|entry| !entry.payload.is_empty())
+                    .map(|entry| (entry.payload.to_vec(), entry.is_command)),
+            );
+            Ok(batch.len())
+        })
+        .unwrap();
+        assert_eq!(recovered, expected);
+    }
+}
+
+#[test]
 fn tracked_proposals_require_real_acknowledgments_and_fail_closed_after_handoff() {
     use matrixraft::peer_runtime::PeerProposalStatus;
     let dir = Directory::new();

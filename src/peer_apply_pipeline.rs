@@ -383,6 +383,7 @@ impl DurablePeer {
                     break;
                 }
             }
+            self.sync_application_commands(&batch)?;
             self.apply_pipeline
                 .as_ref()
                 .unwrap()
