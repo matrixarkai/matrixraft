@@ -203,6 +203,7 @@ impl PeerStorage {
                 node: options.node_id,
                 voters: options.voters.clone(),
                 permitted: self.permitted.clone(),
+                witness_identity: self.witness_identity.clone(),
                 index: self.current_log_index(),
             });
         } else if let Some(reader) = state.reader.as_mut() {

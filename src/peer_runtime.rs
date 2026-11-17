@@ -66,6 +66,10 @@ mod lifecycle;
 mod membership;
 #[path = "peer_snapshot_stream.rs"]
 mod snapshot_stream;
+#[path = "peer_witness.rs"]
+mod witness;
+#[path = "peer_witness_identity.rs"]
+mod witness_identity;
 pub use membership::{MembershipChange, MembershipState};
 
 const LIMIT: usize = 8 * 1024 * 1024;
@@ -677,6 +681,9 @@ fn exact_batch_encoding(batch: &WalBatch, bytes: &[u8], output: &mut Vec<u8>) ->
     if batch.durable_commands {
         prost::encoding::bool::encode(16, &true, &mut *output);
     }
+    if !batch.witness_identity.is_empty() {
+        prost::encoding::bytes::encode(17, &batch.witness_identity, &mut *output);
+    }
     consume(&mut input, output) && input.is_empty()
 }
 
@@ -829,6 +836,8 @@ struct WalBatch {
     /// Announces command semantics to readers with an exact-encoding fence.
     #[prost(bool, tag = "16")]
     durable_commands: bool,
+    #[prost(bytes = "vec", tag = "17")]
+    witness_identity: Vec<u8>,
 }
 fn invalid(s: impl ToString) -> RaftError {
     RaftError::InvalidRequest(s.to_string())
@@ -882,10 +891,12 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         promotion_policy: Vec::new(),
         flushed_membership: Vec::new(),
         durable_commands: entries.iter().any(commands::is_command),
+        witness_identity: Vec::new(),
     }
 }
 #[derive(Clone)]
 struct PeerStorage {
+    witness_identity: Option<Arc<witness_identity::Identity>>,
     cache: log_cache::Cache,
     max_disk_replicate_entries: Option<usize>,
     permitted: Vec<u64>,
@@ -1497,6 +1508,7 @@ fn zero_range(file: &File, from: u64, to: u64) -> Result<(), RaftError> {
     }
 }
 struct Journal {
+    witness_identity: Option<Arc<witness_identity::Identity>>,
     /// Durability barriers this journal has issued, and records it has written.
     ///
     /// A durable append costs about one block whatever the record holds, so what one append costs
@@ -1589,6 +1601,7 @@ impl Journal {
         let mut validation = Vec::new();
         let mut flushed_index = 0u64;
         let mut flushed_membership = Vec::new();
+        let mut identity_seen = false;
         while offset < length {
             let remaining = length - offset;
             if remaining < 24 {
@@ -1665,6 +1678,17 @@ impl Journal {
             }
             let wire = bytes.freeze();
             let record = WalBatch::decode(wire.clone()).map_err(storage_error)?;
+            if !witness_identity::matches(&store.witness_identity, &record.witness_identity)
+                || (offset == 0
+                    && record.witness_identity.is_empty()
+                    && store
+                        .witness_identity
+                        .as_ref()
+                        .is_some_and(|identity| !identity.can_adopt_full_history()))
+            {
+                return Err(storage_error("peer WAL witness identity mismatch"));
+            }
+            identity_seen |= !record.witness_identity.is_empty();
             if !matches!(
                 (record.version, record.snapshot.is_empty()),
                 (1, true) | (2, false) | (3, false) | (4, false)
@@ -1740,6 +1764,7 @@ impl Journal {
         .and_then(|f| f.sync_all())
         .map_err(storage_error)?;
         let mut journal = Self {
+            witness_identity: store.witness_identity.clone(),
             permitted: store.permitted.clone(),
             file,
             _lock: Arc::new(lock),
@@ -1756,8 +1781,10 @@ impl Journal {
         };
         // Fill the first chunk now, while the peer is not serving, so no request waits on it.
         journal.prefill()?;
-        if offset == 0 {
-            journal.append(&batch(options, None, &[]))?;
+        if offset == 0 || (!identity_seen && journal.witness_identity.is_some()) {
+            let mut initial = batch(options, None, &[]);
+            initial.witness_identity = witness_identity::bytes(&journal.witness_identity).to_vec();
+            journal.append(&initial)?;
         }
         store.refresh_cache(options, journal.length, false)?;
         Ok(journal)
@@ -1784,6 +1811,7 @@ impl Journal {
         fs2::FileExt::try_lock_exclusive(&file).map_err(storage_error)?;
         file.set_len(0).map_err(storage_error)?;
         let mut replacement = Journal {
+            witness_identity: self.witness_identity.clone(),
             permitted: self.permitted.clone(),
             file,
             length: 0,
@@ -1802,6 +1830,7 @@ impl Journal {
         let mut floor_state = hs.clone();
         floor_state.commit = snapshot.get_metadata().index;
         let mut first = batch(options, Some(&floor_state), &[]);
+        first.witness_identity = witness_identity::bytes(&self.witness_identity).to_vec();
         first.version = 2;
         first.snapshot = snapshot_wire;
         first.promotion_policy = promotion_policy.to_vec();
@@ -1951,6 +1980,7 @@ impl Journal {
             voters: record.voters.clone(),
             permitted: self.permitted.clone(),
             durable_commands: record.durable_commands,
+            witness_identity: record.witness_identity.clone(),
             ..Default::default()
         };
         let overhead = envelope.encoded_len();
@@ -2040,6 +2070,7 @@ impl Journal {
             voters: record.voters.clone(),
             permitted: self.permitted.clone(),
             durable_commands: record.durable_commands,
+            witness_identity: record.witness_identity.clone(),
             ..Default::default()
         };
         let overhead = envelope.encoded_len();
@@ -2252,6 +2283,9 @@ impl Journal {
         if batch.durable_commands {
             prost::encoding::bool::encode(16, &true, &mut *metadata);
         }
+        if !batch.witness_identity.is_empty() {
+            prost::encoding::bytes::encode(17, &batch.witness_identity, &mut *metadata);
+        }
 
         let size = metadata.len() + batch.snapshot.len();
         if size > LIMIT {
@@ -2377,6 +2411,9 @@ impl Journal {
         prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
         if batch.durable_commands {
             prost::encoding::bool::encode(16, &true, &mut *metadata);
+        }
+        if !batch.witness_identity.is_empty() {
+            prost::encoding::bytes::encode(17, &batch.witness_identity, &mut *metadata);
         }
         let size = batch
             .entries
@@ -2514,6 +2551,9 @@ impl Journal {
         prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
         if batch.durable_commands {
             prost::encoding::bool::encode(16, &true, &mut *metadata);
+        }
+        if !batch.witness_identity.is_empty() {
+            prost::encoding::bytes::encode(17, &batch.witness_identity, &mut *metadata);
         }
         let size = entries.iter().try_fold(metadata.len(), |size, entry| {
             size.checked_add(entry.data.len())
@@ -2697,6 +2737,7 @@ pub struct DurablePeer {
     campaign_receipts: Option<Box<campaign_receipts::Tracker>>,
     replica_contacts: Option<Box<replica_retention::Window>>,
     command_commit_synced: u64,
+    witness_commit: Option<Box<witness::CommitPolicy>>,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
@@ -2717,9 +2758,17 @@ impl DurablePeer {
         Self::open_inner_with_tuning(options, permitted, PeerTuning::default())
     }
     fn open_inner_with_tuning(
+        options: PeerOptions,
+        permitted: Vec<u64>,
+        tuning: PeerTuning,
+    ) -> Result<Self, RaftError> {
+        Self::open_inner_with_role(options, permitted, tuning, None)
+    }
+    fn open_inner_with_role(
         mut options: PeerOptions,
         permitted: Vec<u64>,
         tuning: PeerTuning,
+        role: Option<witness_identity::OpenRole>,
     ) -> Result<Self, RaftError> {
         let unique: BTreeSet<_> = options.voters.iter().copied().collect();
         if options.group_id == 0
@@ -2733,8 +2782,10 @@ impl DurablePeer {
             return Err(invalid("invalid peer identity or voter set"));
         }
         options.voters = unique.into_iter().collect();
+        let witness_identity = witness_identity::Identity::from_role(role, &options, &permitted)?;
         let mut config = tuning.config(options.node_id)?;
         let store = PeerStorage {
+            witness_identity,
             cache: log_cache::Cache::new(tuning.max_log_cache_bytes),
             max_disk_replicate_entries: tuning.max_disk_replicate_entries,
             permitted,
@@ -2851,6 +2902,7 @@ impl DurablePeer {
                 .max_inflight_apply_tasks
                 .map(|capacity| apply_pipeline::Pipeline::new(capacity, config.applied)),
             startup_hold: startup_hold::Hold::new(tuning.startup_election_delay)?,
+            witness_commit: witness::CommitPolicy::from_witnesses(BTreeSet::new()),
         })
     }
     fn membership_recovered(&self) -> Result<(), RaftError> {
@@ -2899,6 +2951,7 @@ impl DurablePeer {
             node: self.options.node_id,
             voters: self.options.voters.clone(),
             permitted: self.store.permitted.clone(),
+            witness_identity: self.store.witness_identity.clone(),
             index: self.store.current_log_index(),
         })
     }
@@ -3111,6 +3164,7 @@ impl DurablePeer {
             return Err(error);
         }
         self.membership_recovered()?;
+        self.tick_witness_commit();
         self.tick_replica_contacts();
         self.expire_read_deadlines()?;
         let startup_held = self.raw.raft.state == StateRole::Follower
@@ -3165,6 +3219,7 @@ impl DurablePeer {
                 .report_snapshot(id, raft_core::SnapshotStatus::Failure);
         }
         self.service_append_window()?;
+        self.settle_witness_commit();
         self.service_apply_pipeline()?;
         self.service_proposal_receipts();
         self.align_replica_contacts();
@@ -4211,6 +4266,7 @@ impl DurablePeer {
             }
         }
         self.service_campaign_receipts(false);
+        self.settle_witness_commit();
         self.store.cache.check()
     }
     fn packets(&mut self, messages: Vec<Message>) -> Result<Vec<PeerPacket>, RaftError> {
@@ -4679,6 +4735,7 @@ impl DurablePeer {
             if self.drain_complete() {
                 break;
             }
+            self.settle_witness_commit();
             self.schedule_automatic_promotion()?;
             self.dispatch_deferred_reads()?;
             if !self.raw.has_ready() {
@@ -4826,6 +4883,7 @@ impl DurablePeer {
             let number = ready.number();
             self.raw.advance_append_async(ready);
             self.raw.on_persist_ready(number);
+            self.settle_witness_commit();
             self.store.cache.check()?;
             self.service_campaign_receipts(true);
             self.apply_async_consensus(&entries)?;
@@ -4873,6 +4931,7 @@ mod tests {
         };
         let store = PeerStorage {
             cache: Default::default(),
+            witness_identity: None,
             max_disk_replicate_entries: None,
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
@@ -4942,6 +5001,7 @@ mod tests {
         );
         drop(journal);
         let recovered = PeerStorage {
+            witness_identity: None,
             cache: Default::default(),
             max_disk_replicate_entries: None,
             permitted: Vec::new(),
@@ -4989,6 +5049,7 @@ mod tests {
         };
         let store = PeerStorage {
             cache: Default::default(),
+            witness_identity: None,
             max_disk_replicate_entries: None,
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
@@ -5167,6 +5228,7 @@ mod tests {
             permitted: vec![1, 2, 3, 4],
             flushed_index: 0,
             durable_commands: true,
+            witness_identity: vec![8, 1, 16, 1],
         };
         let bytes = record.encode_to_vec();
         let mut validation = Vec::new();
