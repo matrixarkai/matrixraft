@@ -268,6 +268,7 @@ impl DurablePeer {
         let local_voter =
             conf.voters.contains(&self.node_id()) || conf.voters_outgoing.contains(&self.node_id());
         self.store.wl().set_conf_state(conf);
+        self.append_reorder.clear();
         if !local_voter && self.raw.raft.state != StateRole::Follower {
             self.raw.raft.become_follower(self.term(), 0);
         }

@@ -24,10 +24,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "peer_append_reorder.rs"]
+mod append_reorder;
 #[path = "peer_checkpoint_file.rs"]
 mod checkpoint_file;
 #[path = "peer_checkpoint_policy.rs"]
 mod checkpoint_policy;
+pub use append_reorder::AppendReorderTuning;
 #[path = "peer_log_reader.rs"]
 mod log_reader;
 pub use log_reader::{PeerLogReader, ScrubStep};
@@ -132,6 +135,9 @@ pub struct PeerTuning {
     /// setting is read as before and keeps its layout until a checkpoint replaces it. None, the
     /// default, writes the original layout.
     pub wal_zero_fill_bytes: Option<u64>,
+    /// Optional bounded waiting window for out-of-order follower appends.
+    /// None retains immediate core processing and rejection of missing prefixes.
+    pub append_reorder: Option<AppendReorderTuning>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -152,6 +158,7 @@ impl Default for PeerTuning {
             checkpoint_after_bytes: None,
             wal_preallocate_bytes: None,
             wal_zero_fill_bytes: None,
+            append_reorder: None,
         }
     }
 }
@@ -192,6 +199,9 @@ impl PeerTuning {
                 .is_some_and(|bytes| !(4096..=WAL_LIMIT).contains(&bytes))
         {
             return Err(invalid("peer tuning exceeds supported bounds"));
+        }
+        if let Some(reorder) = self.append_reorder {
+            reorder.validate()?;
         }
         let config = Config {
             id,
@@ -2540,6 +2550,7 @@ pub struct DurablePeer {
     stream: snapshot_stream::Stream,
     incoming_payload: Option<(LogId, Arc<checkpoint_file::Blob>)>,
     checkpoint_policy: checkpoint_policy::Policy,
+    append_reorder: append_reorder::Queue,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
@@ -2643,6 +2654,7 @@ impl DurablePeer {
             stream,
             incoming_payload: None,
             checkpoint_policy: checkpoint_policy::Policy::new(tuning.checkpoint_after_bytes),
+            append_reorder: append_reorder::Queue::new(tuning.append_reorder),
         })
     }
     fn membership_recovered(&self) -> Result<(), RaftError> {
@@ -2907,6 +2919,7 @@ impl DurablePeer {
             self.raw
                 .report_snapshot(id, raft_core::SnapshotStatus::Failure);
         }
+        self.service_append_window(std::time::Instant::now())?;
         Ok(())
     }
     fn tick_consensus(&mut self) {
@@ -3805,7 +3818,7 @@ impl DurablePeer {
             self.snapshot_flights.remove(&message.from);
             self.stream.completed_send(message.from);
         }
-        let result = self.raw.step(message).map_err(invalid);
+        let result = self.step_with_append_window(message);
         self.store.cache.check().and(result)
     }
     fn packets(&mut self, messages: Vec<Message>) -> Result<Vec<PeerPacket>, RaftError> {
@@ -3869,6 +3882,7 @@ impl DurablePeer {
             && !self.stopped
             && self.store.cache.check().is_ok()
             && (self.pending_restore.is_some()
+                || self.append_reorder.expired(std::time::Instant::now())
                 || self.raw.has_ready()
                 || self.pending_apply > self.applied_index())
     }
@@ -4044,6 +4058,7 @@ impl DurablePeer {
     ) -> Result<Vec<PeerPacket>, RaftError> {
         self.processing_allowed()?;
         let result = (|| {
+            self.service_append_window(std::time::Instant::now())?;
             // Invalid incoming transfer bytes are rejected just like step errors.
             // They must not poison an otherwise healthy voter. A failed worker
             // drops its payload and sends no completion acknowledgment.
