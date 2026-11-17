@@ -17,6 +17,11 @@ struct Cluster {
     checkpoint_sends: Option<usize>,
     hold_after: Option<u64>,
     hold_except: Option<u64>,
+    hold_append_acks_from: Option<u64>,
+    held_acks: Vec<matrixraft::peer_runtime::PeerPacket>,
+    uncommitted_limit: u64,
+    replica_timeout: Option<usize>,
+    receipt_capacity: Option<usize>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -27,6 +32,528 @@ struct MembershipPacket {
     group: u64,
     #[prost(bytes = "vec", tag = "3")]
     message: Vec<u8>,
+}
+
+#[test]
+fn flushed_automatic_joint_membership_finishes_after_all_peers_restart() {
+    let mut c = Cluster::new();
+    c.add_caught_up_learner();
+    for value in 0..8 {
+        c.write(1, value);
+    }
+    let floor = c.hold_automatic_joint();
+    let joint = c.peers[&1].membership();
+    assert!(joint.auto_leave);
+    let durable: BTreeMap<_, _> = (1..=4)
+        .map(|id| (id, c.values[&id].borrow().clone()))
+        .collect();
+    c.pump();
+    for id in 1..=4 {
+        let peer = c.peers.get_mut(&id).unwrap();
+        peer.set_flushed_index(floor).unwrap();
+        peer.trim_log_to(floor).unwrap();
+    }
+    c.peers.clear();
+    c.hold_after = None;
+    for id in 1..=4 {
+        c.open(id);
+        *c.values[&id].borrow_mut() = durable[&id].clone();
+        assert_eq!(c.peers[&id].membership(), joint);
+    }
+    c.pump();
+    c.peers.get_mut(&1).unwrap().campaign().unwrap();
+    c.pump();
+    for _ in 0..10 {
+        if c.peers[&1].membership().outgoing_voters.is_empty() {
+            break;
+        }
+        c.tick();
+    }
+    for id in 1..=4 {
+        let state = c.peers[&id].membership();
+        assert_eq!(state.voters, vec![1, 2, 3, 4]);
+        assert!(state.outgoing_voters.is_empty());
+        assert!(!state.auto_leave);
+    }
+    c.write(1, 99);
+    assert!(c
+        .values
+        .values()
+        .all(|values| values.borrow().as_slice() == [0, 1, 2, 3, 4, 5, 6, 7, 99]));
+}
+
+fn retention_cluster(timeout: usize) -> Cluster {
+    let mut c = Cluster::new();
+    c.replica_timeout = Some(timeout);
+    c.peers.clear();
+    for id in 1..=3 {
+        c.open(id);
+    }
+    c.pump();
+    c.peers.get_mut(&1).unwrap().campaign().unwrap();
+    c.pump();
+    c
+}
+
+fn receipt_cluster() -> Cluster {
+    let mut c = Cluster::new();
+    c.receipt_capacity = Some(4);
+    c.peers.clear();
+    for id in 1..=3 {
+        c.open(id);
+    }
+    c.pump();
+    c.peers.get_mut(&1).unwrap().campaign().unwrap();
+    c.pump();
+    c
+}
+
+#[test]
+fn membership_receipts_wait_for_the_automatic_joint_exit() {
+    use matrixraft::peer_runtime::PeerProposalStatus;
+    let mut c = receipt_cluster();
+    c.add_caught_up_learner();
+    let receipt = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_auto_tracked(MembershipChange::Promote(4), None)
+        .unwrap();
+    let initial = receipt.position();
+    c.hold_after = Some(initial.index);
+    c.pump();
+    assert_eq!(c.peers[&1].applied_index(), initial.index);
+    assert!(c.peers[&1].membership().auto_leave);
+    assert!(!c.peers[&1].membership().outgoing_voters.is_empty());
+    assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+    c.hold_after = None;
+    for _ in 0..10 {
+        c.tick();
+        if receipt.status() == PeerProposalStatus::Applied {
+            break;
+        }
+    }
+    assert_eq!(receipt.status(), PeerProposalStatus::Applied);
+    assert_eq!(receipt.position(), initial);
+    assert!(c.peers[&1].applied_index() > initial.index);
+    assert_eq!(c.peers[&1].membership().voters, vec![1, 2, 3, 4]);
+    assert!(c.peers[&1].membership().outgoing_voters.is_empty());
+    c.write(1, 99);
+}
+
+#[test]
+fn membership_receipts_acknowledge_manual_phases_and_local_voter_removal() {
+    use matrixraft::peer_runtime::PeerProposalStatus;
+    let mut c = receipt_cluster();
+    let initial = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_tracked(MembershipChange::Remove(1), None)
+        .unwrap();
+    c.pump();
+    assert_eq!(initial.status(), PeerProposalStatus::Applied);
+    assert_eq!(c.peers[&1].membership().voters, vec![2, 3]);
+    assert_eq!(c.peers[&1].membership().outgoing_voters, vec![1, 2, 3]);
+    assert!(c.peers[&1].is_leader());
+    let exit = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_tracked(MembershipChange::LeaveJoint, None)
+        .unwrap();
+    c.pump();
+    assert!(!c.peers[&1].is_leader());
+    assert!(c.peers[&1].membership().outgoing_voters.is_empty());
+    assert_eq!(
+        c.peers.get_mut(&1).unwrap().poll_proposal(&exit).unwrap(),
+        PeerProposalStatus::Applied
+    );
+    c.peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    c.pump();
+    assert!(c.peers[&2].is_leader());
+    c.write(2, 99);
+    assert_eq!(exit.status(), PeerProposalStatus::Applied);
+}
+
+#[test]
+fn membership_receipts_do_not_complete_an_uncommitted_automatic_exit_during_shutdown() {
+    use matrixraft::peer_runtime::PeerProposalStatus;
+    let mut c = receipt_cluster();
+    c.add_caught_up_learner();
+    let receipt = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_auto_tracked(MembershipChange::Promote(4), None)
+        .unwrap();
+    c.hold_after = Some(receipt.position().index);
+    c.pump();
+    assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+    let fence = c.peers.get_mut(&1).unwrap().begin_shutdown().unwrap();
+    assert_eq!(fence, receipt.position().index);
+    assert!(c.peers.get_mut(&1).unwrap().poll_shutdown().unwrap());
+    assert_eq!(receipt.status(), PeerProposalStatus::Stopped);
+    c.peers.remove(&1);
+    c.hold_after = None;
+    c.peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    c.pump();
+    for _ in 0..6 {
+        if c.peers[&2].membership().outgoing_voters.is_empty() {
+            break;
+        }
+        c.tick();
+    }
+    assert!(c.peers[&2].membership().outgoing_voters.is_empty());
+    c.write(2, 99);
+    assert_eq!(receipt.status(), PeerProposalStatus::Stopped);
+}
+
+#[test]
+fn membership_receipts_do_not_resurrect_after_losing_an_unfinished_joint_transition() {
+    use matrixraft::peer_runtime::PeerProposalStatus;
+    let mut c = receipt_cluster();
+    c.add_caught_up_learner();
+    let receipt = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_auto_tracked(MembershipChange::Promote(4), None)
+        .unwrap();
+    c.hold_after = Some(receipt.position().index);
+    c.pump();
+    assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+    c.isolated.insert(1);
+    c.hold_after = None;
+    c.peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    c.pump();
+    assert!(c.peers[&2].is_leader());
+    for _ in 0..6 {
+        if c.peers[&2].membership().outgoing_voters.is_empty() {
+            break;
+        }
+        c.tick();
+    }
+    assert!(c.peers[&2].membership().outgoing_voters.is_empty());
+    c.isolated.remove(&1);
+    for _ in 0..6 {
+        c.tick();
+        if c.peers[&1].membership().outgoing_voters.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(receipt.status(), PeerProposalStatus::LeadershipLost);
+    assert_eq!(c.peers[&1].membership().voters, vec![1, 2, 3, 4]);
+    assert!(c.peers[&1].membership().outgoing_voters.is_empty());
+    c.write(2, 99);
+    assert_eq!(receipt.status(), PeerProposalStatus::LeadershipLost);
+}
+
+#[test]
+fn replica_retention_waits_for_silent_voters_then_reclaims_and_restores_them() {
+    let mut c = retention_cluster(5);
+    let baseline = c.peers[&1].replication_retention_index().unwrap();
+    c.isolated.insert(3);
+    for value in 0..24 {
+        c.write(1, value);
+    }
+    let applied = c.peers[&1].applied_index();
+    c.peers
+        .get_mut(&1)
+        .unwrap()
+        .set_flushed_index(applied)
+        .unwrap();
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), baseline);
+    assert_eq!(
+        c.peers.get_mut(&1).unwrap().trim_flushed_log().unwrap(),
+        baseline
+    );
+    let before = c.peers[&1].persisted_wal_bytes().unwrap();
+    for _ in 0..4 {
+        c.tick();
+    }
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), baseline);
+    c.tick();
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), applied);
+    assert_eq!(
+        c.peers.get_mut(&1).unwrap().trim_flushed_log().unwrap(),
+        applied
+    );
+    assert!(c.peers[&1].persisted_wal_bytes().unwrap() < before);
+    c.isolated.remove(&3);
+    for _ in 0..6 {
+        c.tick();
+        if c.peers[&1].snapshot_wanted() {
+            break;
+        }
+    }
+    assert!(c.peers[&1].snapshot_wanted());
+    c.checkpoint(1);
+    for _ in 0..10 {
+        c.tick();
+        if c.values[&3].borrow().len() == 24 {
+            break;
+        }
+    }
+    assert_eq!(*c.values[&3].borrow(), (0..24).collect::<Vec<_>>());
+    c.write(1, 99);
+}
+
+#[test]
+fn replica_retention_keeps_responding_learners_until_real_data_acknowledgment() {
+    let mut c = retention_cluster(5);
+    c.add_caught_up_learner();
+    let baseline = c.peers[&1].replication_retention_index().unwrap();
+    c.hold_append_acks_from = Some(4);
+    for value in 0..16 {
+        c.write(1, value);
+    }
+    let applied = c.peers[&1].applied_index();
+    for _ in 0..20 {
+        c.tick();
+    }
+    assert!(c.peers[&1].is_leader());
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), baseline);
+    c.peers
+        .get_mut(&1)
+        .unwrap()
+        .set_flushed_index(applied)
+        .unwrap();
+    assert_eq!(
+        c.peers.get_mut(&1).unwrap().trim_flushed_log().unwrap(),
+        baseline
+    );
+    assert!(!c.held_acks.is_empty());
+    c.hold_append_acks_from = None;
+    for packet in std::mem::take(&mut c.held_acks) {
+        c.peers
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    c.pump();
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), applied);
+    assert_eq!(
+        c.peers.get_mut(&1).unwrap().trim_flushed_log().unwrap(),
+        applied
+    );
+}
+
+#[test]
+fn replica_retention_window_selects_handoff_targets_independently_of_quorum_ticks() {
+    let mut c = retention_cluster(20);
+    for _ in 0..9 {
+        c.tick();
+    }
+    c.peers.get_mut(&1).unwrap().tick().unwrap();
+    assert_eq!(c.peers[&1].closest_follower(), Some(2));
+    c.pump();
+    c.hold_after = Some(c.peers[&1].applied_index());
+    c.hold_except = Some(2);
+    for value in 0..8 {
+        c.write(1, value);
+    }
+    assert_eq!(c.peers[&1].closest_follower(), Some(2));
+    c.isolated.insert(2);
+    for _ in 0..20 {
+        c.tick();
+    }
+    assert!(c.peers[&1].is_leader());
+    assert_eq!(c.peers[&1].closest_follower(), Some(3));
+    assert_eq!(
+        c.peers
+            .get_mut(&1)
+            .unwrap()
+            .transfer_leadership_to_closest()
+            .unwrap(),
+        3
+    );
+    c.hold_after = None;
+    c.pump();
+    for _ in 0..8 {
+        if c.peers[&3].is_leader() {
+            break;
+        }
+        c.tick();
+    }
+    assert!(c.peers[&3].is_leader());
+    assert_eq!(c.peers[&3].closest_follower(), Some(1));
+    c.write(3, 99);
+}
+
+#[test]
+fn replica_retention_rejects_stale_epoch_responses_and_malformed_refreshes() {
+    let mut c = retention_cluster(5);
+    c.peers.get_mut(&1).unwrap().tick().unwrap();
+    c.peers.get_mut(&1).unwrap().tick().unwrap();
+    for packet in c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap()
+    {
+        if packet.to == 2 {
+            c.peers.get_mut(&2).unwrap().step(&packet.bytes).unwrap();
+        }
+    }
+    let old = c
+        .peers
+        .get_mut(&2)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap()
+        .into_iter()
+        .find(|packet| {
+            let envelope = MembershipPacket::decode(packet.bytes.as_slice()).unwrap();
+            raft_core::eraftpb::Message::decode(envelope.message.as_slice())
+                .unwrap()
+                .get_msg_type()
+                == raft_core::eraftpb::MessageType::MsgHeartbeatResponse
+        })
+        .expect("capture an actual old-epoch heartbeat response");
+    c.peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    c.pump();
+    assert!(c.peers[&2].is_leader());
+    c.isolated.insert(2);
+    c.peers.get_mut(&1).unwrap().force_campaign().unwrap();
+    c.pump();
+    assert!(c.peers[&1].is_leader());
+    for _ in 0..5 {
+        c.tick();
+    }
+    let applied = c.peers[&1].applied_index();
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), applied);
+    c.peers.get_mut(&1).unwrap().step(&old.bytes).unwrap();
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), applied);
+    assert_eq!(c.peers[&1].closest_follower(), Some(3));
+    let mut malformed = old.bytes;
+    malformed.push(0);
+    assert!(c.peers.get_mut(&1).unwrap().step(&malformed).is_err());
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), applied);
+}
+
+#[test]
+fn flushed_joint_membership_trims_and_recovers_later_changes_with_real_votes() {
+    for cache in [None, Some(512)] {
+        let mut c = Cluster::new();
+        c.cache_target = cache;
+        c.peers.clear();
+        for id in 1..=3 {
+            c.open(id);
+        }
+        c.pump();
+        c.peers.get_mut(&1).unwrap().campaign().unwrap();
+        c.pump();
+        c.add_caught_up_learner();
+        for value in 0..24 {
+            c.write(1, value);
+        }
+        c.change(1, MembershipChange::Promote(4));
+        let floor = c.peers[&1].applied_index();
+        let joint = c.peers[&1].membership();
+        assert!(!joint.outgoing_voters.is_empty());
+        let durable: BTreeMap<_, _> = [1, 2, 4]
+            .into_iter()
+            .map(|id| (id, c.values[&id].borrow().clone()))
+            .collect();
+        for id in [1, 2, 4] {
+            c.peers
+                .get_mut(&id)
+                .unwrap()
+                .set_flushed_index(floor)
+                .unwrap();
+        }
+        c.change(1, MembershipChange::LeaveJoint);
+        c.change(1, MembershipChange::Remove(3));
+        c.change(1, MembershipChange::LeaveJoint);
+        c.write(1, 99);
+        let final_state = c.peers[&1].membership();
+        for id in [1, 2, 4] {
+            let peer = c.peers.get_mut(&id).unwrap();
+            peer.trim_log_to(floor).unwrap();
+            assert_eq!(peer.membership(), final_state);
+        }
+        c.peers.clear();
+        for id in [1, 2, 4] {
+            c.open(id);
+            *c.values[&id].borrow_mut() = durable[&id].clone();
+            assert_eq!(c.peers[&id].membership(), joint);
+        }
+        c.pump();
+        for id in [1, 2, 4] {
+            assert_eq!(c.peers[&id].membership(), final_state);
+            assert_eq!(
+                *c.values[&id].borrow(),
+                (0..24).chain([99]).collect::<Vec<_>>()
+            );
+        }
+        c.peers.get_mut(&2).unwrap().campaign().unwrap();
+        c.pump();
+        assert!(c.peers[&2].is_leader());
+        c.write(2, 100);
+        assert!([1, 2, 4]
+            .into_iter()
+            .all(|id| c.values[&id].borrow().contains(&100)));
+    }
+}
+
+#[test]
+fn a_flushed_membership_floor_beyond_the_trim_restores_automatic_learner_catchup() {
+    let mut c = Cluster::new();
+    c.isolated.insert(4);
+    for value in 0..8 {
+        c.write(1, value);
+    }
+    c.change(1, MembershipChange::AddLearnerAuto(4));
+    let trim = c.peers[&1].applied_index();
+    c.change(1, MembershipChange::AddLearner(5));
+    c.write(1, 8);
+    let floor = c.peers[&1].applied_index();
+    let durable = c.values[&1].borrow().clone();
+    let floor_state = c.peers[&1].membership();
+    c.peers
+        .get_mut(&1)
+        .unwrap()
+        .set_flushed_index(floor)
+        .unwrap();
+    c.change(1, MembershipChange::Remove(5));
+    if !c.peers[&1].membership().outgoing_voters.is_empty() {
+        c.change(1, MembershipChange::LeaveJoint);
+    }
+    c.write(1, 9);
+    c.peers.get_mut(&1).unwrap().trim_log_to(trim).unwrap();
+    c.peers.remove(&1);
+    c.open(1);
+    *c.values[&1].borrow_mut() = durable;
+    assert_eq!(c.peers[&1].membership(), floor_state);
+    c.pump();
+    assert_eq!(*c.values[&1].borrow(), (0..10).collect::<Vec<_>>());
+    assert_eq!(c.peers[&1].membership().learners, vec![4]);
+    assert_eq!(c.peers[&1].membership().automatic_learners, vec![4]);
+    c.peers.get_mut(&1).unwrap().force_campaign().unwrap();
+    c.pump();
+    c.open(4);
+    c.isolated.remove(&4);
+    c.pump();
+    for _ in 0..4 {
+        c.tick();
+    }
+    assert!(c.peers[&1].snapshot_wanted());
+    c.checkpoint(1);
+    for _ in 0..20 {
+        c.tick();
+        if c.peers[&1].membership().voters.contains(&4)
+            && c.peers[&1].membership().outgoing_voters.is_empty()
+        {
+            break;
+        }
+    }
+    assert_eq!(c.peers[&1].membership().voters, vec![1, 2, 3, 4]);
+    assert!(c.peers[&1].membership().automatic_learners.is_empty());
+    assert_eq!(*c.values[&4].borrow(), (0..10).collect::<Vec<_>>());
+    c.write(1, 10);
 }
 
 #[test]
@@ -189,6 +716,11 @@ impl Cluster {
             checkpoint_sends: None,
             hold_after: None,
             hold_except: None,
+            hold_append_acks_from: None,
+            held_acks: Vec::new(),
+            uncommitted_limit: PeerTuning::default().max_uncommitted_size,
+            replica_timeout: None,
+            receipt_capacity: None,
         };
         for id in 1..=3 {
             result.open(id);
@@ -212,8 +744,14 @@ impl Cluster {
             self.options(id),
             vec![1, 2, 3, 4, 5],
             PeerTuning {
+                max_uncommitted_size: self.uncommitted_limit,
+                max_size_per_msg: self
+                    .uncommitted_limit
+                    .min(PeerTuning::default().max_size_per_msg),
                 max_log_cache_bytes: self.cache_target,
                 max_pending_reads: 4,
+                replica_inactivity_tick: self.replica_timeout,
+                max_pending_proposal_receipts: self.receipt_capacity,
                 max_checkpoint_sends: self.checkpoint_sends,
                 ..Default::default()
             },
@@ -251,11 +789,29 @@ impl Cluster {
                     )
                     .unwrap();
                 if !self.isolated.contains(id) {
-                    packets.extend(
-                        outgoing
-                            .into_iter()
-                            .filter(|p| !self.isolated.contains(&p.to)),
-                    );
+                    for packet in outgoing {
+                        if self.isolated.contains(&packet.to) {
+                            continue;
+                        }
+                        if self.hold_append_acks_from == Some(*id) {
+                            let envelope =
+                                MembershipPacket::decode(packet.bytes.as_slice()).unwrap();
+                            if envelope.version == 1 {
+                                let message = raft_core::eraftpb::Message::decode(
+                                    envelope.message.as_slice(),
+                                )
+                                .unwrap();
+                                if message.get_msg_type()
+                                    == raft_core::eraftpb::MessageType::MsgAppendResponse
+                                    && !message.reject
+                                {
+                                    self.held_acks.push(packet);
+                                    continue;
+                                }
+                            }
+                        }
+                        packets.push(packet);
+                    }
                 }
             }
             if packets.is_empty() {
@@ -390,6 +946,285 @@ impl Cluster {
         }
         self.pump();
     }
+}
+
+fn finish_learner_promotion(c: &mut Cluster, leader: u64, voters: &[u64]) {
+    for _ in 0..100 {
+        c.pump();
+        if c.peers[&leader].membership().voters == voters
+            && c.peers[&leader].membership().outgoing_voters.is_empty()
+            && c.peers[&leader].membership().automatic_learners.is_empty()
+        {
+            return;
+        }
+        c.tick();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("automatic learner promotion did not finish");
+}
+
+#[test]
+fn automatic_learners_wait_for_catch_up_and_complete_joint_consensus() {
+    for cache in [None, Some(512)] {
+        let mut c = Cluster::new();
+        c.cache_target = cache;
+        c.reopen_all();
+        c.peers.get_mut(&1).unwrap().campaign().unwrap();
+        c.pump();
+        c.write(1, 7);
+        c.open(4);
+        c.isolated.insert(4);
+        c.change(1, MembershipChange::AddLearnerAuto(4));
+        for id in 1..=3 {
+            assert_eq!(c.peers[&id].membership().automatic_learners, vec![4]);
+            assert_eq!(c.peers[&id].membership().voters, vec![1, 2, 3]);
+        }
+        for _ in 0..3 {
+            c.tick();
+        }
+        assert_eq!(c.peers[&1].membership().learners, vec![4]);
+        c.isolated.clear();
+        finish_learner_promotion(&mut c, 1, &[1, 2, 3, 4]);
+        c.write(1, 8);
+        assert_eq!(*c.values[&4].borrow(), vec![7, 8]);
+        c.reopen_all();
+        for peer in c.peers.values() {
+            assert_eq!(peer.membership().voters, vec![1, 2, 3, 4]);
+            assert!(peer.membership().automatic_learners.is_empty());
+        }
+    }
+}
+
+#[test]
+fn automatic_learner_intent_survives_restart_and_a_different_leader() {
+    let mut c = Cluster::new();
+    c.open(4);
+    c.isolated.insert(4);
+    c.change(1, MembershipChange::AddLearnerAuto(4));
+    c.write(1, 42);
+    c.reopen_all();
+    for id in 1..=3 {
+        assert_eq!(c.peers[&id].membership().automatic_learners, vec![4]);
+    }
+    c.peers.get_mut(&2).unwrap().campaign().unwrap();
+    c.pump();
+    assert!(c.peers[&2].is_leader());
+    c.isolated.clear();
+    finish_learner_promotion(&mut c, 2, &[1, 2, 3, 4]);
+    c.write(2, 43);
+    assert_eq!(*c.values[&4].borrow(), vec![42, 43]);
+}
+
+#[test]
+fn automatic_learner_checkpoints_keep_intent_through_all_transport_formats() {
+    for format in 0..3 {
+        let mut c = Cluster::new();
+        c.checkpoint_sends = (format == 1).then_some(2);
+        c.reopen_all();
+        c.peers.get_mut(&1).unwrap().campaign().unwrap();
+        c.pump();
+        c.open(4);
+        c.isolated.insert(4);
+        c.change(1, MembershipChange::AddLearnerAuto(4));
+        for value in 0..5 {
+            c.write(1, value);
+        }
+        let bytes: Vec<_> = (0..5u64).flat_map(u64::to_be_bytes).collect();
+        if format == 2 {
+            c.peers
+                .get_mut(&1)
+                .unwrap()
+                .checkpoint_from_reader(&mut std::io::Cursor::new(&bytes), bytes.len() as u64)
+                .unwrap();
+        } else {
+            c.checkpoint(1);
+        }
+        let cut = c.peers[&1].applied_index();
+        c.peers.remove(&1);
+        c.open(1);
+        c.pump();
+        assert_eq!(c.peers[&1].membership().automatic_learners, vec![4]);
+        c.peers.get_mut(&1).unwrap().force_campaign().unwrap();
+        c.pump();
+        assert!(c.peers[&1].is_leader());
+        c.hold_after = Some(cut + 1); // Admit the new leader's no-op, not its promotion.
+        c.isolated.clear();
+        for _ in 0..100 {
+            c.tick();
+            if c.peers[&4].applied_index() >= cut {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(c.peers[&4].applied_index() >= cut);
+        assert_eq!(c.peers[&4].membership().automatic_learners, vec![4]);
+        assert_eq!(*c.values[&4].borrow(), (0..5).collect::<Vec<_>>());
+        c.hold_after = None;
+        finish_learner_promotion(&mut c, 1, &[1, 2, 3, 4]);
+        c.write(1, 99);
+        assert_eq!(c.values[&4].borrow().last(), Some(&99));
+    }
+}
+
+#[test]
+fn staged_learner_policies_replay_later_intents_and_cancellations() {
+    for (before, cancel) in [(true, false), (false, false), (false, true)] {
+        let mut c = Cluster::new();
+        c.write(1, 7);
+        c.open(4);
+        c.isolated.insert(4);
+        let old = before.then(|| c.peers[&1].prepare_checkpoint().unwrap());
+        c.change(1, MembershipChange::AddLearnerAuto(4));
+        let ticket = old.unwrap_or_else(|| c.peers[&1].prepare_checkpoint().unwrap());
+        let prepared = ticket
+            .capture(&mut std::io::Cursor::new(7u64.to_be_bytes()), 8)
+            .unwrap();
+        c.write(1, 8);
+        if cancel {
+            c.change(1, MembershipChange::Remove(4));
+        }
+        assert!(c
+            .peers
+            .get_mut(&1)
+            .unwrap()
+            .install_checkpoint(&prepared)
+            .unwrap());
+        drop(prepared);
+        c.peers.remove(&1);
+        c.open(1);
+        c.pump();
+        assert_eq!(
+            c.peers[&1].membership().automatic_learners,
+            if cancel { vec![] } else { vec![4] }
+        );
+        assert_eq!(*c.values[&1].borrow(), vec![7, 8]);
+        c.peers.get_mut(&1).unwrap().force_campaign().unwrap();
+        c.pump();
+        if !cancel {
+            if c.peers[&1].membership_checkpoint_needed() {
+                c.checkpoint(1);
+            }
+            c.isolated.clear();
+            finish_learner_promotion(&mut c, 1, &[1, 2, 3, 4]);
+        } else {
+            c.isolated.clear();
+            for _ in 0..3 {
+                c.tick();
+            }
+            assert_eq!(c.peers[&1].membership().voters, vec![1, 2, 3]);
+            assert!(c.peers[&1].membership().automatic_learners.is_empty());
+        }
+    }
+}
+
+#[test]
+fn automatic_learners_are_serialized_and_cannot_replace_an_old_majority() {
+    let mut c = Cluster::new();
+    for id in [4, 5] {
+        c.open(id);
+        c.isolated.insert(id);
+    }
+    c.change(1, MembershipChange::AddLearnerAuto(4));
+    c.change(1, MembershipChange::AddLearnerAuto(5));
+    let committed = c.peers[&1].commit_index();
+    c.isolated = BTreeSet::from([2, 3]);
+    for _ in 0..3 {
+        c.tick();
+    }
+    assert_eq!(c.peers[&1].commit_index(), committed);
+    assert_eq!(c.peers[&1].membership().voters, vec![1, 2, 3]);
+    assert_eq!(c.peers[&1].membership().automatic_learners, vec![4, 5]);
+    c.isolated.clear();
+    finish_learner_promotion(&mut c, 1, &[1, 2, 3, 4, 5]);
+    c.write(1, 99);
+    for id in [4, 5] {
+        assert_eq!(*c.values[&id].borrow(), vec![99]);
+    }
+}
+
+#[test]
+fn automatic_learner_promotion_waits_for_the_uncommitted_byte_budget() {
+    let mut c = Cluster::new();
+    c.uncommitted_limit = 8;
+    c.reopen_all();
+    c.peers.get_mut(&1).unwrap().campaign().unwrap();
+    c.pump();
+    c.open(4);
+    c.hold_append_acks_from = Some(4);
+    c.change(1, MembershipChange::AddLearnerAuto(4));
+    for _ in 0..3 {
+        c.tick();
+    }
+    assert!(!c.held_acks.is_empty());
+    let committed = c.peers[&1].commit_index();
+    for _ in 0..20 {
+        for packet in std::mem::take(&mut c.held_acks) {
+            let envelope = MembershipPacket::decode(packet.bytes.as_slice()).unwrap();
+            let message = raft_core::eraftpb::Message::decode(envelope.message.as_slice()).unwrap();
+            if message.index < committed {
+                c.peers
+                    .get_mut(&packet.to)
+                    .unwrap()
+                    .step(&packet.bytes)
+                    .unwrap();
+            } else {
+                c.held_acks.push(packet);
+            }
+        }
+        c.pump();
+        if c.held_acks.iter().any(|packet| {
+            let envelope = MembershipPacket::decode(packet.bytes.as_slice()).unwrap();
+            raft_core::eraftpb::Message::decode(envelope.message.as_slice())
+                .unwrap()
+                .index
+                == committed
+        }) {
+            break;
+        }
+    }
+    assert!(c.held_acks.iter().any(|packet| {
+        let envelope = MembershipPacket::decode(packet.bytes.as_slice()).unwrap();
+        raft_core::eraftpb::Message::decode(envelope.message.as_slice())
+            .unwrap()
+            .index
+            == committed
+    }));
+    c.isolated = BTreeSet::from([2, 3]);
+    c.peers
+        .get_mut(&1)
+        .unwrap()
+        .propose(99u64.to_be_bytes().to_vec())
+        .unwrap();
+    for packet in std::mem::take(&mut c.held_acks) {
+        c.peers
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    c.pump();
+    assert!(c.peers[&1].is_leader());
+    assert!(c.peers[&1].persisted_wal_bytes().is_ok());
+    assert_eq!(c.peers[&1].commit_index(), committed);
+    assert_eq!(c.peers[&1].membership().automatic_learners, vec![4]);
+    assert!(!c.held_acks.is_empty());
+    assert!(c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose(100u64.to_be_bytes().to_vec())
+        .is_err());
+    c.hold_append_acks_from = None;
+    c.isolated.clear();
+    for packet in std::mem::take(&mut c.held_acks) {
+        c.peers
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    finish_learner_promotion(&mut c, 1, &[1, 2, 3, 4]);
+    assert_eq!(*c.values[&4].borrow(), vec![99]);
 }
 
 #[test]

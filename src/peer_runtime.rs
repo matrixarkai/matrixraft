@@ -24,10 +24,34 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "peer_append_reorder.rs"]
+mod append_reorder;
+#[path = "peer_apply_pipeline.rs"]
+mod apply_pipeline;
+pub use apply_pipeline::{PeerApplyCompletion, PeerApplyTask};
+#[path = "peer_campaign_receipts.rs"]
+mod campaign_receipts;
 #[path = "peer_checkpoint_file.rs"]
 mod checkpoint_file;
 #[path = "peer_checkpoint_policy.rs"]
 mod checkpoint_policy;
+pub use campaign_receipts::{PeerCampaignReceipt, PeerCampaignStatus};
+#[path = "peer_commands.rs"]
+mod commands;
+#[path = "peer_flushed_membership.rs"]
+mod flushed_membership;
+pub use commands::PeerProposalOptions;
+#[path = "peer_read_deadlines.rs"]
+mod read_deadlines;
+#[path = "peer_replica_retention.rs"]
+mod replica_retention;
+#[path = "peer_startup_hold.rs"]
+mod startup_hold;
+pub use append_reorder::AppendReorderTuning;
+pub use read_deadlines::{PeerReadStatus, PeerReadTicket};
+#[path = "peer_proposal_receipts.rs"]
+mod proposal_receipts;
+pub use proposal_receipts::{PeerProposalReceipt, PeerProposalStatus};
 #[path = "peer_log_reader.rs"]
 mod log_reader;
 pub use log_reader::{PeerLogReader, ScrubStep};
@@ -42,6 +66,10 @@ mod lifecycle;
 mod membership;
 #[path = "peer_snapshot_stream.rs"]
 mod snapshot_stream;
+#[path = "peer_witness.rs"]
+mod witness;
+#[path = "peer_witness_identity.rs"]
+mod witness_identity;
 pub use membership::{MembershipChange, MembershipState};
 
 const LIMIT: usize = 8 * 1024 * 1024;
@@ -132,6 +160,24 @@ pub struct PeerTuning {
     /// setting is read as before and keeps its layout until a checkpoint replaces it. None, the
     /// default, writes the original layout.
     pub wal_zero_fill_bytes: Option<u64>,
+    /// Optional bounded waiting window for out-of-order follower appends.
+    /// None retains immediate core processing and rejection of missing prefixes.
+    pub append_reorder: Option<AppendReorderTuning>,
+    /// Opt-in host-owned application pipeline, 1 through 64 outstanding batches.
+    /// None retains synchronous callbacks. Tasks must mutate each application in order.
+    pub max_inflight_apply_tasks: Option<usize>,
+    /// Optional monotonic startup window inhibiting ordinary elections and newer-term votes.
+    /// None retains immediate election eligibility. This does not enable lease-based reads.
+    pub startup_election_delay: Option<std::time::Duration>,
+    /// Opt-in outstanding proposal receipt limit, 1 through 65536. None disables
+    /// tracked proposal admission without changing ordinary proposals.
+    pub max_pending_proposal_receipts: Option<usize>,
+    /// Opt-in outstanding campaign receipt limit, 1 through 65536. None disables
+    /// tracked campaign admission without changing ordinary election behavior.
+    pub max_pending_campaign_receipts: Option<usize>,
+    /// Optional response-silence window for retention and closest-follower selection.
+    /// None retains every replica for retention and the core's handoff activity test.
+    pub replica_inactivity_tick: Option<usize>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -152,6 +198,12 @@ impl Default for PeerTuning {
             checkpoint_after_bytes: None,
             wal_preallocate_bytes: None,
             wal_zero_fill_bytes: None,
+            append_reorder: None,
+            max_inflight_apply_tasks: None,
+            startup_election_delay: None,
+            max_pending_proposal_receipts: None,
+            max_pending_campaign_receipts: None,
+            replica_inactivity_tick: None,
         }
     }
 }
@@ -159,9 +211,23 @@ impl PeerTuning {
     fn application_read_budget(self) -> Option<u64> {
         self.max_apply_bytes
             .or_else(|| self.max_log_cache_bytes.map(|bytes| bytes.min(65536)))
+            .or_else(|| self.max_inflight_apply_tasks.map(|_| 65536))
     }
     fn config(self, id: u64) -> Result<Config, RaftError> {
+        startup_hold::Hold::validate(self.startup_election_delay)?;
         if self.election_tick > usize::MAX / 2
+            || self
+                .replica_inactivity_tick
+                .is_some_and(|ticks| ticks == 0 || ticks > usize::MAX / 2)
+            || self
+                .max_pending_proposal_receipts
+                .is_some_and(|limit| !(1..=65536).contains(&limit))
+            || self
+                .max_pending_campaign_receipts
+                .is_some_and(|limit| !(1..=65536).contains(&limit))
+            || self
+                .max_inflight_apply_tasks
+                .is_some_and(|limit| !(1..=64).contains(&limit))
             || self
                 .checkpoint_after_bytes
                 .is_some_and(|bytes| bytes == 0 || bytes > WAL_LIMIT)
@@ -192,6 +258,9 @@ impl PeerTuning {
                 .is_some_and(|bytes| !(4096..=WAL_LIMIT).contains(&bytes))
         {
             return Err(invalid("peer tuning exceeds supported bounds"));
+        }
+        if let Some(reorder) = self.append_reorder {
+            reorder.validate()?;
         }
         let config = Config {
             id,
@@ -231,6 +300,8 @@ pub enum RestoreDecision {
 pub struct ApplicationEntry<'a> {
     pub position: LogId,
     pub payload: &'a [u8],
+    /// The committed position was synced before this entry became available.
+    pub is_command: bool,
 }
 
 /// A contiguous run of application entries that never crosses a membership change.
@@ -246,6 +317,7 @@ fn application_entry(entry: &Entry) -> ApplicationEntry<'_> {
             index: entry.index,
         },
         payload: &entry.data,
+        is_command: commands::is_command(entry),
     }
 }
 impl<'a> ApplicationBatch<'a> {
@@ -600,6 +672,18 @@ fn exact_batch_encoding(batch: &WalBatch, bytes: &[u8], output: &mut Vec<u8>) ->
     if batch.flushed_index != 0 {
         prost::encoding::uint64::encode(13, &batch.flushed_index, &mut *output);
     }
+    if !batch.promotion_policy.is_empty() {
+        prost::encoding::bytes::encode(14, &batch.promotion_policy, &mut *output);
+    }
+    if !batch.flushed_membership.is_empty() {
+        prost::encoding::bytes::encode(15, &batch.flushed_membership, &mut *output);
+    }
+    if batch.durable_commands {
+        prost::encoding::bool::encode(16, &true, &mut *output);
+    }
+    if !batch.witness_identity.is_empty() {
+        prost::encoding::bytes::encode(17, &batch.witness_identity, &mut *output);
+    }
     consume(&mut input, output) && input.is_empty()
 }
 
@@ -745,6 +829,15 @@ struct WalBatch {
     /// at or below it again. Zero when absent. Only ever written by `set_flushed_index`.
     #[prost(uint64, tag = "13")]
     flushed_index: u64,
+    #[prost(bytes = "vec", tag = "14")]
+    promotion_policy: Vec<u8>,
+    #[prost(bytes = "vec", tag = "15")]
+    flushed_membership: Vec<u8>,
+    /// Announces command semantics to readers with an exact-encoding fence.
+    #[prost(bool, tag = "16")]
+    durable_commands: bool,
+    #[prost(bytes = "vec", tag = "17")]
+    witness_identity: Vec<u8>,
 }
 fn invalid(s: impl ToString) -> RaftError {
     RaftError::InvalidRequest(s.to_string())
@@ -795,16 +888,22 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         payload_manifest: Vec::new(),
         permitted: Vec::new(),
         flushed_index: 0,
+        promotion_policy: Vec::new(),
+        flushed_membership: Vec::new(),
+        durable_commands: entries.iter().any(commands::is_command),
+        witness_identity: Vec::new(),
     }
 }
 #[derive(Clone)]
 struct PeerStorage {
+    witness_identity: Option<Arc<witness_identity::Identity>>,
     cache: log_cache::Cache,
     max_disk_replicate_entries: Option<usize>,
     permitted: Vec<u64>,
     memory: MemStorage,
     async_reads: Arc<Mutex<Option<async_reads::State>>>,
     checkpoint: Arc<Mutex<Option<Arc<Snapshot>>>>,
+    checkpoint_promotions: Arc<Mutex<Vec<u8>>>,
     payload_directory: PathBuf,
     payload: Arc<Mutex<Option<Arc<checkpoint_file::Blob>>>>,
     /// Raised when a follower needed a snapshot and only a deferred one existed.
@@ -901,13 +1000,18 @@ impl Storage for PeerStorage {
                 raft_core::StorageError::SnapshotTemporarilyUnavailable,
             ));
         }
-        checkpoint
+        let result = checkpoint
             .as_ref()
             .filter(|snapshot| snapshot.get_metadata().index >= request_index)
             .map(|snapshot| snapshot.as_ref().clone())
             .ok_or(raft_core::Error::Store(
                 raft_core::StorageError::SnapshotTemporarilyUnavailable,
-            ))
+            ));
+        if result.is_err() {
+            self.snapshot_wanted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        result
     }
 }
 fn validate_snapshot_for(
@@ -998,6 +1102,11 @@ fn install_recovered_entries(store: &PeerStorage, batch: WalBatch) -> Result<(),
     let mut decoded = Entry::default();
     for encoded in &batch.entries {
         merge_entry_reusing_payload_storage(encoded.clone(), &mut decoded)?;
+        if !batch.durable_commands && commands::is_command(&decoded) {
+            return Err(storage_error(
+                "command entries require an extended journal record",
+            ));
+        }
         if decoded.entry_type != EntryType::EntryNormal as i32 {
             membership::decode_change(&decoded, &store.permitted).map_err(storage_error)?;
         }
@@ -1184,6 +1293,11 @@ fn install_decoded_with_scratch(
         SnapshotSource::Journal | SnapshotSource::Trim => None,
         SnapshotSource::LocalCapture(payload) | SnapshotSource::Received(payload) => Some(payload),
     };
+    if !batch.durable_commands && entries.iter().any(commands::is_command) {
+        return Err(storage_error(
+            "command entries require an extended journal record",
+        ));
+    }
     for entry in entries
         .iter()
         .filter(|e| e.entry_type != EntryType::EntryNormal as i32)
@@ -1229,6 +1343,10 @@ fn install_decoded_with_scratch(
             None
         };
         validate_snapshot_for(&snapshot, &batch.voters, &store.permitted)?;
+        membership::decode_promotions(
+            &batch.promotion_policy,
+            snapshot.get_metadata().get_conf_state(),
+        )?;
         let meta = snapshot.get_metadata();
         let next = hs
             .as_ref()
@@ -1270,6 +1388,7 @@ fn install_decoded_with_scratch(
             .map_err(storage_error)?;
         store.cache.reset();
         *store.checkpoint.lock().unwrap() = Some(snapshot);
+        *store.checkpoint_promotions.lock().unwrap() = batch.promotion_policy.clone();
         let mut current = store.payload.lock().unwrap();
         if let Some(old) = current.as_ref() {
             if payload
@@ -1389,6 +1508,7 @@ fn zero_range(file: &File, from: u64, to: u64) -> Result<(), RaftError> {
     }
 }
 struct Journal {
+    witness_identity: Option<Arc<witness_identity::Identity>>,
     /// Durability barriers this journal has issued, and records it has written.
     ///
     /// A durable append costs about one block whatever the record holds, so what one append costs
@@ -1401,6 +1521,7 @@ struct Journal {
     records: u64,
     /// The highest flushed index any record in this WAL reports; see `set_flushed_index`.
     flushed_index: u64,
+    flushed_membership: Vec<u8>,
     /// End of the disk space reserved ahead of the log, and the chunk to reserve at a time; zero
     /// chunk means no preallocation. See `PeerTuning::wal_preallocate_bytes`.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -1479,6 +1600,8 @@ impl Journal {
         let mut bytes = prost::bytes::BytesMut::new();
         let mut validation = Vec::new();
         let mut flushed_index = 0u64;
+        let mut flushed_membership = Vec::new();
+        let mut identity_seen = false;
         while offset < length {
             let remaining = length - offset;
             if remaining < 24 {
@@ -1555,10 +1678,22 @@ impl Journal {
             }
             let wire = bytes.freeze();
             let record = WalBatch::decode(wire.clone()).map_err(storage_error)?;
+            if !witness_identity::matches(&store.witness_identity, &record.witness_identity)
+                || (offset == 0
+                    && record.witness_identity.is_empty()
+                    && store
+                        .witness_identity
+                        .as_ref()
+                        .is_some_and(|identity| !identity.can_adopt_full_history()))
+            {
+                return Err(storage_error("peer WAL witness identity mismatch"));
+            }
+            identity_seen |= !record.witness_identity.is_empty();
             if !matches!(
                 (record.version, record.snapshot.is_empty()),
                 (1, true) | (2, false) | (3, false) | (4, false)
             ) || (record.version == 4) == record.payload_manifest.is_empty()
+                || (record.snapshot.is_empty() && !record.promotion_policy.is_empty())
                 || record.group != options.group_id
                 || record.node != options.node_id
                 || record.voters != options.voters
@@ -1567,7 +1702,17 @@ impl Journal {
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
             }
-            flushed_index = flushed_index.max(record.flushed_index);
+            flushed_membership::validate_record(&record, &store.permitted)?;
+            if record.flushed_index != 0 {
+                if record.flushed_index < flushed_index
+                    || (record.flushed_index == flushed_index
+                        && record.flushed_membership != flushed_membership)
+                {
+                    return Err(storage_error("inconsistent flushed application floor"));
+                }
+                flushed_index = record.flushed_index;
+                flushed_membership.clone_from(&record.flushed_membership);
+            }
             if record.version == 2 {
                 drop(wire);
                 if let Some(record) = assembly.accept(record, offset, &mut validation)? {
@@ -1619,6 +1764,7 @@ impl Journal {
         .and_then(|f| f.sync_all())
         .map_err(storage_error)?;
         let mut journal = Self {
+            witness_identity: store.witness_identity.clone(),
             permitted: store.permitted.clone(),
             file,
             _lock: Arc::new(lock),
@@ -1626,6 +1772,7 @@ impl Journal {
             barriers: 0,
             records: 0,
             flushed_index,
+            flushed_membership,
             reserved: 0,
             reserve_chunk: 0,
             chain,
@@ -1634,8 +1781,10 @@ impl Journal {
         };
         // Fill the first chunk now, while the peer is not serving, so no request waits on it.
         journal.prefill()?;
-        if offset == 0 {
-            journal.append(&batch(options, None, &[]))?;
+        if offset == 0 || (!identity_seen && journal.witness_identity.is_some()) {
+            let mut initial = batch(options, None, &[]);
+            initial.witness_identity = witness_identity::bytes(&journal.witness_identity).to_vec();
+            journal.append(&initial)?;
         }
         store.refresh_cache(options, journal.length, false)?;
         Ok(journal)
@@ -1648,7 +1797,9 @@ impl Journal {
         hs: &HardState,
         entries: &[Entry],
         payload: Option<&checkpoint_file::Blob>,
+        promotion_policy: &[u8],
     ) -> Result<(), RaftError> {
+        membership::decode_promotions(promotion_policy, snapshot.get_metadata().get_conf_state())?;
         let temporary = options.wal_path.with_extension("checkpoint.tmp");
         let file = OpenOptions::new()
             .read(true)
@@ -1660,6 +1811,7 @@ impl Journal {
         fs2::FileExt::try_lock_exclusive(&file).map_err(storage_error)?;
         file.set_len(0).map_err(storage_error)?;
         let mut replacement = Journal {
+            witness_identity: self.witness_identity.clone(),
             permitted: self.permitted.clone(),
             file,
             length: 0,
@@ -1667,6 +1819,7 @@ impl Journal {
             barriers: 0,
             records: 0,
             flushed_index: self.flushed_index,
+            flushed_membership: self.flushed_membership.clone(),
             reserved: 0,
             reserve_chunk: self.reserve_chunk,
             chain: self.zero_chunk != 0,
@@ -1677,8 +1830,10 @@ impl Journal {
         let mut floor_state = hs.clone();
         floor_state.commit = snapshot.get_metadata().index;
         let mut first = batch(options, Some(&floor_state), &[]);
+        first.witness_identity = witness_identity::bytes(&self.witness_identity).to_vec();
         first.version = 2;
         first.snapshot = snapshot_wire;
+        first.promotion_policy = promotion_policy.to_vec();
         if let Some(payload) = payload {
             if !snapshot.data.is_empty() {
                 return Err(invalid("file checkpoint must not contain inline data"));
@@ -1717,6 +1872,7 @@ impl Journal {
         // A single larger entry keeps the existing per-record size limit.
         let mut suffix = batch(options, None, &[]);
         suffix.permitted.clone_from(&self.permitted);
+        suffix.durable_commands = entries.iter().any(commands::is_command);
         let overhead = suffix.encoded_len();
         let mut size = overhead;
         for entry in entries {
@@ -1748,6 +1904,9 @@ impl Journal {
         if self.flushed_index != 0 {
             let mut floor = batch(options, None, &[]);
             floor.flushed_index = self.flushed_index;
+            floor
+                .flushed_membership
+                .clone_from(&self.flushed_membership);
             replacement.write_record_into(&floor, &mut record_buffer)?;
         }
         #[cfg(test)]
@@ -1787,6 +1946,7 @@ impl Journal {
         entries: &[Entry],
         previous: &HardState,
     ) -> Result<(), RaftError> {
+        record.durable_commands = entries.iter().any(commands::is_command);
         if entries.is_empty() {
             return self.append(record);
         }
@@ -1819,6 +1979,8 @@ impl Journal {
             node: record.node,
             voters: record.voters.clone(),
             permitted: self.permitted.clone(),
+            durable_commands: record.durable_commands,
+            witness_identity: record.witness_identity.clone(),
             ..Default::default()
         };
         let overhead = envelope.encoded_len();
@@ -1907,6 +2069,8 @@ impl Journal {
             node: record.node,
             voters: record.voters.clone(),
             permitted: self.permitted.clone(),
+            durable_commands: record.durable_commands,
+            witness_identity: record.witness_identity.clone(),
             ..Default::default()
         };
         let overhead = envelope.encoded_len();
@@ -2113,6 +2277,15 @@ impl Journal {
             prost::encoding::bytes::encode(11, &batch.payload_manifest, &mut *metadata);
         }
         prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
+        if !batch.promotion_policy.is_empty() {
+            prost::encoding::bytes::encode(14, &batch.promotion_policy, &mut *metadata);
+        }
+        if batch.durable_commands {
+            prost::encoding::bool::encode(16, &true, &mut *metadata);
+        }
+        if !batch.witness_identity.is_empty() {
+            prost::encoding::bytes::encode(17, &batch.witness_identity, &mut *metadata);
+        }
 
         let size = metadata.len() + batch.snapshot.len();
         if size > LIMIT {
@@ -2236,6 +2409,12 @@ impl Journal {
         }
         let suffix_start = metadata.len();
         prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
+        if batch.durable_commands {
+            prost::encoding::bool::encode(16, &true, &mut *metadata);
+        }
+        if !batch.witness_identity.is_empty() {
+            prost::encoding::bytes::encode(17, &batch.witness_identity, &mut *metadata);
+        }
         let size = batch
             .entries
             .iter()
@@ -2370,6 +2549,12 @@ impl Journal {
         }
         let suffix_start = metadata.len();
         prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
+        if batch.durable_commands {
+            prost::encoding::bool::encode(16, &true, &mut *metadata);
+        }
+        if !batch.witness_identity.is_empty() {
+            prost::encoding::bytes::encode(17, &batch.witness_identity, &mut *metadata);
+        }
         let size = entries.iter().try_fold(metadata.len(), |size, entry| {
             size.checked_add(entry.data.len())
                 .and_then(|size| size.checked_add(entry.context.len()))
@@ -2459,6 +2644,7 @@ struct PendingRead {
     token: u64,
     term: u64,
     index: Option<u64>,
+    deadline: Option<std::time::Instant>,
 }
 impl PendingRead {
     fn context(&self) -> Vec<u8> {
@@ -2470,6 +2656,7 @@ impl PendingRead {
 /// another runtime from opening and cleaning up the same storage directory.
 pub struct CheckpointCapture {
     configuration: ConfState,
+    promotion_policy: Vec<u8>,
     position: LogId,
     directory: PathBuf,
     lock: Arc<File>,
@@ -2540,9 +2727,22 @@ pub struct DurablePeer {
     stream: snapshot_stream::Stream,
     incoming_payload: Option<(LogId, Arc<checkpoint_file::Blob>)>,
     checkpoint_policy: checkpoint_policy::Policy,
+    append_reorder: append_reorder::Queue,
+    automatic_learners: BTreeSet<u64>,
+    uncommitted_limit: u64,
+    incoming_promotions: Option<(LogId, Vec<u8>)>,
+    apply_pipeline: Option<apply_pipeline::Pipeline>,
+    startup_hold: startup_hold::Hold,
+    proposal_receipts: Option<Box<proposal_receipts::Tracker>>,
+    campaign_receipts: Option<Box<campaign_receipts::Tracker>>,
+    replica_contacts: Option<Box<replica_retention::Window>>,
+    command_commit_synced: u64,
+    witness_commit: Option<Box<witness::CommitPolicy>>,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
+        self.finish_campaign_receipts(PeerCampaignStatus::Stopped);
+        self.finish_proposal_receipts(PeerProposalStatus::Stopped);
         // Retain the journal's exclusive storage lock until all receive I/O ends.
         self.stream.finish_shutdown();
     }
@@ -2558,9 +2758,17 @@ impl DurablePeer {
         Self::open_inner_with_tuning(options, permitted, PeerTuning::default())
     }
     fn open_inner_with_tuning(
+        options: PeerOptions,
+        permitted: Vec<u64>,
+        tuning: PeerTuning,
+    ) -> Result<Self, RaftError> {
+        Self::open_inner_with_role(options, permitted, tuning, None)
+    }
+    fn open_inner_with_role(
         mut options: PeerOptions,
         permitted: Vec<u64>,
         tuning: PeerTuning,
+        role: Option<witness_identity::OpenRole>,
     ) -> Result<Self, RaftError> {
         let unique: BTreeSet<_> = options.voters.iter().copied().collect();
         if options.group_id == 0
@@ -2574,14 +2782,17 @@ impl DurablePeer {
             return Err(invalid("invalid peer identity or voter set"));
         }
         options.voters = unique.into_iter().collect();
+        let witness_identity = witness_identity::Identity::from_role(role, &options, &permitted)?;
         let mut config = tuning.config(options.node_id)?;
         let store = PeerStorage {
+            witness_identity,
             cache: log_cache::Cache::new(tuning.max_log_cache_bytes),
             max_disk_replicate_entries: tuning.max_disk_replicate_entries,
             permitted,
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
+            checkpoint_promotions: Default::default(),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
@@ -2590,10 +2801,16 @@ impl DurablePeer {
         let mut journal = Journal::open(&options, &store, tuning.wal_zero_fill_bytes.unwrap_or(0))?;
         journal.reserve_chunk = tuning.wal_preallocate_bytes.unwrap_or(0);
         let checkpoint = store.checkpoint.lock().unwrap().clone();
+        let mut automatic_learners = membership::decode_promotions(
+            &store.checkpoint_promotions.lock().unwrap(),
+            &store.initial_state().map_err(storage_error)?.conf_state,
+        )?;
         let snapshot_index = checkpoint.as_ref().map_or(0, |s| s.get_metadata().index);
         // A deferred snapshot stands for state the application already holds durably, so there is
         // nothing to restore: the peer opens with it applied and never calls the restore callback.
-        let pending_restore = checkpoint.filter(|s| !is_deferred_snapshot(&s.data));
+        let pending_restore = checkpoint.filter(|s| {
+            !is_deferred_snapshot(&s.data) && s.get_metadata().index > journal.flushed_index
+        });
         // Entries a durable application reported flushed are not delivered again. The floor is
         // clamped to the recovered commit index: raft requires applied <= committed, and a commit
         // watermark that did not survive only means a few entries are delivered once more.
@@ -2603,6 +2820,29 @@ impl DurablePeer {
             .hard_state
             .commit;
         config.applied = snapshot_index.max(journal.flushed_index.min(commit));
+        if !store.permitted.is_empty()
+            && journal.flushed_index != 0
+            && flushed_membership::covering_checkpoint(&journal.flushed_membership)?
+                > snapshot_index
+        {
+            return Err(storage_error(
+                "flushed membership requires its covering checkpoint",
+            ));
+        }
+        if !store.permitted.is_empty() && journal.flushed_index > snapshot_index {
+            if journal.flushed_index > commit {
+                return Err(storage_error(
+                    "flushed configuration exceeds durable commitment",
+                ));
+            }
+            let (conf, promotions) = flushed_membership::decode(
+                &journal.flushed_membership,
+                journal.flushed_index,
+                &store.permitted,
+            )?;
+            store.wl().set_conf_state(conf);
+            automatic_learners = promotions;
+        }
         let logger = slog::Logger::root(slog::Discard, slog::o!());
         let raw = RawNode::new(&config, store.clone(), &logger).map_err(invalid)?;
         let mut stream = snapshot_stream::Stream::new(
@@ -2619,13 +2859,15 @@ impl DurablePeer {
         stream.frame_all_sends = tuning.max_checkpoint_sends.is_some();
         Ok(Self {
             pending_apply: config.applied,
+            command_commit_synced: commit,
             application_fetch_bytes: tuning.application_read_budget(),
             early_sink: None,
             bounded_apply: tuning.max_apply_bytes.is_some(),
             automatic_elections: true,
             transfer_timeout_tick: tuning.transfer_timeout_tick,
             transfer_clock: None,
-            recovering_membership: !store.permitted.is_empty(),
+            recovering_membership: !store.permitted.is_empty()
+                && (config.applied < commit || pending_restore.is_some()),
             options,
             raw,
             store,
@@ -2635,6 +2877,15 @@ impl DurablePeer {
             drain_through: None,
             read_sequence: 0,
             read_limit: tuning.max_pending_reads,
+            replica_contacts: tuning
+                .replica_inactivity_tick
+                .map(|ticks| Box::new(replica_retention::Window::new(ticks))),
+            proposal_receipts: tuning
+                .max_pending_proposal_receipts
+                .map(|limit| Box::new(proposal_receipts::Tracker::new(limit))),
+            campaign_receipts: tuning
+                .max_pending_campaign_receipts
+                .map(|limit| Box::new(campaign_receipts::Tracker::new(limit))),
             pending_reads: BTreeMap::new(),
             deferred_reads: VecDeque::new(),
             pending_restore,
@@ -2643,6 +2894,15 @@ impl DurablePeer {
             stream,
             incoming_payload: None,
             checkpoint_policy: checkpoint_policy::Policy::new(tuning.checkpoint_after_bytes),
+            append_reorder: append_reorder::Queue::new(tuning.append_reorder),
+            automatic_learners,
+            uncommitted_limit: tuning.max_uncommitted_size,
+            incoming_promotions: None,
+            apply_pipeline: tuning
+                .max_inflight_apply_tasks
+                .map(|capacity| apply_pipeline::Pipeline::new(capacity, config.applied)),
+            startup_hold: startup_hold::Hold::new(tuning.startup_election_delay)?,
+            witness_commit: witness::CommitPolicy::from_witnesses(BTreeSet::new()),
         })
     }
     fn membership_recovered(&self) -> Result<(), RaftError> {
@@ -2691,6 +2951,7 @@ impl DurablePeer {
             node: self.options.node_id,
             voters: self.options.voters.clone(),
             permitted: self.store.permitted.clone(),
+            witness_identity: self.store.witness_identity.clone(),
             index: self.store.current_log_index(),
         })
     }
@@ -2724,7 +2985,9 @@ impl DurablePeer {
         if self.pending_restore.is_some() {
             self.restore_floor
         } else {
-            self.raw.raft.raft_log.applied
+            self.apply_pipeline
+                .as_ref()
+                .map_or(self.raw.raft.raft_log.applied, |pipeline| pipeline.safe())
         }
     }
     /// Current persisted WAL file length, excluding checkpoint payload files.
@@ -2742,8 +3005,8 @@ impl DurablePeer {
     /// hold the state of every entry it drops. The WAL is rewritten with a deferred snapshot at
     /// `index`, the entries after it, the hard state and the floor, so the cost follows the
     /// entries kept, not the log dropped. Asking for an index below the log's current start is a
-    /// no-op. Refused on a peer with durable membership, which rebuilds its configuration by
-    /// replaying committed entries.
+    /// no-op. Durable membership is captured at the trim position; later changes remain in
+    /// the retained suffix.
     ///
     /// What replaces the dropped log is not an application image, so this is for applications
     /// whose own state is durable. A follower that needs entries below `index` cannot be served
@@ -2754,11 +3017,6 @@ impl DurablePeer {
     pub fn trim_log_to(&mut self, index: u64) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
-        if !self.store.permitted.is_empty() {
-            return Err(invalid(
-                "a log trim is not supported with durable membership",
-            ));
-        }
         if index > self.journal.flushed_index {
             return Err(invalid(
                 "trim index is beyond what the application reported flushed",
@@ -2768,16 +3026,22 @@ impl DurablePeer {
         if index < first {
             return Ok(());
         }
+        let configuration = if self.store.permitted.is_empty() {
+            None
+        } else {
+            let (conf, promotions) = self.membership_at(index)?;
+            Some((conf, membership::encode_promotions(&promotions)))
+        };
         self.checkpoint_payload_at(
             DEFERRED_SNAPSHOT.to_vec(),
             None,
             index,
-            None,
+            configuration,
             self.checkpoint_policy.total(),
         )
     }
-    /// Whether a follower has needed a snapshot since the log was trimmed and no application image
-    /// has replaced the marker. When true, call `checkpoint` with the application's state.
+    /// Whether a follower needs a newer application image, including after a log trim or a
+    /// rejected application task. Capture settled application state to answer its request.
     pub fn snapshot_wanted(&self) -> bool {
         self.store
             .snapshot_wanted
@@ -2794,29 +3058,56 @@ impl DurablePeer {
     /// checkpoints. A restart delivers entries above the greater of the floor and the latest
     /// checkpoint, never beyond the recovered commit index.
     ///
-    /// Refused on a peer with durable membership: it rebuilds its configuration by replaying
-    /// committed entries, which a floor would skip.
+    /// Durable membership and pending learner promotions at the floor are persisted with it,
+    /// so recovery can skip application entries without skipping configuration state.
     pub fn set_flushed_index(&mut self, index: u64) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
-        if !self.store.permitted.is_empty() {
-            return Err(invalid(
-                "a flushed-index floor is not supported with durable membership",
-            ));
-        }
         if index > self.applied_index() {
             return Err(invalid("flushed index is beyond what has been applied"));
         }
         if index <= self.journal.flushed_index {
             return Ok(());
         }
-        let mut record = batch(&self.options, None, &[]);
+        let mut hs = self
+            .store
+            .initial_state()
+            .map_err(storage_error)?
+            .hard_state;
+        let configuration = if self.store.permitted.is_empty() {
+            Vec::new()
+        } else {
+            let checkpoint_index = self
+                .store
+                .checkpoint
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.get_metadata().index);
+            let (conf, promotions) = self.membership_at(index.max(checkpoint_index))?;
+            hs.commit = hs.commit.max(index);
+            if checkpoint_index > index {
+                flushed_membership::encode_covered(index, checkpoint_index, conf, &promotions)
+            } else {
+                flushed_membership::encode(index, conf, &promotions)
+            }
+        };
+        let mut record = batch(
+            &self.options,
+            (!configuration.is_empty()).then_some(&hs),
+            &[],
+        );
         record.flushed_index = index;
+        record.flushed_membership = configuration;
         if let Err(error) = self.journal.append(&record) {
             self.failed = true;
             return Err(error);
         }
         self.journal.flushed_index = index;
+        self.journal.flushed_membership = record.flushed_membership;
+        if !record.hard_state.is_empty() {
+            self.store.wl().set_hardstate(hs);
+        }
         self.store
             .refresh_cache(&self.options, self.journal.length, false)?;
         Ok(())
@@ -2848,6 +3139,7 @@ impl DurablePeer {
         !self.failed
             && !self.stopped
             && self.drain_through.is_none()
+            && self.required_application_checkpoint().is_none()
             && self.raw.raft.state == StateRole::Leader
     }
     /// True while an incoming file checkpoint is being finalized or awaits polling.
@@ -2867,9 +3159,28 @@ impl DurablePeer {
         self.stream.set_limiters(send, receive)
     }
     pub fn tick(&mut self) -> Result<(), RaftError> {
-        self.healthy()?;
+        if let Err(error) = self.healthy() {
+            self.service_campaign_receipts(false);
+            return Err(error);
+        }
         self.membership_recovered()?;
-        if !self.automatic_elections && !self.is_leader() {
+        self.tick_witness_commit();
+        self.tick_replica_contacts();
+        self.expire_read_deadlines()?;
+        let startup_held = self.raw.raft.state == StateRole::Follower
+            && self.automatic_elections
+            && self.required_application_checkpoint().is_none()
+            && self.startup_hold.active();
+        if startup_held {
+            self.raw.raft.election_elapsed = self
+                .raw
+                .raft
+                .election_elapsed
+                .saturating_add(1)
+                .min(usize::MAX - 1);
+        } else if (!self.automatic_elections || self.required_application_checkpoint().is_some())
+            && !self.is_leader()
+        {
             // Advance the follower lease clock without triggering a campaign.
             // At expiry forget the old leader, but preserve the durable vote.
             self.raw.raft.election_elapsed = self.raw.raft.election_elapsed.saturating_add(1);
@@ -2907,6 +3218,12 @@ impl DurablePeer {
             self.raw
                 .report_snapshot(id, raft_core::SnapshotStatus::Failure);
         }
+        self.service_append_window()?;
+        self.settle_witness_commit();
+        self.service_apply_pipeline()?;
+        self.service_proposal_receipts();
+        self.align_replica_contacts();
+        self.service_campaign_receipts(false);
         Ok(())
     }
     fn tick_consensus(&mut self) {
@@ -2943,7 +3260,15 @@ impl DurablePeer {
 
     pub fn campaign(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
+        if self.required_application_checkpoint().is_some() {
+            return Err(invalid(
+                "application checkpoint required before campaigning",
+            ));
+        }
         self.membership_recovered()?;
+        if !self.is_leader() && self.startup_hold.active() {
+            return Err(invalid("ordinary campaign is inhibited during startup"));
+        }
         if !self.raw.raft.promotable() {
             return Err(invalid("local peer is not a committed voter"));
         }
@@ -2954,6 +3279,11 @@ impl DurablePeer {
     /// Already leading is a no-op; an election already in progress is refused.
     pub fn force_campaign(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
+        if self.required_application_checkpoint().is_some() {
+            return Err(invalid(
+                "application checkpoint required before campaigning",
+            ));
+        }
         self.membership_recovered()?;
         if self.is_leader() {
             return Ok(());
@@ -3068,7 +3398,7 @@ impl DurablePeer {
                     && !membership.next_learners.contains(id)
             })
             .filter_map(|id| progress.get(id).map(|p| (id, p)))
-            .filter(|(_, p)| p.recent_active)
+            .filter(|(id, p)| self.replica_recent(*id, true, p.recent_active))
             .max_by_key(|(id, p)| (p.matched, std::cmp::Reverse(*id)))
             .map(|(id, _)| id)
     }
@@ -3129,6 +3459,18 @@ impl DurablePeer {
 
     /// Acceptance allocates a log position; it does not mean the proposal committed.
     pub fn propose(&mut self, payload: Vec<u8>) -> Result<LogId, RaftError> {
+        self.propose_with_options(PeerProposalOptions::default(), payload)
+    }
+    /// Admit a value with an optional term fence and durable command semantics.
+    /// Acceptance still allocates a position; it is not a commit acknowledgment.
+    pub fn propose_with_options(
+        &mut self,
+        options: PeerProposalOptions,
+        payload: Vec<u8>,
+    ) -> Result<LogId, RaftError> {
+        if let Some(term) = options.expected_term {
+            self.require_proposal_term(term)?;
+        }
         self.healthy()?;
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.options.node_id));
@@ -3145,7 +3487,9 @@ impl DurablePeer {
             return Err(invalid("peer proposal must contain 1..4 MiB"));
         }
         let before = self.raw.raft.raft_log.last_index();
-        self.raw.propose(Vec::new(), payload).map_err(invalid)?;
+        self.raw
+            .propose(options.context(), payload)
+            .map_err(invalid)?;
         let index = self.raw.raft.raft_log.last_index();
         if index == before {
             return Err(invalid("peer proposal was not admitted"));
@@ -3160,6 +3504,17 @@ impl DurablePeer {
     /// Submit up to 1024 nonempty values, totaling at most 4 MiB, in one core proposal.
     /// Returned positions are contiguous admissions, not commit acknowledgments.
     pub fn propose_batch(&mut self, payloads: Vec<Vec<u8>>) -> Result<Vec<LogId>, RaftError> {
+        self.propose_batch_with_options(PeerProposalOptions::default(), payloads)
+    }
+    /// Admit one bounded batch under the same term and command settings.
+    pub fn propose_batch_with_options(
+        &mut self,
+        options: PeerProposalOptions,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<LogId>, RaftError> {
+        if let Some(term) = options.expected_term {
+            self.require_proposal_term(term)?;
+        }
         self.healthy()?;
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.options.node_id));
@@ -3195,6 +3550,7 @@ impl DurablePeer {
             .into_iter()
             .map(|data| Entry {
                 data,
+                context: options.context(),
                 ..Default::default()
             })
             .collect();
@@ -3237,6 +3593,7 @@ impl DurablePeer {
     pub fn prepare_checkpoint(&self) -> Result<CheckpointCapture, RaftError> {
         self.healthy()?;
         if self.has_ready()
+            || !self.application_settled()
             || !self.pending_reads.is_empty()
             || self.pending_restore.is_some()
             || self.applied_index() == 0
@@ -3245,6 +3602,7 @@ impl DurablePeer {
         }
         let index = self.applied_index();
         Ok(CheckpointCapture {
+            promotion_policy: membership::encode_promotions(&self.automatic_learners),
             configuration: self
                 .store
                 .initial_state()
@@ -3268,6 +3626,7 @@ impl DurablePeer {
     pub fn prepare_checkpoint_if_due(&mut self) -> Result<Option<CheckpointCapture>, RaftError> {
         self.healthy()?;
         if !self.checkpoint_policy.due()
+            || !self.application_settled()
             || self.has_ready()
             || !self.pending_reads.is_empty()
             || self.pending_restore.is_some()
@@ -3304,7 +3663,10 @@ impl DurablePeer {
             Vec::new(),
             Some(Arc::clone(&prepared.payload)),
             id.index,
-            Some(prepared.ticket.configuration.clone()),
+            Some((
+                prepared.ticket.configuration.clone(),
+                prepared.ticket.promotion_policy.clone(),
+            )),
             prepared.ticket.applied_bytes,
         )?;
         Ok(true)
@@ -3339,11 +3701,12 @@ impl DurablePeer {
         data: Vec<u8>,
         payload: Option<Arc<checkpoint_file::Blob>>,
         index: u64,
-        configuration: Option<ConfState>,
+        configuration: Option<(ConfState, Vec<u8>)>,
         applied_bytes: u128,
     ) -> Result<(), RaftError> {
         self.healthy()?;
         if data.len() > MAX_CHECKPOINT_BYTES
+            || !self.application_settled()
             || self.has_ready()
             || !self.pending_reads.is_empty()
             || self.pending_restore.is_some()
@@ -3353,19 +3716,21 @@ impl DurablePeer {
                 "checkpoint requires a settled applied state within the snapshot bound",
             ));
         }
+        let (configuration, promotion_policy) = configuration.unwrap_or_else(|| {
+            (
+                self.store
+                    .initial_state()
+                    .expect("memory configuration")
+                    .conf_state,
+                membership::encode_promotions(&self.automatic_learners),
+            )
+        });
         let snapshot = Arc::new(Snapshot {
             data,
             metadata: Some(SnapshotMetadata {
                 index,
                 term: self.store.term(index).map_err(storage_error)?,
-                conf_state: Some(
-                    configuration.unwrap_or(
-                        self.store
-                            .initial_state()
-                            .map_err(storage_error)?
-                            .conf_state,
-                    ),
-                ),
+                conf_state: Some(configuration),
             }),
         });
         validate_snapshot_for(&snapshot, &self.options.voters, &self.store.permitted)?;
@@ -3421,11 +3786,13 @@ impl DurablePeer {
                 &hs,
                 &suffix,
                 payload.as_deref(),
+                &promotion_policy,
             )
             .and_then(|()| {
                 let mut record = batch(&self.options, Some(&hs), &suffix);
                 record.version = 2;
                 record.snapshot = snapshot_wire;
+                record.promotion_policy = promotion_policy.clone();
                 if let Some(payload) = &payload {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
@@ -3454,6 +3821,7 @@ impl DurablePeer {
     /// The token is local to this open peer and is not a durable identifier.
     pub fn begin_read(&mut self) -> Result<u64, RaftError> {
         self.healthy()?;
+        self.expire_read_deadlines()?;
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.options.node_id));
         }
@@ -3477,6 +3845,7 @@ impl DurablePeer {
             token: self.read_sequence,
             term: self.term(),
             index: None,
+            deadline: None,
         };
         self.pending_reads.insert(read.token, read);
         self.deferred_reads.push_back(self.read_sequence);
@@ -3595,13 +3964,15 @@ impl DurablePeer {
         }
         let (version, group, original_message) = decode_canonical_packet(bytes)
             .ok_or_else(|| invalid("invalid peer packet encoding"))?;
-        if !matches!(version, 1..=3) || group != self.options.group_id {
+        if !matches!(version, 1..=7) || group != self.options.group_id {
             return Err(invalid("peer packet identity or encoding mismatch"));
         }
-        if version == 2 || version == 3 {
+        if matches!(version, 2 | 3 | 5 | 6) {
             let mut validation = Vec::with_capacity(original_message.len());
             let part = snapshot_stream::Fragment::decode(original_message).map_err(invalid)?;
-            if part.file_backed != (version == 3) {
+            if part.file_backed != matches!(version, 3 | 6)
+                || part.promotion_policy != (version >= 5)
+            {
                 return Err(invalid("checkpoint transfer format mismatch"));
             }
             let mut routing = self.options.clone();
@@ -3615,6 +3986,8 @@ impl DurablePeer {
                 return Err(invalid("noncanonical checkpoint fragment"));
             }
             if part.ack {
+                let responsive = self.replica_contacts.is_some()
+                    && self.stream.acknowledges_active_transfer(&part);
                 if self.stream.acknowledge(&part) {
                     // Transport completion only unpauses probing. It never
                     // advances the follower match index or commits an entry.
@@ -3622,6 +3995,9 @@ impl DurablePeer {
                         .report_snapshot(part.from, raft_core::SnapshotStatus::Finish);
                 } else if self.leader_id() == Some(part.from) && self.term() == part.term {
                     self.stream.receive_probe(&part);
+                }
+                if responsive {
+                    self.note_replica_response(part.from, part.term);
                 }
                 return Ok(());
             }
@@ -3646,6 +4022,7 @@ impl DurablePeer {
                     })
                     .map_err(invalid)?;
             }
+            self.align_replica_contacts();
             return Ok(());
         }
         let entry_count = canonical_message_entry_count(original_message).unwrap_or(0);
@@ -3663,22 +4040,54 @@ impl DurablePeer {
         if !canonical {
             return Err(invalid("noncanonical peer message"));
         }
+        if (version == 7) != message.entries.iter().any(commands::is_command) {
+            return Err(invalid("command entries require an extended append packet"));
+        }
+        if version == 4
+            && (message.get_msg_type() != MessageType::MsgSnapshot || message.context.is_empty())
+        {
+            return Err(invalid("automatic learner checkpoint format mismatch"));
+        }
+        if version == 1
+            && message.get_msg_type() == MessageType::MsgSnapshot
+            && !message.context.is_empty()
+        {
+            return Err(invalid("checkpoint policy requires an extended packet"));
+        }
         self.step_message(message, true)
     }
     fn accept_received_checkpoint(&mut self, message: Message) -> Result<(), RaftError> {
-        if let Some(payload) = self.stream.received_payload.take() {
-            let meta = message.get_snapshot().get_metadata();
-            if meta.index > self.raw.raft.raft_log.committed {
-                self.incoming_payload = Some((
-                    LogId {
-                        index: meta.index,
-                        term: meta.term,
-                    },
-                    payload,
-                ));
+        let payload = self.stream.received_payload.take();
+        let meta = message.get_snapshot().get_metadata();
+        let position = LogId {
+            index: meta.index,
+            term: meta.term,
+        };
+        let may_install = self.may_install_checkpoint(&message);
+        self.step_message(message, false)?;
+        if let Some(payload) = payload {
+            if may_install && self.accepted_checkpoint(&position) {
+                self.incoming_payload = Some((position, payload));
             }
         }
-        self.step_message(message, false)
+        Ok(())
+    }
+    fn accepted_checkpoint(&self, position: &LogId) -> bool {
+        self.raw
+            .raft
+            .raft_log
+            .unstable_snapshot()
+            .as_ref()
+            .is_some_and(|snapshot| {
+                let meta = snapshot.get_metadata();
+                meta.index == position.index && meta.term == position.term
+            })
+    }
+    fn may_install_checkpoint(&self, message: &Message) -> bool {
+        let index = message.get_snapshot().get_metadata().index;
+        message.term >= self.term()
+            && (index > self.commit_index()
+                || (self.raw.raft.pending_request_snapshot != 0 && index == self.commit_index()))
     }
     fn step_message(&mut self, message: Message, charge_snapshot: bool) -> Result<(), RaftError> {
         let kind = message.get_msg_type();
@@ -3726,18 +4135,26 @@ impl DurablePeer {
                 "transfer timeout must come from the current leader and term",
             ));
         }
+        if kind == MessageType::MsgTimeoutNow && self.required_application_checkpoint().is_some() {
+            return Err(invalid(
+                "application checkpoint required before leadership transfer",
+            ));
+        }
         if kind == MessageType::MsgSnapshot {
             let snapshot = message
                 .snapshot
                 .as_ref()
                 .ok_or_else(|| invalid("missing peer snapshot"))?;
             validate_snapshot_for(snapshot, &self.options.voters, &self.store.permitted)?;
+            membership::decode_promotions(
+                &message.context,
+                snapshot.get_metadata().get_conf_state(),
+            )?;
             if snapshot.get_metadata().term > message.term {
                 return Err(invalid("snapshot term exceeds sender term"));
             }
             if charge_snapshot
-                && message.term >= self.term()
-                && snapshot.get_metadata().index > self.commit_index()
+                && self.may_install_checkpoint(&message)
                 && !self.stream.admit_inline(&message)?
             {
                 self.raw
@@ -3749,6 +4166,7 @@ impl DurablePeer {
                         ..Default::default()
                     })
                     .map_err(invalid)?;
+                self.align_replica_contacts();
                 return self.store.cache.check();
             }
         }
@@ -3802,20 +4220,64 @@ impl DurablePeer {
                 .get(&message.from)
                 .is_some_and(|(term, index, _)| message.term == *term && message.index >= *index)
         {
+            let unchanged = self.raw.raft.state == StateRole::Leader
+                && self
+                    .raw
+                    .raft
+                    .prs()
+                    .get(message.from)
+                    .is_some_and(|progress| progress.matched >= message.index);
             self.snapshot_flights.remove(&message.from);
             self.stream.completed_send(message.from);
+            if unchanged {
+                self.raw
+                    .report_snapshot(message.from, raft_core::SnapshotStatus::Finish);
+                self.raw.ping();
+            }
         }
-        let result = self.raw.step(message).map_err(invalid);
-        self.store.cache.check().and(result)
+        let incoming = (kind == MessageType::MsgSnapshot && self.may_install_checkpoint(&message))
+            .then(|| {
+                (
+                    LogId {
+                        index: message.get_snapshot().get_metadata().index,
+                        term: message.get_snapshot().get_metadata().term,
+                    },
+                    message.context.clone(),
+                )
+            });
+        if self.suppress_startup_vote(&message) {
+            return self.store.cache.check();
+        }
+        self.retire_application_snapshot_request(&message);
+        let response = matches!(
+            kind,
+            MessageType::MsgAppendResponse | MessageType::MsgHeartbeatResponse
+        )
+        .then_some((message.from, message.term));
+        self.step_with_append_window(message)?;
+        self.align_replica_contacts();
+        if let Some((from, term)) = response {
+            self.note_replica_response(from, term);
+        }
+        self.service_proposal_receipts();
+        if let Some((position, policy)) = incoming {
+            if self.accepted_checkpoint(&position) {
+                self.incoming_promotions = Some((position, policy));
+            }
+        }
+        self.service_campaign_receipts(false);
+        self.settle_witness_commit();
+        self.store.cache.check()
     }
     fn packets(&mut self, messages: Vec<Message>) -> Result<Vec<PeerPacket>, RaftError> {
         if self.drain_through.is_some() {
             return Ok(Vec::new());
         }
         let mut output = Vec::new();
-        for message in messages {
+        for mut message in messages {
             let to = message.to;
             if message.get_msg_type() == MessageType::MsgSnapshot {
+                message.context = self.store.checkpoint_promotions.lock().unwrap().clone();
                 self.snapshot_flights.insert(
                     to,
                     (message.term, message.get_snapshot().get_metadata().index, 0),
@@ -3855,7 +4317,15 @@ impl DurablePeer {
             }
             output.push(PeerPacket {
                 to,
-                bytes: encode_packet(self.options.group_id, &message)?,
+                bytes: if message.entries.iter().any(commands::is_command) {
+                    encode_envelope(7, self.options.group_id, &message)?
+                } else if message.get_msg_type() == MessageType::MsgSnapshot
+                    && !message.context.is_empty()
+                {
+                    encode_envelope(4, self.options.group_id, &message)?
+                } else {
+                    encode_packet(self.options.group_id, &message)?
+                },
             });
         }
         Ok(output)
@@ -3864,13 +4334,30 @@ impl DurablePeer {
     /// keep this true; back off application retries when their resource is unavailable.
     /// This excludes
     /// in-flight host reads and checkpoint transfers, which still need completion polling.
+    /// Expired append windows are Ready; fresh ones wait for a prefix or timer polling.
     pub fn has_ready(&self) -> bool {
+        self.consensus_work_ready() || self.automatic_promotion_candidate().is_some()
+    }
+    fn consensus_work_ready(&self) -> bool {
         !self.failed
             && !self.stopped
             && self.store.cache.check().is_ok()
-            && (self.pending_restore.is_some()
+            && ((self.pending_restore.is_some()
+                && self
+                    .apply_pipeline
+                    .as_ref()
+                    .is_none_or(|pipeline| !pipeline.active()))
                 || self.raw.has_ready()
-                || self.pending_apply > self.applied_index())
+                || (self.apply_pipeline.is_none() && self.pending_apply > self.applied_index())
+                || self.apply_pipeline.as_ref().is_some_and(|pipeline| {
+                    pipeline.dirty()
+                        || (self.pending_restore.is_none()
+                            && pipeline.next(self.raw.raft.raft_log.applied).is_some())
+                })
+                || self.append_reorder.due()
+                || self.read_deadline_due()
+                || self.proposal_receipts_due()
+                || self.campaign_receipts_due())
     }
 
     /// Persist before returning packets or applying committed entries. Empty payloads
@@ -3881,7 +4368,10 @@ impl DurablePeer {
         &mut self,
         mut apply: impl FnMut(LogId, &[u8]) -> Result<(), RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
-        self.processing_allowed()?;
+        if let Err(error) = self.processing_allowed() {
+            self.service_campaign_receipts(false);
+            return Err(error);
+        }
         self.process_ready_with_snapshot(&mut apply, |_, _| {
             Err(storage_error(
                 "application snapshot restore callback required",
@@ -4039,11 +4529,27 @@ impl DurablePeer {
 
     fn process_application(
         &mut self,
+        apply: impl FnMut(&[Entry]) -> ApplyProgress,
+        restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
+    ) -> Result<Vec<PeerPacket>, RaftError> {
+        if self.apply_pipeline.is_some() {
+            return Err(invalid("use asynchronous application Ready processing"));
+        }
+        self.process_application_inner(apply, restore)
+    }
+    fn process_application_inner(
+        &mut self,
         mut apply: impl FnMut(&[Entry]) -> ApplyProgress,
         mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
-        self.processing_allowed()?;
+        if let Err(error) = self.processing_allowed() {
+            self.service_campaign_receipts(false);
+            return Err(error);
+        }
+        self.service_campaign_receipts(false);
         let result = (|| {
+            self.service_apply_pipeline()?;
+            self.service_append_window()?;
             // Invalid incoming transfer bytes are rejected just like step errors.
             // They must not poison an otherwise healthy voter. A failed worker
             // drops its payload and sends no completion acknowledgment.
@@ -4063,6 +4569,13 @@ impl DurablePeer {
             {
                 self.incoming_payload = None;
             }
+            if self
+                .incoming_promotions
+                .as_ref()
+                .is_some_and(|(id, _)| id.index <= self.applied_index())
+            {
+                self.incoming_promotions = None;
+            }
             let term = self.term();
             let leader = self.is_leader();
             self.stream.discard_obsolete_send(term, leader);
@@ -4076,9 +4589,18 @@ impl DurablePeer {
         let result = self.store.cache.check().and(result);
         if result.is_err() {
             self.failed = true;
-        } else if self.pending_restore.is_none() && self.applied_index() >= self.commit_index() {
+        } else if self.pending_restore.is_none()
+            && self
+                .apply_pipeline
+                .as_ref()
+                .map_or(self.applied_index(), |_| self.raw.raft.raft_log.applied)
+                >= self.commit_index()
+        {
             self.recovering_membership = false;
         }
+        self.service_proposal_receipts();
+        self.service_campaign_receipts(result.is_ok());
+        self.align_replica_contacts();
         if result.is_ok() {
             self.finish_drain();
         }
@@ -4117,10 +4639,21 @@ impl DurablePeer {
         let Some(snapshot) = self.pending_restore.clone() else {
             return Ok(());
         };
+        if self
+            .apply_pipeline
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.active())
+        {
+            return Ok(());
+        }
         if self.restore_payload(&snapshot, restore)? == RestoreDecision::Restored {
-            self.raw.advance_apply_to(snapshot.get_metadata().index);
+            if self.apply_pipeline.is_none() {
+                self.raw.advance_apply_to(snapshot.get_metadata().index);
+            }
+            self.reset_application_pipeline(snapshot.get_metadata().index);
             self.pending_restore = None;
             self.checkpoint_policy.restored();
+            self.finish_membership_receipts();
         }
         Ok(())
     }
@@ -4129,6 +4662,9 @@ impl DurablePeer {
         entries: Vec<Entry>,
         apply: &mut impl FnMut(&[Entry]) -> ApplyProgress,
     ) -> Result<bool, RaftError> {
+        if self.apply_pipeline.is_some() {
+            return self.issue_application_tasks(entries);
+        }
         if self.pending_apply <= self.applied_index() {
             return Ok(false);
         }
@@ -4154,6 +4690,7 @@ impl DurablePeer {
                 self.apply_committed_membership(&entries[offset])?;
                 self.raw.advance_apply_to(entries[offset].index);
                 self.checkpoint_policy.charge(&entries[offset..offset + 1]);
+                self.apply_proposal_receipts(&entries[offset..offset + 1]);
                 offset += 1;
                 continue;
             }
@@ -4161,6 +4698,7 @@ impl DurablePeer {
                 .iter()
                 .position(|entry| entry.entry_type != EntryType::EntryNormal as i32)
                 .map_or(entries.len(), |length| offset + length);
+            self.sync_application_commands(&entries[offset..end])?;
             let progress = apply(&entries[offset..end]);
             if progress.consumed > end - offset {
                 return Err(invalid("application consumed beyond the supplied batch"));
@@ -4170,6 +4708,7 @@ impl DurablePeer {
                     .advance_apply_to(entries[offset + progress.consumed - 1].index);
                 self.checkpoint_policy
                     .charge(&entries[offset..offset + progress.consumed]);
+                self.apply_proposal_receipts(&entries[offset..offset + progress.consumed]);
             }
             if let Some(error) = progress.error {
                 return Err(error);
@@ -4187,6 +4726,7 @@ impl DurablePeer {
         apply: &mut impl FnMut(&[Entry]) -> ApplyProgress,
         restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
+        self.expire_read_deadlines()?;
         let mut output = Vec::new();
         let mut deferred = false;
         let mut applied_batch = false;
@@ -4195,6 +4735,8 @@ impl DurablePeer {
             if self.drain_complete() {
                 break;
             }
+            self.settle_witness_commit();
+            self.schedule_automatic_promotion()?;
             self.dispatch_deferred_reads()?;
             if !self.raw.has_ready() {
                 if !restore_attempted {
@@ -4235,10 +4777,15 @@ impl DurablePeer {
                 let restore_floor = self.applied_index();
                 let snapshot = Arc::new(ready.snapshot().clone());
                 validate_snapshot_for(&snapshot, &self.options.voters, &self.store.permitted)?;
-                let hs = ready
-                    .hs()
-                    .cloned()
-                    .ok_or_else(|| storage_error("snapshot ready needs hard state"))?;
+                let hs = match ready.hs() {
+                    Some(state) => state.clone(),
+                    None => {
+                        self.store
+                            .initial_state()
+                            .map_err(storage_error)?
+                            .hard_state
+                    }
+                };
                 let position = LogId {
                     index: snapshot.get_metadata().index,
                     term: snapshot.get_metadata().term,
@@ -4249,6 +4796,15 @@ impl DurablePeer {
                     .filter(|(id, _)| *id == position)
                     .map(|(_, p)| Arc::clone(p));
                 let snapshot_wire: prost::bytes::Bytes = snapshot.encode_to_vec().into();
+                let promotion_policy = self
+                    .incoming_promotions
+                    .as_ref()
+                    .filter(|(id, _)| *id == position)
+                    .map_or_else(Vec::new, |(_, policy)| policy.clone());
+                let automatic_learners = membership::decode_promotions(
+                    &promotion_policy,
+                    snapshot.get_metadata().get_conf_state(),
+                )?;
                 self.journal.rewrite(
                     &self.options,
                     &snapshot,
@@ -4256,10 +4812,12 @@ impl DurablePeer {
                     &hs,
                     ready.entries(),
                     payload.as_deref(),
+                    &promotion_policy,
                 )?;
                 let mut record = batch(&self.options, Some(&hs), ready.entries());
                 record.version = 2;
                 record.snapshot = snapshot_wire;
+                record.promotion_policy = promotion_policy;
                 if let Some(payload) = &payload {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
@@ -4267,11 +4825,16 @@ impl DurablePeer {
                 // Receive finalization already validated and synced this owned
                 // payload. Reuse it without scanning it again on the Raft loop.
                 install_received(&self.store, &record, Arc::clone(&snapshot), payload)?;
+                self.command_commit_synced = self.command_commit_synced.max(hs.commit);
+                self.automatic_learners = automatic_learners;
                 self.store
                     .refresh_cache(&self.options, self.journal.length, true)?;
                 self.restore_floor = restore_floor;
                 self.pending_apply = self.pending_apply.max(position.index);
                 self.pending_restore = Some(snapshot);
+                if self.apply_pipeline.is_some() {
+                    self.raw.advance_apply_to(position.index);
+                }
                 self.incoming_payload = None;
             } else if ready.hs().is_some() || !ready.entries().is_empty() {
                 let mut record = batch(&self.options, ready.hs(), &[]);
@@ -4301,6 +4864,11 @@ impl DurablePeer {
                     ready.entries(),
                     ready.hs().cloned(),
                 )?;
+                if !commit_only {
+                    self.command_commit_synced = self
+                        .command_commit_synced
+                        .max(ready.hs().unwrap_or(&previous).commit);
+                }
                 self.store
                     .refresh_cache(&self.options, self.journal.length, false)?;
             }
@@ -4315,7 +4883,10 @@ impl DurablePeer {
             let number = ready.number();
             self.raw.advance_append_async(ready);
             self.raw.on_persist_ready(number);
+            self.settle_witness_commit();
             self.store.cache.check()?;
+            self.service_campaign_receipts(true);
+            self.apply_async_consensus(&entries)?;
             if !restore_attempted && self.pending_restore.is_some() {
                 self.attempt_restore(restore)?;
                 restore_attempted = true;
@@ -4360,11 +4931,13 @@ mod tests {
         };
         let store = PeerStorage {
             cache: Default::default(),
+            witness_identity: None,
             max_disk_replicate_entries: None,
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
+            checkpoint_promotions: Default::default(),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
@@ -4428,12 +5001,14 @@ mod tests {
         );
         drop(journal);
         let recovered = PeerStorage {
+            witness_identity: None,
             cache: Default::default(),
             max_disk_replicate_entries: None,
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
+            checkpoint_promotions: Default::default(),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
@@ -4474,11 +5049,13 @@ mod tests {
         };
         let store = PeerStorage {
             cache: Default::default(),
+            witness_identity: None,
             max_disk_replicate_entries: None,
             permitted: Vec::new(),
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
+            checkpoint_promotions: Default::default(),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
@@ -4646,11 +5223,19 @@ mod tests {
             snapshot_total: 2 * SNAPSHOT_FRAGMENT_BYTES as u64,
             snapshot_digest: 47,
             payload_manifest: vec![53; 96],
+            promotion_policy: vec![1, 2, 3],
+            flushed_membership: vec![4, 5, 6],
             permitted: vec![1, 2, 3, 4],
             flushed_index: 0,
+            durable_commands: true,
+            witness_identity: vec![8, 1, 16, 1],
         };
         let bytes = record.encode_to_vec();
         let mut validation = Vec::new();
+        assert!(exact_batch_encoding(&record, &bytes, &mut validation));
+        let mut older_shape = record.clone();
+        older_shape.promotion_policy.clear();
+        assert!(!exact_batch_encoding(&older_shape, &bytes, &mut validation));
         assert!(exact_batch_encoding(&record, &bytes, &mut validation));
         let pointer = validation.as_ptr();
         let capacity = validation.capacity();
@@ -4669,9 +5254,9 @@ mod tests {
             &mut validation,
         ));
 
-        // Field 14 is not defined. (13 is `flushed_index`, so a varint 1 on it is a valid record.)
+        // Field 16 is not defined.
         let mut extra_field = bytes;
-        extra_field.extend_from_slice(&[0x70, 0x01]);
+        extra_field.extend_from_slice(&[0x80, 0x01, 0x01]);
         let decoded = WalBatch::decode(extra_field.as_slice()).unwrap();
         assert!(!exact_batch_encoding(
             &decoded,
@@ -5319,6 +5904,7 @@ mod tests {
                     &hard,
                     &entries,
                     None,
+                    &[],
                 )
                 .unwrap();
             assert_eq!(snapshot_wire.as_ref(), snapshot.encode_to_vec());
@@ -5369,6 +5955,7 @@ mod tests {
                         &hard,
                         &[oversized],
                         None,
+                        &[],
                     )
                     .is_err());
                 assert_eq!(std::fs::read(&config.wal_path).unwrap(), bytes);

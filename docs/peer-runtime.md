@@ -17,6 +17,49 @@ message budget. Election ticks cannot exceed half the platform's maximum `usize`
 Read confirmation continues to use quorum-safe mode even if quorum-based leader
 step-down is disabled.
 
+`PeerTuning::max_pending_campaign_receipts` optionally admits 1 through 65,536
+campaign completions. `None` disables the receipt APIs without changing ordinary
+election behavior. `campaign_tracked` and `force_campaign_tracked` return a
+`PeerCampaignReceipt`; several admitted waiters can observe the same local win.
+Forced campaigns retain the existing voter-eligibility and already-campaigning
+checks. Refused requests do not consume a receipt slot or trigger an election.
+
+`Elected { term }` is published after actual quorum voting and durable Ready
+processing, before application callbacks or host-owned application work finish.
+An already established, durable leader can complete inline without another write.
+The result records an election event, not a leadership lease, a read confirmation,
+or application completion. A subsequent loss of leadership or application failure
+does not rewrite that event. Use the returned term with term-fenced proposals,
+which still check current leadership at admission.
+
+A positive optional timeout bounds local waiting; `None` waits until a win,
+loss, stop, or failure. Timeouts do not cancel consensus activity. Host ticks,
+Ready processing, receipt polling, and new admissions service waiting requests.
+Expired deadlines make the peer Ready, but live elections still need real packet
+delivery and host ticks. `Lost`, `TimedOut`, `Stopped`, and `Failed` are retained
+terminal outcomes, and late votes cannot revive a completed receipt. Dropping a
+receipt releases its waiting slot at the next service point. Receipts neither
+persist across restart nor retain the storage lock, and polling one on another
+peer or a later open is rejected. No packet or journal format change is required.
+
+`propose_with_options` and `propose_batch_with_options` accept
+`PeerProposalOptions`. `expected_term` optionally fences admission to one exact
+leadership term. `durable_command` syncs the journaled commit position before a
+command reaches a synchronous callback or becomes a host-owned application task.
+`ApplicationEntry::is_command` identifies these entries in application batches.
+The corresponding `propose_tracked_with_options` and
+`propose_batch_tracked_with_options` retain the ordinary receipt limits, deadlines,
+and ordered completion rules. Acceptance alone is still not a commit acknowledgment.
+
+Commands retain the same payload and batch bounds as ordinary proposals. Their
+durability requirement survives replication, deferred application, cache eviction,
+restart, and checkpoint suffix rewrites. Repeated application attempts covered by
+an already synced commit position do not add another barrier. Ordinary proposals
+retain the existing commit-only barrier savings. Upgrade every peer and recovery
+binary before admitting commands: command-bearing append packets use version 7,
+and affected journal records carry an additional required format field. Earlier
+readers reject these formats rather than silently ignore the durability contract.
+
 `PeerTuning::max_log_cache_bytes` optionally sets a resident-entry high-water
 target from 1 byte through 512 MiB. `None` retains the existing all-resident
 behavior. Accounting includes entry structs, payloads, contexts, and cache
@@ -62,6 +105,47 @@ Partial ranges resume through the core's normal acknowledged replication progres
 the count limit never acknowledges entries or advances a replica's match index.
 It may change on reopen without changing durable data or packet formats.
 
+`PeerTuning::append_reorder` optionally admits an `AppendReorderTuning` window
+for out-of-order, nonempty appends from the recognized leader in the current term.
+The default `None` retains direct processing without allocating a window or reading
+a reorder clock. An enabled window defaults to 128 messages, 4 MiB of charged
+memory, and a 3 ms wait. Supported bounds are 1 through 1,024 messages, 1 byte
+through 64 MiB, and a positive delay no longer than 60 seconds. Charging includes
+encoded payloads and message/entry structs, not allocator overhead or unrelated
+Ready buffers; this is not a process-RSS cap.
+
+Held packets own their decoded payloads without copying them. They produce no
+log acknowledgment or application work until a prefix arrives and the core
+accepts them in log order. Ready processing still persists entries before returning
+data acknowledgments. Repeated positions replace their retained message without
+consuming another slot or restarting the first-arrival deadline. Expiry or pressure
+discards the window and sends a retained message through normal core rejection so
+the leader can retry. Oversized messages and empty probes use the direct path.
+Higher terms and unrecognized leaders also retain normal core handling.
+
+Poll `has_ready` and process Ready on a bounded host timer when precise expiry
+matters. Fresh held packets are not Ready on their own; expired windows are.
+Normal ticks also service expiry. Term, role, committed-membership, stop, and
+shutdown changes discard unaccepted work. Reordering state is not journaled and
+does not survive restart. The sender must still retry lost or discarded packets.
+
+`PeerTuning::startup_election_delay` optionally inhibits ordinary elections for
+a positive duration of at most 60 seconds. Every open starts a fresh monotonic
+deadline after journal recovery. `None`, the default, adds no hold or startup
+clock reads. The duration is local tuning, not a persisted timestamp.
+
+While held, a follower does not start timeout campaigns, and `campaign()` refuses
+an ordinary election. Newer-term ordinary vote and pre-vote requests are ignored
+without changing the durable term or vote. Valid leader replication, heartbeats,
+and checkpoints continue normally. Elapsed election ticks accumulate, so expiry
+does not start an additional election wait. A recognized leader's handoff and
+`force_campaign()` keep their existing forced-election behavior, quorum rules,
+and voter-eligibility checks; an already forced election can keep progressing.
+
+This is startup vote inhibition only. Reads remain quorum-confirmed; the option
+does not enable cached lease reads or establish a cluster-wide lease policy.
+It is not a substitute for fencing previous leaseholders before a forced election.
+
 `transfer_leadership(target)` requests a handoff to another committed voter.
 Only a leader may request it; unknown targets, learners, and the local identity
 are refused. Continue
@@ -77,6 +161,14 @@ the leader knows to match furthest among voters it has heard from since it won, 
 the lowest node id, or `None` when this peer is not the leader or has heard from nobody.
 `transfer_leadership_to_closest()` transfers to it and returns it, and is refused rather
 than falling back to a voter that may be down.
+
+`PeerTuning::replica_inactivity_tick` optionally sets an independent response-silence
+window, from 1 through half the platform's maximum `usize`. With it, closest-follower
+selection uses responses received within that window rather than the core's
+periodically cleared quorum-activity flag. A candidate must still be another
+committed voter heard from during this leadership term, and selection still uses
+its actual acknowledged log position. Learners cannot become handoff targets.
+`None` preserves the existing core-activity selection rule.
 
 `PeerTuning::transfer_timeout_tick` optionally supplies an independent handoff
 deadline, from 1 through half the platform's maximum `usize`. `None` preserves the
@@ -115,6 +207,54 @@ elections are suppressed. Network timeout-now requests keep their existing
 current-leader and current-term validation.
 
 `DurablePeer::campaign`, `tick`, and `step` feed the local consensus state.
+
+`PeerTuning::max_pending_proposal_receipts` enables bounded proposal completion
+tracking for writes and membership changes, from 1 through 65536 outstanding
+receipts. The default `None` keeps
+ordinary proposals unchanged and allocates no tracker. `propose_tracked(value,
+timeout)` returns a `PeerProposalReceipt` with its admitted log position;
+`propose_tracked_in_term` adds the expected-term fence. `propose_batch_tracked`
+returns one receipt per entry and refuses the whole batch before admission when
+there are insufficient receipt slots. Existing payload, cache, and uncommitted
+byte budgets still apply. A supplied timeout must be positive and fit the
+monotonic clock; `None` imposes no deadline.
+
+`propose_membership_tracked(change, timeout)` uses the same receipt quota and
+confirms one committed membership phase after ordered local application. A manual
+joint change still needs its separately requested `LeaveJoint` phase.
+`propose_membership_auto_tracked(change, timeout)` waits through that request's
+committed automatic joint exit and its application boundary. Single-phase learner
+additions and removals complete at their own entry. `AddLearnerAuto` confirms the
+learner addition and promotion intent, not the later catch-up-driven promotion.
+The receipt's position always identifies the initial request, even when completion
+requires a later exit entry. Rejected admission allocates no receipt or log position.
+
+`poll_proposal(&receipt)` services outstanding work and returns `Pending`,
+`Applied`, `TimedOut`, `LeadershipLost`, `Stopped`, or `Failed`. Only `Applied`
+acknowledges the operation's committed, ordered application boundary. Merely
+accepting, persisting, or replicating the entry does not complete the receipt.
+Host-worker application waits for the contiguous completion prefix, not the
+core's earlier application cursor. A partial application completes only its
+consumed prefix. Terminal outcomes are retained on receipts even after checkpoint
+compaction; `receipt.status()` observes the last outcome published by the worker.
+
+Ticks, peer inputs, Ready processing, and tracked proposal admission service
+receipt lifetimes. Expired receipts make `has_ready()` true for timer-driven
+cleanup. Completion, expiry, and dropped handles release receipt admission;
+dropping a handle is noticed on the next service pass. No background thread is
+created. Leadership loss ends unconfirmed requests, including automatic transitions
+whose exit has not been observed. A known durable membership boundary can still
+finish behind older worker tasks or a covering checkpoint after leadership loss
+or local voter removal. Already successful receipts remain successful.
+Graceful shutdown continues committed application through
+its captured fence, but closes waiting on uncommitted proposals. Immediate stop
+or dropping the peer ends remaining receipts. Receipts do not retain the storage
+lock and cannot be polled on a different peer or after reopening.
+
+Timeout and other non-success outcomes abandon local waiting only: the entry
+may still commit and apply. They are not rollback acknowledgments. Applications
+that retry uncertain writes must supply their own durable deduplication keys.
+
 `capture_log_reader` pins the current durable journal generation and its log
 bounds. Its reader can move to another thread and read bounded entry ranges
 without repairing files or sharing the writer cursor. Later appends are excluded;
@@ -428,6 +568,56 @@ power-loss durability test. Run it with:
 cargo test --release --features peer-runtime --test peer_process_transport -- --test-threads=1 --nocapture
 ```
 
+## Host-executed application batches
+
+Set `PeerTuning::max_inflight_apply_tasks` to opt in to a bounded application
+pipeline, for example `Some(5)`. Supported capacities are 1 through 64; `None`
+retains the existing synchronous APIs. Use `process_ready_async_apply(restore)`
+to persist consensus work, return packets, and queue committed application work.
+Drain `take_application_tasks()` after Ready processing and on the host's normal
+completion loop. Synchronous Ready callbacks are refused in this mode.
+
+Each `PeerApplyTask` owns its entries. Dispatch tasks to an ordered application
+worker: preparation may run in parallel, but mutations for one peer must follow
+log order. Return `task.finish()` to `complete_application_task`. Completion
+delivery may arrive out of order; `applied_index()` advances only over the
+contiguous completed prefix. Quorum reads still wait for that application prefix,
+not the core's independent committed-membership progress.
+
+The capacity includes queued tasks, running tasks, and completed batches whose
+earlier batches have not completed. Each batch contains at most 1,024 entries
+and uses the existing application-read byte target, or 64 KiB when no target is
+configured. One larger entry remains whole. Payload ownership moves into tasks;
+the peer starts no application threads. Task and completion handles retain the
+storage lock, so release all old handles before reopening the same storage.
+Queued and running host tasks are not by themselves `has_ready` work: the host
+must dispatch tasks and consume completions, rather than spin on Ready.
+
+Committed membership is processed in consensus order independently of application
+workers; membership entries never reach the task's application batch. Checkpoint
+capture waits for application work to settle. Incoming checkpoints can be made
+durable while old tasks run, but their application restore callback waits until
+every issued task or completion handle has been returned or dropped. The restore
+replaces the old task generation before suffix tasks are issued.
+
+`task.reject_after(n)` reports an applied prefix and rejects the remaining entries;
+`n` must be smaller than the batch length. Stop mutating later tasks and return or
+drop their handles. Dropping an unreported task or completion is also rejection.
+`required_application_checkpoint()` names the first index requiring repair.
+Application dispatch and local campaigns pause until a leader checkpoint repairs
+that state. A rejected leader attempts an immediate handoff to a caught-up voter
+and steps down. The core requests the replacement image without inventing an
+application acknowledgment. The healthy leader's `snapshot_wanted()` signals when
+the host must capture a sufficiently recent application image. Existing receive
+quotas also cover a repair image at an unchanged committed index.
+
+Graceful shutdown keeps dispatching and completing work through its committed
+fence. Repair application rejection before closing admission. If a task is
+rejected during draining and no checkpoint is already pending, shutdown reports
+an error rather than claiming completion: stop, release handles, and reopen with
+a fresh or idempotent application. This local tuning option changes no journal
+or packet formats and may change on reopen. Uncompleted work replays normally.
+
 ## Quorum-confirmed reads
 
 A leader calls `begin_read` to obtain a local token, continues processing and
@@ -436,6 +626,24 @@ token only after the core confirms a current-term quorum and the corresponding
 commit index has applied locally. Serve the read immediately on that same
 application worker. Leadership loss, unknown tokens, and failed peers are errors.
 This uses the safe quorum mode, not a clock-based lease.
+
+`begin_read_with_timeout(duration)` returns a `PeerReadTicket` with a positive
+monotonic deadline; an unrepresentable deadline is refused before admission.
+`poll_timed_read(&mut ticket)` returns `Pending`, `Ready`, or `TimedOut`.
+Success still requires a quorum confirmation and local application through its
+index. At or after the deadline, even an earlier confirmation cannot succeed.
+Terminal outcomes are retained on the ticket; an unfinished request loses
+validity when its leadership term changes. Tickets belong to one open peer and
+cannot be used after reopening, even with the same node identity.
+
+Ticks, Ready processing, and new read admission reclaim expired timed requests,
+including their core read contexts. `has_ready()` includes expired requests so
+a host timer can drive cleanup without incoming traffic. No background thread
+is created; hosts must continue polling or ticking. Dropping a ticket does not
+cancel it early; `cancel_timed_read(&ticket)` does. Tickets do not hold the storage
+lock alive. Timeout only abandons local waiting: delivered packets cannot be
+recalled, and a late reply cannot confirm a newer request. Ordinary `begin_read`
+requests retain their explicit-cancellation behavior and have no deadline.
 
 `PeerTuning::max_pending_reads` bounds outstanding tokens from 1 through 1024;
 the default remains one. Each token has its own quorum and local-application
@@ -801,9 +1009,24 @@ the recorded one is a no-op, and a checkpoint carries the value into its replace
 WAL. Report it occasionally rather than per entry, since each new value costs a
 barrier.
 
-A peer with durable membership refuses it: that peer rebuilds its configuration by
-replaying committed entries, which a floor would skip. The floor shortens replay;
-it does not trim the WAL, which still grows until a checkpoint replaces it.
+Durable-membership peers persist the configuration and pending automatic learner
+promotions at `n` in the same record, including both voter sets and automatic-exit
+state during a joint transition. Capturing an older position reconstructs its
+configuration through the consensus core in bounded history reads; it never
+changes live membership or calls the application. The same durability barrier
+also records commitment through that floor. Recovery starts with that configuration
+and replays later configuration entries before admitting peer inputs as usual.
+Membership floor records require a runtime that understands their WAL field;
+older binaries refuse to open those journals.
+
+If `n` predates an existing checkpoint, that checkpoint anchors its configuration
+instead of requiring compacted history. Recovery requires a checkpoint covering
+that anchor and still restores its image when it is newer than the flushed state.
+
+A checkpoint at or below the flushed floor is not restored over the application's
+newer durable state. An image above the floor still requires restoration. The
+floor shortens replay; it does not trim the WAL, which still grows until a
+checkpoint replaces it.
 
 ## Trimming the log below the flushed index
 
@@ -812,8 +1035,12 @@ checkpoint replaces it. An application whose own state is durable can also drop 
 log with `trim_log_to(n)`, where `n` is at or below the flushed index: the WAL is
 rewritten with a marker snapshot at `n`, the entries after it, the hard state and the
 floor, so the cost follows the entries kept, not the log dropped. A value below the log's
-current start is a no-op, a value past the flushed index is refused, and a peer with
-durable membership refuses it, as it does `set_flushed_index`.
+current start is a no-op and a value past the flushed index is refused. With durable
+membership, the marker carries the configuration and promotion policy at the trim
+position, while later changes remain in the suffix. A flushed floor beyond the
+trim retains its own configuration independently, so recovery can skip application
+replay without skipping membership. Capturing a real image later uses the current
+applied configuration and restores ordinary follower catch-up.
 
 The marker is not an application image. It records where the log now begins, and it is
 recognised by `is_deferred_snapshot` and `DEFERRED_SNAPSHOT`:
@@ -831,6 +1058,38 @@ recognised by `is_deferred_snapshot` and `DEFERRED_SNAPSHOT`:
 
 A trim does not count toward the byte policy that schedules checkpoints, and it does not
 answer a waiting follower; only a real checkpoint does.
+
+`replication_retention_index()` bounds retention by local application and, on a
+leader, every protected replica's actual acknowledged log position. This includes
+learners and both sides of a joint configuration. With no inactivity window, all
+configured replicas stay protected, even when silent. Followers use their own
+applied index because they do not maintain authoritative remote replication progress.
+
+`trim_flushed_log()` trims through the lesser of that boundary and the reported
+flushed index, using the same settled-application and recovery requirements as
+`trim_log_to`. It returns the resulting logical log floor. An already compacted
+prefix never comes back: a returning replica may reduce the retention boundary
+below that floor, in which case the helper does not move the floor backward.
+The explicit `trim_log_to` API remains available independently of this policy.
+
+With `replica_inactivity_tick` enabled, each new leadership term and each newly
+configured replica starts a fresh grace window. A replica is protected until it
+has received no valid current-term response for the configured number of host
+ticks. Ordinary append responses, including rejections, heartbeat responses, and
+acknowledgments matching an active checkpoint transfer restart its window.
+Malformed packets, older-term responses, unrelated transfer acknowledgments, and
+transport failure reports do not. A heartbeat or checkpoint transport acknowledgment
+never advances the known log match on its own.
+
+New replicas get grace for retention but cannot be selected for closest-follower
+handoff until heard from. Membership changes preserve existing members' clocks,
+remove departed members, and give re-added identities new grace. Role changes and
+reopening discard the clocks; they are local tick counters, not persisted timestamps.
+The disabled policy keeps no contact map. Drive host ticks during silence; no
+background timer is created. This policy changes neither quorum activity nor
+commitment, voting, replication retries, or read confirmation. A replica returning
+after its retained history was trimmed still needs the host's real application
+checkpoint when `snapshot_wanted()` is raised.
 
 ## Reserving disk ahead of the log (opt-in, Linux)
 
@@ -984,6 +1243,29 @@ during the transition. It can remain pending indefinitely without both majoritie
 an elapsed host timeout never manufactures a vote. The existing manual API remains
 unchanged. Upgrade every peer and recovery reader before opting in: older runtimes
 reject automatic transition entries and automatic joint checkpoint metadata.
+
+`MembershipChange::AddLearnerAuto(id)` commits a learner with durable promotion
+intent. It uses the same permitted inventory and admission checks as `AddLearner`.
+The elected leader schedules promotion after that learner has acknowledged the
+committed log, application recovery has settled, proposal capacity is available,
+and no configuration change or handoff is pending. Promotion and its automatic joint exit still require real
+votes from both majorities. A timeout never promotes a disconnected learner.
+
+`membership().automatic_learners` lists committed learners awaiting promotion.
+Only one promotion is proposed at a time; seven voters remains the limit. Intent
+survives leadership changes, journal replay, inline and file checkpoints, and
+staged captures installed after later membership changes. Removing a learner
+cancels its intent. Ordinary `AddLearner` remains manual. Proposal acceptance
+acknowledges neither catch-up nor promotion: wait for the addition to apply, then
+verify that the learner is a voter and the outgoing voter set is empty. Continue
+driving Ready, ticks, and transport while waiting.
+
+Upgrade every peer and recovery reader before using automatic learners. Their
+configuration entries carry a recognized intent context. Checkpoints preserve
+the capture-time policy separately from application bytes in a canonical journal
+field and extended snapshot packets, including fragmented transfers. Older
+readers reject these extensions. The application payload and bootstrap inventory
+are unchanged; a staged image cannot borrow a newer image's membership policy.
 
 Checkpoint metadata preserves both voter sets and learners. Recovery applies
 retained configuration entries in order, including after an older staged capture.

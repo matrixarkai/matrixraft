@@ -45,6 +45,7 @@ pub struct PeerLogReader {
     pub(super) node: u64,
     pub(super) voters: Vec<u64>,
     pub(super) permitted: Vec<u64>,
+    pub(super) witness_identity: Option<Arc<witness_identity::Identity>>,
     /// Shared by every reader of this journal generation; see [`LogIndex`].
     pub(super) index: Arc<Mutex<LogIndex>>,
 }
@@ -127,6 +128,7 @@ struct Identity<'a> {
     node: u64,
     voters: &'a [u64],
     permitted: &'a [u64],
+    witness_identity: &'a Option<Arc<witness_identity::Identity>>,
 }
 
 impl PeerLogReader {
@@ -162,6 +164,7 @@ impl PeerLogReader {
             node: self.node,
             voters: &self.voters,
             permitted: &self.permitted,
+            witness_identity: &self.witness_identity,
         };
         self.file.seek(SeekFrom::Start(0)).map_err(storage_error)?;
         let mut remaining = self.length;
@@ -242,6 +245,7 @@ impl PeerLogReader {
                 || record.node != self.node
                 || record.voters != self.voters
                 || record.permitted != self.permitted
+                || !witness_identity::matches(&self.witness_identity, &record.witness_identity)
                 || !exact_batch_encoding(&record, &wire, &mut validation)
             {
                 return Err(storage_error(
@@ -313,6 +317,7 @@ impl PeerLogReader {
             node: self.node,
             voters: &self.voters,
             permitted: &self.permitted,
+            witness_identity: &self.witness_identity,
         };
         self.file
             .seek(SeekFrom::Start(from))
@@ -418,6 +423,7 @@ impl PeerLogReader {
             || record.node != identity.node
             || record.voters != identity.voters
             || record.permitted != identity.permitted
+            || !witness_identity::matches(identity.witness_identity, &record.witness_identity)
             || !exact_batch_encoding(&record, &wire, validation)
         {
             return Err(storage_error(
@@ -435,6 +441,7 @@ impl PeerLogReader {
             node: self.node,
             voters: &self.voters,
             permitted: &self.permitted,
+            witness_identity: &self.witness_identity,
         };
         self.file
             .seek(SeekFrom::Start(index.scanned))
@@ -527,6 +534,7 @@ impl PeerLogReader {
             node: self.node,
             voters: &self.voters,
             permitted: &self.permitted,
+            witness_identity: &self.witness_identity,
         };
         let mut selected: Vec<Entry> = Vec::new();
         let mut bytes_used = 0u64;
@@ -619,8 +627,20 @@ mod tests {
             voters: vec![1],
             permitted: Vec::new(),
             index: Default::default(),
+            witness_identity: None,
         };
         (root, reader)
+    }
+
+    #[test]
+    fn every_read_path_rejects_unexpected_witness_identity() {
+        let mut record = record(&entries_of(1, 2, 1));
+        record.witness_identity = vec![8, 1, 16, 1];
+        let (_root, mut reader) = fixture(&[record], 2);
+        assert!(reader.entries(1, 3, None).is_err());
+        assert!(reader.scan_entries(1, 3, None).is_err());
+        assert!(reader.verify().is_err());
+        assert!(reader.scrub_step(0, u64::MAX).is_err());
     }
 
     fn entries_of(low: u64, high: u64, term: u64) -> Vec<Entry> {
@@ -741,6 +761,7 @@ mod tests {
                 voters: vec![1],
                 permitted: Vec::new(),
                 index: Arc::clone(&long.index),
+                witness_identity: None,
             };
             if longer_first {
                 assert_eq!(terms(&long.entries(1, 10, None).unwrap()), longer);
