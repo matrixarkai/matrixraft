@@ -2919,7 +2919,7 @@ impl DurablePeer {
             self.raw
                 .report_snapshot(id, raft_core::SnapshotStatus::Failure);
         }
-        self.service_append_window(std::time::Instant::now())?;
+        self.service_append_window()?;
         Ok(())
     }
     fn tick_consensus(&mut self) {
@@ -3877,14 +3877,15 @@ impl DurablePeer {
     /// keep this true; back off application retries when their resource is unavailable.
     /// This excludes
     /// in-flight host reads and checkpoint transfers, which still need completion polling.
+    /// Expired append windows are Ready; fresh ones wait for a prefix or timer polling.
     pub fn has_ready(&self) -> bool {
         !self.failed
             && !self.stopped
             && self.store.cache.check().is_ok()
             && (self.pending_restore.is_some()
-                || self.append_reorder.expired(std::time::Instant::now())
                 || self.raw.has_ready()
-                || self.pending_apply > self.applied_index())
+                || self.pending_apply > self.applied_index()
+                || self.append_reorder.due())
     }
 
     /// Persist before returning packets or applying committed entries. Empty payloads
@@ -4058,7 +4059,7 @@ impl DurablePeer {
     ) -> Result<Vec<PeerPacket>, RaftError> {
         self.processing_allowed()?;
         let result = (|| {
-            self.service_append_window(std::time::Instant::now())?;
+            self.service_append_window()?;
             // Invalid incoming transfer bytes are rejected just like step errors.
             // They must not poison an otherwise healthy voter. A failed worker
             // drops its payload and sends no completion acknowledgment.

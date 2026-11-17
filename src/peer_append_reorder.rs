@@ -85,6 +85,12 @@ impl Queue {
             })
         })
     }
+    pub(super) fn due(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|window| window.started.is_some())
+            && self.expired(Instant::now())
+    }
     pub(super) fn hold(&mut self, message: Message, now: Instant) -> Option<Message> {
         let Some(window) = self.0.as_mut() else {
             return Some(message);
@@ -139,7 +145,13 @@ impl DurablePeer {
             self.raw.raft.state == StateRole::Follower,
         );
     }
-    pub(super) fn service_append_window(&mut self, now: Instant) -> Result<(), RaftError> {
+    pub(super) fn service_append_window(&mut self) -> Result<(), RaftError> {
+        if !self.append_reorder.enabled() {
+            return Ok(());
+        }
+        self.service_append_window_at(Instant::now())
+    }
+    fn service_append_window_at(&mut self, now: Instant) -> Result<(), RaftError> {
         self.align_append_window();
         while let Some(message) = self
             .append_reorder
@@ -159,6 +171,9 @@ impl DurablePeer {
         Ok(())
     }
     pub(super) fn step_with_append_window(&mut self, message: Message) -> Result<(), RaftError> {
+        if !self.append_reorder.enabled() {
+            return self.raw.step(message).map_err(invalid);
+        }
         self.align_append_window();
         let now = Instant::now();
         let buffer = self.append_reorder.enabled()
@@ -169,11 +184,11 @@ impl DurablePeer {
             && self.leader_id() == Some(message.from)
             && message.index > self.raw.raft.raft_log.last_index();
         let message = if buffer {
-            self.service_append_window(now)?;
+            self.service_append_window_at(now)?;
             match self.append_reorder.hold(message, now) {
                 None => {
                     self.raw.raft.election_elapsed = 0;
-                    return Ok(());
+                    return self.service_append_window_at(now);
                 }
                 Some(message) => {
                     self.flush_append_window()?;
@@ -184,6 +199,115 @@ impl DurablePeer {
             message
         };
         self.raw.step(message).map_err(invalid)?;
-        self.service_append_window(now)
+        self.service_append_window_at(now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(index: u64) -> Message {
+        Message {
+            from: 1,
+            to: 3,
+            term: 4,
+            log_term: 4,
+            index,
+            msg_type: MessageType::MsgAppend as i32,
+            entries: vec![Entry {
+                term: 4,
+                index: index + 1,
+                data: vec![7; 32],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+    fn queue(tuning: AppendReorderTuning) -> Queue {
+        let mut queue = Queue::new(Some(tuning));
+        queue.align(4, Some(1), true);
+        queue
+    }
+    #[test]
+    fn disabled_window_is_one_word_and_passes_messages_through() {
+        assert_eq!(std::mem::size_of::<Queue>(), std::mem::size_of::<usize>());
+        let mut queue = Queue::new(None);
+        assert!(!queue.enabled());
+        assert!(queue.hold(message(5), Instant::now()).is_some());
+        assert!(queue.take_ready(10).is_none());
+    }
+    #[test]
+    fn prefix_ordering_moves_payloads_and_coalesces_repeated_positions() {
+        let mut queue = queue(AppendReorderTuning {
+            max_messages: 2,
+            ..Default::default()
+        });
+        let now = Instant::now();
+        let high = message(6);
+        let pointer = high.entries[0].data.as_ptr();
+        assert!(queue.hold(high, now).is_none());
+        assert!(queue.hold(message(5), now).is_none());
+        assert!(queue.hold(message(5), now).is_none());
+        assert!(queue.hold(message(7), now).is_some());
+        assert_eq!(queue.0.as_ref().unwrap().held.len(), 2);
+        assert!(queue.take_ready(4).is_none());
+        assert_eq!(queue.take_ready(5).unwrap().index, 5);
+        assert_eq!(
+            queue.take_ready(6).unwrap().entries[0].data.as_ptr(),
+            pointer
+        );
+        assert_eq!(queue.0.as_ref().unwrap().bytes, 0);
+        assert!(queue.0.as_ref().unwrap().started.is_none());
+    }
+    #[test]
+    fn replacement_respects_bytes_and_preserves_the_first_deadline() {
+        let tuning = AppendReorderTuning::default();
+        let mut queue = queue(tuning);
+        let start = Instant::now();
+        assert!(queue.hold(message(5), start).is_none());
+        let charge = queue.0.as_ref().unwrap().bytes;
+        queue.0.as_mut().unwrap().tuning.max_bytes = charge;
+        let mut larger = message(5);
+        larger.entries[0].data.push(8);
+        assert!(queue.hold(larger, start).is_some());
+        assert_eq!(queue.0.as_ref().unwrap().bytes, charge);
+        assert!(queue
+            .hold(message(5), start + tuning.max_delay / 2)
+            .is_none());
+        assert!(!queue.expired(start + tuning.max_delay - Duration::from_nanos(1)));
+        assert!(queue.expired(start + tuning.max_delay));
+        assert_eq!(queue.take_one_and_clear().unwrap().index, 5);
+        assert!(queue.take_one_and_clear().is_none());
+        assert!(!queue.expired(start + tuning.max_delay));
+    }
+    #[test]
+    fn context_changes_discard_unaccepted_work() {
+        let mut queue = queue(AppendReorderTuning::default());
+        for (term, leader, follower) in [
+            (5, Some(1), true),
+            (4, Some(2), true),
+            (4, None, true),
+            (4, Some(1), false),
+        ] {
+            queue.align(4, Some(1), true);
+            assert!(queue.hold(message(5), Instant::now()).is_none());
+            queue.align(term, leader, follower);
+            assert!(queue.0.as_ref().unwrap().held.is_empty());
+            assert_eq!(queue.0.as_ref().unwrap().bytes, 0);
+        }
+    }
+    #[test]
+    fn expiry_fallback_retains_one_core_rejection_candidate() {
+        let tuning = AppendReorderTuning::default();
+        let mut queue = queue(tuning);
+        let start = Instant::now();
+        for index in [8, 5, 6] {
+            assert!(queue.hold(message(index), start).is_none());
+        }
+        assert!(queue.expired(start + tuning.max_delay));
+        assert_eq!(queue.take_one_and_clear().unwrap().index, 5);
+        assert!(queue.take_ready(100).is_none());
+        assert_eq!(queue.0.as_ref().unwrap().bytes, 0);
     }
 }

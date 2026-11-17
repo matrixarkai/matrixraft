@@ -62,6 +62,30 @@ Partial ranges resume through the core's normal acknowledged replication progres
 the count limit never acknowledges entries or advances a replica's match index.
 It may change on reopen without changing durable data or packet formats.
 
+`PeerTuning::append_reorder` optionally admits an `AppendReorderTuning` window
+for out-of-order, nonempty appends from the recognized leader in the current term.
+The default `None` retains direct processing without allocating a window or reading
+a reorder clock. An enabled window defaults to 128 messages, 4 MiB of charged
+memory, and a 3 ms wait. Supported bounds are 1 through 1,024 messages, 1 byte
+through 64 MiB, and a positive delay no longer than 60 seconds. Charging includes
+encoded payloads and message/entry structs, not allocator overhead or unrelated
+Ready buffers; this is not a process-RSS cap.
+
+Held packets own their decoded payloads without copying them. They produce no
+log acknowledgment or application work until a prefix arrives and the core
+accepts them in log order. Ready processing still persists entries before returning
+data acknowledgments. Repeated positions replace their retained message without
+consuming another slot or restarting the first-arrival deadline. Expiry or pressure
+discards the window and sends a retained message through normal core rejection so
+the leader can retry. Oversized messages and empty probes use the direct path.
+Higher terms and unrecognized leaders also retain normal core handling.
+
+Poll `has_ready` and process Ready on a bounded host timer when precise expiry
+matters. Fresh held packets are not Ready on their own; expired windows are.
+Normal ticks also service expiry. Term, role, committed-membership, stop, and
+shutdown changes discard unaccepted work. Reordering state is not journaled and
+does not survive restart. The sender must still retry lost or discarded packets.
+
 `transfer_leadership(target)` requests a handoff to another committed voter.
 Only a leader may request it; unknown targets, learners, and the local identity
 are refused. Continue
