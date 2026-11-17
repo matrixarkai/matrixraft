@@ -33,6 +33,8 @@ pub use apply_pipeline::{PeerApplyCompletion, PeerApplyTask};
 mod checkpoint_file;
 #[path = "peer_checkpoint_policy.rs"]
 mod checkpoint_policy;
+#[path = "peer_flushed_membership.rs"]
+mod flushed_membership;
 #[path = "peer_read_deadlines.rs"]
 mod read_deadlines;
 #[path = "peer_startup_hold.rs"]
@@ -644,6 +646,9 @@ fn exact_batch_encoding(batch: &WalBatch, bytes: &[u8], output: &mut Vec<u8>) ->
     if !batch.promotion_policy.is_empty() {
         prost::encoding::bytes::encode(14, &batch.promotion_policy, &mut *output);
     }
+    if !batch.flushed_membership.is_empty() {
+        prost::encoding::bytes::encode(15, &batch.flushed_membership, &mut *output);
+    }
     consume(&mut input, output) && input.is_empty()
 }
 
@@ -791,6 +796,8 @@ struct WalBatch {
     flushed_index: u64,
     #[prost(bytes = "vec", tag = "14")]
     promotion_policy: Vec<u8>,
+    #[prost(bytes = "vec", tag = "15")]
+    flushed_membership: Vec<u8>,
 }
 fn invalid(s: impl ToString) -> RaftError {
     RaftError::InvalidRequest(s.to_string())
@@ -842,6 +849,7 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         permitted: Vec::new(),
         flushed_index: 0,
         promotion_policy: Vec::new(),
+        flushed_membership: Vec::new(),
     }
 }
 #[derive(Clone)]
@@ -1459,6 +1467,7 @@ struct Journal {
     records: u64,
     /// The highest flushed index any record in this WAL reports; see `set_flushed_index`.
     flushed_index: u64,
+    flushed_membership: Vec<u8>,
     /// End of the disk space reserved ahead of the log, and the chunk to reserve at a time; zero
     /// chunk means no preallocation. See `PeerTuning::wal_preallocate_bytes`.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -1537,6 +1546,7 @@ impl Journal {
         let mut bytes = prost::bytes::BytesMut::new();
         let mut validation = Vec::new();
         let mut flushed_index = 0u64;
+        let mut flushed_membership = Vec::new();
         while offset < length {
             let remaining = length - offset;
             if remaining < 24 {
@@ -1626,7 +1636,17 @@ impl Journal {
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
             }
-            flushed_index = flushed_index.max(record.flushed_index);
+            flushed_membership::validate_record(&record, &store.permitted)?;
+            if record.flushed_index != 0 {
+                if record.flushed_index < flushed_index
+                    || (record.flushed_index == flushed_index
+                        && record.flushed_membership != flushed_membership)
+                {
+                    return Err(storage_error("inconsistent flushed application floor"));
+                }
+                flushed_index = record.flushed_index;
+                flushed_membership.clone_from(&record.flushed_membership);
+            }
             if record.version == 2 {
                 drop(wire);
                 if let Some(record) = assembly.accept(record, offset, &mut validation)? {
@@ -1685,6 +1705,7 @@ impl Journal {
             barriers: 0,
             records: 0,
             flushed_index,
+            flushed_membership,
             reserved: 0,
             reserve_chunk: 0,
             chain,
@@ -1728,6 +1749,7 @@ impl Journal {
             barriers: 0,
             records: 0,
             flushed_index: self.flushed_index,
+            flushed_membership: self.flushed_membership.clone(),
             reserved: 0,
             reserve_chunk: self.reserve_chunk,
             chain: self.zero_chunk != 0,
@@ -1810,6 +1832,9 @@ impl Journal {
         if self.flushed_index != 0 {
             let mut floor = batch(options, None, &[]);
             floor.flushed_index = self.flushed_index;
+            floor
+                .flushed_membership
+                .clone_from(&self.flushed_membership);
             replacement.write_record_into(&floor, &mut record_buffer)?;
         }
         #[cfg(test)]
@@ -2666,14 +2691,16 @@ impl DurablePeer {
         let mut journal = Journal::open(&options, &store, tuning.wal_zero_fill_bytes.unwrap_or(0))?;
         journal.reserve_chunk = tuning.wal_preallocate_bytes.unwrap_or(0);
         let checkpoint = store.checkpoint.lock().unwrap().clone();
-        let automatic_learners = membership::decode_promotions(
+        let mut automatic_learners = membership::decode_promotions(
             &store.checkpoint_promotions.lock().unwrap(),
             &store.initial_state().map_err(storage_error)?.conf_state,
         )?;
         let snapshot_index = checkpoint.as_ref().map_or(0, |s| s.get_metadata().index);
         // A deferred snapshot stands for state the application already holds durably, so there is
         // nothing to restore: the peer opens with it applied and never calls the restore callback.
-        let pending_restore = checkpoint.filter(|s| !is_deferred_snapshot(&s.data));
+        let pending_restore = checkpoint.filter(|s| {
+            !is_deferred_snapshot(&s.data) && s.get_metadata().index > journal.flushed_index
+        });
         // Entries a durable application reported flushed are not delivered again. The floor is
         // clamped to the recovered commit index: raft requires applied <= committed, and a commit
         // watermark that did not survive only means a few entries are delivered once more.
@@ -2683,6 +2710,29 @@ impl DurablePeer {
             .hard_state
             .commit;
         config.applied = snapshot_index.max(journal.flushed_index.min(commit));
+        if !store.permitted.is_empty()
+            && journal.flushed_index != 0
+            && flushed_membership::covering_checkpoint(&journal.flushed_membership)?
+                > snapshot_index
+        {
+            return Err(storage_error(
+                "flushed membership requires its covering checkpoint",
+            ));
+        }
+        if !store.permitted.is_empty() && journal.flushed_index > snapshot_index {
+            if journal.flushed_index > commit {
+                return Err(storage_error(
+                    "flushed configuration exceeds durable commitment",
+                ));
+            }
+            let (conf, promotions) = flushed_membership::decode(
+                &journal.flushed_membership,
+                journal.flushed_index,
+                &store.permitted,
+            )?;
+            store.wl().set_conf_state(conf);
+            automatic_learners = promotions;
+        }
         let logger = slog::Logger::root(slog::Discard, slog::o!());
         let raw = RawNode::new(&config, store.clone(), &logger).map_err(invalid)?;
         let mut stream = snapshot_stream::Stream::new(
@@ -2705,7 +2755,8 @@ impl DurablePeer {
             automatic_elections: true,
             transfer_timeout_tick: tuning.transfer_timeout_tick,
             transfer_clock: None,
-            recovering_membership: !store.permitted.is_empty(),
+            recovering_membership: !store.permitted.is_empty()
+                && (config.applied < commit || pending_restore.is_some()),
             options,
             raw,
             store,
@@ -2835,8 +2886,8 @@ impl DurablePeer {
     /// hold the state of every entry it drops. The WAL is rewritten with a deferred snapshot at
     /// `index`, the entries after it, the hard state and the floor, so the cost follows the
     /// entries kept, not the log dropped. Asking for an index below the log's current start is a
-    /// no-op. Refused on a peer with durable membership, which rebuilds its configuration by
-    /// replaying committed entries.
+    /// no-op. Durable membership is captured at the trim position; later changes remain in
+    /// the retained suffix.
     ///
     /// What replaces the dropped log is not an application image, so this is for applications
     /// whose own state is durable. A follower that needs entries below `index` cannot be served
@@ -2847,11 +2898,6 @@ impl DurablePeer {
     pub fn trim_log_to(&mut self, index: u64) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
-        if !self.store.permitted.is_empty() {
-            return Err(invalid(
-                "a log trim is not supported with durable membership",
-            ));
-        }
         if index > self.journal.flushed_index {
             return Err(invalid(
                 "trim index is beyond what the application reported flushed",
@@ -2861,11 +2907,17 @@ impl DurablePeer {
         if index < first {
             return Ok(());
         }
+        let configuration = if self.store.permitted.is_empty() {
+            None
+        } else {
+            let (conf, promotions) = self.membership_at(index)?;
+            Some((conf, membership::encode_promotions(&promotions)))
+        };
         self.checkpoint_payload_at(
             DEFERRED_SNAPSHOT.to_vec(),
             None,
             index,
-            None,
+            configuration,
             self.checkpoint_policy.total(),
         )
     }
@@ -2887,29 +2939,56 @@ impl DurablePeer {
     /// checkpoints. A restart delivers entries above the greater of the floor and the latest
     /// checkpoint, never beyond the recovered commit index.
     ///
-    /// Refused on a peer with durable membership: it rebuilds its configuration by replaying
-    /// committed entries, which a floor would skip.
+    /// Durable membership and pending learner promotions at the floor are persisted with it,
+    /// so recovery can skip application entries without skipping configuration state.
     pub fn set_flushed_index(&mut self, index: u64) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
-        if !self.store.permitted.is_empty() {
-            return Err(invalid(
-                "a flushed-index floor is not supported with durable membership",
-            ));
-        }
         if index > self.applied_index() {
             return Err(invalid("flushed index is beyond what has been applied"));
         }
         if index <= self.journal.flushed_index {
             return Ok(());
         }
-        let mut record = batch(&self.options, None, &[]);
+        let mut hs = self
+            .store
+            .initial_state()
+            .map_err(storage_error)?
+            .hard_state;
+        let configuration = if self.store.permitted.is_empty() {
+            Vec::new()
+        } else {
+            let checkpoint_index = self
+                .store
+                .checkpoint
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.get_metadata().index);
+            let (conf, promotions) = self.membership_at(index.max(checkpoint_index))?;
+            hs.commit = hs.commit.max(index);
+            if checkpoint_index > index {
+                flushed_membership::encode_covered(index, checkpoint_index, conf, &promotions)
+            } else {
+                flushed_membership::encode(index, conf, &promotions)
+            }
+        };
+        let mut record = batch(
+            &self.options,
+            (!configuration.is_empty()).then_some(&hs),
+            &[],
+        );
         record.flushed_index = index;
+        record.flushed_membership = configuration;
         if let Err(error) = self.journal.append(&record) {
             self.failed = true;
             return Err(error);
         }
         self.journal.flushed_index = index;
+        self.journal.flushed_membership = record.flushed_membership;
+        if !record.hard_state.is_empty() {
+            self.store.wl().set_hardstate(hs);
+        }
         self.store
             .refresh_cache(&self.options, self.journal.length, false)?;
         Ok(())
@@ -4944,6 +5023,7 @@ mod tests {
             snapshot_digest: 47,
             payload_manifest: vec![53; 96],
             promotion_policy: vec![1, 2, 3],
+            flushed_membership: vec![4, 5, 6],
             permitted: vec![1, 2, 3, 4],
             flushed_index: 0,
         };
@@ -4971,9 +5051,9 @@ mod tests {
             &mut validation,
         ));
 
-        // Field 15 is not defined.
+        // Field 16 is not defined.
         let mut extra_field = bytes;
-        extra_field.extend_from_slice(&[0x78, 0x01]);
+        extra_field.extend_from_slice(&[0x80, 0x01, 0x01]);
         let decoded = WalBatch::decode(extra_field.as_slice()).unwrap();
         assert!(!exact_batch_encoding(
             &decoded,

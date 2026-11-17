@@ -33,6 +33,176 @@ struct MembershipPacket {
 }
 
 #[test]
+fn flushed_automatic_joint_membership_finishes_after_all_peers_restart() {
+    let mut c = Cluster::new();
+    c.add_caught_up_learner();
+    for value in 0..8 {
+        c.write(1, value);
+    }
+    let floor = c.hold_automatic_joint();
+    let joint = c.peers[&1].membership();
+    assert!(joint.auto_leave);
+    let durable: BTreeMap<_, _> = (1..=4)
+        .map(|id| (id, c.values[&id].borrow().clone()))
+        .collect();
+    c.pump();
+    for id in 1..=4 {
+        let peer = c.peers.get_mut(&id).unwrap();
+        peer.set_flushed_index(floor).unwrap();
+        peer.trim_log_to(floor).unwrap();
+    }
+    c.peers.clear();
+    c.hold_after = None;
+    for id in 1..=4 {
+        c.open(id);
+        *c.values[&id].borrow_mut() = durable[&id].clone();
+        assert_eq!(c.peers[&id].membership(), joint);
+    }
+    c.pump();
+    c.peers.get_mut(&1).unwrap().campaign().unwrap();
+    c.pump();
+    for _ in 0..10 {
+        if c.peers[&1].membership().outgoing_voters.is_empty() {
+            break;
+        }
+        c.tick();
+    }
+    for id in 1..=4 {
+        let state = c.peers[&id].membership();
+        assert_eq!(state.voters, vec![1, 2, 3, 4]);
+        assert!(state.outgoing_voters.is_empty());
+        assert!(!state.auto_leave);
+    }
+    c.write(1, 99);
+    assert!(c
+        .values
+        .values()
+        .all(|values| values.borrow().as_slice() == [0, 1, 2, 3, 4, 5, 6, 7, 99]));
+}
+
+#[test]
+fn flushed_joint_membership_trims_and_recovers_later_changes_with_real_votes() {
+    for cache in [None, Some(512)] {
+        let mut c = Cluster::new();
+        c.cache_target = cache;
+        c.peers.clear();
+        for id in 1..=3 {
+            c.open(id);
+        }
+        c.pump();
+        c.peers.get_mut(&1).unwrap().campaign().unwrap();
+        c.pump();
+        c.add_caught_up_learner();
+        for value in 0..24 {
+            c.write(1, value);
+        }
+        c.change(1, MembershipChange::Promote(4));
+        let floor = c.peers[&1].applied_index();
+        let joint = c.peers[&1].membership();
+        assert!(!joint.outgoing_voters.is_empty());
+        let durable: BTreeMap<_, _> = [1, 2, 4]
+            .into_iter()
+            .map(|id| (id, c.values[&id].borrow().clone()))
+            .collect();
+        for id in [1, 2, 4] {
+            c.peers
+                .get_mut(&id)
+                .unwrap()
+                .set_flushed_index(floor)
+                .unwrap();
+        }
+        c.change(1, MembershipChange::LeaveJoint);
+        c.change(1, MembershipChange::Remove(3));
+        c.change(1, MembershipChange::LeaveJoint);
+        c.write(1, 99);
+        let final_state = c.peers[&1].membership();
+        for id in [1, 2, 4] {
+            let peer = c.peers.get_mut(&id).unwrap();
+            peer.trim_log_to(floor).unwrap();
+            assert_eq!(peer.membership(), final_state);
+        }
+        c.peers.clear();
+        for id in [1, 2, 4] {
+            c.open(id);
+            *c.values[&id].borrow_mut() = durable[&id].clone();
+            assert_eq!(c.peers[&id].membership(), joint);
+        }
+        c.pump();
+        for id in [1, 2, 4] {
+            assert_eq!(c.peers[&id].membership(), final_state);
+            assert_eq!(
+                *c.values[&id].borrow(),
+                (0..24).chain([99]).collect::<Vec<_>>()
+            );
+        }
+        c.peers.get_mut(&2).unwrap().campaign().unwrap();
+        c.pump();
+        assert!(c.peers[&2].is_leader());
+        c.write(2, 100);
+        assert!([1, 2, 4]
+            .into_iter()
+            .all(|id| c.values[&id].borrow().contains(&100)));
+    }
+}
+
+#[test]
+fn a_flushed_membership_floor_beyond_the_trim_restores_automatic_learner_catchup() {
+    let mut c = Cluster::new();
+    c.isolated.insert(4);
+    for value in 0..8 {
+        c.write(1, value);
+    }
+    c.change(1, MembershipChange::AddLearnerAuto(4));
+    let trim = c.peers[&1].applied_index();
+    c.change(1, MembershipChange::AddLearner(5));
+    c.write(1, 8);
+    let floor = c.peers[&1].applied_index();
+    let durable = c.values[&1].borrow().clone();
+    let floor_state = c.peers[&1].membership();
+    c.peers
+        .get_mut(&1)
+        .unwrap()
+        .set_flushed_index(floor)
+        .unwrap();
+    c.change(1, MembershipChange::Remove(5));
+    if !c.peers[&1].membership().outgoing_voters.is_empty() {
+        c.change(1, MembershipChange::LeaveJoint);
+    }
+    c.write(1, 9);
+    c.peers.get_mut(&1).unwrap().trim_log_to(trim).unwrap();
+    c.peers.remove(&1);
+    c.open(1);
+    *c.values[&1].borrow_mut() = durable;
+    assert_eq!(c.peers[&1].membership(), floor_state);
+    c.pump();
+    assert_eq!(*c.values[&1].borrow(), (0..10).collect::<Vec<_>>());
+    assert_eq!(c.peers[&1].membership().learners, vec![4]);
+    assert_eq!(c.peers[&1].membership().automatic_learners, vec![4]);
+    c.peers.get_mut(&1).unwrap().force_campaign().unwrap();
+    c.pump();
+    c.open(4);
+    c.isolated.remove(&4);
+    c.pump();
+    for _ in 0..4 {
+        c.tick();
+    }
+    assert!(c.peers[&1].snapshot_wanted());
+    c.checkpoint(1);
+    for _ in 0..20 {
+        c.tick();
+        if c.peers[&1].membership().voters.contains(&4)
+            && c.peers[&1].membership().outgoing_voters.is_empty()
+        {
+            break;
+        }
+    }
+    assert_eq!(c.peers[&1].membership().voters, vec![1, 2, 3, 4]);
+    assert!(c.peers[&1].membership().automatic_learners.is_empty());
+    assert_eq!(*c.values[&4].borrow(), (0..10).collect::<Vec<_>>());
+    c.write(1, 10);
+}
+
+#[test]
 fn bounded_membership_recovery_refuses_inputs_until_the_committed_tail_is_applied() {
     let mut cluster = Cluster::new();
     for value in 0..12 {

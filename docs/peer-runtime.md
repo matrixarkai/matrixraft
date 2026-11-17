@@ -944,9 +944,24 @@ the recorded one is a no-op, and a checkpoint carries the value into its replace
 WAL. Report it occasionally rather than per entry, since each new value costs a
 barrier.
 
-A peer with durable membership refuses it: that peer rebuilds its configuration by
-replaying committed entries, which a floor would skip. The floor shortens replay;
-it does not trim the WAL, which still grows until a checkpoint replaces it.
+Durable-membership peers persist the configuration and pending automatic learner
+promotions at `n` in the same record, including both voter sets and automatic-exit
+state during a joint transition. Capturing an older position reconstructs its
+configuration through the consensus core in bounded history reads; it never
+changes live membership or calls the application. The same durability barrier
+also records commitment through that floor. Recovery starts with that configuration
+and replays later configuration entries before admitting peer inputs as usual.
+Membership floor records require a runtime that understands their WAL field;
+older binaries refuse to open those journals.
+
+If `n` predates an existing checkpoint, that checkpoint anchors its configuration
+instead of requiring compacted history. Recovery requires a checkpoint covering
+that anchor and still restores its image when it is newer than the flushed state.
+
+A checkpoint at or below the flushed floor is not restored over the application's
+newer durable state. An image above the floor still requires restoration. The
+floor shortens replay; it does not trim the WAL, which still grows until a
+checkpoint replaces it.
 
 ## Trimming the log below the flushed index
 
@@ -955,8 +970,12 @@ checkpoint replaces it. An application whose own state is durable can also drop 
 log with `trim_log_to(n)`, where `n` is at or below the flushed index: the WAL is
 rewritten with a marker snapshot at `n`, the entries after it, the hard state and the
 floor, so the cost follows the entries kept, not the log dropped. A value below the log's
-current start is a no-op, a value past the flushed index is refused, and a peer with
-durable membership refuses it, as it does `set_flushed_index`.
+current start is a no-op and a value past the flushed index is refused. With durable
+membership, the marker carries the configuration and promotion policy at the trim
+position, while later changes remain in the suffix. A flushed floor beyond the
+trim retains its own configuration independently, so recovery can skip application
+replay without skipping membership. Capturing a real image later uses the current
+applied configuration and restores ordinary follower catch-up.
 
 The marker is not an application image. It records where the log now begins, and it is
 recognised by `is_deferred_snapshot` and `DEFERRED_SNAPSHOT`:

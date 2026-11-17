@@ -65,6 +65,16 @@ pub(super) fn decode_promotions(
     }
     Ok(policy.targets.into_iter().collect())
 }
+pub(super) fn update_promotions(
+    targets: &mut BTreeSet<u64>,
+    change: &ConfChangeV2,
+    conf: &ConfState,
+) {
+    if change.context == AUTO_LEARNER {
+        targets.insert(change.changes[0].node_id);
+    }
+    targets.retain(|id| conf.learners.contains(id));
+}
 fn sorted(values: &[u64]) -> Vec<u64> {
     let mut values = values.to_vec();
     values.sort_unstable();
@@ -320,11 +330,7 @@ impl DurablePeer {
         let change = decode_change(entry, &self.store.permitted)?;
         let conf = self.raw.apply_conf_change(&change).map_err(invalid)?;
         validate_conf(&conf, &self.store.permitted)?;
-        if change.context == AUTO_LEARNER {
-            self.automatic_learners.insert(change.changes[0].node_id);
-        }
-        self.automatic_learners
-            .retain(|id| conf.learners.contains(id));
+        update_promotions(&mut self.automatic_learners, &change, &conf);
         let local_voter =
             conf.voters.contains(&self.node_id()) || conf.voters_outgoing.contains(&self.node_id());
         self.store.wl().set_conf_state(conf);
