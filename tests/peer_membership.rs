@@ -20,6 +20,7 @@ struct Cluster {
     hold_append_acks_from: Option<u64>,
     held_acks: Vec<matrixraft::peer_runtime::PeerPacket>,
     uncommitted_limit: u64,
+    replica_timeout: Option<usize>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -78,6 +79,204 @@ fn flushed_automatic_joint_membership_finishes_after_all_peers_restart() {
         .values
         .values()
         .all(|values| values.borrow().as_slice() == [0, 1, 2, 3, 4, 5, 6, 7, 99]));
+}
+
+fn retention_cluster(timeout: usize) -> Cluster {
+    let mut c = Cluster::new();
+    c.replica_timeout = Some(timeout);
+    c.peers.clear();
+    for id in 1..=3 {
+        c.open(id);
+    }
+    c.pump();
+    c.peers.get_mut(&1).unwrap().campaign().unwrap();
+    c.pump();
+    c
+}
+
+#[test]
+fn replica_retention_waits_for_silent_voters_then_reclaims_and_restores_them() {
+    let mut c = retention_cluster(5);
+    let baseline = c.peers[&1].replication_retention_index().unwrap();
+    c.isolated.insert(3);
+    for value in 0..24 {
+        c.write(1, value);
+    }
+    let applied = c.peers[&1].applied_index();
+    c.peers
+        .get_mut(&1)
+        .unwrap()
+        .set_flushed_index(applied)
+        .unwrap();
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), baseline);
+    assert_eq!(
+        c.peers.get_mut(&1).unwrap().trim_flushed_log().unwrap(),
+        baseline
+    );
+    let before = c.peers[&1].persisted_wal_bytes().unwrap();
+    for _ in 0..4 {
+        c.tick();
+    }
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), baseline);
+    c.tick();
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), applied);
+    assert_eq!(
+        c.peers.get_mut(&1).unwrap().trim_flushed_log().unwrap(),
+        applied
+    );
+    assert!(c.peers[&1].persisted_wal_bytes().unwrap() < before);
+    c.isolated.remove(&3);
+    for _ in 0..6 {
+        c.tick();
+        if c.peers[&1].snapshot_wanted() {
+            break;
+        }
+    }
+    assert!(c.peers[&1].snapshot_wanted());
+    c.checkpoint(1);
+    for _ in 0..10 {
+        c.tick();
+        if c.values[&3].borrow().len() == 24 {
+            break;
+        }
+    }
+    assert_eq!(*c.values[&3].borrow(), (0..24).collect::<Vec<_>>());
+    c.write(1, 99);
+}
+
+#[test]
+fn replica_retention_keeps_responding_learners_until_real_data_acknowledgment() {
+    let mut c = retention_cluster(5);
+    c.add_caught_up_learner();
+    let baseline = c.peers[&1].replication_retention_index().unwrap();
+    c.hold_append_acks_from = Some(4);
+    for value in 0..16 {
+        c.write(1, value);
+    }
+    let applied = c.peers[&1].applied_index();
+    for _ in 0..20 {
+        c.tick();
+    }
+    assert!(c.peers[&1].is_leader());
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), baseline);
+    c.peers
+        .get_mut(&1)
+        .unwrap()
+        .set_flushed_index(applied)
+        .unwrap();
+    assert_eq!(
+        c.peers.get_mut(&1).unwrap().trim_flushed_log().unwrap(),
+        baseline
+    );
+    assert!(!c.held_acks.is_empty());
+    c.hold_append_acks_from = None;
+    for packet in std::mem::take(&mut c.held_acks) {
+        c.peers
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    c.pump();
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), applied);
+    assert_eq!(
+        c.peers.get_mut(&1).unwrap().trim_flushed_log().unwrap(),
+        applied
+    );
+}
+
+#[test]
+fn replica_retention_window_selects_handoff_targets_independently_of_quorum_ticks() {
+    let mut c = retention_cluster(20);
+    for _ in 0..9 {
+        c.tick();
+    }
+    c.peers.get_mut(&1).unwrap().tick().unwrap();
+    assert_eq!(c.peers[&1].closest_follower(), Some(2));
+    c.pump();
+    c.hold_after = Some(c.peers[&1].applied_index());
+    c.hold_except = Some(2);
+    for value in 0..8 {
+        c.write(1, value);
+    }
+    assert_eq!(c.peers[&1].closest_follower(), Some(2));
+    c.isolated.insert(2);
+    for _ in 0..20 {
+        c.tick();
+    }
+    assert!(c.peers[&1].is_leader());
+    assert_eq!(c.peers[&1].closest_follower(), Some(3));
+    assert_eq!(
+        c.peers
+            .get_mut(&1)
+            .unwrap()
+            .transfer_leadership_to_closest()
+            .unwrap(),
+        3
+    );
+    c.hold_after = None;
+    c.pump();
+    for _ in 0..8 {
+        if c.peers[&3].is_leader() {
+            break;
+        }
+        c.tick();
+    }
+    assert!(c.peers[&3].is_leader());
+    assert_eq!(c.peers[&3].closest_follower(), Some(1));
+    c.write(3, 99);
+}
+
+#[test]
+fn replica_retention_rejects_stale_epoch_responses_and_malformed_refreshes() {
+    let mut c = retention_cluster(5);
+    c.peers.get_mut(&1).unwrap().tick().unwrap();
+    c.peers.get_mut(&1).unwrap().tick().unwrap();
+    for packet in c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap()
+    {
+        if packet.to == 2 {
+            c.peers.get_mut(&2).unwrap().step(&packet.bytes).unwrap();
+        }
+    }
+    let old = c
+        .peers
+        .get_mut(&2)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap()
+        .into_iter()
+        .find(|packet| {
+            let envelope = MembershipPacket::decode(packet.bytes.as_slice()).unwrap();
+            raft_core::eraftpb::Message::decode(envelope.message.as_slice())
+                .unwrap()
+                .get_msg_type()
+                == raft_core::eraftpb::MessageType::MsgHeartbeatResponse
+        })
+        .expect("capture an actual old-epoch heartbeat response");
+    c.peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    c.pump();
+    assert!(c.peers[&2].is_leader());
+    c.isolated.insert(2);
+    c.peers.get_mut(&1).unwrap().force_campaign().unwrap();
+    c.pump();
+    assert!(c.peers[&1].is_leader());
+    for _ in 0..5 {
+        c.tick();
+    }
+    let applied = c.peers[&1].applied_index();
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), applied);
+    c.peers.get_mut(&1).unwrap().step(&old.bytes).unwrap();
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), applied);
+    assert_eq!(c.peers[&1].closest_follower(), Some(3));
+    let mut malformed = old.bytes;
+    malformed.push(0);
+    assert!(c.peers.get_mut(&1).unwrap().step(&malformed).is_err());
+    assert_eq!(c.peers[&1].replication_retention_index().unwrap(), applied);
 }
 
 #[test]
@@ -365,6 +564,7 @@ impl Cluster {
             hold_append_acks_from: None,
             held_acks: Vec::new(),
             uncommitted_limit: PeerTuning::default().max_uncommitted_size,
+            replica_timeout: None,
         };
         for id in 1..=3 {
             result.open(id);
@@ -394,6 +594,7 @@ impl Cluster {
                     .min(PeerTuning::default().max_size_per_msg),
                 max_log_cache_bytes: self.cache_target,
                 max_pending_reads: 4,
+                replica_inactivity_tick: self.replica_timeout,
                 max_checkpoint_sends: self.checkpoint_sends,
                 ..Default::default()
             },

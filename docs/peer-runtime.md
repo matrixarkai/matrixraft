@@ -119,6 +119,14 @@ the lowest node id, or `None` when this peer is not the leader or has heard from
 `transfer_leadership_to_closest()` transfers to it and returns it, and is refused rather
 than falling back to a voter that may be down.
 
+`PeerTuning::replica_inactivity_tick` optionally sets an independent response-silence
+window, from 1 through half the platform's maximum `usize`. With it, closest-follower
+selection uses responses received within that window rather than the core's
+periodically cleared quorum-activity flag. A candidate must still be another
+committed voter heard from during this leadership term, and selection still uses
+its actual acknowledged log position. Learners cannot become handoff targets.
+`None` preserves the existing core-activity selection rule.
+
 `PeerTuning::transfer_timeout_tick` optionally supplies an independent handoff
 deadline, from 1 through half the platform's maximum `usize`. `None` preserves the
 core-managed deadline. An explicit deadline can span multiple election intervals;
@@ -993,6 +1001,38 @@ recognised by `is_deferred_snapshot` and `DEFERRED_SNAPSHOT`:
 
 A trim does not count toward the byte policy that schedules checkpoints, and it does not
 answer a waiting follower; only a real checkpoint does.
+
+`replication_retention_index()` bounds retention by local application and, on a
+leader, every protected replica's actual acknowledged log position. This includes
+learners and both sides of a joint configuration. With no inactivity window, all
+configured replicas stay protected, even when silent. Followers use their own
+applied index because they do not maintain authoritative remote replication progress.
+
+`trim_flushed_log()` trims through the lesser of that boundary and the reported
+flushed index, using the same settled-application and recovery requirements as
+`trim_log_to`. It returns the resulting logical log floor. An already compacted
+prefix never comes back: a returning replica may reduce the retention boundary
+below that floor, in which case the helper does not move the floor backward.
+The explicit `trim_log_to` API remains available independently of this policy.
+
+With `replica_inactivity_tick` enabled, each new leadership term and each newly
+configured replica starts a fresh grace window. A replica is protected until it
+has received no valid current-term response for the configured number of host
+ticks. Ordinary append responses, including rejections, heartbeat responses, and
+acknowledgments matching an active checkpoint transfer restart its window.
+Malformed packets, older-term responses, unrelated transfer acknowledgments, and
+transport failure reports do not. A heartbeat or checkpoint transport acknowledgment
+never advances the known log match on its own.
+
+New replicas get grace for retention but cannot be selected for closest-follower
+handoff until heard from. Membership changes preserve existing members' clocks,
+remove departed members, and give re-added identities new grace. Role changes and
+reopening discard the clocks; they are local tick counters, not persisted timestamps.
+The disabled policy keeps no contact map. Drive host ticks during silence; no
+background timer is created. This policy changes neither quorum activity nor
+commitment, voting, replication retries, or read confirmation. A replica returning
+after its retained history was trimmed still needs the host's real application
+checkpoint when `snapshot_wanted()` is raised.
 
 ## Reserving disk ahead of the log (opt-in, Linux)
 

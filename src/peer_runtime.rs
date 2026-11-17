@@ -37,6 +37,8 @@ mod checkpoint_policy;
 mod flushed_membership;
 #[path = "peer_read_deadlines.rs"]
 mod read_deadlines;
+#[path = "peer_replica_retention.rs"]
+mod replica_retention;
 #[path = "peer_startup_hold.rs"]
 mod startup_hold;
 pub use append_reorder::AppendReorderTuning;
@@ -160,6 +162,9 @@ pub struct PeerTuning {
     /// Opt-in outstanding proposal receipt limit, 1 through 65536. None disables
     /// tracked proposal admission without changing ordinary proposals.
     pub max_pending_proposal_receipts: Option<usize>,
+    /// Optional response-silence window for retention and closest-follower selection.
+    /// None retains every replica for retention and the core's handoff activity test.
+    pub replica_inactivity_tick: Option<usize>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -184,6 +189,7 @@ impl Default for PeerTuning {
             max_inflight_apply_tasks: None,
             startup_election_delay: None,
             max_pending_proposal_receipts: None,
+            replica_inactivity_tick: None,
         }
     }
 }
@@ -196,6 +202,9 @@ impl PeerTuning {
     fn config(self, id: u64) -> Result<Config, RaftError> {
         startup_hold::Hold::validate(self.startup_election_delay)?;
         if self.election_tick > usize::MAX / 2
+            || self
+                .replica_inactivity_tick
+                .is_some_and(|ticks| ticks == 0 || ticks > usize::MAX / 2)
             || self
                 .max_pending_proposal_receipts
                 .is_some_and(|limit| !(1..=65536).contains(&limit))
@@ -2639,6 +2648,7 @@ pub struct DurablePeer {
     apply_pipeline: Option<apply_pipeline::Pipeline>,
     startup_hold: startup_hold::Hold,
     proposal_receipts: Option<Box<proposal_receipts::Tracker>>,
+    replica_contacts: Option<Box<replica_retention::Window>>,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
@@ -2766,6 +2776,9 @@ impl DurablePeer {
             drain_through: None,
             read_sequence: 0,
             read_limit: tuning.max_pending_reads,
+            replica_contacts: tuning
+                .replica_inactivity_tick
+                .map(|ticks| Box::new(replica_retention::Window::new(ticks))),
             proposal_receipts: tuning
                 .max_pending_proposal_receipts
                 .map(|limit| Box::new(proposal_receipts::Tracker::new(limit))),
@@ -3042,6 +3055,7 @@ impl DurablePeer {
     pub fn tick(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
+        self.tick_replica_contacts();
         self.expire_read_deadlines()?;
         let startup_held = self.raw.raft.state == StateRole::Follower
             && self.automatic_elections
@@ -3097,6 +3111,7 @@ impl DurablePeer {
         self.service_append_window()?;
         self.service_apply_pipeline()?;
         self.service_proposal_receipts();
+        self.align_replica_contacts();
         Ok(())
     }
     fn tick_consensus(&mut self) {
@@ -3271,7 +3286,7 @@ impl DurablePeer {
                     && !membership.next_learners.contains(id)
             })
             .filter_map(|id| progress.get(id).map(|p| (id, p)))
-            .filter(|(_, p)| p.recent_active)
+            .filter(|(id, p)| self.replica_recent(*id, true, p.recent_active))
             .max_by_key(|(id, p)| (p.matched, std::cmp::Reverse(*id)))
             .map(|(id, _)| id)
     }
@@ -3833,6 +3848,8 @@ impl DurablePeer {
                 return Err(invalid("noncanonical checkpoint fragment"));
             }
             if part.ack {
+                let responsive = self.replica_contacts.is_some()
+                    && self.stream.acknowledges_active_transfer(&part);
                 if self.stream.acknowledge(&part) {
                     // Transport completion only unpauses probing. It never
                     // advances the follower match index or commits an entry.
@@ -3840,6 +3857,9 @@ impl DurablePeer {
                         .report_snapshot(part.from, raft_core::SnapshotStatus::Finish);
                 } else if self.leader_id() == Some(part.from) && self.term() == part.term {
                     self.stream.receive_probe(&part);
+                }
+                if responsive {
+                    self.note_replica_response(part.from, part.term);
                 }
                 return Ok(());
             }
@@ -3864,6 +3884,7 @@ impl DurablePeer {
                     })
                     .map_err(invalid)?;
             }
+            self.align_replica_contacts();
             return Ok(());
         }
         let entry_count = canonical_message_entry_count(original_message).unwrap_or(0);
@@ -4004,6 +4025,7 @@ impl DurablePeer {
                         ..Default::default()
                     })
                     .map_err(invalid)?;
+                self.align_replica_contacts();
                 return self.store.cache.check();
             }
         }
@@ -4086,7 +4108,16 @@ impl DurablePeer {
             return self.store.cache.check();
         }
         self.retire_application_snapshot_request(&message);
+        let response = matches!(
+            kind,
+            MessageType::MsgAppendResponse | MessageType::MsgHeartbeatResponse
+        )
+        .then_some((message.from, message.term));
         self.step_with_append_window(message)?;
+        self.align_replica_contacts();
+        if let Some((from, term)) = response {
+            self.note_replica_response(from, term);
+        }
         self.service_proposal_receipts();
         if let Some((position, policy)) = incoming {
             if self.accepted_checkpoint(&position) {
@@ -4415,6 +4446,7 @@ impl DurablePeer {
             self.recovering_membership = false;
         }
         self.service_proposal_receipts();
+        self.align_replica_contacts();
         if result.is_ok() {
             self.finish_drain();
         }

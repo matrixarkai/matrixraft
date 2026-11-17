@@ -530,6 +530,16 @@ impl Stream {
     pub(super) fn sending_to(&self, to: u64) -> bool {
         self.sending.contains_key(&to)
     }
+    pub(super) fn acknowledges_active_transfer(&self, part: &Fragment) -> bool {
+        part.ack
+            && part.data.is_empty()
+            && self.sending.get(&part.from).is_some_and(|sending| {
+                sending.identity.acknowledgment(0).same_stream(part)
+                    && part.offset <= sending.bytes.len() as u64
+                    && (part.offset == sending.bytes.len() as u64
+                        || part.offset.is_multiple_of(SNAPSHOT_FRAGMENT_BYTES as u64))
+            })
+    }
     pub(super) fn discard_obsolete_send(&mut self, term: u64, leader: bool) {
         self.sending
             .retain(|_, s| leader && s.identity.term == term);

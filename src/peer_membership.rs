@@ -343,6 +343,7 @@ impl DurablePeer {
             .retain_send_targets(|to| progress.get(to).is_some());
         self.snapshot_flights
             .retain(|to, _| progress.get(*to).is_some());
+        self.refresh_replica_contacts();
         // A caller must start a new read under the committed configuration.
         while let Some((&token, _)) = self.pending_reads.first_key_value() {
             self.cancel_read(token)?;

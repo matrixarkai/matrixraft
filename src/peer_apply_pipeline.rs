@@ -328,6 +328,7 @@ impl DurablePeer {
                 }
             }
         }
+        self.align_replica_contacts();
         Ok(())
     }
     pub(super) fn apply_async_consensus(&mut self, entries: &[Entry]) -> Result<(), RaftError> {

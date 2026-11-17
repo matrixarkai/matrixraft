@@ -80,6 +80,7 @@ impl DurablePeer {
     }
     fn cancel_local_requests(&mut self) {
         self.raw.raft.become_follower(self.term(), 0);
+        self.align_replica_contacts();
         self.transfer_clock = None;
         self.append_reorder.clear();
         self.pending_reads.clear();
