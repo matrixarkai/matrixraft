@@ -26,6 +26,9 @@ use std::{
 
 #[path = "peer_append_reorder.rs"]
 mod append_reorder;
+#[path = "peer_apply_pipeline.rs"]
+mod apply_pipeline;
+pub use apply_pipeline::{PeerApplyCompletion, PeerApplyTask};
 #[path = "peer_checkpoint_file.rs"]
 mod checkpoint_file;
 #[path = "peer_checkpoint_policy.rs"]
@@ -138,6 +141,9 @@ pub struct PeerTuning {
     /// Optional bounded waiting window for out-of-order follower appends.
     /// None retains immediate core processing and rejection of missing prefixes.
     pub append_reorder: Option<AppendReorderTuning>,
+    /// Opt-in host-owned application pipeline, 1 through 64 outstanding batches.
+    /// None retains synchronous callbacks. Tasks must mutate each application in order.
+    pub max_inflight_apply_tasks: Option<usize>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -159,6 +165,7 @@ impl Default for PeerTuning {
             wal_preallocate_bytes: None,
             wal_zero_fill_bytes: None,
             append_reorder: None,
+            max_inflight_apply_tasks: None,
         }
     }
 }
@@ -166,9 +173,13 @@ impl PeerTuning {
     fn application_read_budget(self) -> Option<u64> {
         self.max_apply_bytes
             .or_else(|| self.max_log_cache_bytes.map(|bytes| bytes.min(65536)))
+            .or_else(|| self.max_inflight_apply_tasks.map(|_| 65536))
     }
     fn config(self, id: u64) -> Result<Config, RaftError> {
         if self.election_tick > usize::MAX / 2
+            || self
+                .max_inflight_apply_tasks
+                .is_some_and(|limit| !(1..=64).contains(&limit))
             || self
                 .checkpoint_after_bytes
                 .is_some_and(|bytes| bytes == 0 || bytes > WAL_LIMIT)
@@ -918,13 +929,18 @@ impl Storage for PeerStorage {
                 raft_core::StorageError::SnapshotTemporarilyUnavailable,
             ));
         }
-        checkpoint
+        let result = checkpoint
             .as_ref()
             .filter(|snapshot| snapshot.get_metadata().index >= request_index)
             .map(|snapshot| snapshot.as_ref().clone())
             .ok_or(raft_core::Error::Store(
                 raft_core::StorageError::SnapshotTemporarilyUnavailable,
-            ))
+            ));
+        if result.is_err() {
+            self.snapshot_wanted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        result
     }
 }
 fn validate_snapshot_for(
@@ -2574,6 +2590,7 @@ pub struct DurablePeer {
     automatic_learners: BTreeSet<u64>,
     uncommitted_limit: u64,
     incoming_promotions: Option<(LogId, Vec<u8>)>,
+    apply_pipeline: Option<apply_pipeline::Pipeline>,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
@@ -2686,6 +2703,9 @@ impl DurablePeer {
             automatic_learners,
             uncommitted_limit: tuning.max_uncommitted_size,
             incoming_promotions: None,
+            apply_pipeline: tuning
+                .max_inflight_apply_tasks
+                .map(|capacity| apply_pipeline::Pipeline::new(capacity, config.applied)),
         })
     }
     fn membership_recovered(&self) -> Result<(), RaftError> {
@@ -2767,7 +2787,9 @@ impl DurablePeer {
         if self.pending_restore.is_some() {
             self.restore_floor
         } else {
-            self.raw.raft.raft_log.applied
+            self.apply_pipeline
+                .as_ref()
+                .map_or(self.raw.raft.raft_log.applied, |pipeline| pipeline.safe())
         }
     }
     /// Current persisted WAL file length, excluding checkpoint payload files.
@@ -2819,8 +2841,8 @@ impl DurablePeer {
             self.checkpoint_policy.total(),
         )
     }
-    /// Whether a follower has needed a snapshot since the log was trimmed and no application image
-    /// has replaced the marker. When true, call `checkpoint` with the application's state.
+    /// Whether a follower needs a newer application image, including after a log trim or a
+    /// rejected application task. Capture settled application state to answer its request.
     pub fn snapshot_wanted(&self) -> bool {
         self.store
             .snapshot_wanted
@@ -2891,6 +2913,7 @@ impl DurablePeer {
         !self.failed
             && !self.stopped
             && self.drain_through.is_none()
+            && self.required_application_checkpoint().is_none()
             && self.raw.raft.state == StateRole::Leader
     }
     /// True while an incoming file checkpoint is being finalized or awaits polling.
@@ -2912,7 +2935,9 @@ impl DurablePeer {
     pub fn tick(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
-        if !self.automatic_elections && !self.is_leader() {
+        if (!self.automatic_elections || self.required_application_checkpoint().is_some())
+            && !self.is_leader()
+        {
             // Advance the follower lease clock without triggering a campaign.
             // At expiry forget the old leader, but preserve the durable vote.
             self.raw.raft.election_elapsed = self.raw.raft.election_elapsed.saturating_add(1);
@@ -2951,6 +2976,7 @@ impl DurablePeer {
                 .report_snapshot(id, raft_core::SnapshotStatus::Failure);
         }
         self.service_append_window()?;
+        self.service_apply_pipeline()?;
         Ok(())
     }
     fn tick_consensus(&mut self) {
@@ -2987,6 +3013,11 @@ impl DurablePeer {
 
     pub fn campaign(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
+        if self.required_application_checkpoint().is_some() {
+            return Err(invalid(
+                "application checkpoint required before campaigning",
+            ));
+        }
         self.membership_recovered()?;
         if !self.raw.raft.promotable() {
             return Err(invalid("local peer is not a committed voter"));
@@ -2998,6 +3029,11 @@ impl DurablePeer {
     /// Already leading is a no-op; an election already in progress is refused.
     pub fn force_campaign(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
+        if self.required_application_checkpoint().is_some() {
+            return Err(invalid(
+                "application checkpoint required before campaigning",
+            ));
+        }
         self.membership_recovered()?;
         if self.is_leader() {
             return Ok(());
@@ -3281,6 +3317,7 @@ impl DurablePeer {
     pub fn prepare_checkpoint(&self) -> Result<CheckpointCapture, RaftError> {
         self.healthy()?;
         if self.has_ready()
+            || !self.application_settled()
             || !self.pending_reads.is_empty()
             || self.pending_restore.is_some()
             || self.applied_index() == 0
@@ -3313,6 +3350,7 @@ impl DurablePeer {
     pub fn prepare_checkpoint_if_due(&mut self) -> Result<Option<CheckpointCapture>, RaftError> {
         self.healthy()?;
         if !self.checkpoint_policy.due()
+            || !self.application_settled()
             || self.has_ready()
             || !self.pending_reads.is_empty()
             || self.pending_restore.is_some()
@@ -3392,6 +3430,7 @@ impl DurablePeer {
     ) -> Result<(), RaftError> {
         self.healthy()?;
         if data.len() > MAX_CHECKPOINT_BYTES
+            || !self.application_settled()
             || self.has_ready()
             || !self.pending_reads.is_empty()
             || self.pending_restore.is_some()
@@ -3737,8 +3776,7 @@ impl DurablePeer {
             index: meta.index,
             term: meta.term,
         };
-        let may_install =
-            message.term >= self.term() && position.index > self.raw.raft.raft_log.committed;
+        let may_install = self.may_install_checkpoint(&message);
         self.step_message(message, false)?;
         if let Some(payload) = payload {
             if may_install && self.accepted_checkpoint(&position) {
@@ -3757,6 +3795,12 @@ impl DurablePeer {
                 let meta = snapshot.get_metadata();
                 meta.index == position.index && meta.term == position.term
             })
+    }
+    fn may_install_checkpoint(&self, message: &Message) -> bool {
+        let index = message.get_snapshot().get_metadata().index;
+        message.term >= self.term()
+            && (index > self.commit_index()
+                || (self.raw.raft.pending_request_snapshot != 0 && index == self.commit_index()))
     }
     fn step_message(&mut self, message: Message, charge_snapshot: bool) -> Result<(), RaftError> {
         let kind = message.get_msg_type();
@@ -3804,6 +3848,11 @@ impl DurablePeer {
                 "transfer timeout must come from the current leader and term",
             ));
         }
+        if kind == MessageType::MsgTimeoutNow && self.required_application_checkpoint().is_some() {
+            return Err(invalid(
+                "application checkpoint required before leadership transfer",
+            ));
+        }
         if kind == MessageType::MsgSnapshot {
             let snapshot = message
                 .snapshot
@@ -3818,8 +3867,7 @@ impl DurablePeer {
                 return Err(invalid("snapshot term exceeds sender term"));
             }
             if charge_snapshot
-                && message.term >= self.term()
-                && snapshot.get_metadata().index > self.commit_index()
+                && self.may_install_checkpoint(&message)
                 && !self.stream.admit_inline(&message)?
             {
                 self.raw
@@ -3884,12 +3932,22 @@ impl DurablePeer {
                 .get(&message.from)
                 .is_some_and(|(term, index, _)| message.term == *term && message.index >= *index)
         {
+            let unchanged = self.raw.raft.state == StateRole::Leader
+                && self
+                    .raw
+                    .raft
+                    .prs()
+                    .get(message.from)
+                    .is_some_and(|progress| progress.matched >= message.index);
             self.snapshot_flights.remove(&message.from);
             self.stream.completed_send(message.from);
+            if unchanged {
+                self.raw
+                    .report_snapshot(message.from, raft_core::SnapshotStatus::Finish);
+                self.raw.ping();
+            }
         }
-        let incoming = (kind == MessageType::MsgSnapshot
-            && message.term >= self.term()
-            && message.get_snapshot().get_metadata().index > self.raw.raft.raft_log.committed)
+        let incoming = (kind == MessageType::MsgSnapshot && self.may_install_checkpoint(&message))
             .then(|| {
                 (
                     LogId {
@@ -3899,6 +3957,7 @@ impl DurablePeer {
                     message.context.clone(),
                 )
             });
+        self.retire_application_snapshot_request(&message);
         self.step_with_append_window(message)?;
         if let Some((position, policy)) = incoming {
             if self.accepted_checkpoint(&position) {
@@ -3978,9 +4037,18 @@ impl DurablePeer {
         !self.failed
             && !self.stopped
             && self.store.cache.check().is_ok()
-            && (self.pending_restore.is_some()
+            && ((self.pending_restore.is_some()
+                && self
+                    .apply_pipeline
+                    .as_ref()
+                    .is_none_or(|pipeline| !pipeline.active()))
                 || self.raw.has_ready()
-                || self.pending_apply > self.applied_index()
+                || (self.apply_pipeline.is_none() && self.pending_apply > self.applied_index())
+                || self.apply_pipeline.as_ref().is_some_and(|pipeline| {
+                    pipeline.dirty()
+                        || (self.pending_restore.is_none()
+                            && pipeline.next(self.raw.raft.raft_log.applied).is_some())
+                })
                 || self.append_reorder.due())
     }
 
@@ -4150,11 +4218,22 @@ impl DurablePeer {
 
     fn process_application(
         &mut self,
+        apply: impl FnMut(&[Entry]) -> ApplyProgress,
+        restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
+    ) -> Result<Vec<PeerPacket>, RaftError> {
+        if self.apply_pipeline.is_some() {
+            return Err(invalid("use asynchronous application Ready processing"));
+        }
+        self.process_application_inner(apply, restore)
+    }
+    fn process_application_inner(
+        &mut self,
         mut apply: impl FnMut(&[Entry]) -> ApplyProgress,
         mut restore: impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
         self.processing_allowed()?;
         let result = (|| {
+            self.service_apply_pipeline()?;
             self.service_append_window()?;
             // Invalid incoming transfer bytes are rejected just like step errors.
             // They must not poison an otherwise healthy voter. A failed worker
@@ -4195,7 +4274,13 @@ impl DurablePeer {
         let result = self.store.cache.check().and(result);
         if result.is_err() {
             self.failed = true;
-        } else if self.pending_restore.is_none() && self.applied_index() >= self.commit_index() {
+        } else if self.pending_restore.is_none()
+            && self
+                .apply_pipeline
+                .as_ref()
+                .map_or(self.applied_index(), |_| self.raw.raft.raft_log.applied)
+                >= self.commit_index()
+        {
             self.recovering_membership = false;
         }
         if result.is_ok() {
@@ -4236,8 +4321,18 @@ impl DurablePeer {
         let Some(snapshot) = self.pending_restore.clone() else {
             return Ok(());
         };
+        if self
+            .apply_pipeline
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.active())
+        {
+            return Ok(());
+        }
         if self.restore_payload(&snapshot, restore)? == RestoreDecision::Restored {
-            self.raw.advance_apply_to(snapshot.get_metadata().index);
+            if self.apply_pipeline.is_none() {
+                self.raw.advance_apply_to(snapshot.get_metadata().index);
+            }
+            self.reset_application_pipeline(snapshot.get_metadata().index);
             self.pending_restore = None;
             self.checkpoint_policy.restored();
         }
@@ -4248,6 +4343,9 @@ impl DurablePeer {
         entries: Vec<Entry>,
         apply: &mut impl FnMut(&[Entry]) -> ApplyProgress,
     ) -> Result<bool, RaftError> {
+        if self.apply_pipeline.is_some() {
+            return self.issue_application_tasks(entries);
+        }
         if self.pending_apply <= self.applied_index() {
             return Ok(false);
         }
@@ -4355,10 +4453,15 @@ impl DurablePeer {
                 let restore_floor = self.applied_index();
                 let snapshot = Arc::new(ready.snapshot().clone());
                 validate_snapshot_for(&snapshot, &self.options.voters, &self.store.permitted)?;
-                let hs = ready
-                    .hs()
-                    .cloned()
-                    .ok_or_else(|| storage_error("snapshot ready needs hard state"))?;
+                let hs = match ready.hs() {
+                    Some(state) => state.clone(),
+                    None => {
+                        self.store
+                            .initial_state()
+                            .map_err(storage_error)?
+                            .hard_state
+                    }
+                };
                 let position = LogId {
                     index: snapshot.get_metadata().index,
                     term: snapshot.get_metadata().term,
@@ -4404,6 +4507,9 @@ impl DurablePeer {
                 self.restore_floor = restore_floor;
                 self.pending_apply = self.pending_apply.max(position.index);
                 self.pending_restore = Some(snapshot);
+                if self.apply_pipeline.is_some() {
+                    self.raw.advance_apply_to(position.index);
+                }
                 self.incoming_payload = None;
             } else if ready.hs().is_some() || !ready.entries().is_empty() {
                 let mut record = batch(&self.options, ready.hs(), &[]);
@@ -4448,6 +4554,7 @@ impl DurablePeer {
             self.raw.advance_append_async(ready);
             self.raw.on_persist_ready(number);
             self.store.cache.check()?;
+            self.apply_async_consensus(&entries)?;
             if !restore_attempted && self.pending_restore.is_some() {
                 self.attempt_restore(restore)?;
                 restore_attempted = true;

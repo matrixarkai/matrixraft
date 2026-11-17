@@ -10,6 +10,9 @@ impl DurablePeer {
         self.cancel_local_requests();
         self.incoming_payload = None;
         self.incoming_promotions = None;
+        if let Some(pipeline) = &self.apply_pipeline {
+            pipeline.stop();
+        }
         self.stopped = true;
     }
 
@@ -19,6 +22,11 @@ impl DurablePeer {
     /// Repeated calls retain the original fence, including after successful stop.
     pub fn begin_shutdown(&mut self) -> Result<u64, RaftError> {
         self.storage_healthy()?;
+        if self.application_repair_needs_input() {
+            return Err(invalid(
+                "restore the application checkpoint before graceful shutdown",
+            ));
+        }
         if let Some(fence) = self.drain_through {
             if self.stopped && !self.drain_complete() {
                 return Err(invalid(
@@ -44,6 +52,11 @@ impl DurablePeer {
         self.storage_healthy()?;
         if self.drain_through.is_none() {
             return Err(invalid("graceful shutdown has not been requested"));
+        }
+        if self.application_repair_needs_input() {
+            return Err(invalid(
+                "application checkpoint required; shutdown cannot drain",
+            ));
         }
         if self.stopped && !self.drain_complete() {
             return Err(invalid(

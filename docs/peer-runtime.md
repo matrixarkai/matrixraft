@@ -452,6 +452,56 @@ power-loss durability test. Run it with:
 cargo test --release --features peer-runtime --test peer_process_transport -- --test-threads=1 --nocapture
 ```
 
+## Host-executed application batches
+
+Set `PeerTuning::max_inflight_apply_tasks` to opt in to a bounded application
+pipeline, for example `Some(5)`. Supported capacities are 1 through 64; `None`
+retains the existing synchronous APIs. Use `process_ready_async_apply(restore)`
+to persist consensus work, return packets, and queue committed application work.
+Drain `take_application_tasks()` after Ready processing and on the host's normal
+completion loop. Synchronous Ready callbacks are refused in this mode.
+
+Each `PeerApplyTask` owns its entries. Dispatch tasks to an ordered application
+worker: preparation may run in parallel, but mutations for one peer must follow
+log order. Return `task.finish()` to `complete_application_task`. Completion
+delivery may arrive out of order; `applied_index()` advances only over the
+contiguous completed prefix. Quorum reads still wait for that application prefix,
+not the core's independent committed-membership progress.
+
+The capacity includes queued tasks, running tasks, and completed batches whose
+earlier batches have not completed. Each batch contains at most 1,024 entries
+and uses the existing application-read byte target, or 64 KiB when no target is
+configured. One larger entry remains whole. Payload ownership moves into tasks;
+the peer starts no application threads. Task and completion handles retain the
+storage lock, so release all old handles before reopening the same storage.
+Queued and running host tasks are not by themselves `has_ready` work: the host
+must dispatch tasks and consume completions, rather than spin on Ready.
+
+Committed membership is processed in consensus order independently of application
+workers; membership entries never reach the task's application batch. Checkpoint
+capture waits for application work to settle. Incoming checkpoints can be made
+durable while old tasks run, but their application restore callback waits until
+every issued task or completion handle has been returned or dropped. The restore
+replaces the old task generation before suffix tasks are issued.
+
+`task.reject_after(n)` reports an applied prefix and rejects the remaining entries;
+`n` must be smaller than the batch length. Stop mutating later tasks and return or
+drop their handles. Dropping an unreported task or completion is also rejection.
+`required_application_checkpoint()` names the first index requiring repair.
+Application dispatch and local campaigns pause until a leader checkpoint repairs
+that state. A rejected leader attempts an immediate handoff to a caught-up voter
+and steps down. The core requests the replacement image without inventing an
+application acknowledgment. The healthy leader's `snapshot_wanted()` signals when
+the host must capture a sufficiently recent application image. Existing receive
+quotas also cover a repair image at an unchanged committed index.
+
+Graceful shutdown keeps dispatching and completing work through its committed
+fence. Repair application rejection before closing admission. If a task is
+rejected during draining and no checkpoint is already pending, shutdown reports
+an error rather than claiming completion: stop, release handles, and reopen with
+a fresh or idempotent application. This local tuning option changes no journal
+or packet formats and may change on reopen. Uncompleted work replays normally.
+
 ## Quorum-confirmed reads
 
 A leader calls `begin_read` to obtain a local token, continues processing and
