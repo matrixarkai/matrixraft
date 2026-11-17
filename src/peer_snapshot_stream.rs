@@ -373,6 +373,7 @@ pub(super) struct Stream {
     sending: BTreeMap<u64, Sending>,
     pub(super) send_capacity: usize,
     pub(super) frame_all_sends: bool,
+    pub(super) packet_reserve: usize,
     last_data_to: u64,
     receiving: Option<Receiving>,
     finishing: Option<Finishing>,
@@ -400,6 +401,7 @@ impl Stream {
             sending: BTreeMap::new(),
             send_capacity: 1,
             frame_all_sends: false,
+            packet_reserve: 0,
             last_data_to: 0,
             receiving: None,
             finishing: None,
@@ -940,7 +942,7 @@ impl Stream {
             .map(|part| {
                 Ok(PeerPacket {
                     to: part.to,
-                    bytes: encode_envelope(
+                    bytes: encode_envelope_reserved(
                         match (part.promotion_policy, part.file_backed) {
                             (false, false) => 2,
                             (false, true) => 3,
@@ -949,6 +951,7 @@ impl Stream {
                         },
                         group,
                         &part,
+                        self.packet_reserve,
                     )?,
                 })
             })

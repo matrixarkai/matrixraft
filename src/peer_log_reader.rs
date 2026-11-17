@@ -21,6 +21,17 @@ struct EntryView {
     context: prost::bytes::Bytes,
 }
 impl EntryView {
+    fn checked_decode(
+        encoded: prost::bytes::Bytes,
+        identity: &Option<Arc<witness_identity::Identity>>,
+    ) -> Result<Self, RaftError> {
+        let entry = Self::decode(encoded).map_err(storage_error)?;
+        if !witness_wire::valid_entry_role(identity, entry.entry_type, &entry.data, &entry.context)
+        {
+            return Err(storage_error("invalid captured witness entry role"));
+        }
+        Ok(entry)
+    }
     fn into_owned(self) -> Entry {
         Entry {
             entry_type: self.entry_type,
@@ -180,7 +191,7 @@ impl PeerLogReader {
                 &mut validation,
             )?;
             for encoded in std::mem::take(&mut record.entries) {
-                EntryView::decode(encoded).map_err(storage_error)?;
+                EntryView::checked_decode(encoded, &self.witness_identity)?;
             }
             drop(record);
             bytes = wire.try_into_mut().unwrap_or_default();
@@ -253,7 +264,7 @@ impl PeerLogReader {
                 ));
             }
             for (position, encoded) in std::mem::take(&mut record.entries).into_iter().enumerate() {
-                let entry = EntryView::decode(encoded).map_err(storage_error)?;
+                let entry = EntryView::checked_decode(encoded, &self.witness_identity)?;
                 if position == 0 && !selected.is_empty() && highest_selected >= entry.index {
                     highest_selected = 0;
                     selected.retain(|old| {
@@ -337,7 +348,7 @@ impl PeerLogReader {
                 &mut validation,
             )?;
             for encoded in std::mem::take(&mut record.entries) {
-                EntryView::decode(encoded).map_err(storage_error)?;
+                EntryView::checked_decode(encoded, &self.witness_identity)?;
             }
             drop(record);
             at += before - remaining;
@@ -464,7 +475,7 @@ impl PeerLogReader {
             let mut first = None;
             let mut count = 0u64;
             for encoded in std::mem::take(&mut record.entries) {
-                let entry = EntryView::decode(encoded).map_err(storage_error)?;
+                let entry = EntryView::checked_decode(encoded, &self.witness_identity)?;
                 match first {
                     None => first = Some(entry.index),
                     Some(start) if entry.index == start + count => {}
@@ -554,7 +565,7 @@ impl PeerLogReader {
                 &mut validation,
             )?;
             for encoded in std::mem::take(&mut record.entries) {
-                let entry = EntryView::decode(encoded).map_err(storage_error)?;
+                let entry = EntryView::checked_decode(encoded, &self.witness_identity)?;
                 if entry.index < segment.start
                     || entry.index > segment.end
                     || entry.index < low
@@ -641,6 +652,49 @@ mod tests {
         assert!(reader.scan_entries(1, 3, None).is_err());
         assert!(reader.verify().is_err());
         assert!(reader.scrub_step(0, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn every_read_path_enforces_the_captured_entry_role() {
+        for (witness, data, context) in [
+            (true, b"ordinary".as_slice(), b"".as_slice()),
+            (true, b"", b"unexpected-context"),
+            (true, b"hidden-payload", b"\0W"),
+            (false, b"", b"\0W"),
+        ] {
+            let identity = witness_identity::Identity::from_role(
+                Some(witness_identity::OpenRole {
+                    local_witness: witness,
+                    bootstrap_witnesses: vec![if witness { 1 } else { 2 }],
+                }),
+                &PeerOptions {
+                    group_id: 17,
+                    node_id: 1,
+                    voters: vec![1, 2],
+                    wal_path: PathBuf::new(),
+                },
+                &[1, 2],
+            )
+            .unwrap();
+            let mut batch = record(&[Entry {
+                index: 1,
+                term: 1,
+                data: data.to_vec(),
+                context: context.to_vec(),
+                ..Default::default()
+            }]);
+            batch.voters = vec![1, 2];
+            batch.permitted = vec![1, 2];
+            batch.witness_identity = witness_identity::bytes(&identity).to_vec();
+            let (_root, mut reader) = fixture(&[batch], 1);
+            reader.voters = vec![1, 2];
+            reader.permitted = vec![1, 2];
+            reader.witness_identity = identity;
+            assert!(reader.verify().is_err());
+            assert!(reader.scrub_step(0, u64::MAX).is_err());
+            assert!(reader.scan_entries(1, 2, None).is_err());
+            assert!(reader.entries(1, 2, None).is_err());
+        }
     }
 
     fn entries_of(low: u64, high: u64, term: u64) -> Vec<Entry> {

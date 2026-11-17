@@ -14,6 +14,9 @@ pub(super) struct CommitPolicy {
 }
 
 impl CommitPolicy {
+    pub(super) fn contains(&self, id: u64) -> bool {
+        self.witnesses.contains(&id)
+    }
     pub(super) fn from_witnesses(witnesses: BTreeSet<u64>) -> Option<Box<Self>> {
         (!witnesses.is_empty()).then(|| {
             Box::new(Self {

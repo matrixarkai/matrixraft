@@ -261,12 +261,18 @@ impl DurablePeer {
             }
             let (node_id, kind, joint_change) = match operation {
                 MembershipChange::AddLearner(id) | MembershipChange::AddLearnerAuto(id) => {
+                    if self.store.witness_identity.is_some() && self.witness_node(id) {
+                        return Err(invalid("a witness cannot join as a data learner"));
+                    }
                     if state.voters.contains(&id) || state.learners.contains(&id) {
                         return Err(invalid("member already exists"));
                     }
                     (id, ConfChangeType::AddLearnerNode, false)
                 }
                 MembershipChange::Promote(id) => {
+                    if self.store.witness_identity.is_some() && self.witness_node(id) {
+                        return Err(invalid("a witness cannot be promoted to a data voter"));
+                    }
                     if !state.learners.contains(&id)
                         || state.voters.len() >= 7
                         || self
@@ -286,6 +292,12 @@ impl DurablePeer {
                     let voter = state.voters.contains(&id);
                     if (!voter && !state.learners.contains(&id))
                         || (voter && state.voters.len() == 1)
+                        || (voter
+                            && self.store.witness_identity.is_some()
+                            && state
+                                .voters
+                                .iter()
+                                .all(|member| *member == id || self.witness_node(*member)))
                     {
                         return Err(invalid("cannot remove this member"));
                     }
@@ -330,6 +342,7 @@ impl DurablePeer {
         let change = decode_change(entry, &self.store.permitted)?;
         let conf = self.raw.apply_conf_change(&change).map_err(invalid)?;
         validate_conf(&conf, &self.store.permitted)?;
+        self.validate_witness_conf(&conf)?;
         update_promotions(&mut self.automatic_learners, &change, &conf);
         let local_voter =
             conf.voters.contains(&self.node_id()) || conf.voters_outgoing.contains(&self.node_id());

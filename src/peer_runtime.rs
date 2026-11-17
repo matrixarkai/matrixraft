@@ -70,6 +70,8 @@ mod snapshot_stream;
 mod witness;
 #[path = "peer_witness_identity.rs"]
 mod witness_identity;
+#[path = "peer_witness_wire.rs"]
+mod witness_wire;
 pub use membership::{MembershipChange, MembershipState};
 
 const LIMIT: usize = 8 * 1024 * 1024;
@@ -302,6 +304,8 @@ pub struct ApplicationEntry<'a> {
     pub payload: &'a [u8],
     /// The committed position was synced before this entry became available.
     pub is_command: bool,
+    /// A witness retained the log position without the ordinary proposal payload.
+    pub is_metadata: bool,
 }
 
 /// A contiguous run of application entries that never crosses a membership change.
@@ -318,6 +322,7 @@ fn application_entry(entry: &Entry) -> ApplicationEntry<'_> {
         },
         payload: &entry.data,
         is_command: commands::is_command(entry),
+        is_metadata: witness_wire::is_metadata(entry.entry_type, &entry.context),
     }
 }
 impl<'a> ApplicationBatch<'a> {
@@ -400,6 +405,11 @@ fn take_canonical_varint(input: &mut &[u8]) -> Option<u64> {
 }
 
 fn decode_canonical_packet(bytes: &[u8]) -> Option<(u32, u64, &[u8])> {
+    let (version, group, message, remaining) = decode_packet_prefix(bytes)?;
+    remaining.is_empty().then_some((version, group, message))
+}
+
+fn decode_packet_prefix(bytes: &[u8]) -> Option<(u32, u64, &[u8], &[u8])> {
     let mut input = bytes;
     let version = if input.first() == Some(&0x08) {
         input = &input[1..];
@@ -423,16 +433,16 @@ fn decode_canonical_packet(bytes: &[u8]) -> Option<(u32, u64, &[u8])> {
     let message = if input.first() == Some(&0x1a) {
         input = &input[1..];
         let length = usize::try_from(take_canonical_varint(&mut input)?).ok()?;
-        if length == 0 || input.len() != length {
+        if length == 0 || input.len() < length {
             return None;
         }
-        input
-    } else if input.is_empty() {
-        input
+        let (message, remaining) = input.split_at(length);
+        input = remaining;
+        message
     } else {
-        return None;
+        &[]
     };
-    Some((version, group, message))
+    Some((version, group, message, input))
 }
 
 fn canonical_message_entry_count(bytes: &[u8]) -> Option<usize> {
@@ -776,6 +786,15 @@ fn encode_envelope(
     group: u64,
     message: &impl ProstMessage,
 ) -> Result<Vec<u8>, RaftError> {
+    encode_envelope_reserved(version, group, message, 0)
+}
+
+fn encode_envelope_reserved(
+    version: u32,
+    group: u64,
+    message: &impl ProstMessage,
+    reserve: usize,
+) -> Result<Vec<u8>, RaftError> {
     let header = Packet {
         version,
         group,
@@ -788,10 +807,10 @@ fn encode_envelope(
         } else {
             1 + prost::encoding::encoded_len_varint(message_len as u64) + message_len
         };
-    if size > LIMIT {
+    if size.saturating_add(reserve) > LIMIT {
         return Err(invalid("outgoing peer packet exceeds size limit"));
     }
-    let mut bytes = Vec::with_capacity(size);
+    let mut bytes = Vec::with_capacity(size + reserve);
     header.encode(&mut bytes).map_err(invalid)?;
     if message_len != 0 {
         // Embedded messages and byte fields share the length-delimited wire format.
@@ -1102,6 +1121,14 @@ fn install_recovered_entries(store: &PeerStorage, batch: WalBatch) -> Result<(),
     let mut decoded = Entry::default();
     for encoded in &batch.entries {
         merge_entry_reusing_payload_storage(encoded.clone(), &mut decoded)?;
+        if !witness_wire::valid_entry_role(
+            &store.witness_identity,
+            decoded.entry_type,
+            &decoded.data,
+            &decoded.context,
+        ) {
+            return Err(storage_error("invalid durable witness entry role"));
+        }
         if !batch.durable_commands && commands::is_command(&decoded) {
             return Err(storage_error(
                 "command entries require an extended journal record",
@@ -1297,6 +1324,18 @@ fn install_decoded_with_scratch(
         return Err(storage_error(
             "command entries require an extended journal record",
         ));
+    }
+    if store.witness_identity.is_some()
+        && entries.iter().any(|entry| {
+            !witness_wire::valid_entry_role(
+                &store.witness_identity,
+                entry.entry_type,
+                &entry.data,
+                &entry.context,
+            )
+        })
+    {
+        return Err(storage_error("invalid durable witness entry role"));
     }
     for entry in entries
         .iter()
@@ -2857,7 +2896,17 @@ impl DurablePeer {
         stream.permitted = store.permitted.clone();
         stream.send_capacity = tuning.max_checkpoint_sends.unwrap_or(1);
         stream.frame_all_sends = tuning.max_checkpoint_sends.is_some();
-        Ok(Self {
+        stream.packet_reserve = store
+            .witness_identity
+            .as_ref()
+            .map_or(0, |identity| witness_wire::trailer_len(identity));
+        let witnesses = store
+            .witness_identity
+            .as_ref()
+            .map_or_else(BTreeSet::new, |identity| {
+                identity.bootstrap_witnesses().iter().copied().collect()
+            });
+        let mut peer = Self {
             pending_apply: config.applied,
             command_commit_synced: commit,
             application_fetch_bytes: tuning.application_read_budget(),
@@ -2902,8 +2951,17 @@ impl DurablePeer {
                 .max_inflight_apply_tasks
                 .map(|capacity| apply_pipeline::Pipeline::new(capacity, config.applied)),
             startup_hold: startup_hold::Hold::new(tuning.startup_election_delay)?,
-            witness_commit: witness::CommitPolicy::from_witnesses(BTreeSet::new()),
-        })
+            witness_commit: witness::CommitPolicy::from_witnesses(witnesses),
+        };
+        peer.validate_witness_conf(
+            &peer
+                .store
+                .initial_state()
+                .map_err(storage_error)?
+                .conf_state,
+        )?;
+        peer.settle_witness_commit();
+        Ok(peer)
     }
     fn membership_recovered(&self) -> Result<(), RaftError> {
         if self.recovering_membership {
@@ -3178,7 +3236,9 @@ impl DurablePeer {
                 .election_elapsed
                 .saturating_add(1)
                 .min(usize::MAX - 1);
-        } else if (!self.automatic_elections || self.required_application_checkpoint().is_some())
+        } else if (!self.automatic_elections
+            || self.local_witness()
+            || self.required_application_checkpoint().is_some())
             && !self.is_leader()
         {
             // Advance the follower lease clock without triggering a campaign.
@@ -3260,6 +3320,9 @@ impl DurablePeer {
 
     pub fn campaign(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
+        if self.local_witness() {
+            return Err(invalid("a witness cannot campaign"));
+        }
         if self.required_application_checkpoint().is_some() {
             return Err(invalid(
                 "application checkpoint required before campaigning",
@@ -3279,6 +3342,9 @@ impl DurablePeer {
     /// Already leading is a no-op; an election already in progress is refused.
     pub fn force_campaign(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
+        if self.local_witness() {
+            return Err(invalid("a witness cannot campaign"));
+        }
         if self.required_application_checkpoint().is_some() {
             return Err(invalid(
                 "application checkpoint required before campaigning",
@@ -3348,6 +3414,7 @@ impl DurablePeer {
             || target == 0
             || (!membership.voters.contains(&target)
                 && !membership.outgoing_voters.contains(&target))
+            || self.witness_node(target)
             || membership.learners.contains(&target)
             || membership.next_learners.contains(&target)
         {
@@ -3394,6 +3461,7 @@ impl DurablePeer {
             .copied()
             .filter(|id| {
                 *id != self.options.node_id
+                    && !self.witness_node(*id)
                     && !membership.learners.contains(id)
                     && !membership.next_learners.contains(id)
             })
@@ -3962,8 +4030,7 @@ impl DurablePeer {
         if bytes.len() > LIMIT {
             return Err(invalid("peer packet exceeds size limit"));
         }
-        let (version, group, original_message) = decode_canonical_packet(bytes)
-            .ok_or_else(|| invalid("invalid peer packet encoding"))?;
+        let (version, group, original_message) = self.decode_witness_input(bytes)?;
         if !matches!(version, 1..=7) || group != self.options.group_id {
             return Err(invalid("peer packet identity or encoding mismatch"));
         }
@@ -3980,6 +4047,9 @@ impl DurablePeer {
                 routing.voters = self.store.permitted.clone();
             }
             part.validate(&routing, self.term())?;
+            if !part.ack && self.witness_node(part.from) {
+                return Err(invalid("a witness cannot send checkpoint data"));
+            }
             validation.clear();
             part.encode(&mut validation).map_err(invalid)?;
             if validation != original_message {
@@ -4128,6 +4198,32 @@ impl DurablePeer {
         {
             return Err(invalid("unexpected peer message payload"));
         }
+        if self.witness_node(message.from)
+            && matches!(
+                kind,
+                MessageType::MsgAppend
+                    | MessageType::MsgHeartbeat
+                    | MessageType::MsgSnapshot
+                    | MessageType::MsgRequestVote
+                    | MessageType::MsgRequestPreVote
+            )
+        {
+            return Err(invalid("a witness cannot act as a leader or candidate"));
+        }
+        if self.store.witness_identity.is_some()
+            && message.entries.iter().any(|entry| {
+                !witness_wire::valid_entry_role(
+                    &self.store.witness_identity,
+                    entry.entry_type,
+                    &entry.data,
+                    &entry.context,
+                )
+            })
+        {
+            return Err(invalid(
+                "ordinary witness entries must contain metadata only",
+            ));
+        }
         if kind == MessageType::MsgTimeoutNow
             && (self.leader_id() != Some(message.from) || message.term != self.term())
         {
@@ -4140,12 +4236,16 @@ impl DurablePeer {
                 "application checkpoint required before leadership transfer",
             ));
         }
+        if kind == MessageType::MsgTimeoutNow && self.local_witness() {
+            return Ok(());
+        }
         if kind == MessageType::MsgSnapshot {
             let snapshot = message
                 .snapshot
                 .as_ref()
                 .ok_or_else(|| invalid("missing peer snapshot"))?;
             validate_snapshot_for(snapshot, &self.options.voters, &self.store.permitted)?;
+            self.validate_witness_conf(snapshot.get_metadata().get_conf_state())?;
             membership::decode_promotions(
                 &message.context,
                 snapshot.get_metadata().get_conf_state(),
@@ -4276,6 +4376,7 @@ impl DurablePeer {
         let mut output = Vec::new();
         for mut message in messages {
             let to = message.to;
+            self.thin_witness_message(&mut message);
             if message.get_msg_type() == MessageType::MsgSnapshot {
                 message.context = self.store.checkpoint_promotions.lock().unwrap().clone();
                 self.snapshot_flights.insert(
@@ -4317,15 +4418,7 @@ impl DurablePeer {
             }
             output.push(PeerPacket {
                 to,
-                bytes: if message.entries.iter().any(commands::is_command) {
-                    encode_envelope(7, self.options.group_id, &message)?
-                } else if message.get_msg_type() == MessageType::MsgSnapshot
-                    && !message.context.is_empty()
-                {
-                    encode_envelope(4, self.options.group_id, &message)?
-                } else {
-                    encode_packet(self.options.group_id, &message)?
-                },
+                bytes: self.encode_witness_message(&message)?,
             });
         }
         Ok(output)
@@ -4361,7 +4454,7 @@ impl DurablePeer {
     }
 
     /// Persist before returning packets or applying committed entries. Empty payloads
-    /// are election no-ops and still carry an application position. On restart the
+    /// are election no-ops or witness metadata and still carry an application position. On restart the
     /// callback must rebuild a fresh application (or provide idempotent application).
     /// Any persistence or application failure permanently stops this peer instance.
     pub fn process_ready(
@@ -4580,7 +4673,9 @@ impl DurablePeer {
             let leader = self.is_leader();
             self.stream.discard_obsolete_send(term, leader);
             if self.drain_through.is_none() {
-                output.extend(self.stream.packets(self.options.group_id)?);
+                let mut streamed = self.stream.packets(self.options.group_id)?;
+                self.wrap_witness_packets(&mut streamed)?;
+                output.extend(streamed);
             } else {
                 output.clear();
             }
