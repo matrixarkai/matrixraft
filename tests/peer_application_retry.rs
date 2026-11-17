@@ -3,7 +3,8 @@
 #![cfg(feature = "peer-runtime")]
 use matrixraft::{
     peer_runtime::{
-        ApplyDecision, DurablePeer, MembershipChange, PeerOptions, PeerTuning, RestoreDecision,
+        ApplyDecision, DurablePeer, MembershipChange, PeerOptions, PeerProposalStatus, PeerTuning,
+        RestoreDecision,
     },
     RaftError,
 };
@@ -32,6 +33,14 @@ struct AsyncCluster {
 }
 impl AsyncCluster {
     fn new(capacity: usize, bytes: u64, cache: Option<u64>) -> Self {
+        Self::with_receipts(capacity, bytes, cache, None)
+    }
+    fn with_receipts(
+        capacity: usize,
+        bytes: u64,
+        cache: Option<u64>,
+        receipts: Option<usize>,
+    ) -> Self {
         let mut c = Self {
             root: tempfile::tempdir().unwrap(),
             peers: BTreeMap::new(),
@@ -42,6 +51,7 @@ impl AsyncCluster {
                 max_inflight_apply_tasks: Some(capacity),
                 max_apply_bytes: Some(bytes),
                 max_log_cache_bytes: cache,
+                max_pending_proposal_receipts: receipts,
                 ..Default::default()
             },
             hold_ack_above: None,
@@ -148,6 +158,102 @@ impl AsyncCluster {
             .propose_batch(values.map(|value| vec![value]).collect())
             .unwrap();
     }
+}
+
+#[test]
+fn membership_receipts_finish_after_real_checkpoint_repair_of_a_rejected_prefix() {
+    let mut c = AsyncCluster::with_receipts(8, 1, Some(512), Some(8));
+    c.open(4);
+    c.drive(None);
+    c.propose(1, 1..=3);
+    c.drive(Some(1));
+    assert_eq!(c.tasks[&1].len(), 3);
+    let receipt = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_tracked(MembershipChange::AddLearner(4), None)
+        .unwrap();
+    c.drive(Some(1));
+    assert_eq!(c.peers[&1].membership().learners, vec![4]);
+    assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+    let rejected = c.tasks.get_mut(&1).unwrap().pop_front().unwrap();
+    c.peers
+        .get_mut(&1)
+        .unwrap()
+        .complete_application_task(rejected.reject_after(0).unwrap())
+        .unwrap();
+    c.tasks.get_mut(&1).unwrap().clear();
+    c.drive(Some(1));
+    assert!(c.peers[&2].is_leader());
+    assert!(!c.peers[&1].is_leader());
+    assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+    assert!(c.peers[&1].required_application_checkpoint().is_some());
+    let image = c.values[&2].clone();
+    c.peers.get_mut(&2).unwrap().checkpoint(image).unwrap();
+    for _ in 0..6 {
+        c.tick(Some(1));
+        if receipt.status() == PeerProposalStatus::Applied {
+            break;
+        }
+    }
+    assert!(c.restores[&1] > 0);
+    assert_eq!(c.values[&1], vec![1, 2, 3]);
+    assert_eq!(receipt.status(), PeerProposalStatus::Applied);
+    assert!(c.peers[&1].applied_index() >= receipt.position().index);
+}
+
+#[test]
+fn membership_receipts_drain_ordered_workers_after_automatic_self_removal() {
+    let mut c = AsyncCluster::with_receipts(8, 1, None, Some(8));
+    c.propose(1, 1..=2);
+    c.drive(Some(1));
+    assert_eq!(c.tasks[&1].len(), 2);
+    let receipt = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_auto_tracked(MembershipChange::Remove(1), None)
+        .unwrap();
+    c.drive(Some(1));
+    for _ in 0..6 {
+        if c.peers[&1].membership().outgoing_voters.is_empty() {
+            break;
+        }
+        c.tick(Some(1));
+    }
+    assert_eq!(c.peers[&1].membership().voters, vec![2, 3]);
+    assert!(c.peers[&1].membership().outgoing_voters.is_empty());
+    assert!(!c.peers[&1].is_leader());
+    assert!(c.peers[&1].applied_index() < receipt.position().index);
+    assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+    let fence = c.peers.get_mut(&1).unwrap().begin_shutdown().unwrap();
+    assert!(fence > receipt.position().index);
+    while let Some(task) = c.tasks.get_mut(&1).unwrap().pop_front() {
+        for entry in task.entries().iter() {
+            c.values
+                .get_mut(&1)
+                .unwrap()
+                .extend_from_slice(entry.payload);
+        }
+        c.peers
+            .get_mut(&1)
+            .unwrap()
+            .complete_application_task(task.finish())
+            .unwrap();
+    }
+    assert!(c.peers.get_mut(&1).unwrap().poll_shutdown().unwrap());
+    assert_eq!(c.values[&1], vec![1, 2]);
+    assert_eq!(receipt.status(), PeerProposalStatus::Applied);
+    c.peers.remove(&1);
+    c.peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    c.drive(None);
+    assert!(c.peers[&2].is_leader());
+    c.propose(2, 3..=3);
+    c.drive(None);
+    assert_eq!(c.values[&2], vec![1, 2, 3]);
+    assert_eq!(c.values[&3], vec![1, 2, 3]);
+    assert_eq!(receipt.status(), PeerProposalStatus::Applied);
 }
 
 #[test]

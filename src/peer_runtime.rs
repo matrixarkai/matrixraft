@@ -4499,6 +4499,7 @@ impl DurablePeer {
             self.reset_application_pipeline(snapshot.get_metadata().index);
             self.pending_restore = None;
             self.checkpoint_policy.restored();
+            self.finish_membership_receipts();
         }
         Ok(())
     }
@@ -4535,6 +4536,7 @@ impl DurablePeer {
                 self.apply_committed_membership(&entries[offset])?;
                 self.raw.advance_apply_to(entries[offset].index);
                 self.checkpoint_policy.charge(&entries[offset..offset + 1]);
+                self.apply_proposal_receipts(&entries[offset..offset + 1]);
                 offset += 1;
                 continue;
             }

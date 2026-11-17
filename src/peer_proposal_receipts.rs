@@ -9,8 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// A volatile completion receipt for one admitted application entry. It does
-/// not retain the payload or keep the storage lock alive across reopening.
+/// A volatile receipt for an admitted log operation and its ordered completion
+/// boundary. It retains no payload and does not keep the storage lock alive.
 #[derive(Debug)]
 pub struct PeerProposalReceipt {
     position: LogId,
@@ -265,6 +265,164 @@ mod tests {
         assert_eq!(peer.raw.raft.raft_log.last_index(), before);
         assert!(peer.propose(vec![1]).is_ok());
     }
+
+    fn membership_leader(path: PathBuf, asynchronous: bool) -> DurablePeer {
+        let mut config = tuning();
+        if asynchronous {
+            config.max_inflight_apply_tasks = Some(4);
+            config.max_apply_bytes = Some(1);
+        }
+        let mut peer =
+            DurablePeer::open_with_membership_and_tuning(options(path), vec![1, 2, 3], config)
+                .unwrap();
+        peer.campaign().unwrap();
+        if asynchronous {
+            for _ in 0..8 {
+                peer.process_ready_async_apply(|_, _, _| Ok(RestoreDecision::Restored))
+                    .unwrap();
+                for task in peer.take_application_tasks().unwrap() {
+                    peer.complete_application_task(task.finish()).unwrap();
+                }
+            }
+        } else {
+            peer.process_ready(|_, _| Ok(())).unwrap();
+        }
+        peer
+    }
+
+    #[test]
+    fn membership_receipts_share_admission_and_timeouts_without_undoing_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut peer = membership_leader(dir.path().join("peer.wal"), false);
+        peer.proposal_receipts.as_mut().unwrap().limit = 1;
+        let write = peer.propose_tracked(vec![7], None).unwrap();
+        let before = peer.raw.raft.raft_log.last_index();
+        assert!(peer
+            .propose_membership_tracked(MembershipChange::AddLearner(2), None)
+            .is_err());
+        assert_eq!(peer.raw.raft.raft_log.last_index(), before);
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        assert_eq!(write.status(), PeerProposalStatus::Applied);
+        for operation in [
+            MembershipChange::AddLearner(1),
+            MembershipChange::AddLearner(9),
+            MembershipChange::LeaveJoint,
+        ] {
+            assert!(peer
+                .propose_membership_auto_tracked(operation, None)
+                .is_err());
+        }
+        for timeout in [Duration::ZERO, Duration::MAX] {
+            assert!(peer
+                .propose_membership_tracked(MembershipChange::AddLearner(2), Some(timeout))
+                .is_err());
+        }
+        assert_eq!(peer.raw.raft.raft_log.last_index(), before);
+        assert!(peer.proposal_receipts.as_ref().unwrap().pending.is_empty());
+        let change = peer
+            .propose_membership_auto_tracked(
+                MembershipChange::AddLearnerAuto(2),
+                Some(Duration::from_secs(60)),
+            )
+            .unwrap();
+        assert_eq!(change.status(), PeerProposalStatus::Pending);
+        peer.proposal_receipts
+            .as_mut()
+            .unwrap()
+            .pending
+            .get_mut(&change.position().index)
+            .unwrap()
+            .deadline = Some(Instant::now());
+        peer.tick().unwrap();
+        assert_eq!(change.status(), PeerProposalStatus::TimedOut);
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        assert_eq!(peer.membership().learners, vec![2]);
+        assert_eq!(peer.membership().automatic_learners, vec![2]);
+        let remove = peer
+            .propose_membership_auto_tracked(MembershipChange::Remove(2), None)
+            .unwrap();
+        peer.process_ready(|_, _| Ok(())).unwrap();
+        assert_eq!(remove.status(), PeerProposalStatus::Applied);
+        assert!(peer.membership().learners.is_empty());
+        assert_eq!(change.status(), PeerProposalStatus::TimedOut);
+    }
+
+    #[test]
+    fn membership_receipts_wait_for_ordered_workers_after_metadata_is_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut peer = membership_leader(dir.path().join("peer.wal"), true);
+        let write = peer.propose_tracked(vec![8], None).unwrap();
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            peer.process_ready_async_apply(|_, _, _| Ok(RestoreDecision::Restored))
+                .unwrap();
+            tasks.extend(peer.take_application_tasks().unwrap());
+        }
+        assert_eq!(tasks.len(), 1);
+        let change = peer
+            .propose_membership_tracked(MembershipChange::AddLearner(2), None)
+            .unwrap();
+        for _ in 0..8 {
+            peer.process_ready_async_apply(|_, _, _| Ok(RestoreDecision::Restored))
+                .unwrap();
+        }
+        assert_eq!(peer.membership().learners, vec![2]);
+        assert!(peer.raw.raft.raft_log.applied >= change.position().index);
+        assert!(peer.applied_index() < change.position().index);
+        assert_eq!(
+            peer.poll_proposal(&change).unwrap(),
+            PeerProposalStatus::Pending
+        );
+        let completion = std::thread::spawn(move || tasks.pop().unwrap().finish())
+            .join()
+            .unwrap();
+        peer.complete_application_task(completion).unwrap();
+        assert_eq!(write.status(), PeerProposalStatus::Applied);
+        assert_eq!(change.status(), PeerProposalStatus::Applied);
+        peer.checkpoint(vec![9]).unwrap();
+        assert_eq!(
+            peer.poll_proposal(&change).unwrap(),
+            PeerProposalStatus::Applied
+        );
+    }
+
+    #[test]
+    fn membership_receipts_do_not_acknowledge_uncommitted_changes_during_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut peer = membership_leader(dir.path().join("peer.wal"), false);
+        let change = peer
+            .propose_membership_auto_tracked(MembershipChange::AddLearner(2), None)
+            .unwrap();
+        let fence = peer.begin_shutdown().unwrap();
+        assert!(fence < change.position().index);
+        while !peer.poll_shutdown().unwrap() {
+            peer.process_ready(|_, _| Ok(())).unwrap();
+        }
+        assert_eq!(change.status(), PeerProposalStatus::Stopped);
+        assert!(peer.membership().learners.is_empty());
+    }
+
+    #[test]
+    fn membership_receipts_complete_before_an_unrelated_later_callback_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut peer = membership_leader(dir.path().join("peer.wal"), false);
+        let change = peer
+            .propose_membership_tracked(MembershipChange::AddLearner(2), None)
+            .unwrap();
+        peer.propose(vec![99]).unwrap();
+        assert!(peer
+            .process_ready(|_, payload| {
+                if payload == [99] {
+                    assert_eq!(change.status(), PeerProposalStatus::Applied);
+                    Err(storage_error("later application command refused"))
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err());
+        assert_eq!(change.status(), PeerProposalStatus::Applied);
+        assert_eq!(peer.membership().learners, vec![2]);
+    }
 }
 impl PeerProposalReceipt {
     pub fn position(&self) -> LogId {
@@ -284,8 +442,8 @@ impl PeerProposalReceipt {
     }
 }
 
-/// Only Applied acknowledges successful local application of the committed
-/// entry. Other terminal outcomes do not prove the write was rolled back.
+/// Only Applied acknowledges the operation's committed, ordered application
+/// boundary. Other terminal outcomes do not prove the operation was rolled back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PeerProposalStatus {
@@ -300,6 +458,12 @@ struct Pending {
     term: u64,
     deadline: Option<Instant>,
     state: Arc<AtomicU8>,
+    membership: Option<MembershipCompletion>,
+}
+struct MembershipCompletion {
+    automatic: bool,
+    waiting_exit: bool,
+    apply_through: Option<u64>,
 }
 pub(super) struct Tracker {
     limit: usize,
@@ -315,8 +479,18 @@ impl Tracker {
     pub(super) fn applied(&mut self, entries: &[Entry]) {
         // The application path supplies the exact consumed entries, not a core
         // applied cursor that can run ahead of host-worker completion.
+        let mut membership_boundary = None;
         for entry in entries {
-            if let Some(pending) = self.pending.remove(&entry.index) {
+            if entry.entry_type != EntryType::EntryNormal as i32 {
+                membership_boundary = Some(entry.index);
+            }
+            if let std::collections::btree_map::Entry::Occupied(slot) =
+                self.pending.entry(entry.index)
+            {
+                if slot.get().membership.is_some() {
+                    continue;
+                }
+                let pending = slot.remove();
                 let outcome = if pending.term != entry.term {
                     PeerProposalStatus::LeadershipLost
                 } else if pending
@@ -330,10 +504,114 @@ impl Tracker {
                 pending.state.store(outcome as u8, Ordering::Release);
             }
         }
+        if let Some(index) = membership_boundary {
+            self.memberships_completed_through(index);
+        }
+    }
+    fn memberships_completed_through(&mut self, index: u64) {
+        let mut now = None;
+        self.pending.retain(|_, pending| {
+            if pending
+                .membership
+                .as_ref()
+                .and_then(|completion| completion.apply_through)
+                .is_some_and(|through| through <= index)
+            {
+                let outcome = if pending
+                    .deadline
+                    .is_some_and(|deadline| *now.get_or_insert_with(Instant::now) >= deadline)
+                {
+                    PeerProposalStatus::TimedOut
+                } else {
+                    PeerProposalStatus::Applied
+                };
+                pending.state.store(outcome as u8, Ordering::Release);
+                false
+            } else {
+                true
+            }
+        });
+    }
+    pub(super) fn membership_applied(
+        &mut self,
+        entry: &Entry,
+        automatic_joint: bool,
+        leaving_joint: bool,
+    ) {
+        if let Some(pending) = self
+            .pending
+            .get_mut(&entry.index)
+            .filter(|pending| pending.term == entry.term)
+        {
+            if let Some(completion) = &mut pending.membership {
+                if completion.automatic && automatic_joint {
+                    completion.waiting_exit = true;
+                } else {
+                    completion.apply_through = Some(entry.index);
+                }
+            }
+        }
+        if leaving_joint {
+            // Automatic receipts retain their initial position but wait on the later exit.
+            for (_, pending) in self.pending.range_mut(..entry.index) {
+                if let Some(completion) = pending
+                    .membership
+                    .as_mut()
+                    .filter(|completion| completion.waiting_exit)
+                {
+                    completion.waiting_exit = false;
+                    completion.apply_through = Some(entry.index);
+                }
+            }
+        }
     }
 }
 
 impl DurablePeer {
+    /// Track one membership phase through committed metadata and ordered local
+    /// application. Manual joint transitions need a separately requested exit.
+    pub fn propose_membership_tracked(
+        &mut self,
+        operation: MembershipChange,
+        timeout: Option<Duration>,
+    ) -> Result<PeerProposalReceipt, RaftError> {
+        self.propose_membership_with_receipt(operation, timeout, false)
+    }
+    /// Track an automatic membership transition through its committed joint exit
+    /// and ordered application, not merely admission of its initial entry.
+    pub fn propose_membership_auto_tracked(
+        &mut self,
+        operation: MembershipChange,
+        timeout: Option<Duration>,
+    ) -> Result<PeerProposalReceipt, RaftError> {
+        self.propose_membership_with_receipt(operation, timeout, true)
+    }
+    fn propose_membership_with_receipt(
+        &mut self,
+        operation: MembershipChange,
+        timeout: Option<Duration>,
+        automatic: bool,
+    ) -> Result<PeerProposalReceipt, RaftError> {
+        let deadline = self.admit_proposal_receipts(1, timeout)?;
+        let position = if automatic {
+            self.propose_membership_auto(operation)?
+        } else {
+            self.propose_membership(operation)?
+        };
+        let receipt = self.register_proposal_receipt(position, deadline);
+        self.proposal_receipts
+            .as_mut()
+            .unwrap()
+            .pending
+            .get_mut(&receipt.position.index)
+            .unwrap()
+            .membership = Some(MembershipCompletion {
+            automatic,
+            waiting_exit: false,
+            apply_through: None,
+        });
+        Ok(receipt)
+    }
     /// Admit one tracked proposal. A positive timeout bounds local waiting;
     /// None waits until application or a terminal lifecycle event.
     pub fn propose_tracked(
@@ -419,6 +697,7 @@ impl DurablePeer {
                 term: position.term,
                 deadline,
                 state: Arc::clone(&state),
+                membership: None,
             },
         );
         PeerProposalReceipt {
@@ -434,6 +713,7 @@ impl DurablePeer {
         let term = self.term();
         let leading = self.is_leader();
         let draining = self.drain_through;
+        let applied = self.applied_index();
         let Some(tracker) = &mut self.proposal_receipts else {
             return;
         };
@@ -443,6 +723,11 @@ impl DurablePeer {
             .any(|pending| pending.deadline.is_some())
             .then(Instant::now);
         tracker.pending.retain(|index, pending| {
+            // A durable membership boundary survives local removal or a later term.
+            let membership_through = pending
+                .membership
+                .as_ref()
+                .and_then(|completion| completion.apply_through);
             let outcome = if self.failed {
                 Some(PeerProposalStatus::Failed)
             } else if self.stopped {
@@ -452,9 +737,14 @@ impl DurablePeer {
                 .is_some_and(|deadline| now.is_some_and(|now| now >= deadline))
             {
                 Some(PeerProposalStatus::TimedOut)
+            } else if membership_through.is_some_and(|index| index <= applied) {
+                Some(PeerProposalStatus::Applied)
             } else if draining.is_some_and(|fence| *index > fence) {
                 Some(PeerProposalStatus::Stopped)
-            } else if draining.is_none() && (!leading || term != pending.term) {
+            } else if draining.is_none()
+                && (!leading || term != pending.term)
+                && membership_through.is_none()
+            {
                 Some(PeerProposalStatus::LeadershipLost)
             } else {
                 None
@@ -488,5 +778,15 @@ impl DurablePeer {
         if let Some(tracker) = &mut self.proposal_receipts {
             tracker.applied(entries);
         }
+    }
+    pub(super) fn finish_membership_receipts(&mut self) {
+        if self.proposal_receipts.is_none() {
+            return;
+        }
+        let applied = self.applied_index();
+        self.proposal_receipts
+            .as_mut()
+            .unwrap()
+            .memberships_completed_through(applied);
     }
 }

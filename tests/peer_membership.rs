@@ -21,6 +21,7 @@ struct Cluster {
     held_acks: Vec<matrixraft::peer_runtime::PeerPacket>,
     uncommitted_limit: u64,
     replica_timeout: Option<usize>,
+    receipt_capacity: Option<usize>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -92,6 +93,160 @@ fn retention_cluster(timeout: usize) -> Cluster {
     c.peers.get_mut(&1).unwrap().campaign().unwrap();
     c.pump();
     c
+}
+
+fn receipt_cluster() -> Cluster {
+    let mut c = Cluster::new();
+    c.receipt_capacity = Some(4);
+    c.peers.clear();
+    for id in 1..=3 {
+        c.open(id);
+    }
+    c.pump();
+    c.peers.get_mut(&1).unwrap().campaign().unwrap();
+    c.pump();
+    c
+}
+
+#[test]
+fn membership_receipts_wait_for_the_automatic_joint_exit() {
+    use matrixraft::peer_runtime::PeerProposalStatus;
+    let mut c = receipt_cluster();
+    c.add_caught_up_learner();
+    let receipt = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_auto_tracked(MembershipChange::Promote(4), None)
+        .unwrap();
+    let initial = receipt.position();
+    c.hold_after = Some(initial.index);
+    c.pump();
+    assert_eq!(c.peers[&1].applied_index(), initial.index);
+    assert!(c.peers[&1].membership().auto_leave);
+    assert!(!c.peers[&1].membership().outgoing_voters.is_empty());
+    assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+    c.hold_after = None;
+    for _ in 0..10 {
+        c.tick();
+        if receipt.status() == PeerProposalStatus::Applied {
+            break;
+        }
+    }
+    assert_eq!(receipt.status(), PeerProposalStatus::Applied);
+    assert_eq!(receipt.position(), initial);
+    assert!(c.peers[&1].applied_index() > initial.index);
+    assert_eq!(c.peers[&1].membership().voters, vec![1, 2, 3, 4]);
+    assert!(c.peers[&1].membership().outgoing_voters.is_empty());
+    c.write(1, 99);
+}
+
+#[test]
+fn membership_receipts_acknowledge_manual_phases_and_local_voter_removal() {
+    use matrixraft::peer_runtime::PeerProposalStatus;
+    let mut c = receipt_cluster();
+    let initial = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_tracked(MembershipChange::Remove(1), None)
+        .unwrap();
+    c.pump();
+    assert_eq!(initial.status(), PeerProposalStatus::Applied);
+    assert_eq!(c.peers[&1].membership().voters, vec![2, 3]);
+    assert_eq!(c.peers[&1].membership().outgoing_voters, vec![1, 2, 3]);
+    assert!(c.peers[&1].is_leader());
+    let exit = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_tracked(MembershipChange::LeaveJoint, None)
+        .unwrap();
+    c.pump();
+    assert!(!c.peers[&1].is_leader());
+    assert!(c.peers[&1].membership().outgoing_voters.is_empty());
+    assert_eq!(
+        c.peers.get_mut(&1).unwrap().poll_proposal(&exit).unwrap(),
+        PeerProposalStatus::Applied
+    );
+    c.peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    c.pump();
+    assert!(c.peers[&2].is_leader());
+    c.write(2, 99);
+    assert_eq!(exit.status(), PeerProposalStatus::Applied);
+}
+
+#[test]
+fn membership_receipts_do_not_complete_an_uncommitted_automatic_exit_during_shutdown() {
+    use matrixraft::peer_runtime::PeerProposalStatus;
+    let mut c = receipt_cluster();
+    c.add_caught_up_learner();
+    let receipt = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_auto_tracked(MembershipChange::Promote(4), None)
+        .unwrap();
+    c.hold_after = Some(receipt.position().index);
+    c.pump();
+    assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+    let fence = c.peers.get_mut(&1).unwrap().begin_shutdown().unwrap();
+    assert_eq!(fence, receipt.position().index);
+    assert!(c.peers.get_mut(&1).unwrap().poll_shutdown().unwrap());
+    assert_eq!(receipt.status(), PeerProposalStatus::Stopped);
+    c.peers.remove(&1);
+    c.hold_after = None;
+    c.peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    c.pump();
+    for _ in 0..6 {
+        if c.peers[&2].membership().outgoing_voters.is_empty() {
+            break;
+        }
+        c.tick();
+    }
+    assert!(c.peers[&2].membership().outgoing_voters.is_empty());
+    c.write(2, 99);
+    assert_eq!(receipt.status(), PeerProposalStatus::Stopped);
+}
+
+#[test]
+fn membership_receipts_do_not_resurrect_after_losing_an_unfinished_joint_transition() {
+    use matrixraft::peer_runtime::PeerProposalStatus;
+    let mut c = receipt_cluster();
+    c.add_caught_up_learner();
+    let receipt = c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose_membership_auto_tracked(MembershipChange::Promote(4), None)
+        .unwrap();
+    c.hold_after = Some(receipt.position().index);
+    c.pump();
+    assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+    c.isolated.insert(1);
+    c.hold_after = None;
+    c.peers.get_mut(&2).unwrap().force_campaign().unwrap();
+    c.pump();
+    assert!(c.peers[&2].is_leader());
+    for _ in 0..6 {
+        if c.peers[&2].membership().outgoing_voters.is_empty() {
+            break;
+        }
+        c.tick();
+    }
+    assert!(c.peers[&2].membership().outgoing_voters.is_empty());
+    c.isolated.remove(&1);
+    for _ in 0..6 {
+        c.tick();
+        if c.peers[&1].membership().outgoing_voters.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(receipt.status(), PeerProposalStatus::LeadershipLost);
+    assert_eq!(c.peers[&1].membership().voters, vec![1, 2, 3, 4]);
+    assert!(c.peers[&1].membership().outgoing_voters.is_empty());
+    c.write(2, 99);
+    assert_eq!(receipt.status(), PeerProposalStatus::LeadershipLost);
 }
 
 #[test]
@@ -565,6 +720,7 @@ impl Cluster {
             held_acks: Vec::new(),
             uncommitted_limit: PeerTuning::default().max_uncommitted_size,
             replica_timeout: None,
+            receipt_capacity: None,
         };
         for id in 1..=3 {
             result.open(id);
@@ -595,6 +751,7 @@ impl Cluster {
                 max_log_cache_bytes: self.cache_target,
                 max_pending_reads: 4,
                 replica_inactivity_tick: self.replica_timeout,
+                max_pending_proposal_receipts: self.receipt_capacity,
                 max_checkpoint_sends: self.checkpoint_sends,
                 ..Default::default()
             },

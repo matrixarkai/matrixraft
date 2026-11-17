@@ -333,6 +333,7 @@ impl DurablePeer {
         update_promotions(&mut self.automatic_learners, &change, &conf);
         let local_voter =
             conf.voters.contains(&self.node_id()) || conf.voters_outgoing.contains(&self.node_id());
+        let automatic_joint = conf.auto_leave && !conf.voters_outgoing.is_empty();
         self.store.wl().set_conf_state(conf);
         self.append_reorder.clear();
         if !local_voter && self.raw.raft.state != StateRole::Follower {
@@ -347,6 +348,9 @@ impl DurablePeer {
         // A caller must start a new read under the committed configuration.
         while let Some((&token, _)) = self.pending_reads.first_key_value() {
             self.cancel_read(token)?;
+        }
+        if let Some(tracker) = &mut self.proposal_receipts {
+            tracker.membership_applied(entry, automatic_joint, change.changes.is_empty());
         }
         Ok(())
     }

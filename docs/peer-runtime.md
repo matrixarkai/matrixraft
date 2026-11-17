@@ -165,8 +165,9 @@ current-leader and current-term validation.
 
 `DurablePeer::campaign`, `tick`, and `step` feed the local consensus state.
 
-`PeerTuning::max_pending_proposal_receipts` enables bounded write completion
-tracking, from 1 through 65536 outstanding receipts. The default `None` keeps
+`PeerTuning::max_pending_proposal_receipts` enables bounded proposal completion
+tracking for writes and membership changes, from 1 through 65536 outstanding
+receipts. The default `None` keeps
 ordinary proposals unchanged and allocates no tracker. `propose_tracked(value,
 timeout)` returns a `PeerProposalReceipt` with its admitted log position;
 `propose_tracked_in_term` adds the expected-term fence. `propose_batch_tracked`
@@ -175,9 +176,19 @@ there are insufficient receipt slots. Existing payload, cache, and uncommitted
 byte budgets still apply. A supplied timeout must be positive and fit the
 monotonic clock; `None` imposes no deadline.
 
+`propose_membership_tracked(change, timeout)` uses the same receipt quota and
+confirms one committed membership phase after ordered local application. A manual
+joint change still needs its separately requested `LeaveJoint` phase.
+`propose_membership_auto_tracked(change, timeout)` waits through that request's
+committed automatic joint exit and its application boundary. Single-phase learner
+additions and removals complete at their own entry. `AddLearnerAuto` confirms the
+learner addition and promotion intent, not the later catch-up-driven promotion.
+The receipt's position always identifies the initial request, even when completion
+requires a later exit entry. Rejected admission allocates no receipt or log position.
+
 `poll_proposal(&receipt)` services outstanding work and returns `Pending`,
 `Applied`, `TimedOut`, `LeadershipLost`, `Stopped`, or `Failed`. Only `Applied`
-acknowledges successful local application of that exact committed entry. Merely
+acknowledges the operation's committed, ordered application boundary. Merely
 accepting, persisting, or replicating the entry does not complete the receipt.
 Host-worker application waits for the contiguous completion prefix, not the
 core's earlier application cursor. A partial application completes only its
@@ -188,8 +199,11 @@ Ticks, peer inputs, Ready processing, and tracked proposal admission service
 receipt lifetimes. Expired receipts make `has_ready()` true for timer-driven
 cleanup. Completion, expiry, and dropped handles release receipt admission;
 dropping a handle is noticed on the next service pass. No background thread is
-created. Leadership loss ends unfinished receipts; already successful receipts
-remain successful. Graceful shutdown continues committed application through
+created. Leadership loss ends unconfirmed requests, including automatic transitions
+whose exit has not been observed. A known durable membership boundary can still
+finish behind older worker tasks or a covering checkpoint after leadership loss
+or local voter removal. Already successful receipts remain successful.
+Graceful shutdown continues committed application through
 its captured fence, but closes waiting on uncommitted proposals. Immediate stop
 or dropping the peer ends remaining receipts. Receipts do not retain the storage
 lock and cannot be polled on a different peer or after reopening.
