@@ -17,6 +17,9 @@ struct Cluster {
     checkpoint_sends: Option<usize>,
     hold_after: Option<u64>,
     hold_except: Option<u64>,
+    hold_append_acks_from: Option<u64>,
+    held_acks: Vec<matrixraft::peer_runtime::PeerPacket>,
+    uncommitted_limit: u64,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -189,6 +192,9 @@ impl Cluster {
             checkpoint_sends: None,
             hold_after: None,
             hold_except: None,
+            hold_append_acks_from: None,
+            held_acks: Vec::new(),
+            uncommitted_limit: PeerTuning::default().max_uncommitted_size,
         };
         for id in 1..=3 {
             result.open(id);
@@ -212,6 +218,10 @@ impl Cluster {
             self.options(id),
             vec![1, 2, 3, 4, 5],
             PeerTuning {
+                max_uncommitted_size: self.uncommitted_limit,
+                max_size_per_msg: self
+                    .uncommitted_limit
+                    .min(PeerTuning::default().max_size_per_msg),
                 max_log_cache_bytes: self.cache_target,
                 max_pending_reads: 4,
                 max_checkpoint_sends: self.checkpoint_sends,
@@ -251,11 +261,29 @@ impl Cluster {
                     )
                     .unwrap();
                 if !self.isolated.contains(id) {
-                    packets.extend(
-                        outgoing
-                            .into_iter()
-                            .filter(|p| !self.isolated.contains(&p.to)),
-                    );
+                    for packet in outgoing {
+                        if self.isolated.contains(&packet.to) {
+                            continue;
+                        }
+                        if self.hold_append_acks_from == Some(*id) {
+                            let envelope =
+                                MembershipPacket::decode(packet.bytes.as_slice()).unwrap();
+                            if envelope.version == 1 {
+                                let message = raft_core::eraftpb::Message::decode(
+                                    envelope.message.as_slice(),
+                                )
+                                .unwrap();
+                                if message.get_msg_type()
+                                    == raft_core::eraftpb::MessageType::MsgAppendResponse
+                                    && !message.reject
+                                {
+                                    self.held_acks.push(packet);
+                                    continue;
+                                }
+                            }
+                        }
+                        packets.push(packet);
+                    }
                 }
             }
             if packets.is_empty() {
@@ -390,6 +418,285 @@ impl Cluster {
         }
         self.pump();
     }
+}
+
+fn finish_learner_promotion(c: &mut Cluster, leader: u64, voters: &[u64]) {
+    for _ in 0..100 {
+        c.pump();
+        if c.peers[&leader].membership().voters == voters
+            && c.peers[&leader].membership().outgoing_voters.is_empty()
+            && c.peers[&leader].membership().automatic_learners.is_empty()
+        {
+            return;
+        }
+        c.tick();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!("automatic learner promotion did not finish");
+}
+
+#[test]
+fn automatic_learners_wait_for_catch_up_and_complete_joint_consensus() {
+    for cache in [None, Some(512)] {
+        let mut c = Cluster::new();
+        c.cache_target = cache;
+        c.reopen_all();
+        c.peers.get_mut(&1).unwrap().campaign().unwrap();
+        c.pump();
+        c.write(1, 7);
+        c.open(4);
+        c.isolated.insert(4);
+        c.change(1, MembershipChange::AddLearnerAuto(4));
+        for id in 1..=3 {
+            assert_eq!(c.peers[&id].membership().automatic_learners, vec![4]);
+            assert_eq!(c.peers[&id].membership().voters, vec![1, 2, 3]);
+        }
+        for _ in 0..3 {
+            c.tick();
+        }
+        assert_eq!(c.peers[&1].membership().learners, vec![4]);
+        c.isolated.clear();
+        finish_learner_promotion(&mut c, 1, &[1, 2, 3, 4]);
+        c.write(1, 8);
+        assert_eq!(*c.values[&4].borrow(), vec![7, 8]);
+        c.reopen_all();
+        for peer in c.peers.values() {
+            assert_eq!(peer.membership().voters, vec![1, 2, 3, 4]);
+            assert!(peer.membership().automatic_learners.is_empty());
+        }
+    }
+}
+
+#[test]
+fn automatic_learner_intent_survives_restart_and_a_different_leader() {
+    let mut c = Cluster::new();
+    c.open(4);
+    c.isolated.insert(4);
+    c.change(1, MembershipChange::AddLearnerAuto(4));
+    c.write(1, 42);
+    c.reopen_all();
+    for id in 1..=3 {
+        assert_eq!(c.peers[&id].membership().automatic_learners, vec![4]);
+    }
+    c.peers.get_mut(&2).unwrap().campaign().unwrap();
+    c.pump();
+    assert!(c.peers[&2].is_leader());
+    c.isolated.clear();
+    finish_learner_promotion(&mut c, 2, &[1, 2, 3, 4]);
+    c.write(2, 43);
+    assert_eq!(*c.values[&4].borrow(), vec![42, 43]);
+}
+
+#[test]
+fn automatic_learner_checkpoints_keep_intent_through_all_transport_formats() {
+    for format in 0..3 {
+        let mut c = Cluster::new();
+        c.checkpoint_sends = (format == 1).then_some(2);
+        c.reopen_all();
+        c.peers.get_mut(&1).unwrap().campaign().unwrap();
+        c.pump();
+        c.open(4);
+        c.isolated.insert(4);
+        c.change(1, MembershipChange::AddLearnerAuto(4));
+        for value in 0..5 {
+            c.write(1, value);
+        }
+        let bytes: Vec<_> = (0..5u64).flat_map(u64::to_be_bytes).collect();
+        if format == 2 {
+            c.peers
+                .get_mut(&1)
+                .unwrap()
+                .checkpoint_from_reader(&mut std::io::Cursor::new(&bytes), bytes.len() as u64)
+                .unwrap();
+        } else {
+            c.checkpoint(1);
+        }
+        let cut = c.peers[&1].applied_index();
+        c.peers.remove(&1);
+        c.open(1);
+        c.pump();
+        assert_eq!(c.peers[&1].membership().automatic_learners, vec![4]);
+        c.peers.get_mut(&1).unwrap().force_campaign().unwrap();
+        c.pump();
+        assert!(c.peers[&1].is_leader());
+        c.hold_after = Some(cut + 1); // Admit the new leader's no-op, not its promotion.
+        c.isolated.clear();
+        for _ in 0..100 {
+            c.tick();
+            if c.peers[&4].applied_index() >= cut {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(c.peers[&4].applied_index() >= cut);
+        assert_eq!(c.peers[&4].membership().automatic_learners, vec![4]);
+        assert_eq!(*c.values[&4].borrow(), (0..5).collect::<Vec<_>>());
+        c.hold_after = None;
+        finish_learner_promotion(&mut c, 1, &[1, 2, 3, 4]);
+        c.write(1, 99);
+        assert_eq!(c.values[&4].borrow().last(), Some(&99));
+    }
+}
+
+#[test]
+fn staged_learner_policies_replay_later_intents_and_cancellations() {
+    for (before, cancel) in [(true, false), (false, false), (false, true)] {
+        let mut c = Cluster::new();
+        c.write(1, 7);
+        c.open(4);
+        c.isolated.insert(4);
+        let old = before.then(|| c.peers[&1].prepare_checkpoint().unwrap());
+        c.change(1, MembershipChange::AddLearnerAuto(4));
+        let ticket = old.unwrap_or_else(|| c.peers[&1].prepare_checkpoint().unwrap());
+        let prepared = ticket
+            .capture(&mut std::io::Cursor::new(7u64.to_be_bytes()), 8)
+            .unwrap();
+        c.write(1, 8);
+        if cancel {
+            c.change(1, MembershipChange::Remove(4));
+        }
+        assert!(c
+            .peers
+            .get_mut(&1)
+            .unwrap()
+            .install_checkpoint(&prepared)
+            .unwrap());
+        drop(prepared);
+        c.peers.remove(&1);
+        c.open(1);
+        c.pump();
+        assert_eq!(
+            c.peers[&1].membership().automatic_learners,
+            if cancel { vec![] } else { vec![4] }
+        );
+        assert_eq!(*c.values[&1].borrow(), vec![7, 8]);
+        c.peers.get_mut(&1).unwrap().force_campaign().unwrap();
+        c.pump();
+        if !cancel {
+            if c.peers[&1].membership_checkpoint_needed() {
+                c.checkpoint(1);
+            }
+            c.isolated.clear();
+            finish_learner_promotion(&mut c, 1, &[1, 2, 3, 4]);
+        } else {
+            c.isolated.clear();
+            for _ in 0..3 {
+                c.tick();
+            }
+            assert_eq!(c.peers[&1].membership().voters, vec![1, 2, 3]);
+            assert!(c.peers[&1].membership().automatic_learners.is_empty());
+        }
+    }
+}
+
+#[test]
+fn automatic_learners_are_serialized_and_cannot_replace_an_old_majority() {
+    let mut c = Cluster::new();
+    for id in [4, 5] {
+        c.open(id);
+        c.isolated.insert(id);
+    }
+    c.change(1, MembershipChange::AddLearnerAuto(4));
+    c.change(1, MembershipChange::AddLearnerAuto(5));
+    let committed = c.peers[&1].commit_index();
+    c.isolated = BTreeSet::from([2, 3]);
+    for _ in 0..3 {
+        c.tick();
+    }
+    assert_eq!(c.peers[&1].commit_index(), committed);
+    assert_eq!(c.peers[&1].membership().voters, vec![1, 2, 3]);
+    assert_eq!(c.peers[&1].membership().automatic_learners, vec![4, 5]);
+    c.isolated.clear();
+    finish_learner_promotion(&mut c, 1, &[1, 2, 3, 4, 5]);
+    c.write(1, 99);
+    for id in [4, 5] {
+        assert_eq!(*c.values[&id].borrow(), vec![99]);
+    }
+}
+
+#[test]
+fn automatic_learner_promotion_waits_for_the_uncommitted_byte_budget() {
+    let mut c = Cluster::new();
+    c.uncommitted_limit = 8;
+    c.reopen_all();
+    c.peers.get_mut(&1).unwrap().campaign().unwrap();
+    c.pump();
+    c.open(4);
+    c.hold_append_acks_from = Some(4);
+    c.change(1, MembershipChange::AddLearnerAuto(4));
+    for _ in 0..3 {
+        c.tick();
+    }
+    assert!(!c.held_acks.is_empty());
+    let committed = c.peers[&1].commit_index();
+    for _ in 0..20 {
+        for packet in std::mem::take(&mut c.held_acks) {
+            let envelope = MembershipPacket::decode(packet.bytes.as_slice()).unwrap();
+            let message = raft_core::eraftpb::Message::decode(envelope.message.as_slice()).unwrap();
+            if message.index < committed {
+                c.peers
+                    .get_mut(&packet.to)
+                    .unwrap()
+                    .step(&packet.bytes)
+                    .unwrap();
+            } else {
+                c.held_acks.push(packet);
+            }
+        }
+        c.pump();
+        if c.held_acks.iter().any(|packet| {
+            let envelope = MembershipPacket::decode(packet.bytes.as_slice()).unwrap();
+            raft_core::eraftpb::Message::decode(envelope.message.as_slice())
+                .unwrap()
+                .index
+                == committed
+        }) {
+            break;
+        }
+    }
+    assert!(c.held_acks.iter().any(|packet| {
+        let envelope = MembershipPacket::decode(packet.bytes.as_slice()).unwrap();
+        raft_core::eraftpb::Message::decode(envelope.message.as_slice())
+            .unwrap()
+            .index
+            == committed
+    }));
+    c.isolated = BTreeSet::from([2, 3]);
+    c.peers
+        .get_mut(&1)
+        .unwrap()
+        .propose(99u64.to_be_bytes().to_vec())
+        .unwrap();
+    for packet in std::mem::take(&mut c.held_acks) {
+        c.peers
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    c.pump();
+    assert!(c.peers[&1].is_leader());
+    assert!(c.peers[&1].persisted_wal_bytes().is_ok());
+    assert_eq!(c.peers[&1].commit_index(), committed);
+    assert_eq!(c.peers[&1].membership().automatic_learners, vec![4]);
+    assert!(!c.held_acks.is_empty());
+    assert!(c
+        .peers
+        .get_mut(&1)
+        .unwrap()
+        .propose(100u64.to_be_bytes().to_vec())
+        .is_err());
+    c.hold_append_acks_from = None;
+    c.isolated.clear();
+    for packet in std::mem::take(&mut c.held_acks) {
+        c.peers
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    finish_learner_promotion(&mut c, 1, &[1, 2, 3, 4]);
+    assert_eq!(*c.values[&4].borrow(), vec![99]);
 }
 
 #[test]

@@ -610,6 +610,9 @@ fn exact_batch_encoding(batch: &WalBatch, bytes: &[u8], output: &mut Vec<u8>) ->
     if batch.flushed_index != 0 {
         prost::encoding::uint64::encode(13, &batch.flushed_index, &mut *output);
     }
+    if !batch.promotion_policy.is_empty() {
+        prost::encoding::bytes::encode(14, &batch.promotion_policy, &mut *output);
+    }
     consume(&mut input, output) && input.is_empty()
 }
 
@@ -755,6 +758,8 @@ struct WalBatch {
     /// at or below it again. Zero when absent. Only ever written by `set_flushed_index`.
     #[prost(uint64, tag = "13")]
     flushed_index: u64,
+    #[prost(bytes = "vec", tag = "14")]
+    promotion_policy: Vec<u8>,
 }
 fn invalid(s: impl ToString) -> RaftError {
     RaftError::InvalidRequest(s.to_string())
@@ -805,6 +810,7 @@ fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> Wa
         payload_manifest: Vec::new(),
         permitted: Vec::new(),
         flushed_index: 0,
+        promotion_policy: Vec::new(),
     }
 }
 #[derive(Clone)]
@@ -815,6 +821,7 @@ struct PeerStorage {
     memory: MemStorage,
     async_reads: Arc<Mutex<Option<async_reads::State>>>,
     checkpoint: Arc<Mutex<Option<Arc<Snapshot>>>>,
+    checkpoint_promotions: Arc<Mutex<Vec<u8>>>,
     payload_directory: PathBuf,
     payload: Arc<Mutex<Option<Arc<checkpoint_file::Blob>>>>,
     /// Raised when a follower needed a snapshot and only a deferred one existed.
@@ -1239,6 +1246,10 @@ fn install_decoded_with_scratch(
             None
         };
         validate_snapshot_for(&snapshot, &batch.voters, &store.permitted)?;
+        membership::decode_promotions(
+            &batch.promotion_policy,
+            snapshot.get_metadata().get_conf_state(),
+        )?;
         let meta = snapshot.get_metadata();
         let next = hs
             .as_ref()
@@ -1280,6 +1291,7 @@ fn install_decoded_with_scratch(
             .map_err(storage_error)?;
         store.cache.reset();
         *store.checkpoint.lock().unwrap() = Some(snapshot);
+        *store.checkpoint_promotions.lock().unwrap() = batch.promotion_policy.clone();
         let mut current = store.payload.lock().unwrap();
         if let Some(old) = current.as_ref() {
             if payload
@@ -1569,6 +1581,7 @@ impl Journal {
                 (record.version, record.snapshot.is_empty()),
                 (1, true) | (2, false) | (3, false) | (4, false)
             ) || (record.version == 4) == record.payload_manifest.is_empty()
+                || (record.snapshot.is_empty() && !record.promotion_policy.is_empty())
                 || record.group != options.group_id
                 || record.node != options.node_id
                 || record.voters != options.voters
@@ -1658,7 +1671,9 @@ impl Journal {
         hs: &HardState,
         entries: &[Entry],
         payload: Option<&checkpoint_file::Blob>,
+        promotion_policy: &[u8],
     ) -> Result<(), RaftError> {
+        membership::decode_promotions(promotion_policy, snapshot.get_metadata().get_conf_state())?;
         let temporary = options.wal_path.with_extension("checkpoint.tmp");
         let file = OpenOptions::new()
             .read(true)
@@ -1689,6 +1704,7 @@ impl Journal {
         let mut first = batch(options, Some(&floor_state), &[]);
         first.version = 2;
         first.snapshot = snapshot_wire;
+        first.promotion_policy = promotion_policy.to_vec();
         if let Some(payload) = payload {
             if !snapshot.data.is_empty() {
                 return Err(invalid("file checkpoint must not contain inline data"));
@@ -2123,6 +2139,9 @@ impl Journal {
             prost::encoding::bytes::encode(11, &batch.payload_manifest, &mut *metadata);
         }
         prost::encoding::uint64::encode_packed(12, &self.permitted, &mut *metadata);
+        if !batch.promotion_policy.is_empty() {
+            prost::encoding::bytes::encode(14, &batch.promotion_policy, &mut *metadata);
+        }
 
         let size = metadata.len() + batch.snapshot.len();
         if size > LIMIT {
@@ -2480,6 +2499,7 @@ impl PendingRead {
 /// another runtime from opening and cleaning up the same storage directory.
 pub struct CheckpointCapture {
     configuration: ConfState,
+    promotion_policy: Vec<u8>,
     position: LogId,
     directory: PathBuf,
     lock: Arc<File>,
@@ -2551,6 +2571,9 @@ pub struct DurablePeer {
     incoming_payload: Option<(LogId, Arc<checkpoint_file::Blob>)>,
     checkpoint_policy: checkpoint_policy::Policy,
     append_reorder: append_reorder::Queue,
+    automatic_learners: BTreeSet<u64>,
+    uncommitted_limit: u64,
+    incoming_promotions: Option<(LogId, Vec<u8>)>,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
@@ -2593,6 +2616,7 @@ impl DurablePeer {
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
+            checkpoint_promotions: Default::default(),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
@@ -2601,6 +2625,10 @@ impl DurablePeer {
         let mut journal = Journal::open(&options, &store, tuning.wal_zero_fill_bytes.unwrap_or(0))?;
         journal.reserve_chunk = tuning.wal_preallocate_bytes.unwrap_or(0);
         let checkpoint = store.checkpoint.lock().unwrap().clone();
+        let automatic_learners = membership::decode_promotions(
+            &store.checkpoint_promotions.lock().unwrap(),
+            &store.initial_state().map_err(storage_error)?.conf_state,
+        )?;
         let snapshot_index = checkpoint.as_ref().map_or(0, |s| s.get_metadata().index);
         // A deferred snapshot stands for state the application already holds durably, so there is
         // nothing to restore: the peer opens with it applied and never calls the restore callback.
@@ -2655,6 +2683,9 @@ impl DurablePeer {
             incoming_payload: None,
             checkpoint_policy: checkpoint_policy::Policy::new(tuning.checkpoint_after_bytes),
             append_reorder: append_reorder::Queue::new(tuning.append_reorder),
+            automatic_learners,
+            uncommitted_limit: tuning.max_uncommitted_size,
+            incoming_promotions: None,
         })
     }
     fn membership_recovered(&self) -> Result<(), RaftError> {
@@ -3258,6 +3289,7 @@ impl DurablePeer {
         }
         let index = self.applied_index();
         Ok(CheckpointCapture {
+            promotion_policy: membership::encode_promotions(&self.automatic_learners),
             configuration: self
                 .store
                 .initial_state()
@@ -3317,7 +3349,10 @@ impl DurablePeer {
             Vec::new(),
             Some(Arc::clone(&prepared.payload)),
             id.index,
-            Some(prepared.ticket.configuration.clone()),
+            Some((
+                prepared.ticket.configuration.clone(),
+                prepared.ticket.promotion_policy.clone(),
+            )),
             prepared.ticket.applied_bytes,
         )?;
         Ok(true)
@@ -3352,7 +3387,7 @@ impl DurablePeer {
         data: Vec<u8>,
         payload: Option<Arc<checkpoint_file::Blob>>,
         index: u64,
-        configuration: Option<ConfState>,
+        configuration: Option<(ConfState, Vec<u8>)>,
         applied_bytes: u128,
     ) -> Result<(), RaftError> {
         self.healthy()?;
@@ -3366,19 +3401,21 @@ impl DurablePeer {
                 "checkpoint requires a settled applied state within the snapshot bound",
             ));
         }
+        let (configuration, promotion_policy) = configuration.unwrap_or_else(|| {
+            (
+                self.store
+                    .initial_state()
+                    .expect("memory configuration")
+                    .conf_state,
+                membership::encode_promotions(&self.automatic_learners),
+            )
+        });
         let snapshot = Arc::new(Snapshot {
             data,
             metadata: Some(SnapshotMetadata {
                 index,
                 term: self.store.term(index).map_err(storage_error)?,
-                conf_state: Some(
-                    configuration.unwrap_or(
-                        self.store
-                            .initial_state()
-                            .map_err(storage_error)?
-                            .conf_state,
-                    ),
-                ),
+                conf_state: Some(configuration),
             }),
         });
         validate_snapshot_for(&snapshot, &self.options.voters, &self.store.permitted)?;
@@ -3434,11 +3471,13 @@ impl DurablePeer {
                 &hs,
                 &suffix,
                 payload.as_deref(),
+                &promotion_policy,
             )
             .and_then(|()| {
                 let mut record = batch(&self.options, Some(&hs), &suffix);
                 record.version = 2;
                 record.snapshot = snapshot_wire;
+                record.promotion_policy = promotion_policy.clone();
                 if let Some(payload) = &payload {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
@@ -3608,13 +3647,15 @@ impl DurablePeer {
         }
         let (version, group, original_message) = decode_canonical_packet(bytes)
             .ok_or_else(|| invalid("invalid peer packet encoding"))?;
-        if !matches!(version, 1..=3) || group != self.options.group_id {
+        if !matches!(version, 1..=6) || group != self.options.group_id {
             return Err(invalid("peer packet identity or encoding mismatch"));
         }
-        if version == 2 || version == 3 {
+        if matches!(version, 2 | 3 | 5 | 6) {
             let mut validation = Vec::with_capacity(original_message.len());
             let part = snapshot_stream::Fragment::decode(original_message).map_err(invalid)?;
-            if part.file_backed != (version == 3) {
+            if part.file_backed != matches!(version, 3 | 6)
+                || part.promotion_policy != (version >= 5)
+            {
                 return Err(invalid("checkpoint transfer format mismatch"));
             }
             let mut routing = self.options.clone();
@@ -3676,22 +3717,46 @@ impl DurablePeer {
         if !canonical {
             return Err(invalid("noncanonical peer message"));
         }
+        if version == 4
+            && (message.get_msg_type() != MessageType::MsgSnapshot || message.context.is_empty())
+        {
+            return Err(invalid("automatic learner checkpoint format mismatch"));
+        }
+        if version == 1
+            && message.get_msg_type() == MessageType::MsgSnapshot
+            && !message.context.is_empty()
+        {
+            return Err(invalid("checkpoint policy requires an extended packet"));
+        }
         self.step_message(message, true)
     }
     fn accept_received_checkpoint(&mut self, message: Message) -> Result<(), RaftError> {
-        if let Some(payload) = self.stream.received_payload.take() {
-            let meta = message.get_snapshot().get_metadata();
-            if meta.index > self.raw.raft.raft_log.committed {
-                self.incoming_payload = Some((
-                    LogId {
-                        index: meta.index,
-                        term: meta.term,
-                    },
-                    payload,
-                ));
+        let payload = self.stream.received_payload.take();
+        let meta = message.get_snapshot().get_metadata();
+        let position = LogId {
+            index: meta.index,
+            term: meta.term,
+        };
+        let may_install =
+            message.term >= self.term() && position.index > self.raw.raft.raft_log.committed;
+        self.step_message(message, false)?;
+        if let Some(payload) = payload {
+            if may_install && self.accepted_checkpoint(&position) {
+                self.incoming_payload = Some((position, payload));
             }
         }
-        self.step_message(message, false)
+        Ok(())
+    }
+    fn accepted_checkpoint(&self, position: &LogId) -> bool {
+        self.raw
+            .raft
+            .raft_log
+            .unstable_snapshot()
+            .as_ref()
+            .is_some_and(|snapshot| {
+                let meta = snapshot.get_metadata();
+                meta.index == position.index && meta.term == position.term
+            })
     }
     fn step_message(&mut self, message: Message, charge_snapshot: bool) -> Result<(), RaftError> {
         let kind = message.get_msg_type();
@@ -3745,6 +3810,10 @@ impl DurablePeer {
                 .as_ref()
                 .ok_or_else(|| invalid("missing peer snapshot"))?;
             validate_snapshot_for(snapshot, &self.options.voters, &self.store.permitted)?;
+            membership::decode_promotions(
+                &message.context,
+                snapshot.get_metadata().get_conf_state(),
+            )?;
             if snapshot.get_metadata().term > message.term {
                 return Err(invalid("snapshot term exceeds sender term"));
             }
@@ -3818,17 +3887,35 @@ impl DurablePeer {
             self.snapshot_flights.remove(&message.from);
             self.stream.completed_send(message.from);
         }
-        let result = self.step_with_append_window(message);
-        self.store.cache.check().and(result)
+        let incoming = (kind == MessageType::MsgSnapshot
+            && message.term >= self.term()
+            && message.get_snapshot().get_metadata().index > self.raw.raft.raft_log.committed)
+            .then(|| {
+                (
+                    LogId {
+                        index: message.get_snapshot().get_metadata().index,
+                        term: message.get_snapshot().get_metadata().term,
+                    },
+                    message.context.clone(),
+                )
+            });
+        self.step_with_append_window(message)?;
+        if let Some((position, policy)) = incoming {
+            if self.accepted_checkpoint(&position) {
+                self.incoming_promotions = Some((position, policy));
+            }
+        }
+        self.store.cache.check()
     }
     fn packets(&mut self, messages: Vec<Message>) -> Result<Vec<PeerPacket>, RaftError> {
         if self.drain_through.is_some() {
             return Ok(Vec::new());
         }
         let mut output = Vec::new();
-        for message in messages {
+        for mut message in messages {
             let to = message.to;
             if message.get_msg_type() == MessageType::MsgSnapshot {
+                message.context = self.store.checkpoint_promotions.lock().unwrap().clone();
                 self.snapshot_flights.insert(
                     to,
                     (message.term, message.get_snapshot().get_metadata().index, 0),
@@ -3868,7 +3955,13 @@ impl DurablePeer {
             }
             output.push(PeerPacket {
                 to,
-                bytes: encode_packet(self.options.group_id, &message)?,
+                bytes: if message.get_msg_type() == MessageType::MsgSnapshot
+                    && !message.context.is_empty()
+                {
+                    encode_envelope(4, self.options.group_id, &message)?
+                } else {
+                    encode_packet(self.options.group_id, &message)?
+                },
             });
         }
         Ok(output)
@@ -3879,6 +3972,9 @@ impl DurablePeer {
     /// in-flight host reads and checkpoint transfers, which still need completion polling.
     /// Expired append windows are Ready; fresh ones wait for a prefix or timer polling.
     pub fn has_ready(&self) -> bool {
+        self.consensus_work_ready() || self.automatic_promotion_candidate().is_some()
+    }
+    fn consensus_work_ready(&self) -> bool {
         !self.failed
             && !self.stopped
             && self.store.cache.check().is_ok()
@@ -4079,6 +4175,13 @@ impl DurablePeer {
             {
                 self.incoming_payload = None;
             }
+            if self
+                .incoming_promotions
+                .as_ref()
+                .is_some_and(|(id, _)| id.index <= self.applied_index())
+            {
+                self.incoming_promotions = None;
+            }
             let term = self.term();
             let leader = self.is_leader();
             self.stream.discard_obsolete_send(term, leader);
@@ -4211,6 +4314,7 @@ impl DurablePeer {
             if self.drain_complete() {
                 break;
             }
+            self.schedule_automatic_promotion()?;
             self.dispatch_deferred_reads()?;
             if !self.raw.has_ready() {
                 if !restore_attempted {
@@ -4265,6 +4369,15 @@ impl DurablePeer {
                     .filter(|(id, _)| *id == position)
                     .map(|(_, p)| Arc::clone(p));
                 let snapshot_wire: prost::bytes::Bytes = snapshot.encode_to_vec().into();
+                let promotion_policy = self
+                    .incoming_promotions
+                    .as_ref()
+                    .filter(|(id, _)| *id == position)
+                    .map_or_else(Vec::new, |(_, policy)| policy.clone());
+                let automatic_learners = membership::decode_promotions(
+                    &promotion_policy,
+                    snapshot.get_metadata().get_conf_state(),
+                )?;
                 self.journal.rewrite(
                     &self.options,
                     &snapshot,
@@ -4272,10 +4385,12 @@ impl DurablePeer {
                     &hs,
                     ready.entries(),
                     payload.as_deref(),
+                    &promotion_policy,
                 )?;
                 let mut record = batch(&self.options, Some(&hs), ready.entries());
                 record.version = 2;
                 record.snapshot = snapshot_wire;
+                record.promotion_policy = promotion_policy;
                 if let Some(payload) = &payload {
                     record.version = 4;
                     record.payload_manifest = payload.manifest.encode_to_vec();
@@ -4283,6 +4398,7 @@ impl DurablePeer {
                 // Receive finalization already validated and synced this owned
                 // payload. Reuse it without scanning it again on the Raft loop.
                 install_received(&self.store, &record, Arc::clone(&snapshot), payload)?;
+                self.automatic_learners = automatic_learners;
                 self.store
                     .refresh_cache(&self.options, self.journal.length, true)?;
                 self.restore_floor = restore_floor;
@@ -4381,6 +4497,7 @@ mod tests {
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
+            checkpoint_promotions: Default::default(),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
@@ -4450,6 +4567,7 @@ mod tests {
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
+            checkpoint_promotions: Default::default(),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
@@ -4495,6 +4613,7 @@ mod tests {
             memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
             async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
+            checkpoint_promotions: Default::default(),
             payload_directory: checkpoint_file::directory(&options.wal_path),
             payload: Arc::new(Mutex::new(None)),
             log_index: Default::default(),
@@ -4662,11 +4781,16 @@ mod tests {
             snapshot_total: 2 * SNAPSHOT_FRAGMENT_BYTES as u64,
             snapshot_digest: 47,
             payload_manifest: vec![53; 96],
+            promotion_policy: vec![1, 2, 3],
             permitted: vec![1, 2, 3, 4],
             flushed_index: 0,
         };
         let bytes = record.encode_to_vec();
         let mut validation = Vec::new();
+        assert!(exact_batch_encoding(&record, &bytes, &mut validation));
+        let mut older_shape = record.clone();
+        older_shape.promotion_policy.clear();
+        assert!(!exact_batch_encoding(&older_shape, &bytes, &mut validation));
         assert!(exact_batch_encoding(&record, &bytes, &mut validation));
         let pointer = validation.as_ptr();
         let capacity = validation.capacity();
@@ -4685,9 +4809,9 @@ mod tests {
             &mut validation,
         ));
 
-        // Field 14 is not defined. (13 is `flushed_index`, so a varint 1 on it is a valid record.)
+        // Field 15 is not defined.
         let mut extra_field = bytes;
-        extra_field.extend_from_slice(&[0x70, 0x01]);
+        extra_field.extend_from_slice(&[0x78, 0x01]);
         let decoded = WalBatch::decode(extra_field.as_slice()).unwrap();
         assert!(!exact_batch_encoding(
             &decoded,
@@ -5335,6 +5459,7 @@ mod tests {
                     &hard,
                     &entries,
                     None,
+                    &[],
                 )
                 .unwrap();
             assert_eq!(snapshot_wire.as_ref(), snapshot.encode_to_vec());
@@ -5385,6 +5510,7 @@ mod tests {
                         &hard,
                         &[oversized],
                         None,
+                        &[],
                     )
                     .is_err());
                 assert_eq!(std::fs::read(&config.wal_path).unwrap(), bytes);

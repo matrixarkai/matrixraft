@@ -9,6 +9,7 @@ impl DurablePeer {
     pub fn stop(&mut self) {
         self.cancel_local_requests();
         self.incoming_payload = None;
+        self.incoming_promotions = None;
         self.stopped = true;
     }
 

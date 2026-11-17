@@ -1009,6 +1009,29 @@ an elapsed host timeout never manufactures a vote. The existing manual API remai
 unchanged. Upgrade every peer and recovery reader before opting in: older runtimes
 reject automatic transition entries and automatic joint checkpoint metadata.
 
+`MembershipChange::AddLearnerAuto(id)` commits a learner with durable promotion
+intent. It uses the same permitted inventory and admission checks as `AddLearner`.
+The elected leader schedules promotion after that learner has acknowledged the
+committed log, application recovery has settled, proposal capacity is available,
+and no configuration change or handoff is pending. Promotion and its automatic joint exit still require real
+votes from both majorities. A timeout never promotes a disconnected learner.
+
+`membership().automatic_learners` lists committed learners awaiting promotion.
+Only one promotion is proposed at a time; seven voters remains the limit. Intent
+survives leadership changes, journal replay, inline and file checkpoints, and
+staged captures installed after later membership changes. Removing a learner
+cancels its intent. Ordinary `AddLearner` remains manual. Proposal acceptance
+acknowledges neither catch-up nor promotion: wait for the addition to apply, then
+verify that the learner is a voter and the outgoing voter set is empty. Continue
+driving Ready, ticks, and transport while waiting.
+
+Upgrade every peer and recovery reader before using automatic learners. Their
+configuration entries carry a recognized intent context. Checkpoints preserve
+the capture-time policy separately from application bytes in a canonical journal
+field and extended snapshot packets, including fragmented transfers. Older
+readers reject these extensions. The application payload and bootstrap inventory
+are unchanged; a staged image cannot borrow a newer image's membership policy.
+
 Checkpoint metadata preserves both voter sets and learners. Recovery applies
 retained configuration entries in order, including after an older staged capture.
 Tests exercise both-majority partitions, learner catch-up, leader removal,

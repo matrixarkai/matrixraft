@@ -66,6 +66,7 @@ impl WalAssembly {
                 || record.snapshot_total != pending.record.snapshot_total
                 || record.snapshot_digest != pending.record.snapshot_digest
                 || !record.hard_state.is_empty()
+                || record.promotion_policy != pending.record.promotion_policy
             {
                 return Err(storage_error("noncontiguous checkpoint records"));
             }
@@ -139,6 +140,8 @@ pub(super) struct Fragment {
     pub ack: bool,
     #[prost(bool, tag = "10")]
     pub file_backed: bool,
+    #[prost(bool, tag = "11")]
+    pub promotion_policy: bool,
 }
 impl Fragment {
     #[cfg(test)]
@@ -189,6 +192,7 @@ impl Fragment {
             && self.total == other.total
             && self.checksum == other.checksum
             && self.file_backed == other.file_backed
+            && self.promotion_policy == other.promotion_policy
     }
     fn acknowledgment(&self, offset: u64) -> Self {
         Self {
@@ -209,6 +213,7 @@ impl Fragment {
             checksum: self.checksum,
             ack: self.ack,
             file_backed: self.file_backed,
+            promotion_policy: self.promotion_policy,
             data: Default::default(),
             offset: 0,
         }
@@ -561,6 +566,7 @@ impl Stream {
                     data: Default::default(),
                     ack: false,
                     file_backed: false,
+                    promotion_policy: !message.context.is_empty(),
                 },
                 bytes: Source::Memory(bytes.into()),
                 offset: 0,
@@ -615,6 +621,7 @@ impl Stream {
                     data: Default::default(),
                     ack: false,
                     file_backed: true,
+                    promotion_policy: !message.context.is_empty(),
                 },
                 bytes: source,
                 offset: 0,
@@ -865,6 +872,13 @@ impl Stream {
             return Err(invalid("checkpoint transfer message mismatch"));
         }
         validate_snapshot_for(message.get_snapshot(), voters, &self.permitted)?;
+        if part.promotion_policy != !message.context.is_empty() {
+            return Err(invalid("checkpoint policy transport mismatch"));
+        }
+        membership::decode_promotions(
+            &message.context,
+            message.get_snapshot().get_metadata().get_conf_state(),
+        )?;
         self.received_payload = payload;
         self.completed = Some(part.identity());
         self.ack = Some(part.acknowledgment(part.total));
@@ -916,7 +930,16 @@ impl Stream {
             .map(|part| {
                 Ok(PeerPacket {
                     to: part.to,
-                    bytes: encode_envelope(if part.file_backed { 3 } else { 2 }, group, &part)?,
+                    bytes: encode_envelope(
+                        match (part.promotion_policy, part.file_backed) {
+                            (false, false) => 2,
+                            (false, true) => 3,
+                            (true, false) => 5,
+                            (true, true) => 6,
+                        },
+                        group,
+                        &part,
+                    )?,
                 })
             })
             .collect()
@@ -1440,6 +1463,7 @@ mod tests {
                         data: vec![13; length].into(),
                         ack: false,
                         file_backed,
+                        promotion_policy: false,
                     };
                     let mut expected_identity = part.clone();
                     expected_identity.data.clear();
@@ -1463,6 +1487,102 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn promotion_policies_survive_fragmented_journal_assembly() {
+        let snapshot = Snapshot {
+            data: vec![17; SNAPSHOT_FRAGMENT_BYTES + 64],
+            metadata: Some(SnapshotMetadata {
+                index: 9,
+                term: 4,
+                conf_state: Some(ConfState {
+                    voters: vec![1, 2, 3],
+                    learners: vec![4],
+                    ..Default::default()
+                }),
+            }),
+        };
+        let encoded: prost::bytes::Bytes = snapshot.encode_to_vec().into();
+        let options = PeerOptions {
+            group_id: 71,
+            node_id: 1,
+            voters: vec![1, 2, 3],
+            wal_path: PathBuf::from("unused.wal"),
+        };
+        let policy = membership::encode_promotions(&BTreeSet::from([4]));
+        let mut records = Vec::new();
+        for start in (0..encoded.len()).step_by(SNAPSHOT_FRAGMENT_BYTES) {
+            let mut record = batch(&options, None, &[]);
+            record.version = 3;
+            record.snapshot =
+                encoded.slice(start..(start + SNAPSHOT_FRAGMENT_BYTES).min(encoded.len()));
+            record.snapshot_offset = start as u64;
+            record.snapshot_total = encoded.len() as u64;
+            record.snapshot_digest = digest(&encoded);
+            record.promotion_policy = policy.clone();
+            if start == 0 {
+                record.hard_state = HardState {
+                    term: 4,
+                    vote: 1,
+                    commit: 9,
+                }
+                .encode_to_vec();
+            }
+            records.push(record);
+        }
+        assert_eq!(records.len(), 2);
+        let mut assembly = WalAssembly::new(encoded.len() as u64 + 4096);
+        let mut scratch = Vec::new();
+        assert!(assembly
+            .accept(records[0].clone(), 0, &mut scratch)
+            .unwrap()
+            .is_none());
+        let recovered = assembly
+            .accept(records[1].clone(), 1, &mut scratch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.record.promotion_policy, policy);
+        assert_eq!(recovered.snapshot.as_deref(), Some(&snapshot));
+        assembly.finish().unwrap();
+        let mut assembly = WalAssembly::new(encoded.len() as u64 + 4096);
+        assembly
+            .accept(records[0].clone(), 0, &mut scratch)
+            .unwrap();
+        records[1].promotion_policy.clear();
+        assert!(assembly
+            .accept(records[1].clone(), 1, &mut scratch)
+            .is_err());
+    }
+
+    #[test]
+    fn promotion_checkpoint_acknowledgments_keep_their_transport_format() {
+        for file_backed in [false, true] {
+            let part = Fragment {
+                from: 1,
+                to: 2,
+                term: 4,
+                index: 9,
+                total: 128,
+                checksum: 17,
+                ack: true,
+                file_backed,
+                promotion_policy: true,
+                ..Default::default()
+            };
+            let mut other = part.clone();
+            other.promotion_policy = false;
+            assert!(!part.same_stream(&other));
+            assert!(part.acknowledgment(128).promotion_policy);
+            let mut stream = Stream::default();
+            stream.ack = Some(part.clone());
+            let packets = stream.packets(71).unwrap();
+            assert_eq!(packets.len(), 1);
+            let (version, group, message) = decode_canonical_packet(&packets[0].bytes).unwrap();
+            assert_eq!(group, 71);
+            assert_eq!(version, if file_backed { 6 } else { 5 });
+            assert_eq!(Fragment::decode(message).unwrap(), part);
         }
     }
 
@@ -1742,6 +1862,7 @@ mod tests {
             data: vec![13; SNAPSHOT_FRAGMENT_BYTES].into(),
             ack: false,
             file_backed: false,
+            promotion_policy: false,
         };
         for number in 0..16 {
             part.offset = number * SNAPSHOT_FRAGMENT_BYTES as u64;
