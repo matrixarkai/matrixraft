@@ -33,6 +33,8 @@ pub use apply_pipeline::{PeerApplyCompletion, PeerApplyTask};
 mod checkpoint_file;
 #[path = "peer_checkpoint_policy.rs"]
 mod checkpoint_policy;
+#[path = "peer_startup_hold.rs"]
+mod startup_hold;
 pub use append_reorder::AppendReorderTuning;
 #[path = "peer_log_reader.rs"]
 mod log_reader;
@@ -144,6 +146,9 @@ pub struct PeerTuning {
     /// Opt-in host-owned application pipeline, 1 through 64 outstanding batches.
     /// None retains synchronous callbacks. Tasks must mutate each application in order.
     pub max_inflight_apply_tasks: Option<usize>,
+    /// Optional monotonic startup window inhibiting ordinary elections and newer-term votes.
+    /// None retains immediate election eligibility. This does not enable lease-based reads.
+    pub startup_election_delay: Option<std::time::Duration>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -166,6 +171,7 @@ impl Default for PeerTuning {
             wal_zero_fill_bytes: None,
             append_reorder: None,
             max_inflight_apply_tasks: None,
+            startup_election_delay: None,
         }
     }
 }
@@ -176,6 +182,7 @@ impl PeerTuning {
             .or_else(|| self.max_inflight_apply_tasks.map(|_| 65536))
     }
     fn config(self, id: u64) -> Result<Config, RaftError> {
+        startup_hold::Hold::validate(self.startup_election_delay)?;
         if self.election_tick > usize::MAX / 2
             || self
                 .max_inflight_apply_tasks
@@ -2591,6 +2598,7 @@ pub struct DurablePeer {
     uncommitted_limit: u64,
     incoming_promotions: Option<(LogId, Vec<u8>)>,
     apply_pipeline: Option<apply_pipeline::Pipeline>,
+    startup_hold: startup_hold::Hold,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
@@ -2706,6 +2714,7 @@ impl DurablePeer {
             apply_pipeline: tuning
                 .max_inflight_apply_tasks
                 .map(|capacity| apply_pipeline::Pipeline::new(capacity, config.applied)),
+            startup_hold: startup_hold::Hold::new(tuning.startup_election_delay)?,
         })
     }
     fn membership_recovered(&self) -> Result<(), RaftError> {
@@ -2935,7 +2944,18 @@ impl DurablePeer {
     pub fn tick(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
-        if (!self.automatic_elections || self.required_application_checkpoint().is_some())
+        let startup_held = self.raw.raft.state == StateRole::Follower
+            && self.automatic_elections
+            && self.required_application_checkpoint().is_none()
+            && self.startup_hold.active();
+        if startup_held {
+            self.raw.raft.election_elapsed = self
+                .raw
+                .raft
+                .election_elapsed
+                .saturating_add(1)
+                .min(usize::MAX - 1);
+        } else if (!self.automatic_elections || self.required_application_checkpoint().is_some())
             && !self.is_leader()
         {
             // Advance the follower lease clock without triggering a campaign.
@@ -3019,6 +3039,9 @@ impl DurablePeer {
             ));
         }
         self.membership_recovered()?;
+        if !self.is_leader() && self.startup_hold.active() {
+            return Err(invalid("ordinary campaign is inhibited during startup"));
+        }
         if !self.raw.raft.promotable() {
             return Err(invalid("local peer is not a committed voter"));
         }
@@ -3957,6 +3980,9 @@ impl DurablePeer {
                     message.context.clone(),
                 )
             });
+        if self.suppress_startup_vote(&message) {
+            return self.store.cache.check();
+        }
         self.retire_application_snapshot_request(&message);
         self.step_with_append_window(message)?;
         if let Some((position, policy)) = incoming {

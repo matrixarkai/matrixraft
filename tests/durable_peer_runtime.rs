@@ -1902,6 +1902,170 @@ fn append_reordering_validates_bounds_before_creating_storage() {
     }
 }
 
+#[test]
+fn startup_election_delay_suppresses_real_votes_but_not_leader_replication() {
+    use raft_core::eraftpb::MessageType;
+    let dir = Directory::new();
+    let mut group: BTreeMap<_, _> = (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(
+                    dir.options(id, vec![1, 2, 3]),
+                    PeerTuning {
+                        startup_election_delay: (id == 3)
+                            .then_some(std::time::Duration::from_secs(60)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let mut applied = Applied::new();
+    let bytes = group[&3].persisted_wal_bytes().unwrap();
+    assert!(group.get_mut(&3).unwrap().campaign().is_err());
+    for _ in 0..32 {
+        group.get_mut(&3).unwrap().tick().unwrap();
+    }
+    assert_eq!(group[&3].term(), 0);
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    let previews = group
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap();
+    assert!(previews.iter().any(|packet| packet.to == 3
+        && append_message(packet).get_msg_type() == MessageType::MsgRequestPreVote));
+    for packet in previews {
+        group
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    assert!(receive_window_packets(group.get_mut(&3).unwrap(), &mut applied).is_empty());
+    assert_eq!(group[&3].term(), 0);
+    assert_eq!(group[&3].persisted_wal_bytes().unwrap(), bytes);
+    for packet in group
+        .get_mut(&2)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap()
+    {
+        group
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    let votes = group
+        .get_mut(&1)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap();
+    assert!(votes.iter().any(|packet| packet.to == 3
+        && append_message(packet).get_msg_type() == MessageType::MsgRequestVote));
+    for packet in votes {
+        group
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    assert!(receive_window_packets(group.get_mut(&3).unwrap(), &mut applied).is_empty());
+    assert_eq!(group[&3].term(), 0);
+    assert_eq!(group[&3].persisted_wal_bytes().unwrap(), bytes);
+    for packet in group
+        .get_mut(&2)
+        .unwrap()
+        .process_ready(|_, _| Ok(()))
+        .unwrap()
+    {
+        group
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    pump(&mut group, &mut applied, None);
+    assert!(group[&1].is_leader());
+    group.get_mut(&1).unwrap().propose(vec![9]).unwrap();
+    pump(&mut group, &mut applied, None);
+    assert_eq!(group[&3].term(), group[&1].term());
+    assert_eq!(applied.get(&1), applied.get(&3));
+    assert_eq!(applied[&3].last().unwrap().1, vec![9]);
+    group.get_mut(&1).unwrap().transfer_leadership(3).unwrap();
+    pump(&mut group, &mut applied, None);
+    assert!(group[&3].is_leader());
+    group.get_mut(&2).unwrap().force_campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    assert!(group[&2].is_leader());
+    assert!(group.get_mut(&3).unwrap().campaign().is_err());
+    group.get_mut(&3).unwrap().force_campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    assert!(group[&3].is_leader());
+    group.get_mut(&3).unwrap().propose(vec![10]).unwrap();
+    pump(&mut group, &mut applied, None);
+    assert_eq!(applied.get(&1), applied.get(&3));
+    assert_eq!(applied[&3].last().unwrap().1, vec![10]);
+}
+
+#[test]
+fn startup_election_delay_validates_before_storage_and_restarts_on_reopen() {
+    use std::time::Duration;
+    let dir = Directory::new();
+    let options = dir.options(1, vec![1]);
+    for delay in [
+        Duration::ZERO,
+        Duration::from_secs(60) + Duration::from_nanos(1),
+        Duration::MAX,
+    ] {
+        assert!(DurablePeer::open_with_tuning(
+            options.clone(),
+            PeerTuning {
+                startup_election_delay: Some(delay),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        assert!(!options.wal_path.exists());
+        assert!(!options.wal_path.with_extension("runtime.lock").exists());
+    }
+    let mut peer = DurablePeer::open_with_tuning(
+        options.clone(),
+        PeerTuning {
+            startup_election_delay: Some(Duration::from_nanos(1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(1));
+    peer.campaign().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    assert!(peer.is_leader());
+    let term = peer.term();
+    drop(peer);
+    let mut peer = DurablePeer::open_with_tuning(
+        options,
+        PeerTuning {
+            startup_election_delay: Some(Duration::from_secs(60)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    assert!(peer.campaign().is_err());
+    for _ in 0..32 {
+        peer.tick().unwrap();
+    }
+    assert_eq!(peer.term(), term);
+    peer.force_campaign().unwrap();
+    peer.process_ready(|_, _| Ok(())).unwrap();
+    assert!(peer.is_leader());
+    assert!(peer.term() > term);
+}
+
 fn peers_with_checkpoint_threshold(dir: &Directory) -> BTreeMap<u64, DurablePeer> {
     (1..=3)
         .map(|id| {

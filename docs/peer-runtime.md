@@ -86,6 +86,23 @@ Normal ticks also service expiry. Term, role, committed-membership, stop, and
 shutdown changes discard unaccepted work. Reordering state is not journaled and
 does not survive restart. The sender must still retry lost or discarded packets.
 
+`PeerTuning::startup_election_delay` optionally inhibits ordinary elections for
+a positive duration of at most 60 seconds. Every open starts a fresh monotonic
+deadline after journal recovery. `None`, the default, adds no hold or startup
+clock reads. The duration is local tuning, not a persisted timestamp.
+
+While held, a follower does not start timeout campaigns, and `campaign()` refuses
+an ordinary election. Newer-term ordinary vote and pre-vote requests are ignored
+without changing the durable term or vote. Valid leader replication, heartbeats,
+and checkpoints continue normally. Elapsed election ticks accumulate, so expiry
+does not start an additional election wait. A recognized leader's handoff and
+`force_campaign()` keep their existing forced-election behavior, quorum rules,
+and voter-eligibility checks; an already forced election can keep progressing.
+
+This is startup vote inhibition only. Reads remain quorum-confirmed; the option
+does not enable cached lease reads or establish a cluster-wide lease policy.
+It is not a substitute for fencing previous leaseholders before a forced election.
+
 `transfer_leadership(target)` requests a handoff to another committed voter.
 Only a leader may request it; unknown targets, learners, and the local identity
 are refused. Continue
