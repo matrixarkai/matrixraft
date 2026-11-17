@@ -39,6 +39,9 @@ mod read_deadlines;
 mod startup_hold;
 pub use append_reorder::AppendReorderTuning;
 pub use read_deadlines::{PeerReadStatus, PeerReadTicket};
+#[path = "peer_proposal_receipts.rs"]
+mod proposal_receipts;
+pub use proposal_receipts::{PeerProposalReceipt, PeerProposalStatus};
 #[path = "peer_log_reader.rs"]
 mod log_reader;
 pub use log_reader::{PeerLogReader, ScrubStep};
@@ -152,6 +155,9 @@ pub struct PeerTuning {
     /// Optional monotonic startup window inhibiting ordinary elections and newer-term votes.
     /// None retains immediate election eligibility. This does not enable lease-based reads.
     pub startup_election_delay: Option<std::time::Duration>,
+    /// Opt-in outstanding proposal receipt limit, 1 through 65536. None disables
+    /// tracked proposal admission without changing ordinary proposals.
+    pub max_pending_proposal_receipts: Option<usize>,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -175,6 +181,7 @@ impl Default for PeerTuning {
             append_reorder: None,
             max_inflight_apply_tasks: None,
             startup_election_delay: None,
+            max_pending_proposal_receipts: None,
         }
     }
 }
@@ -187,6 +194,9 @@ impl PeerTuning {
     fn config(self, id: u64) -> Result<Config, RaftError> {
         startup_hold::Hold::validate(self.startup_election_delay)?;
         if self.election_tick > usize::MAX / 2
+            || self
+                .max_pending_proposal_receipts
+                .is_some_and(|limit| !(1..=65536).contains(&limit))
             || self
                 .max_inflight_apply_tasks
                 .is_some_and(|limit| !(1..=64).contains(&limit))
@@ -2603,9 +2613,11 @@ pub struct DurablePeer {
     incoming_promotions: Option<(LogId, Vec<u8>)>,
     apply_pipeline: Option<apply_pipeline::Pipeline>,
     startup_hold: startup_hold::Hold,
+    proposal_receipts: Option<Box<proposal_receipts::Tracker>>,
 }
 impl Drop for DurablePeer {
     fn drop(&mut self) {
+        self.finish_proposal_receipts(PeerProposalStatus::Stopped);
         // Retain the journal's exclusive storage lock until all receive I/O ends.
         self.stream.finish_shutdown();
     }
@@ -2703,6 +2715,9 @@ impl DurablePeer {
             drain_through: None,
             read_sequence: 0,
             read_limit: tuning.max_pending_reads,
+            proposal_receipts: tuning
+                .max_pending_proposal_receipts
+                .map(|limit| Box::new(proposal_receipts::Tracker::new(limit))),
             pending_reads: BTreeMap::new(),
             deferred_reads: VecDeque::new(),
             pending_restore,
@@ -3002,6 +3017,7 @@ impl DurablePeer {
         }
         self.service_append_window()?;
         self.service_apply_pipeline()?;
+        self.service_proposal_receipts();
         Ok(())
     }
     fn tick_consensus(&mut self) {
@@ -3992,6 +4008,7 @@ impl DurablePeer {
         }
         self.retire_application_snapshot_request(&message);
         self.step_with_append_window(message)?;
+        self.service_proposal_receipts();
         if let Some((position, policy)) = incoming {
             if self.accepted_checkpoint(&position) {
                 self.incoming_promotions = Some((position, policy));
@@ -4083,7 +4100,8 @@ impl DurablePeer {
                             && pipeline.next(self.raw.raft.raft_log.applied).is_some())
                 })
                 || self.append_reorder.due()
-                || self.read_deadline_due())
+                || self.read_deadline_due()
+                || self.proposal_receipts_due())
     }
 
     /// Persist before returning packets or applying committed entries. Empty payloads
@@ -4317,6 +4335,7 @@ impl DurablePeer {
         {
             self.recovering_membership = false;
         }
+        self.service_proposal_receipts();
         if result.is_ok() {
             self.finish_drain();
         }
@@ -4421,6 +4440,7 @@ impl DurablePeer {
                     .advance_apply_to(entries[offset + progress.consumed - 1].index);
                 self.checkpoint_policy
                     .charge(&entries[offset..offset + progress.consumed]);
+                self.apply_proposal_receipts(&entries[offset..offset + progress.consumed]);
             }
             if let Some(error) = progress.error {
                 return Err(error);

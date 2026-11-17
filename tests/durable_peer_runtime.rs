@@ -79,6 +79,80 @@ impl Drop for Directory {
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
 
 #[test]
+fn tracked_proposals_require_real_acknowledgments_and_fail_closed_after_handoff() {
+    use matrixraft::peer_runtime::PeerProposalStatus;
+    let dir = Directory::new();
+    let mut group: BTreeMap<_, _> = (1..=3)
+        .map(|id| {
+            (
+                id,
+                DurablePeer::open_with_tuning(
+                    dir.options(id, vec![1, 2, 3]),
+                    PeerTuning {
+                        max_pending_proposal_receipts: Some(8),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let receipt = group
+        .get_mut(&1)
+        .unwrap()
+        .propose_tracked(vec![71], None)
+        .unwrap();
+    pump(&mut group, &mut applied, Some(1));
+    assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+    assert!(group[&1].commit_index() < receipt.position().index);
+    for _ in 0..2 {
+        group.get_mut(&1).unwrap().tick().unwrap();
+    }
+    pump(&mut group, &mut applied, None);
+    assert_eq!(receipt.status(), PeerProposalStatus::Applied);
+    assert!(applied
+        .values()
+        .all(|values| values.iter().any(|(_, value)| value == &[71])));
+
+    let abandoned = group
+        .get_mut(&1)
+        .unwrap()
+        .propose_tracked(vec![72], None)
+        .unwrap();
+    pump(&mut group, &mut applied, Some(1));
+    group.get_mut(&2).unwrap().force_campaign().unwrap();
+    pump(&mut group, &mut applied, Some(1));
+    assert!(group[&2].is_leader());
+    group.get_mut(&2).unwrap().tick().unwrap();
+    group.get_mut(&2).unwrap().tick().unwrap();
+    pump(&mut group, &mut applied, None);
+    assert_eq!(abandoned.status(), PeerProposalStatus::LeadershipLost);
+    assert!(applied
+        .values()
+        .all(|values| values.iter().all(|(_, value)| value != &[72])));
+    let replacement = group
+        .get_mut(&2)
+        .unwrap()
+        .propose_tracked(vec![73], None)
+        .unwrap();
+    pump(&mut group, &mut applied, None);
+    assert_eq!(replacement.status(), PeerProposalStatus::Applied);
+    assert_eq!(abandoned.status(), PeerProposalStatus::LeadershipLost);
+    assert_eq!(receipt.status(), PeerProposalStatus::Applied);
+    let not_committed = group
+        .get_mut(&2)
+        .unwrap()
+        .propose_tracked(vec![74], None)
+        .unwrap();
+    let fence = group.get_mut(&2).unwrap().begin_shutdown().unwrap();
+    assert!(fence < not_committed.position().index);
+    assert_eq!(not_committed.status(), PeerProposalStatus::Stopped);
+}
+
+#[test]
 fn timed_reads_reclaim_partitioned_requests_without_accepting_late_confirmations() {
     use std::time::Duration;
     let dir = Directory::new();

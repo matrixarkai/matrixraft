@@ -264,6 +264,7 @@ impl DurablePeer {
         }
         drop(completion);
         self.service_apply_pipeline()?;
+        self.service_proposal_receipts();
         self.finish_drain();
         Ok(())
     }
@@ -289,6 +290,9 @@ impl DurablePeer {
         };
         for (entries, count) in pipeline.drain() {
             self.checkpoint_policy.charge(&entries[..count]);
+            if let Some(tracker) = &mut self.proposal_receipts {
+                tracker.applied(&entries[..count]);
+            }
         }
         if pipeline.required().is_some() {
             if self.drain_through.is_some() && self.application_repair_needs_input() {
