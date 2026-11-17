@@ -528,6 +528,24 @@ commit index has applied locally. Serve the read immediately on that same
 application worker. Leadership loss, unknown tokens, and failed peers are errors.
 This uses the safe quorum mode, not a clock-based lease.
 
+`begin_read_with_timeout(duration)` returns a `PeerReadTicket` with a positive
+monotonic deadline; an unrepresentable deadline is refused before admission.
+`poll_timed_read(&mut ticket)` returns `Pending`, `Ready`, or `TimedOut`.
+Success still requires a quorum confirmation and local application through its
+index. At or after the deadline, even an earlier confirmation cannot succeed.
+Terminal outcomes are retained on the ticket; an unfinished request loses
+validity when its leadership term changes. Tickets belong to one open peer and
+cannot be used after reopening, even with the same node identity.
+
+Ticks, Ready processing, and new read admission reclaim expired timed requests,
+including their core read contexts. `has_ready()` includes expired requests so
+a host timer can drive cleanup without incoming traffic. No background thread
+is created; hosts must continue polling or ticking. Dropping a ticket does not
+cancel it early; `cancel_timed_read(&ticket)` does. Tickets do not hold the storage
+lock alive. Timeout only abandons local waiting: delivered packets cannot be
+recalled, and a late reply cannot confirm a newer request. Ordinary `begin_read`
+requests retain their explicit-cancellation behavior and have no deadline.
+
 `PeerTuning::max_pending_reads` bounds outstanding tokens from 1 through 1024;
 the default remains one. Each token has its own quorum and local-application
 fence, and callers may poll or cancel them in any order. Requests admitted before

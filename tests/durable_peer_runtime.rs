@@ -2,7 +2,9 @@
 // Copyright 2026 MatrixArkAI
 #![cfg(feature = "peer-runtime")]
 use matrixraft::{
-    peer_runtime::{AppendReorderTuning, DurablePeer, PeerOptions, PeerPacket, PeerTuning},
+    peer_runtime::{
+        AppendReorderTuning, DurablePeer, PeerOptions, PeerPacket, PeerReadStatus, PeerTuning,
+    },
     RaftError,
 };
 use prost::Message as _;
@@ -75,6 +77,78 @@ impl Drop for Directory {
     }
 }
 type Applied = BTreeMap<u64, Vec<(u64, Vec<u8>)>>;
+
+#[test]
+fn timed_reads_reclaim_partitioned_requests_without_accepting_late_confirmations() {
+    use std::time::Duration;
+    let dir = Directory::new();
+    let mut group = peers(&dir);
+    let mut applied = Applied::new();
+    group.get_mut(&1).unwrap().campaign().unwrap();
+    pump(&mut group, &mut applied, None);
+    let leader = group.get_mut(&1).unwrap();
+    let bytes = leader.persisted_wal_bytes().unwrap();
+    let mut expired = leader
+        .begin_read_with_timeout(Duration::from_millis(200))
+        .unwrap();
+    let old_packets = leader.process_ready(|_, _| Ok(())).unwrap();
+    assert!(!old_packets.is_empty());
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(leader.has_ready());
+    leader.process_ready(|_, _| Ok(())).unwrap();
+    assert_eq!(
+        leader.poll_timed_read(&mut expired).unwrap(),
+        PeerReadStatus::TimedOut
+    );
+    let mut current = leader
+        .begin_read_with_timeout(Duration::from_secs(60))
+        .unwrap();
+    let current_packets = leader.process_ready(|_, _| Ok(())).unwrap();
+    for packet in old_packets {
+        group
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    pump(&mut group, &mut applied, None);
+    assert_eq!(
+        group
+            .get_mut(&1)
+            .unwrap()
+            .poll_timed_read(&mut current)
+            .unwrap(),
+        PeerReadStatus::Pending
+    );
+    for packet in current_packets {
+        group
+            .get_mut(&packet.to)
+            .unwrap()
+            .step(&packet.bytes)
+            .unwrap();
+    }
+    pump(&mut group, &mut applied, None);
+    let leader = group.get_mut(&1).unwrap();
+    assert_eq!(
+        leader.poll_timed_read(&mut current).unwrap(),
+        PeerReadStatus::Ready
+    );
+    assert_eq!(
+        leader.poll_timed_read(&mut expired).unwrap(),
+        PeerReadStatus::TimedOut
+    );
+    assert_eq!(leader.persisted_wal_bytes().unwrap(), bytes);
+    let mut invalidated = leader
+        .begin_read_with_timeout(Duration::from_secs(60))
+        .unwrap();
+    leader.transfer_leadership(2).unwrap();
+    pump(&mut group, &mut applied, None);
+    assert!(group.get(&2).unwrap().is_leader());
+    assert!(matches!(
+        group.get_mut(&1).unwrap().poll_timed_read(&mut invalidated),
+        Err(RaftError::NotLeader(1))
+    ));
+}
 
 #[test]
 fn bounded_apply_yields_keeps_reads_waiting_and_replays_the_committed_tail() {

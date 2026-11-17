@@ -33,9 +33,12 @@ pub use apply_pipeline::{PeerApplyCompletion, PeerApplyTask};
 mod checkpoint_file;
 #[path = "peer_checkpoint_policy.rs"]
 mod checkpoint_policy;
+#[path = "peer_read_deadlines.rs"]
+mod read_deadlines;
 #[path = "peer_startup_hold.rs"]
 mod startup_hold;
 pub use append_reorder::AppendReorderTuning;
+pub use read_deadlines::{PeerReadStatus, PeerReadTicket};
 #[path = "peer_log_reader.rs"]
 mod log_reader;
 pub use log_reader::{PeerLogReader, ScrubStep};
@@ -2511,6 +2514,7 @@ struct PendingRead {
     token: u64,
     term: u64,
     index: Option<u64>,
+    deadline: Option<std::time::Instant>,
 }
 impl PendingRead {
     fn context(&self) -> Vec<u8> {
@@ -2944,6 +2948,7 @@ impl DurablePeer {
     pub fn tick(&mut self) -> Result<(), RaftError> {
         self.healthy()?;
         self.membership_recovered()?;
+        self.expire_read_deadlines()?;
         let startup_held = self.raw.raft.state == StateRole::Follower
             && self.automatic_elections
             && self.required_application_checkpoint().is_none()
@@ -3568,6 +3573,7 @@ impl DurablePeer {
     /// The token is local to this open peer and is not a durable identifier.
     pub fn begin_read(&mut self) -> Result<u64, RaftError> {
         self.healthy()?;
+        self.expire_read_deadlines()?;
         if !self.is_leader() {
             return Err(RaftError::NotLeader(self.options.node_id));
         }
@@ -3591,6 +3597,7 @@ impl DurablePeer {
             token: self.read_sequence,
             term: self.term(),
             index: None,
+            deadline: None,
         };
         self.pending_reads.insert(read.token, read);
         self.deferred_reads.push_back(self.read_sequence);
@@ -4075,7 +4082,8 @@ impl DurablePeer {
                         || (self.pending_restore.is_none()
                             && pipeline.next(self.raw.raft.raft_log.applied).is_some())
                 })
-                || self.append_reorder.due())
+                || self.append_reorder.due()
+                || self.read_deadline_due())
     }
 
     /// Persist before returning packets or applying committed entries. Empty payloads
@@ -4430,6 +4438,7 @@ impl DurablePeer {
         apply: &mut impl FnMut(&[Entry]) -> ApplyProgress,
         restore: &mut impl FnMut(LogId, &mut dyn Read, u64) -> Result<RestoreDecision, RaftError>,
     ) -> Result<Vec<PeerPacket>, RaftError> {
+        self.expire_read_deadlines()?;
         let mut output = Vec::new();
         let mut deferred = false;
         let mut applied_batch = false;
