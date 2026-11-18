@@ -20,6 +20,7 @@ struct RoleRecord {
 pub(super) struct Identity {
     encoded: Vec<u8>,
     record: RoleRecord,
+    wire_bootstrap: Vec<u8>,
 }
 
 impl Identity {
@@ -59,11 +60,26 @@ impl Identity {
             bootstrap_witnesses: role.bootstrap_witnesses,
         };
         let encoded = record.encode_to_vec();
-        Ok(Some(Arc::new(Self { encoded, record })))
+        let mut wire_bootstrap = Vec::new();
+        prost::encoding::uint64::encode_packed(3, &record.bootstrap_witnesses, &mut wire_bootstrap);
+        Ok(Some(Arc::new(Self {
+            encoded,
+            record,
+            wire_bootstrap,
+        })))
     }
 
     pub(super) fn can_adopt_full_history(&self) -> bool {
         self.record.local_role == 1 && self.record.bootstrap_witnesses.is_empty()
+    }
+    pub(super) fn local_witness(&self) -> bool {
+        self.record.local_role == 2
+    }
+    pub(super) fn bootstrap_witnesses(&self) -> &[u64] {
+        &self.record.bootstrap_witnesses
+    }
+    pub(super) fn wire_bootstrap(&self) -> &[u8] {
+        &self.wire_bootstrap
     }
 }
 

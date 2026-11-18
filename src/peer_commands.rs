@@ -14,7 +14,11 @@ pub struct PeerProposalOptions {
 const COMMAND_CONTEXT: &[u8] = b"matrixraft-command-v1";
 
 pub(super) fn is_command(entry: &Entry) -> bool {
-    entry.entry_type == EntryType::EntryNormal as i32 && entry.context == COMMAND_CONTEXT
+    is_command_context(entry.entry_type, &entry.context)
+}
+
+pub(super) fn is_command_context(entry_type: i32, context: &[u8]) -> bool {
+    entry_type == EntryType::EntryNormal as i32 && context == COMMAND_CONTEXT
 }
 
 impl PeerProposalOptions {
