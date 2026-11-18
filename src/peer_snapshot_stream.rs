@@ -366,6 +366,7 @@ struct InlineCredit {
 /// Outgoing transfers have a configured bound; one incoming transfer is retained.
 /// File completion runs on one owned worker while Raft continues processing.
 pub(super) struct Stream {
+    pub(super) witness_identity: Option<Arc<witness_identity::Identity>>,
     pub(super) permitted: Vec<u64>,
     spool_directory: PathBuf,
     pub(super) payload_directory: PathBuf,
@@ -395,6 +396,7 @@ impl Stream {
     pub(super) fn new(spool_directory: PathBuf) -> Self {
         Self {
             permitted: Vec::new(),
+            witness_identity: None,
             payload_directory: spool_directory.join("file-payloads"),
             received_payload: None,
             spool_directory,
@@ -887,9 +889,11 @@ impl Stream {
         if part.promotion_policy != !message.context.is_empty() {
             return Err(invalid("checkpoint policy transport mismatch"));
         }
-        membership::decode_promotions(
+        membership_roles::decode(
             &message.context,
             message.get_snapshot().get_metadata().get_conf_state(),
+            &self.permitted,
+            &self.witness_identity,
         )?;
         self.received_payload = payload;
         self.completed = Some(part.identity());

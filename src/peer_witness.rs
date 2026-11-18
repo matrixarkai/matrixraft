@@ -14,6 +14,9 @@ pub(super) struct CommitPolicy {
 }
 
 impl CommitPolicy {
+    pub(super) fn set_witnesses(&mut self, witnesses: &BTreeSet<u64>) {
+        self.witnesses.clone_from(witnesses);
+    }
     pub(super) fn contains(&self, id: u64) -> bool {
         self.witnesses.contains(&id)
     }

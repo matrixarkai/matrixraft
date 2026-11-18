@@ -2,7 +2,9 @@
 // Copyright 2026 MatrixArkAI
 #![cfg(feature = "peer-runtime")]
 
-use matrixraft::peer_runtime::{DurablePeer, PeerOptions};
+use matrixraft::peer_runtime::{
+    DurablePeer, MembershipChange, PeerOptions, PeerProposalOptions, PeerRole, PeerRoles,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -22,11 +24,24 @@ enum Request {
     Step(Vec<u8>),
     StepBatch(Vec<Vec<u8>>),
     Inspect,
+    Tick,
+    AddWitness(u64),
+    ProposeCommand(Vec<u8>),
+    WitnessCampaignForbidden,
 }
 #[derive(Serialize, Deserialize)]
 struct Reply {
     packets: Vec<(u64, Vec<u8>)>,
     applied: Vec<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    membership: Option<ProcessMembership>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProcessMembership {
+    voters: Vec<u64>,
+    outgoing: Vec<u64>,
+    witnesses: Vec<u64>,
 }
 
 fn send<T: Serialize>(stream: &mut TcpStream, value: &T) {
@@ -70,12 +85,29 @@ fn peer_transport_child() {
         .parse()
         .unwrap();
     let root = Path::new(&root);
-    let mut peer = DurablePeer::open(PeerOptions {
+    let roles = std::env::var("MATRIXRAFT_PROCESS_TEST_ROLES").as_deref() == Ok("1");
+    let options = PeerOptions {
         group_id: 31,
         node_id: id,
-        voters: (1..=count).collect(),
+        voters: (1..=if roles { 3 } else { count }).collect(),
         wal_path: root.join(format!("{id}.wal")),
-    })
+    };
+    let mut peer = if roles {
+        DurablePeer::open_with_roles(
+            options,
+            (1..=count).collect(),
+            PeerRoles {
+                local: if id >= 3 {
+                    PeerRole::Witness
+                } else {
+                    PeerRole::Data
+                },
+                bootstrap_witnesses: vec![3],
+            },
+        )
+    } else {
+        DurablePeer::open(options)
+    }
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
@@ -108,6 +140,24 @@ fn peer_transport_child() {
                 }
             }
             Request::Inspect => {}
+            Request::Tick => peer.tick().unwrap(),
+            Request::AddWitness(id) => {
+                peer.propose_membership_auto(MembershipChange::AddWitness(id))
+                    .unwrap();
+            }
+            Request::ProposeCommand(bytes) => {
+                peer.propose_with_options(
+                    PeerProposalOptions {
+                        durable_command: true,
+                        ..Default::default()
+                    },
+                    bytes,
+                )
+                .unwrap();
+            }
+            Request::WitnessCampaignForbidden => {
+                assert!(peer.campaign().is_err());
+            }
         }
         let packets = peer
             .process_ready(|_, bytes| {
@@ -125,6 +175,14 @@ fn peer_transport_child() {
             &Reply {
                 packets,
                 applied: if inspect { applied.clone() } else { Vec::new() },
+                membership: (inspect && roles).then(|| {
+                    let membership = peer.membership();
+                    ProcessMembership {
+                        voters: membership.voters,
+                        outgoing: membership.outgoing_voters,
+                        witnesses: membership.witnesses,
+                    }
+                }),
             },
         );
     }
@@ -142,6 +200,9 @@ impl Drop for Voter {
 }
 impl Voter {
     fn start(root: &Path, id: u64, count: u64) -> Self {
+        Self::start_inner(root, id, count, false)
+    }
+    fn start_inner(root: &Path, id: u64, count: u64, roles: bool) -> Self {
         let address_file = root.join(format!("{id}.addr"));
         if address_file.exists() {
             std::fs::remove_file(&address_file).unwrap();
@@ -156,6 +217,10 @@ impl Voter {
             .env("MATRIXRAFT_PROCESS_TEST_DIR", root)
             .env("MATRIXRAFT_PROCESS_TEST_ID", id.to_string())
             .env("MATRIXRAFT_PROCESS_TEST_COUNT", count.to_string())
+            .env(
+                "MATRIXRAFT_PROCESS_TEST_ROLES",
+                if roles { "1" } else { "0" },
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
@@ -223,6 +288,72 @@ fn deliver_batched(voters: &[Voter], mut packets: Vec<(u64, Vec<u8>)>) {
             }
         }
     }
+}
+
+#[test]
+fn independent_tcp_witnesses_join_filter_payloads_and_recover_roles_and_commands() {
+    let root = tempfile::tempdir().unwrap();
+    let start = || {
+        (1..=4)
+            .map(|id| Voter::start_inner(root.path(), id, 4, true))
+            .collect::<Vec<_>>()
+    };
+    let voters = start();
+    for voter in &voters {
+        deliver(&voters, voter.request(Request::Inspect).packets);
+    }
+    deliver(&voters, voters[0].request(Request::Campaign).packets);
+    deliver(&voters, voters[0].request(Request::AddWitness(4)).packets);
+    for _ in 0..25 {
+        deliver(&voters, voters[0].request(Request::Tick).packets);
+    }
+    let ordinary = b"tcp-ordinary-payload-not-kept-by-witness".to_vec();
+    let command = b"tcp-durable-command-kept-by-witness".to_vec();
+    deliver(
+        &voters,
+        voters[0]
+            .request(Request::Propose(ordinary.clone()))
+            .packets,
+    );
+    deliver(
+        &voters,
+        voters[0]
+            .request(Request::ProposeCommand(command.clone()))
+            .packets,
+    );
+    for _ in 0..4 {
+        deliver(&voters, voters[0].request(Request::Tick).packets);
+    }
+    let verify = |voters: &[Voter]| {
+        for (index, voter) in voters.iter().enumerate() {
+            let reply = voter.request(Request::Inspect);
+            let membership = reply.membership.unwrap();
+            assert_eq!(membership.voters, vec![1, 2, 3, 4]);
+            assert!(membership.outgoing.is_empty());
+            assert_eq!(membership.witnesses, vec![3, 4]);
+            assert_eq!(
+                reply.applied,
+                if index >= 2 {
+                    vec![command.clone()]
+                } else {
+                    vec![ordinary.clone(), command.clone()]
+                }
+            );
+        }
+    };
+    verify(&voters);
+    for id in [3, 4] {
+        let bytes = std::fs::read(root.path().join(format!("{id}.wal"))).unwrap();
+        assert!(!bytes.windows(ordinary.len()).any(|part| part == ordinary));
+        assert!(bytes.windows(command.len()).any(|part| part == command));
+        assert!(voters[id as usize - 1]
+            .request(Request::WitnessCampaignForbidden)
+            .packets
+            .is_empty());
+    }
+    drop(voters);
+    let voters = start();
+    verify(&voters);
 }
 
 fn run_durable_batch(
