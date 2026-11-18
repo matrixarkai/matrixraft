@@ -882,7 +882,7 @@ fn digest_extend(state: u64, bytes: &[u8]) -> u64 {
         (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
     })
 }
-fn write_all_vectored(file: &mut File, buffers: &mut [IoSlice<'_>]) -> std::io::Result<()> {
+fn write_all_vectored(file: &mut impl Write, buffers: &mut [IoSlice<'_>]) -> std::io::Result<()> {
     let mut remaining = buffers;
     while !remaining.is_empty() {
         match file.write_vectored(remaining) {
@@ -898,6 +898,25 @@ fn write_all_vectored(file: &mut File, buffers: &mut [IoSlice<'_>]) -> std::io::
         }
     }
     Ok(())
+}
+fn write_parts_vectored<'a>(
+    file: &mut impl Write,
+    parts: impl IntoIterator<Item = &'a [u8]>,
+) -> std::io::Result<()> {
+    let mut parts = parts.into_iter().filter(|part| !part.is_empty());
+    // Descriptor staging stays bounded even when one Ready contains a long suffix.
+    let mut buffers: [IoSlice<'a>; 64] = std::array::from_fn(|_| IoSlice::new(&[]));
+    loop {
+        let mut count = 0;
+        for (buffer, part) in buffers.iter_mut().zip(parts.by_ref()) {
+            *buffer = IoSlice::new(part);
+            count += 1;
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        write_all_vectored(file, &mut buffers[..count])?;
+    }
 }
 fn batch(options: &PeerOptions, hs: Option<&HardState>, entries: &[Entry]) -> WalBatch {
     WalBatch {
@@ -2368,19 +2387,18 @@ impl Journal {
         let header_checksum = digest(&header[..8]).to_be_bytes();
         header[8..16].copy_from_slice(&header_checksum);
         header[16..24].copy_from_slice(&checksum.to_be_bytes());
-        self.file.write_all(&header).map_err(storage_error)?;
-        self.file
-            .write_all(&metadata[..prefix_len])
-            .map_err(storage_error)?;
-        self.file
-            .write_all(&batch.snapshot)
-            .map_err(storage_error)?;
-        self.file
-            .write_all(&metadata[prefix_len..])
-            .map_err(storage_error)?;
-        if self.chain {
-            self.file.write_all(&[FRAME_END]).map_err(storage_error)?;
-        }
+        let tail: &[u8] = if self.chain { &[FRAME_END] } else { &[] };
+        write_parts_vectored(
+            &mut self.file,
+            [
+                header.as_slice(),
+                &metadata[..prefix_len],
+                batch.snapshot.as_ref(),
+                &metadata[prefix_len..],
+                tail,
+            ],
+        )
+        .map_err(storage_error)?;
         self.length += self.frame(size);
         self.records = self.records.saturating_add(1);
         Ok(())
@@ -2506,25 +2524,19 @@ impl Journal {
         let header_checksum = digest(&header[..8]).to_be_bytes();
         header[8..16].copy_from_slice(&header_checksum);
         header[16..24].copy_from_slice(&checksum.to_be_bytes());
-        self.file.write_all(&header).map_err(storage_error)?;
-
-        let mut slices = Vec::with_capacity(2 * batch.entries.len() + 2);
-        if prefix_len != 0 {
-            slices.push(IoSlice::new(&metadata[..prefix_len]));
-        }
-        for ((start, end), entry) in fields.iter().zip(&batch.entries) {
-            slices.push(IoSlice::new(&metadata[*start..*end]));
-            slices.push(IoSlice::new(entry));
-        }
-        if suffix_start != metadata.len() {
-            slices.push(IoSlice::new(&metadata[suffix_start..]));
-        }
-        if self.chain {
-            slices.push(IoSlice::new(&[FRAME_END]));
-        }
-        for chunk in slices.chunks_mut(64) {
-            write_all_vectored(&mut self.file, chunk).map_err(storage_error)?;
-        }
+        let entry_parts = fields
+            .iter()
+            .zip(&batch.entries)
+            .flat_map(|((start, end), entry)| [&metadata[*start..*end], entry.as_ref()]);
+        let tail: &[u8] = if self.chain { &[FRAME_END] } else { &[] };
+        write_parts_vectored(
+            &mut self.file,
+            [header.as_slice(), &metadata[..prefix_len]]
+                .into_iter()
+                .chain(entry_parts)
+                .chain([&metadata[suffix_start..], tail]),
+        )
+        .map_err(storage_error)?;
         self.length += self.frame(size);
         self.records = self.records.saturating_add(1);
         Ok(())
@@ -2654,37 +2666,23 @@ impl Journal {
         let header_checksum = digest(&header[..8]).to_be_bytes();
         header[8..16].copy_from_slice(&header_checksum);
         header[16..24].copy_from_slice(&checksum.to_be_bytes());
-        self.file.write_all(&header).map_err(storage_error)?;
-
-        let mut slices = Vec::with_capacity(4 * entries.len() + 2);
-        if prefix_len != 0 {
-            slices.push(IoSlice::new(&metadata[..prefix_len]));
-        }
-        for (field, entry) in fields.iter().zip(entries) {
-            slices.push(IoSlice::new(
+        let entry_parts = fields.iter().zip(entries).flat_map(|(field, entry)| {
+            [
                 &metadata[field.before_data.0..field.before_data.1],
-            ));
-            if !entry.data.is_empty() {
-                slices.push(IoSlice::new(&entry.data));
-            }
-            if field.before_context.0 != field.before_context.1 {
-                slices.push(IoSlice::new(
-                    &metadata[field.before_context.0..field.before_context.1],
-                ));
-            }
-            if !entry.context.is_empty() {
-                slices.push(IoSlice::new(&entry.context));
-            }
-        }
-        if suffix_start != metadata.len() {
-            slices.push(IoSlice::new(&metadata[suffix_start..]));
-        }
-        if self.chain {
-            slices.push(IoSlice::new(&[FRAME_END]));
-        }
-        for chunk in slices.chunks_mut(64) {
-            write_all_vectored(&mut self.file, chunk).map_err(storage_error)?;
-        }
+                entry.data.as_slice(),
+                &metadata[field.before_context.0..field.before_context.1],
+                entry.context.as_slice(),
+            ]
+        });
+        let tail: &[u8] = if self.chain { &[FRAME_END] } else { &[] };
+        write_parts_vectored(
+            &mut self.file,
+            [header.as_slice(), &metadata[..prefix_len]]
+                .into_iter()
+                .chain(entry_parts)
+                .chain([&metadata[suffix_start..], tail]),
+        )
+        .map_err(storage_error)?;
         self.length += self.frame(size);
         self.records = self.records.saturating_add(1);
         Ok(())
@@ -5818,6 +5816,98 @@ mod tests {
     // these WAL fixtures; ordinary file tests can still run together.
     static PROCESS_FIXTURE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+    #[derive(Default)]
+    struct VectoredProbe {
+        bytes: Vec<u8>,
+        calls: usize,
+        max_buffers: usize,
+        short: bool,
+    }
+    impl Write for VectoredProbe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            panic!("the entry writer must use vectored I/O");
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> std::io::Result<usize> {
+            self.calls += 1;
+            self.max_buffers = self.max_buffers.max(buffers.len());
+            assert!(buffers.iter().all(|buffer| !buffer.is_empty()));
+            if self.short && self.calls.is_multiple_of(5) {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            let mut remaining = if self.short { 17 } else { usize::MAX };
+            let before = self.bytes.len();
+            for buffer in buffers {
+                let count = remaining.min(buffer.len());
+                self.bytes.extend_from_slice(&buffer[..count]);
+                remaining -= count;
+                if remaining == 0 {
+                    break;
+                }
+            }
+            Ok(self.bytes.len() - before)
+        }
+    }
+
+    #[test]
+    fn vectored_parts_bound_descriptors_and_skip_empty_segments() {
+        for count in [0usize, 1, 63, 64, 65, 129, 4097] {
+            let parts: Vec<_> = (0..count)
+                .map(|index| vec![index as u8; index % 13 + 1])
+                .collect();
+            let expected = parts.concat();
+            let mut probe = VectoredProbe::default();
+            write_parts_vectored(
+                &mut probe,
+                parts.iter().flat_map(|part| [&[][..], part.as_slice()]),
+            )
+            .unwrap();
+            assert_eq!(probe.bytes, expected);
+            assert_eq!(probe.calls, count.div_ceil(64));
+            assert!(probe.max_buffers <= 64);
+        }
+    }
+
+    #[test]
+    fn vectored_parts_resume_short_and_interrupted_writes_across_chunks() {
+        let parts: Vec<_> = (0..257).map(|index| vec![index as u8; 31]).collect();
+        let mut probe = VectoredProbe {
+            short: true,
+            ..Default::default()
+        };
+        write_parts_vectored(&mut probe, parts.iter().map(Vec::as_slice)).unwrap();
+        assert_eq!(probe.bytes, parts.concat());
+        assert!(probe.calls > parts.len());
+        assert_eq!(probe.max_buffers, 64);
+    }
+
+    #[test]
+    fn vectored_parts_stop_on_zero_or_failed_writes() {
+        struct Failed(std::io::ErrorKind);
+        impl Write for Failed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                if self.0 == std::io::ErrorKind::WriteZero {
+                    Ok(0)
+                } else {
+                    Err(self.0.into())
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for kind in [std::io::ErrorKind::WriteZero, std::io::ErrorKind::Other] {
+            assert_eq!(
+                write_parts_vectored(&mut Failed(kind), [&[1, 2][..], &[3][..]])
+                    .unwrap_err()
+                    .kind(),
+                kind
+            );
+        }
+    }
+
     fn path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "peer-wal-{label}-{}-{}",
@@ -5946,6 +6036,116 @@ mod tests {
             digest(&expected)
         );
         assert_eq!(&frame[24..], expected);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn entry_writers_preserve_canonical_bytes_across_vector_boundaries() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for chained in [false, true] {
+            for count in [1, 15, 16, 31, 32, 63, 64, 65, 129] {
+                let directory = tempfile::tempdir().unwrap();
+                let config = options(directory.path().join("peer.wal"));
+                let tuning = PeerTuning {
+                    wal_zero_fill_bytes: chained.then_some(4096),
+                    ..Default::default()
+                };
+                let mut peer = DurablePeer::open_with_tuning(config.clone(), tuning).unwrap();
+                let entries: Vec<_> = (0..count)
+                    .map(|index| Entry {
+                        entry_type: index % 3,
+                        term: u64::MAX,
+                        index: index as u64 + 127,
+                        data: vec![index as u8; (index as usize % 4) * 128],
+                        context: vec![index as u8; (index as usize % 3) * 64],
+                        sync_log: index % 2 == 0,
+                    })
+                    .collect();
+                let mut encoded = batch(&config, None, &entries);
+                encoded.permitted.clone_from(&peer.journal.permitted);
+                encoded.durable_commands = true;
+                encoded.witness_identity = vec![1, 2, 3];
+                let expected = encoded.encode_to_vec();
+                let mut decoded = encoded.clone();
+                decoded.entries.clear();
+                let mut metadata = Vec::new();
+                for use_decoded in [false, true] {
+                    let start = peer.journal.length as usize;
+                    if use_decoded {
+                        peer.journal
+                            .write_decoded_entry_record_into(&decoded, &entries, &mut metadata)
+                            .unwrap();
+                    } else {
+                        peer.journal
+                            .write_entry_record_into(&encoded, &mut metadata)
+                            .unwrap();
+                    }
+                    let bytes = std::fs::read(&config.wal_path).unwrap();
+                    let frame = &bytes[start..peer.journal.length as usize];
+                    assert_eq!(&frame[..4], peer.journal.magic());
+                    assert_eq!(
+                        u32::from_be_bytes(frame[4..8].try_into().unwrap()) as usize,
+                        expected.len()
+                    );
+                    assert_eq!(
+                        u64::from_be_bytes(frame[8..16].try_into().unwrap()),
+                        digest(&frame[..8])
+                    );
+                    assert_eq!(
+                        u64::from_be_bytes(frame[16..24].try_into().unwrap()),
+                        digest(&expected)
+                    );
+                    assert_eq!(&frame[24..24 + expected.len()], expected);
+                    let tail: &[u8] = if chained { &[FRAME_END] } else { &[] };
+                    assert_eq!(&frame[24 + expected.len()..], tail);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn large_ready_recovers_after_bounded_vector_writes() {
+        let _fixture = PROCESS_FIXTURE.read().unwrap();
+        for chained in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = options(directory.path().join("peer.wal"));
+            let tuning = PeerTuning {
+                wal_zero_fill_bytes: chained.then_some(4096),
+                ..Default::default()
+            };
+            let mut peer = DurablePeer::open_with_tuning(config.clone(), tuning).unwrap();
+            peer.campaign().unwrap();
+            peer.process_ready(|_, _| Ok(())).unwrap();
+            let payloads: Vec<_> = (0..4097u64)
+                .map(|index| index.to_be_bytes().to_vec())
+                .collect();
+            for payload in &payloads {
+                peer.propose(payload.clone()).unwrap();
+            }
+            let barriers = peer.journal.barriers;
+            let mut applied = Vec::new();
+            peer.process_ready(|_, data| {
+                if !data.is_empty() {
+                    applied.push(data.to_vec());
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(applied, payloads);
+            assert_eq!(peer.journal.barriers, barriers + 1);
+            drop(peer);
+            let mut peer = DurablePeer::open_with_tuning(config, tuning).unwrap();
+            peer.campaign().unwrap();
+            let mut restored = Vec::new();
+            peer.process_ready(|_, data| {
+                if !data.is_empty() {
+                    restored.push(data.to_vec());
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(restored, payloads);
+        }
     }
     #[test]
     fn snapshot_record_writer_matches_canonical_protobuf_without_payload_staging() {
