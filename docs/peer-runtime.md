@@ -1314,7 +1314,8 @@ As with learner admission, a checkpoint predating the new member cannot seed it.
 When `membership_checkpoint_needed()` becomes true, capture a fresh image after
 the addition applies, then continue transport. Inline, fragmented, file-backed,
 and staged captures retain their capture-time configuration and role policy.
-`membership().witnesses` reports witness voters in either committed voter set.
+`membership().witnesses` reports active witness replicas in the voter or learner
+sets, including either side of a joint configuration.
 
 Role history includes removed identities and survives checkpoint replacement,
 flushed membership floors, log trimming, and restart. A removed witness can rejoin
@@ -1322,3 +1323,44 @@ as a witness, but cannot become a data learner or data voter. A retired data
 identity cannot become a witness. Local storage roles are immutable: reopening a
 journal under another local role or bootstrap role list is refused. Use a distinct
 permitted identity and storage when replacing a replica with a different role.
+
+### Witness Voting
+
+To create a new role-aware group with data-only voting, set
+`PeerTuning::bootstrap_witness_voting_disabled` on every peer. A data quorum can
+then elect and commit without receiving witness responses. The bootstrap choice
+is fenced in the immutable journal and packet identities. Keep the original
+setting on every reopen, even after a later committed policy change. It cannot
+be changed on existing storage or enabled through ordinary constructors.
+
+`MembershipChange::SetWitnessVoting(false)` changes a role-aware group to
+data-only voting while witnesses continue receiving metadata, commands, and
+checkpoints. Use `propose_membership_auto` for automatic joint exit, or request
+the initial change and `LeaveJoint` explicitly. The tracked automatic variant
+acknowledges completion only after the exit and ordered application.
+
+This is a committed group policy, not a process-local flag. Both old and new
+majorities govern the transition. During joint membership, outgoing witnesses
+retain their old votes; wait for an empty outgoing voter set before treating
+them as excluded. `membership().witness_voting` reports the committed target,
+and `membership().nonvoting_witnesses` lists witnesses assigned a nonvoting role.
+The ordinary learner fields contain only data learners.
+
+After joint exit, only data voters count toward elections, commit advancement,
+quorum reads, and leader quorum checks. Witness acknowledgments still advance
+their real replication progress and retention positions, but cannot replace a
+missing data vote. New `AddWitness` requests follow the committed policy and join
+as nonvoting replicas while voting is disabled. Nonvoting witnesses can be removed
+with `Remove` without changing the data voting set.
+
+`SetWitnessVoting(true)` restores active witnesses to voting through another
+joint transition. Re-enabling requires capacity for every active witness under
+the seven-voter limit. The permitted inventory bounds nonvoting replicas. A group
+without active witnesses can still record this policy for future joins. Repeating
+a setting reconfirms it through consensus without changing replica identities.
+
+The policy survives leader changes, checkpoint transfer, staged capture, flushed
+floors, compaction, and restart. Upgrade every peer and recovery reader before
+using it: policy-change entries and disabled-voting checkpoint metadata are
+explicitly fenced from older formats. Unselected groups retain their original
+packet and policy encodings.

@@ -139,10 +139,7 @@ impl DurablePeer {
             return Err(invalid("membership position has been compacted"));
         }
         let mut conf = checkpoint.as_ref().map_or_else(
-            || ConfState {
-                voters: self.options.voters.clone(),
-                ..Default::default()
-            },
+            || witness_identity::bootstrap_conf(&self.options.voters, &self.store.witness_identity),
             |image| image.get_metadata().get_conf_state().clone(),
         );
         let mut policy = membership_roles::decode(
@@ -192,7 +189,7 @@ impl DurablePeer {
                         &self.store.witness_identity,
                     )?;
                     if let Some(roles) = &mut policy.roles {
-                        roles.apply(&change)?;
+                        roles.apply(&change, &conf)?;
                     }
                     conf = replay.apply_conf_change(&change).map_err(invalid)?;
                     membership::validate_conf(&conf, &self.store.permitted)?;

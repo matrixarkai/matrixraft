@@ -12,6 +12,8 @@ pub enum MembershipChange {
     AddLearnerAuto(u64),
     /// Add a metadata-only voter through joint consensus in a role-aware group.
     AddWitness(u64),
+    /// Change witness participation through joint consensus while retaining replication.
+    SetWitnessVoting(bool),
     Promote(u64),
     Remove(u64),
     LeaveJoint,
@@ -28,8 +30,12 @@ pub struct MembershipState {
     pub auto_leave: bool,
     /// Committed learners whose catch-up will schedule automatic promotion.
     pub automatic_learners: Vec<u64>,
-    /// Witness voters in either side of the committed joint configuration.
+    /// Active witness replicas, including nonvoting witnesses and either joint side.
     pub witnesses: Vec<u64>,
+    /// Committed target policy; outgoing witnesses still vote until joint exit.
+    pub witness_voting: bool,
+    /// Witnesses assigned a nonvoting role; outgoing votes remain until joint exit.
+    pub nonvoting_witnesses: Vec<u64>,
 }
 const AUTO_LEARNER: &[u8] = b"matrixraft-automatic-learner-v1";
 
@@ -154,8 +160,9 @@ fn decode_change_inner(
         && change.context == membership_roles::ADD_WITNESS
         && change.changes.len() == 1
         && matches!(change.transition, x if x == ConfChangeTransition::Implicit as i32 || x == ConfChangeTransition::Explicit as i32)
-        && change.changes[0].change_type == ConfChangeType::AddNode as i32;
-    if change.encode_to_vec() != entry.data || (!change.context.is_empty() && !automatic_learner && !witness) || change.changes.len() > 1
+        && matches!(change.changes[0].change_type, x if x == ConfChangeType::AddNode as i32 || x == ConfChangeType::AddLearnerNode as i32);
+    let voting = roles_enabled && witness_voting::valid_shape(&change);
+    if change.encode_to_vec() != entry.data || (!change.context.is_empty() && !automatic_learner && !witness && !voting) || (change.changes.len() > 1 && !voting)
         || !matches!(change.transition, x if x == ConfChangeTransition::Auto as i32 || x == ConfChangeTransition::Implicit as i32 || x == ConfChangeTransition::Explicit as i32)
         || change.changes.iter().any(|c| !permitted.contains(&c.node_id) || !matches!(c.change_type,
             x if x == ConfChangeType::AddNode as i32 || x == ConfChangeType::AddLearnerNode as i32 || x == ConfChangeType::RemoveNode as i32))
@@ -219,17 +226,41 @@ impl DurablePeer {
             .initial_state()
             .expect("memory configuration")
             .conf_state;
+        let data_learners = |values: &[u64]| {
+            let mut values: Vec<_> = values
+                .iter()
+                .copied()
+                .filter(|id| !self.witness_node(*id))
+                .collect();
+            values.sort_unstable();
+            values
+        };
         MembershipState {
             voters: sorted(&conf.voters),
             outgoing_voters: sorted(&conf.voters_outgoing),
-            learners: sorted(&conf.learners),
-            next_learners: sorted(&conf.learners_next),
+            learners: data_learners(&conf.learners),
+            next_learners: data_learners(&conf.learners_next),
             auto_leave: conf.auto_leave,
             automatic_learners: self.automatic_learners.iter().copied().collect(),
             witnesses: conf
                 .voters
                 .iter()
                 .chain(&conf.voters_outgoing)
+                .chain(&conf.learners)
+                .chain(&conf.learners_next)
+                .copied()
+                .filter(|id| self.witness_node(*id))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            witness_voting: self
+                .roles
+                .as_ref()
+                .is_none_or(|roles| !roles.witness_voting_disabled),
+            nonvoting_witnesses: conf
+                .learners
+                .iter()
+                .chain(&conf.learners_next)
                 .copied()
                 .filter(|id| self.witness_node(*id))
                 .collect::<BTreeSet<_>>()
@@ -290,6 +321,20 @@ impl DurablePeer {
             if !joint {
                 return Err(invalid("configuration is not joint"));
             }
+        } else if let MembershipChange::SetWitnessVoting(enabled) = operation {
+            if joint {
+                return Err(invalid("leave the committed joint configuration first"));
+            }
+            let roles = self
+                .roles
+                .as_ref()
+                .ok_or_else(|| invalid("witness voting requires a role-aware group"))?;
+            let conf = self
+                .store
+                .initial_state()
+                .map_err(storage_error)?
+                .conf_state;
+            change = witness_voting::proposal(roles, &conf, enabled, automatic)?;
         } else {
             if joint {
                 return Err(invalid("leave the committed joint configuration first"));
@@ -330,15 +375,26 @@ impl DurablePeer {
                     if roles.data.contains(&id)
                         || state.voters.contains(&id)
                         || state.learners.contains(&id)
-                        || state.voters.len() >= 7
+                        || state.witnesses.contains(&id)
+                        || (!roles.witness_voting_disabled && state.voters.len() >= 7)
                     {
                         return Err(invalid("witness addition requires an unused witness identity and voter capacity"));
                     }
-                    (id, ConfChangeType::AddNode, true)
+                    (
+                        id,
+                        if roles.witness_voting_disabled {
+                            ConfChangeType::AddLearnerNode
+                        } else {
+                            ConfChangeType::AddNode
+                        },
+                        true,
+                    )
                 }
                 MembershipChange::Remove(id) => {
                     let voter = state.voters.contains(&id);
-                    if (!voter && !state.learners.contains(&id))
+                    if (!voter
+                        && !state.learners.contains(&id)
+                        && !state.nonvoting_witnesses.contains(&id))
                         || (voter && state.voters.len() == 1)
                         || (voter
                             && self.store.witness_identity.is_some()
@@ -351,7 +407,9 @@ impl DurablePeer {
                     }
                     (id, ConfChangeType::RemoveNode, voter)
                 }
-                MembershipChange::LeaveJoint => unreachable!(),
+                MembershipChange::LeaveJoint | MembershipChange::SetWitnessVoting(_) => {
+                    unreachable!()
+                }
             };
             if !self.store.permitted.contains(&node_id) {
                 return Err(invalid("peer is outside the permitted inventory"));
@@ -392,7 +450,14 @@ impl DurablePeer {
         let change = decode_change_for(entry, &self.store.permitted, &self.store.witness_identity)?;
         let mut roles = self.roles.clone();
         if let Some(history) = &mut roles {
-            history.apply(&change)?;
+            history.apply(
+                &change,
+                &self
+                    .store
+                    .initial_state()
+                    .map_err(storage_error)?
+                    .conf_state,
+            )?;
         }
         let conf = self.raw.apply_conf_change(&change).map_err(invalid)?;
         validate_conf(&conf, &self.store.permitted)?;

@@ -15,6 +15,8 @@ struct RoleRecord {
     local_role: u32,
     #[prost(uint64, repeated, packed = "true", tag = "3")]
     bootstrap_witnesses: Vec<u64>,
+    #[prost(bool, tag = "4")]
+    bootstrap_voting_disabled: bool,
 }
 
 pub(super) struct Identity {
@@ -31,7 +33,19 @@ impl Identity {
         options: &PeerOptions,
         permitted: &[u64],
     ) -> Result<Option<Arc<Self>>, RaftError> {
+        Self::from_role_with_voting(role, options, permitted, false)
+    }
+
+    pub(super) fn from_role_with_voting(
+        role: Option<OpenRole>,
+        options: &PeerOptions,
+        permitted: &[u64],
+        disabled: bool,
+    ) -> Result<Option<Arc<Self>>, RaftError> {
         let Some(mut role) = role else {
+            if disabled {
+                return Err(invalid("bootstrap witness voting requires replica roles"));
+            }
             return Ok(None);
         };
         role.bootstrap_witnesses.sort_unstable();
@@ -57,13 +71,17 @@ impl Identity {
             return Err(invalid("invalid witness bootstrap identity"));
         }
         let record = RoleRecord {
-            version: 1,
+            version: if disabled { 2 } else { 1 },
             local_role: if role.local_witness { 2 } else { 1 },
             bootstrap_witnesses: role.bootstrap_witnesses,
+            bootstrap_voting_disabled: disabled,
         };
         let encoded = record.encode_to_vec();
         let mut wire_bootstrap = Vec::new();
         prost::encoding::uint64::encode_packed(3, &record.bootstrap_witnesses, &mut wire_bootstrap);
+        if disabled {
+            prost::encoding::bool::encode(4, &true, &mut wire_bootstrap);
+        }
         Ok(Some(Arc::new(Self {
             encoded,
             record,
@@ -74,7 +92,9 @@ impl Identity {
     }
 
     pub(super) fn can_adopt_full_history(&self) -> bool {
-        self.record.local_role == 1 && self.record.bootstrap_witnesses.is_empty()
+        self.record.local_role == 1
+            && self.record.bootstrap_witnesses.is_empty()
+            && !self.record.bootstrap_voting_disabled
     }
     pub(super) fn local_witness(&self) -> bool {
         self.record.local_role == 2
@@ -88,8 +108,33 @@ impl Identity {
     pub(super) fn bootstrap_voters(&self) -> &[u64] {
         &self.bootstrap_voters
     }
+    pub(super) fn bootstrap_voting_disabled(&self) -> bool {
+        self.record.bootstrap_voting_disabled
+    }
     pub(super) fn wire_bootstrap(&self) -> &[u8] {
         &self.wire_bootstrap
+    }
+}
+
+pub(super) fn bootstrap_conf(voters: &[u64], identity: &Option<Arc<Identity>>) -> ConfState {
+    if let Some(identity) = identity
+        .as_ref()
+        .filter(|identity| identity.bootstrap_voting_disabled())
+    {
+        ConfState {
+            voters: voters
+                .iter()
+                .copied()
+                .filter(|id| !identity.bootstrap_witnesses().contains(id))
+                .collect(),
+            learners: identity.bootstrap_witnesses().to_vec(),
+            ..Default::default()
+        }
+    } else {
+        ConfState {
+            voters: voters.to_vec(),
+            ..Default::default()
+        }
     }
 }
 

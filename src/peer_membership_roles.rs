@@ -25,6 +25,7 @@ pub(super) const ADD_WITNESS: &[u8] = b"matrixraft-add-witness-v1";
 pub(super) struct History {
     pub(super) data: BTreeSet<u64>,
     pub(super) witnesses: BTreeSet<u64>,
+    pub(super) witness_voting_disabled: bool,
 }
 
 pub(super) struct Policy {
@@ -42,6 +43,8 @@ struct Record {
     witnesses: Vec<u64>,
     #[prost(uint64, repeated, packed = "true", tag = "4")]
     data: Vec<u64>,
+    #[prost(bool, tag = "5")]
+    witness_voting_disabled: bool,
 }
 
 pub(super) fn encode(promotions: &BTreeSet<u64>, roles: Option<&History>) -> Vec<u8> {
@@ -49,10 +52,11 @@ pub(super) fn encode(promotions: &BTreeSet<u64>, roles: Option<&History>) -> Vec
         return membership::encode_promotions(promotions);
     };
     Record {
-        version: 2,
+        version: if roles.witness_voting_disabled { 3 } else { 2 },
         promotions: promotions.iter().copied().collect(),
         witnesses: roles.witnesses.iter().copied().collect(),
         data: roles.data.iter().copied().collect(),
+        witness_voting_disabled: roles.witness_voting_disabled,
     }
     .encode_to_vec()
 }
@@ -83,7 +87,7 @@ pub(super) fn decode(
     let record = Record::decode(bytes).map_err(invalid)?;
     let ordered =
         |values: &[u64]| values.len() <= 64 && values.windows(2).all(|pair| pair[0] < pair[1]);
-    if record.version != 2
+    if record.version != if record.witness_voting_disabled { 3 } else { 2 }
         || !ordered(&record.promotions)
         || !ordered(&record.witnesses)
         || !ordered(&record.data)
@@ -91,13 +95,14 @@ pub(super) fn decode(
         || record
             .promotions
             .iter()
-            .any(|id| !conf.learners.contains(id))
+            .any(|id| !conf.learners.contains(id) || record.witnesses.contains(id))
     {
         return Err(invalid("invalid membership role policy"));
     }
     let roles = History {
         data: record.data.into_iter().collect(),
         witnesses: record.witnesses.into_iter().collect(),
+        witness_voting_disabled: record.witness_voting_disabled,
     };
     roles.validate(conf, permitted, identity)?;
     Ok(Policy {
@@ -120,6 +125,7 @@ impl History {
                 .filter(|id| !witnesses.contains(id))
                 .collect(),
             witnesses,
+            witness_voting_disabled: identity.bootstrap_voting_disabled(),
         }
     }
 
@@ -150,11 +156,14 @@ impl History {
                 .chain(&conf.learners)
                 .chain(&conf.learners_next)
                 .any(|id| !self.data.contains(id) && !self.witnesses.contains(id))
-            || conf
-                .learners
-                .iter()
-                .chain(&conf.learners_next)
-                .any(|id| self.witnesses.contains(id))
+            || (!self.witness_voting_disabled
+                && conf
+                    .learners
+                    .iter()
+                    .chain(&conf.learners_next)
+                    .any(|id| self.witnesses.contains(id)))
+            || (self.witness_voting_disabled
+                && conf.voters.iter().any(|id| self.witnesses.contains(id)))
             || conf.voters.iter().all(|id| !self.data.contains(id))
             || (!conf.voters_outgoing.is_empty()
                 && conf
@@ -174,10 +183,28 @@ impl History {
     pub(super) fn apply(
         &mut self,
         change: &raft_core::eraftpb::ConfChangeV2,
+        conf: &ConfState,
     ) -> Result<(), RaftError> {
         use raft_core::eraftpb::ConfChangeType;
+        if let Some(enabled) = witness_voting::target(change) {
+            if change.changes != witness_voting::changes(self, conf, enabled)? {
+                return Err(invalid(
+                    "witness voting change does not match committed membership",
+                ));
+            }
+            self.witness_voting_disabled = !enabled;
+            return Ok(());
+        }
         for member in &change.changes {
             if change.context == ADD_WITNESS {
+                let kind = if self.witness_voting_disabled {
+                    ConfChangeType::AddLearnerNode
+                } else {
+                    ConfChangeType::AddNode
+                };
+                if member.change_type != kind as i32 {
+                    return Err(invalid("witness addition conflicts with voting policy"));
+                }
                 if self.data.contains(&member.node_id) {
                     return Err(invalid("a data identity cannot be reused as a witness"));
                 }
@@ -283,6 +310,7 @@ mod tests {
             promotions: vec![4],
             witnesses: vec![3, 5],
             data: vec![1, 2, 4, 6],
+            witness_voting_disabled: false,
         }
     }
 
@@ -409,8 +437,17 @@ mod tests {
         change.transition = ConfChangeTransition::Explicit as i32;
         change.changes[0].change_type = ConfChangeType::AddLearnerNode as i32;
         assert!(
-            membership::decode_change_for(&entry(&change), &permitted, &identity(1, false))
-                .is_err()
+            membership::decode_change_for(&entry(&change), &permitted, &identity(1, false)).is_ok()
         );
+        let identity = identity(1, false).unwrap();
+        assert!(History::bootstrap(&identity)
+            .apply(
+                &change,
+                &ConfState {
+                    voters: vec![1, 2, 3],
+                    ..Default::default()
+                }
+            )
+            .is_err());
     }
 }
