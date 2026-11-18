@@ -4,6 +4,7 @@
 
 use matrixraft::peer_runtime::{
     DurablePeer, MembershipChange, PeerOptions, PeerProposalOptions, PeerRole, PeerRoles,
+    PeerTuning,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -28,6 +29,8 @@ enum Request {
     AddWitness(u64),
     ProposeCommand(Vec<u8>),
     WitnessCampaignForbidden,
+    WitnessVoting(bool),
+    ForceCampaign,
 }
 #[derive(Serialize, Deserialize)]
 struct Reply {
@@ -42,6 +45,9 @@ struct ProcessMembership {
     voters: Vec<u64>,
     outgoing: Vec<u64>,
     witnesses: Vec<u64>,
+    witness_voting: bool,
+    nonvoting_witnesses: Vec<u64>,
+    leader: bool,
 }
 
 fn send<T: Serialize>(stream: &mut TcpStream, value: &T) {
@@ -93,7 +99,7 @@ fn peer_transport_child() {
         wal_path: root.join(format!("{id}.wal")),
     };
     let mut peer = if roles {
-        DurablePeer::open_with_roles(
+        DurablePeer::open_with_roles_and_tuning(
             options,
             (1..=count).collect(),
             PeerRoles {
@@ -103,6 +109,14 @@ fn peer_transport_child() {
                     PeerRole::Data
                 },
                 bootstrap_witnesses: vec![3],
+            },
+            PeerTuning {
+                bootstrap_witness_voting_disabled: std::env::var(
+                    "MATRIXRAFT_PROCESS_TEST_BOOTSTRAP_DATA_ONLY",
+                )
+                .as_deref()
+                    == Ok("1"),
+                ..Default::default()
             },
         )
     } else {
@@ -158,6 +172,11 @@ fn peer_transport_child() {
             Request::WitnessCampaignForbidden => {
                 assert!(peer.campaign().is_err());
             }
+            Request::WitnessVoting(enabled) => {
+                peer.propose_membership_auto(MembershipChange::SetWitnessVoting(enabled))
+                    .unwrap();
+            }
+            Request::ForceCampaign => peer.force_campaign().unwrap(),
         }
         let packets = peer
             .process_ready(|_, bytes| {
@@ -181,6 +200,9 @@ fn peer_transport_child() {
                         voters: membership.voters,
                         outgoing: membership.outgoing_voters,
                         witnesses: membership.witnesses,
+                        witness_voting: membership.witness_voting,
+                        nonvoting_witnesses: membership.nonvoting_witnesses,
+                        leader: peer.is_leader(),
                     }
                 }),
             },
@@ -203,6 +225,15 @@ impl Voter {
         Self::start_inner(root, id, count, false)
     }
     fn start_inner(root: &Path, id: u64, count: u64, roles: bool) -> Self {
+        Self::start_with_bootstrap(root, id, count, roles, false)
+    }
+    fn start_with_bootstrap(
+        root: &Path,
+        id: u64,
+        count: u64,
+        roles: bool,
+        bootstrap_disabled: bool,
+    ) -> Self {
         let address_file = root.join(format!("{id}.addr"));
         if address_file.exists() {
             std::fs::remove_file(&address_file).unwrap();
@@ -220,6 +251,10 @@ impl Voter {
             .env(
                 "MATRIXRAFT_PROCESS_TEST_ROLES",
                 if roles { "1" } else { "0" },
+            )
+            .env(
+                "MATRIXRAFT_PROCESS_TEST_BOOTSTRAP_DATA_ONLY",
+                if bootstrap_disabled { "1" } else { "0" },
             )
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -354,6 +389,172 @@ fn independent_tcp_witnesses_join_filter_payloads_and_recover_roles_and_commands
     drop(voters);
     let voters = start();
     verify(&voters);
+}
+
+#[test]
+fn independent_tcp_nonvoting_witnesses_replicate_but_do_not_commit_or_elect() {
+    let root = tempfile::tempdir().unwrap();
+    let start = || {
+        (1..=4)
+            .map(|id| Voter::start_inner(root.path(), id, 4, true))
+            .collect::<Vec<_>>()
+    };
+    let voters = start();
+    for voter in &voters {
+        deliver(&voters, voter.request(Request::Inspect).packets);
+    }
+    deliver(&voters, voters[0].request(Request::Campaign).packets);
+    deliver(&voters, voters[0].request(Request::AddWitness(4)).packets);
+    for _ in 0..25 {
+        deliver(&voters, voters[0].request(Request::Tick).packets);
+    }
+    deliver(
+        &voters,
+        voters[0].request(Request::WitnessVoting(false)).packets,
+    );
+    for _ in 0..25 {
+        deliver(&voters, voters[0].request(Request::Tick).packets);
+    }
+    let exchange_except = |voters: &[Voter], packets: Vec<(u64, Vec<u8>)>, blocked: u64| {
+        let mut queue: VecDeque<_> = packets.into();
+        for _ in 0..10000 {
+            let Some((to, bytes)) = queue.pop_front() else {
+                return;
+            };
+            if to != blocked {
+                queue.extend(
+                    voters[to as usize - 1]
+                        .request(Request::Step(bytes))
+                        .packets,
+                );
+            }
+        }
+        panic!("filtered packet exchange did not settle");
+    };
+    let ordinary = b"ordinary-data-needs-data-votes".to_vec();
+    let command = b"command-needs-data-votes".to_vec();
+    exchange_except(
+        &voters,
+        voters[0]
+            .request(Request::Propose(ordinary.clone()))
+            .packets,
+        2,
+    );
+    exchange_except(
+        &voters,
+        voters[0]
+            .request(Request::ProposeCommand(command.clone()))
+            .packets,
+        2,
+    );
+    assert!(voters[0].request(Request::Inspect).applied.is_empty());
+    for _ in 0..5 {
+        deliver(&voters, voters[0].request(Request::Tick).packets);
+    }
+    let verify = |voters: &[Voter]| {
+        for (index, voter) in voters.iter().enumerate() {
+            let reply = voter.request(Request::Inspect);
+            let membership = reply.membership.unwrap();
+            assert_eq!(membership.voters, vec![1, 2]);
+            assert_eq!(membership.witnesses, vec![3, 4]);
+            assert_eq!(membership.nonvoting_witnesses, vec![3, 4]);
+            assert!(!membership.witness_voting);
+            assert!(membership.outgoing.is_empty());
+            assert_eq!(
+                reply.applied,
+                if index >= 2 {
+                    vec![command.clone()]
+                } else {
+                    vec![ordinary.clone(), command.clone()]
+                }
+            );
+        }
+    };
+    verify(&voters);
+    drop(voters);
+    let voters = start();
+    verify(&voters);
+    exchange_except(
+        &voters,
+        voters[1].request(Request::ForceCampaign).packets,
+        1,
+    );
+    assert!(
+        !voters[1]
+            .request(Request::Inspect)
+            .membership
+            .unwrap()
+            .leader
+    );
+}
+
+#[test]
+fn independent_tcp_bootstrap_data_only_voting_uses_only_data_election_votes() {
+    let root = tempfile::tempdir().unwrap();
+    let start = || {
+        (1..=4)
+            .map(|id| Voter::start_with_bootstrap(root.path(), id, 4, true, true))
+            .collect::<Vec<_>>()
+    };
+    let voters = start();
+    for voter in &voters {
+        let membership = voter.request(Request::Inspect).membership.unwrap();
+        assert!(!membership.witness_voting);
+        assert_eq!(membership.voters, vec![1, 2]);
+        assert_eq!(membership.nonvoting_witnesses, vec![3]);
+    }
+    let requests = voters[0].request(Request::ForceCampaign).packets;
+    assert!(!requests.is_empty());
+    assert!(requests.iter().all(|packet| packet.0 == 2));
+    assert!(
+        !voters[0]
+            .request(Request::Inspect)
+            .membership
+            .unwrap()
+            .leader
+    );
+    deliver(&voters, requests);
+    assert!(
+        voters[0]
+            .request(Request::Inspect)
+            .membership
+            .unwrap()
+            .leader
+    );
+    let ordinary = b"bootstrap-ordinary-data".to_vec();
+    let command = b"bootstrap-durable-command".to_vec();
+    deliver(
+        &voters,
+        voters[0]
+            .request(Request::Propose(ordinary.clone()))
+            .packets,
+    );
+    deliver(
+        &voters,
+        voters[0]
+            .request(Request::ProposeCommand(command.clone()))
+            .packets,
+    );
+    for _ in 0..4 {
+        deliver(&voters, voters[0].request(Request::Tick).packets);
+    }
+    drop(voters);
+    let voters = start();
+    for (index, voter) in voters.iter().enumerate() {
+        let reply = voter.request(Request::Inspect);
+        let membership = reply.membership.unwrap();
+        assert!(!membership.witness_voting);
+        assert_eq!(membership.voters, vec![1, 2]);
+        assert_eq!(membership.nonvoting_witnesses, vec![3]);
+        assert_eq!(
+            reply.applied,
+            match index {
+                0 | 1 => vec![ordinary.clone(), command.clone()],
+                2 => vec![command.clone()],
+                _ => Vec::new(),
+            }
+        );
+    }
 }
 
 fn run_durable_batch(

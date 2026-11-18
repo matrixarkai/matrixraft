@@ -72,6 +72,8 @@ mod snapshot_stream;
 mod witness;
 #[path = "peer_witness_identity.rs"]
 mod witness_identity;
+#[path = "peer_witness_voting.rs"]
+mod witness_voting;
 #[path = "peer_witness_wire.rs"]
 mod witness_wire;
 pub use membership::{MembershipChange, MembershipState};
@@ -183,6 +185,10 @@ pub struct PeerTuning {
     /// Optional response-silence window for retention and closest-follower selection.
     /// None retains every replica for retention and the core's handoff activity test.
     pub replica_inactivity_tick: Option<usize>,
+    /// Bootstrap-only data-only voting for role-aware groups. This setting is
+    /// part of the immutable identity and must be repeated on every reopen.
+    /// Later changes use MembershipChange::SetWitnessVoting.
+    pub bootstrap_witness_voting_disabled: bool,
 }
 impl Default for PeerTuning {
     fn default() -> Self {
@@ -209,6 +215,7 @@ impl Default for PeerTuning {
             max_pending_proposal_receipts: None,
             max_pending_campaign_receipts: None,
             replica_inactivity_tick: None,
+            bootstrap_witness_voting_disabled: false,
         }
     }
 }
@@ -2838,14 +2845,19 @@ impl DurablePeer {
             return Err(invalid("invalid peer identity or voter set"));
         }
         options.voters = unique.into_iter().collect();
-        let witness_identity = witness_identity::Identity::from_role(role, &options, &permitted)?;
+        let witness_identity = if tuning.bootstrap_witness_voting_disabled {
+            witness_identity::Identity::from_role_with_voting(role, &options, &permitted, true)?
+        } else {
+            witness_identity::Identity::from_role(role, &options, &permitted)?
+        };
+        let bootstrap = witness_identity::bootstrap_conf(&options.voters, &witness_identity);
         let mut config = tuning.config(options.node_id)?;
         let store = PeerStorage {
             witness_identity,
             cache: log_cache::Cache::new(tuning.max_log_cache_bytes),
             max_disk_replicate_entries: tuning.max_disk_replicate_entries,
             permitted,
-            memory: MemStorage::new_with_conf_state((options.voters.clone(), Vec::<u64>::new())),
+            memory: MemStorage::new_with_conf_state(bootstrap),
             async_reads: Arc::new(Mutex::new(None)),
             checkpoint: Arc::new(Mutex::new(None)),
             checkpoint_promotions: Default::default(),
@@ -2973,13 +2985,6 @@ impl DurablePeer {
             startup_hold: startup_hold::Hold::new(tuning.startup_election_delay)?,
             witness_commit: witness::CommitPolicy::from_witnesses(witnesses),
         };
-        peer.validate_witness_conf(
-            &peer
-                .store
-                .initial_state()
-                .map_err(storage_error)?
-                .conf_state,
-        )?;
         peer.settle_witness_commit();
         Ok(peer)
     }
@@ -4273,7 +4278,6 @@ impl DurablePeer {
                 .as_ref()
                 .ok_or_else(|| invalid("missing peer snapshot"))?;
             validate_snapshot_for(snapshot, &self.options.voters, &self.store.permitted)?;
-            self.validate_witness_conf(snapshot.get_metadata().get_conf_state())?;
             let policy = membership_roles::decode(
                 &message.context,
                 snapshot.get_metadata().get_conf_state(),
