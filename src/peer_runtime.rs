@@ -64,6 +64,8 @@ pub use async_reads::{PeerLogReadCompletion, PeerLogReadTask};
 mod lifecycle;
 #[path = "peer_membership.rs"]
 mod membership;
+#[path = "peer_membership_roles.rs"]
+mod membership_roles;
 #[path = "peer_snapshot_stream.rs"]
 mod snapshot_stream;
 #[path = "peer_witness.rs"]
@@ -73,6 +75,7 @@ mod witness_identity;
 #[path = "peer_witness_wire.rs"]
 mod witness_wire;
 pub use membership::{MembershipChange, MembershipState};
+pub use membership_roles::{PeerRole, PeerRoles};
 
 const LIMIT: usize = 8 * 1024 * 1024;
 /// Maximum application checkpoint size. Transfers and WAL records are segmented.
@@ -1135,7 +1138,8 @@ fn install_recovered_entries(store: &PeerStorage, batch: WalBatch) -> Result<(),
             ));
         }
         if decoded.entry_type != EntryType::EntryNormal as i32 {
-            membership::decode_change(&decoded, &store.permitted).map_err(storage_error)?;
+            membership::decode_change_for(&decoded, &store.permitted, &store.witness_identity)
+                .map_err(storage_error)?;
         }
         if decoded.index <= previous.commit {
             let saved = store
@@ -1341,7 +1345,8 @@ fn install_decoded_with_scratch(
         .iter()
         .filter(|e| e.entry_type != EntryType::EntryNormal as i32)
     {
-        membership::decode_change(entry, &store.permitted).map_err(storage_error)?;
+        membership::decode_change_for(entry, &store.permitted, &store.witness_identity)
+            .map_err(storage_error)?;
     }
     let previous = store.initial_state().map_err(storage_error)?.hard_state;
     // Local compaction may retain committed entries after the captured index.
@@ -1382,9 +1387,11 @@ fn install_decoded_with_scratch(
             None
         };
         validate_snapshot_for(&snapshot, &batch.voters, &store.permitted)?;
-        membership::decode_promotions(
+        membership_roles::decode(
             &batch.promotion_policy,
             snapshot.get_metadata().get_conf_state(),
+            &store.permitted,
+            &store.witness_identity,
         )?;
         let meta = snapshot.get_metadata();
         let next = hs
@@ -1741,7 +1748,11 @@ impl Journal {
             {
                 return Err(storage_error("peer WAL identity or encoding mismatch"));
             }
-            flushed_membership::validate_record(&record, &store.permitted)?;
+            flushed_membership::validate_record_for(
+                &record,
+                &store.permitted,
+                &store.witness_identity,
+            )?;
             if record.flushed_index != 0 {
                 if record.flushed_index < flushed_index
                     || (record.flushed_index == flushed_index
@@ -1838,7 +1849,12 @@ impl Journal {
         payload: Option<&checkpoint_file::Blob>,
         promotion_policy: &[u8],
     ) -> Result<(), RaftError> {
-        membership::decode_promotions(promotion_policy, snapshot.get_metadata().get_conf_state())?;
+        membership_roles::decode(
+            promotion_policy,
+            snapshot.get_metadata().get_conf_state(),
+            &self.permitted,
+            &self.witness_identity,
+        )?;
         let temporary = options.wal_path.with_extension("checkpoint.tmp");
         let file = OpenOptions::new()
             .read(true)
@@ -2768,6 +2784,7 @@ pub struct DurablePeer {
     checkpoint_policy: checkpoint_policy::Policy,
     append_reorder: append_reorder::Queue,
     automatic_learners: BTreeSet<u64>,
+    roles: Option<Box<membership_roles::History>>,
     uncommitted_limit: u64,
     incoming_promotions: Option<(LogId, Vec<u8>)>,
     apply_pipeline: Option<apply_pipeline::Pipeline>,
@@ -2840,9 +2857,11 @@ impl DurablePeer {
         let mut journal = Journal::open(&options, &store, tuning.wal_zero_fill_bytes.unwrap_or(0))?;
         journal.reserve_chunk = tuning.wal_preallocate_bytes.unwrap_or(0);
         let checkpoint = store.checkpoint.lock().unwrap().clone();
-        let mut automatic_learners = membership::decode_promotions(
+        let mut policy = membership_roles::decode(
             &store.checkpoint_promotions.lock().unwrap(),
             &store.initial_state().map_err(storage_error)?.conf_state,
+            &store.permitted,
+            &store.witness_identity,
         )?;
         let snapshot_index = checkpoint.as_ref().map_or(0, |s| s.get_metadata().index);
         // A deferred snapshot stands for state the application already holds durably, so there is
@@ -2874,13 +2893,14 @@ impl DurablePeer {
                     "flushed configuration exceeds durable commitment",
                 ));
             }
-            let (conf, promotions) = flushed_membership::decode(
+            let (conf, recovered_policy) = flushed_membership::decode_with_roles(
                 &journal.flushed_membership,
                 journal.flushed_index,
                 &store.permitted,
+                &store.witness_identity,
             )?;
             store.wl().set_conf_state(conf);
-            automatic_learners = promotions;
+            policy = recovered_policy;
         }
         let logger = slog::Logger::root(slog::Discard, slog::o!());
         let raw = RawNode::new(&config, store.clone(), &logger).map_err(invalid)?;
@@ -2894,18 +2914,17 @@ impl DurablePeer {
         );
         stream.payload_directory = store.payload_directory.clone();
         stream.permitted = store.permitted.clone();
+        stream.witness_identity = store.witness_identity.clone();
         stream.send_capacity = tuning.max_checkpoint_sends.unwrap_or(1);
         stream.frame_all_sends = tuning.max_checkpoint_sends.is_some();
         stream.packet_reserve = store
             .witness_identity
             .as_ref()
             .map_or(0, |identity| witness_wire::trailer_len(identity));
-        let witnesses = store
-            .witness_identity
+        let witnesses = policy
+            .roles
             .as_ref()
-            .map_or_else(BTreeSet::new, |identity| {
-                identity.bootstrap_witnesses().iter().copied().collect()
-            });
+            .map_or_else(BTreeSet::new, |roles| roles.witnesses.clone());
         let mut peer = Self {
             pending_apply: config.applied,
             command_commit_synced: commit,
@@ -2944,7 +2963,8 @@ impl DurablePeer {
             incoming_payload: None,
             checkpoint_policy: checkpoint_policy::Policy::new(tuning.checkpoint_after_bytes),
             append_reorder: append_reorder::Queue::new(tuning.append_reorder),
-            automatic_learners,
+            automatic_learners: policy.promotions,
+            roles: policy.roles,
             uncommitted_limit: tuning.max_uncommitted_size,
             incoming_promotions: None,
             apply_pipeline: tuning
@@ -3087,8 +3107,11 @@ impl DurablePeer {
         let configuration = if self.store.permitted.is_empty() {
             None
         } else {
-            let (conf, promotions) = self.membership_at(index)?;
-            Some((conf, membership::encode_promotions(&promotions)))
+            let (conf, policy) = self.membership_at(index)?;
+            Some((
+                conf,
+                membership_roles::encode(&policy.promotions, policy.roles.as_deref()),
+            ))
         };
         self.checkpoint_payload_at(
             DEFERRED_SNAPSHOT.to_vec(),
@@ -3142,13 +3165,18 @@ impl DurablePeer {
                 .unwrap()
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.get_metadata().index);
-            let (conf, promotions) = self.membership_at(index.max(checkpoint_index))?;
+            let (conf, policy) = self.membership_at(index.max(checkpoint_index))?;
             hs.commit = hs.commit.max(index);
-            if checkpoint_index > index {
-                flushed_membership::encode_covered(index, checkpoint_index, conf, &promotions)
-            } else {
-                flushed_membership::encode(index, conf, &promotions)
-            }
+            flushed_membership::encode_policy(
+                index,
+                if checkpoint_index > index {
+                    checkpoint_index
+                } else {
+                    0
+                },
+                conf,
+                membership_roles::encode(&policy.promotions, policy.roles.as_deref()),
+            )
         };
         let mut record = batch(
             &self.options,
@@ -3670,7 +3698,7 @@ impl DurablePeer {
         }
         let index = self.applied_index();
         Ok(CheckpointCapture {
-            promotion_policy: membership::encode_promotions(&self.automatic_learners),
+            promotion_policy: self.membership_policy(),
             configuration: self
                 .store
                 .initial_state()
@@ -3790,7 +3818,7 @@ impl DurablePeer {
                     .initial_state()
                     .expect("memory configuration")
                     .conf_state,
-                membership::encode_promotions(&self.automatic_learners),
+                self.membership_policy(),
             )
         });
         let snapshot = Arc::new(Snapshot {
@@ -4246,10 +4274,21 @@ impl DurablePeer {
                 .ok_or_else(|| invalid("missing peer snapshot"))?;
             validate_snapshot_for(snapshot, &self.options.voters, &self.store.permitted)?;
             self.validate_witness_conf(snapshot.get_metadata().get_conf_state())?;
-            membership::decode_promotions(
+            let policy = membership_roles::decode(
                 &message.context,
                 snapshot.get_metadata().get_conf_state(),
+                &self.store.permitted,
+                &self.store.witness_identity,
             )?;
+            if self.may_install_checkpoint(&message) {
+                if let (Some(previous), Some(next)) = (&self.roles, &policy.roles) {
+                    if !next.extends(previous) {
+                        return Err(invalid(
+                            "checkpoint discards committed replica role history",
+                        ));
+                    }
+                }
+            }
             if snapshot.get_metadata().term > message.term {
                 return Err(invalid("snapshot term exceeds sender term"));
             }
@@ -4282,7 +4321,11 @@ impl DurablePeer {
             .iter()
             .filter(|e| e.entry_type != EntryType::EntryNormal as i32)
         {
-            membership::decode_change(entry, &self.store.permitted)?;
+            membership::decode_change_for(
+                entry,
+                &self.store.permitted,
+                &self.store.witness_identity,
+            )?;
         }
         if !self.store.permitted.is_empty()
             && matches!(
@@ -4896,9 +4939,11 @@ impl DurablePeer {
                     .as_ref()
                     .filter(|(id, _)| *id == position)
                     .map_or_else(Vec::new, |(_, policy)| policy.clone());
-                let automatic_learners = membership::decode_promotions(
+                let policy = membership_roles::decode(
                     &promotion_policy,
                     snapshot.get_metadata().get_conf_state(),
+                    &self.store.permitted,
+                    &self.store.witness_identity,
                 )?;
                 self.journal.rewrite(
                     &self.options,
@@ -4921,7 +4966,7 @@ impl DurablePeer {
                 // payload. Reuse it without scanning it again on the Raft loop.
                 install_received(&self.store, &record, Arc::clone(&snapshot), payload)?;
                 self.command_commit_synced = self.command_commit_synced.max(hs.commit);
-                self.automatic_learners = automatic_learners;
+                self.install_membership_policy(policy);
                 self.store
                     .refresh_cache(&self.options, self.journal.length, true)?;
                 self.restore_floor = restore_floor;

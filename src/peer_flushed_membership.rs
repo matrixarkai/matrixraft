@@ -16,29 +16,54 @@ struct FloorConfiguration {
     checkpoint_index: u64,
 }
 
+#[cfg(test)]
 pub(super) fn encode(index: u64, conf: ConfState, promotions: &BTreeSet<u64>) -> Vec<u8> {
     encode_covered(index, 0, conf, promotions)
 }
+#[cfg(test)]
 pub(super) fn encode_covered(
     index: u64,
     checkpoint_index: u64,
     conf: ConfState,
     promotions: &BTreeSet<u64>,
 ) -> Vec<u8> {
+    encode_policy(
+        index,
+        checkpoint_index,
+        conf,
+        membership::encode_promotions(promotions),
+    )
+}
+pub(super) fn encode_policy(
+    index: u64,
+    checkpoint_index: u64,
+    conf: ConfState,
+    policy: Vec<u8>,
+) -> Vec<u8> {
     FloorConfiguration {
         version: 1,
         index,
         configuration: conf.encode_to_vec(),
-        promotions: membership::encode_promotions(promotions),
+        promotions: policy,
         checkpoint_index,
     }
     .encode_to_vec()
 }
+#[cfg(test)]
 pub(super) fn decode(
     bytes: &[u8],
     index: u64,
     permitted: &[u64],
 ) -> Result<(ConfState, BTreeSet<u64>), RaftError> {
+    decode_with_roles(bytes, index, permitted, &None)
+        .map(|(conf, policy)| (conf, policy.promotions))
+}
+pub(super) fn decode_with_roles(
+    bytes: &[u8],
+    index: u64,
+    permitted: &[u64],
+    identity: &Option<Arc<witness_identity::Identity>>,
+) -> Result<(ConfState, membership_roles::Policy), RaftError> {
     if bytes.is_empty() || bytes.len() > 4096 || index == 0 || permitted.is_empty() {
         return Err(storage_error("missing or oversized flushed configuration"));
     }
@@ -55,15 +80,23 @@ pub(super) fn decode(
         return Err(storage_error("invalid flushed membership encoding"));
     }
     membership::validate_conf(&conf, permitted)?;
-    let promotions = membership::decode_promotions(&record.promotions, &conf)?;
-    Ok((conf, promotions))
+    let policy = membership_roles::decode(&record.promotions, &conf, permitted, identity)?;
+    Ok((conf, policy))
 }
 pub(super) fn covering_checkpoint(bytes: &[u8]) -> Result<u64, RaftError> {
     FloorConfiguration::decode(bytes)
         .map(|record| record.checkpoint_index)
         .map_err(storage_error)
 }
+#[cfg(test)]
 pub(super) fn validate_record(record: &WalBatch, permitted: &[u64]) -> Result<(), RaftError> {
+    validate_record_for(record, permitted, &None)
+}
+pub(super) fn validate_record_for(
+    record: &WalBatch,
+    permitted: &[u64],
+    identity: &Option<Arc<witness_identity::Identity>>,
+) -> Result<(), RaftError> {
     if record.flushed_index == 0 {
         if !record.flushed_membership.is_empty() {
             return Err(storage_error(
@@ -76,7 +109,12 @@ pub(super) fn validate_record(record: &WalBatch, permitted: &[u64]) -> Result<()
                 "flushed configuration requires a floor record",
             ));
         }
-        decode(&record.flushed_membership, record.flushed_index, permitted)?;
+        decode_with_roles(
+            &record.flushed_membership,
+            record.flushed_index,
+            permitted,
+            identity,
+        )?;
     } else if !record.flushed_membership.is_empty() {
         return Err(storage_error(
             "flushed configuration requires durable membership",
@@ -89,7 +127,7 @@ impl DurablePeer {
     pub(super) fn membership_at(
         &self,
         index: u64,
-    ) -> Result<(ConfState, BTreeSet<u64>), RaftError> {
+    ) -> Result<(ConfState, membership_roles::Policy), RaftError> {
         if index > self.applied_index() {
             return Err(invalid("membership position has not applied"));
         }
@@ -107,20 +145,23 @@ impl DurablePeer {
             },
             |image| image.get_metadata().get_conf_state().clone(),
         );
-        let mut promotions = membership::decode_promotions(
+        let mut policy = membership_roles::decode(
             &self.store.checkpoint_promotions.lock().unwrap(),
             &conf,
+            &self.store.permitted,
+            &self.store.witness_identity,
         )?;
         if self.journal.flushed_index > start && self.journal.flushed_index <= index {
-            (conf, promotions) = decode(
+            (conf, policy) = decode_with_roles(
                 &self.journal.flushed_membership,
                 self.journal.flushed_index,
                 &self.store.permitted,
+                &self.store.witness_identity,
             )?;
             start = self.journal.flushed_index;
         }
         if start == index {
-            return Ok((conf, promotions));
+            return Ok((conf, policy));
         }
         let memory = MemStorage::new_with_conf_state(conf.clone());
         let logger = slog::Logger::root(slog::Discard, slog::o!());
@@ -145,14 +186,26 @@ impl DurablePeer {
             for entry in entries {
                 next = entry.index + 1;
                 if entry.entry_type != EntryType::EntryNormal as i32 {
-                    let change = membership::decode_change(&entry, &self.store.permitted)?;
+                    let change = membership::decode_change_for(
+                        &entry,
+                        &self.store.permitted,
+                        &self.store.witness_identity,
+                    )?;
+                    if let Some(roles) = &mut policy.roles {
+                        roles.apply(&change)?;
+                    }
                     conf = replay.apply_conf_change(&change).map_err(invalid)?;
                     membership::validate_conf(&conf, &self.store.permitted)?;
-                    membership::update_promotions(&mut promotions, &change, &conf);
+                    if let (Some(roles), Some(identity)) =
+                        (&policy.roles, &self.store.witness_identity)
+                    {
+                        roles.validate(&conf, &self.store.permitted, identity)?;
+                    }
+                    membership::update_promotions(&mut policy.promotions, &change, &conf);
                 }
             }
         }
-        Ok((conf, promotions))
+        Ok((conf, policy))
     }
 }
 

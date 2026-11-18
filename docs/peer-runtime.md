@@ -1278,3 +1278,47 @@ This library API does not implement endpoint discovery, an administrative networ
 API, application catalog changes or automatic replacement. Applications must wire
 those operations before offering membership changes to operators. Losing a
 voter's durable state never makes reuse of its old identity safe.
+
+### Witness Membership
+
+Use `DurablePeer::open_with_roles` or `open_with_roles_and_tuning` to opt an entire
+group into explicit replica roles. Pass `PeerRoles { local: PeerRole::Data,
+bootstrap_witnesses: vec![3] }` on data replicas and select `PeerRole::Witness`
+on witness replicas. Every peer must use the same bootstrap voter set, permitted
+inventory, and bootstrap witness IDs, including spare identities that have not
+joined yet. A spare witness selects its local witness role before its first open.
+Role-aware groups use fenced packets and journal identities; ordinary constructors
+and their existing packet and membership-policy formats remain unchanged.
+
+Witnesses vote and durably acknowledge metadata entries but cannot campaign,
+accept a leadership handoff, or lead quorum reads. Ordinary proposal payloads are
+not sent to witnesses. Durable command payloads and configuration entries are
+retained and replayed. Borrowed application batches and host-owned worker tasks
+mark ordinary witness entries with `ApplicationEntry::is_metadata`; those entries
+still carry application positions and must be consumed in order. Checkpoints
+remain opaque application images and may contain the state needed by commands.
+
+The leader normally prefers a data-replica majority for commitment. If that
+majority is unavailable, real recent voter responses can enable witness counting
+at the quorum-clock boundary. Continue driving ticks, Ready processing, and packet
+delivery; neither a timer nor a receipt manufactures an acknowledgment.
+
+`MembershipChange::AddWitness(id)` adds a permitted, unused witness identity as a
+voter through explicit joint consensus. After its initial entry applies, complete
+`LeaveJoint`; `propose_membership_auto` and its tracked variant schedule that exit
+automatically. Tracked automatic membership completes only after the joint exit
+and ordered application. Both old and new majorities remain necessary. The
+seven-voter limit includes witnesses, and each voter set must retain a data voter.
+
+As with learner admission, a checkpoint predating the new member cannot seed it.
+When `membership_checkpoint_needed()` becomes true, capture a fresh image after
+the addition applies, then continue transport. Inline, fragmented, file-backed,
+and staged captures retain their capture-time configuration and role policy.
+`membership().witnesses` reports witness voters in either committed voter set.
+
+Role history includes removed identities and survives checkpoint replacement,
+flushed membership floors, log trimming, and restart. A removed witness can rejoin
+as a witness, but cannot become a data learner or data voter. A retired data
+identity cannot become a witness. Local storage roles are immutable: reopening a
+journal under another local role or bootstrap role list is refused. Use a distinct
+permitted identity and storage when replacing a replica with a different role.

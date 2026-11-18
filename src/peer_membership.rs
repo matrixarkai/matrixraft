@@ -10,6 +10,8 @@ pub enum MembershipChange {
     AddLearner(u64),
     /// Commit a learner whose promotion is scheduled after catch-up.
     AddLearnerAuto(u64),
+    /// Add a metadata-only voter through joint consensus in a role-aware group.
+    AddWitness(u64),
     Promote(u64),
     Remove(u64),
     LeaveJoint,
@@ -26,6 +28,8 @@ pub struct MembershipState {
     pub auto_leave: bool,
     /// Committed learners whose catch-up will schedule automatic promotion.
     pub automatic_learners: Vec<u64>,
+    /// Witness voters in either side of the committed joint configuration.
+    pub witnesses: Vec<u64>,
 }
 const AUTO_LEARNER: &[u8] = b"matrixraft-automatic-learner-v1";
 
@@ -118,6 +122,23 @@ pub(super) fn validate_conf(conf: &ConfState, permitted: &[u64]) -> Result<(), R
     Ok(())
 }
 pub(super) fn decode_change(entry: &Entry, permitted: &[u64]) -> Result<ConfChangeV2, RaftError> {
+    decode_change_inner(entry, permitted, false)
+}
+pub(super) fn decode_change_for(
+    entry: &Entry,
+    permitted: &[u64],
+    identity: &Option<Arc<witness_identity::Identity>>,
+) -> Result<ConfChangeV2, RaftError> {
+    if identity.is_none() {
+        return decode_change(entry, permitted);
+    }
+    decode_change_inner(entry, permitted, true)
+}
+fn decode_change_inner(
+    entry: &Entry,
+    permitted: &[u64],
+    roles_enabled: bool,
+) -> Result<ConfChangeV2, RaftError> {
     if permitted.is_empty()
         || entry.entry_type != EntryType::EntryConfChangeV2 as i32
         || entry.data.len() > 1024
@@ -129,7 +150,12 @@ pub(super) fn decode_change(entry: &Entry, permitted: &[u64]) -> Result<ConfChan
         && change.changes.len() == 1
         && change.transition == ConfChangeTransition::Auto as i32
         && change.changes[0].change_type == ConfChangeType::AddLearnerNode as i32;
-    if change.encode_to_vec() != entry.data || (!change.context.is_empty() && !automatic_learner) || change.changes.len() > 1
+    let witness = roles_enabled
+        && change.context == membership_roles::ADD_WITNESS
+        && change.changes.len() == 1
+        && matches!(change.transition, x if x == ConfChangeTransition::Implicit as i32 || x == ConfChangeTransition::Explicit as i32)
+        && change.changes[0].change_type == ConfChangeType::AddNode as i32;
+    if change.encode_to_vec() != entry.data || (!change.context.is_empty() && !automatic_learner && !witness) || change.changes.len() > 1
         || !matches!(change.transition, x if x == ConfChangeTransition::Auto as i32 || x == ConfChangeTransition::Implicit as i32 || x == ConfChangeTransition::Explicit as i32)
         || change.changes.iter().any(|c| !permitted.contains(&c.node_id) || !matches!(c.change_type,
             x if x == ConfChangeType::AddNode as i32 || x == ConfChangeType::AddLearnerNode as i32 || x == ConfChangeType::RemoveNode as i32))
@@ -176,8 +202,8 @@ impl DurablePeer {
             .initial_state()
             .expect("memory configuration")
             .conf_state;
-        let policy_changed = *self.store.checkpoint_promotions.lock().unwrap()
-            != encode_promotions(&self.automatic_learners);
+        let policy_changed =
+            *self.store.checkpoint_promotions.lock().unwrap() != self.membership_policy();
         self.store
             .checkpoint
             .lock()
@@ -200,6 +226,15 @@ impl DurablePeer {
             next_learners: sorted(&conf.learners_next),
             auto_leave: conf.auto_leave,
             automatic_learners: self.automatic_learners.iter().copied().collect(),
+            witnesses: conf
+                .voters
+                .iter()
+                .chain(&conf.voters_outgoing)
+                .copied()
+                .filter(|id| self.witness_node(*id))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         }
     }
     /// Propose one change. Promote only a learner caught up to the leader's commit.
@@ -288,6 +323,19 @@ impl DurablePeer {
                     }
                     (id, ConfChangeType::AddNode, true)
                 }
+                MembershipChange::AddWitness(id) => {
+                    let Some(roles) = &self.roles else {
+                        return Err(invalid("witness additions require a role-aware group"));
+                    };
+                    if roles.data.contains(&id)
+                        || state.voters.contains(&id)
+                        || state.learners.contains(&id)
+                        || state.voters.len() >= 7
+                    {
+                        return Err(invalid("witness addition requires an unused witness identity and voter capacity"));
+                    }
+                    (id, ConfChangeType::AddNode, true)
+                }
                 MembershipChange::Remove(id) => {
                     let voter = state.voters.contains(&id);
                     if (!voter && !state.learners.contains(&id))
@@ -314,6 +362,8 @@ impl DurablePeer {
             });
             if matches!(operation, MembershipChange::AddLearnerAuto(_)) {
                 change.context = AUTO_LEARNER.to_vec();
+            } else if matches!(operation, MembershipChange::AddWitness(_)) {
+                change.context = membership_roles::ADD_WITNESS.to_vec();
             }
             if joint_change {
                 change.transition = if automatic {
@@ -339,10 +389,18 @@ impl DurablePeer {
         })
     }
     pub(super) fn apply_committed_membership(&mut self, entry: &Entry) -> Result<(), RaftError> {
-        let change = decode_change(entry, &self.store.permitted)?;
+        let change = decode_change_for(entry, &self.store.permitted, &self.store.witness_identity)?;
+        let mut roles = self.roles.clone();
+        if let Some(history) = &mut roles {
+            history.apply(&change)?;
+        }
         let conf = self.raw.apply_conf_change(&change).map_err(invalid)?;
         validate_conf(&conf, &self.store.permitted)?;
-        self.validate_witness_conf(&conf)?;
+        if let (Some(history), Some(identity)) = (&roles, &self.store.witness_identity) {
+            history.validate(&conf, &self.store.permitted, identity)?;
+        }
+        self.roles = roles;
+        self.synchronize_witness_roles();
         update_promotions(&mut self.automatic_learners, &change, &conf);
         let local_voter =
             conf.voters.contains(&self.node_id()) || conf.voters_outgoing.contains(&self.node_id());

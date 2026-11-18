@@ -195,7 +195,17 @@ mod tests {
     }
 
     fn open(directory: &Path, id: u64, witnesses: &[u64], tuning: PeerTuning) -> DurablePeer {
-        DurablePeer::open_inner_with_role(
+        open_role(directory, id, witnesses, witnesses.contains(&id), tuning)
+    }
+
+    fn open_role(
+        directory: &Path,
+        id: u64,
+        witnesses: &[u64],
+        local_witness: bool,
+        tuning: PeerTuning,
+    ) -> DurablePeer {
+        DurablePeer::open_with_roles_and_tuning(
             PeerOptions {
                 group_id: 83,
                 node_id: id,
@@ -203,11 +213,15 @@ mod tests {
                 wal_path: directory.join(format!("{id}.wal")),
             },
             vec![1, 2, 3, 4],
-            tuning,
-            Some(witness_identity::OpenRole {
-                local_witness: witnesses.contains(&id),
+            PeerRoles {
+                local: if local_witness {
+                    PeerRole::Witness
+                } else {
+                    PeerRole::Data
+                },
                 bootstrap_witnesses: witnesses.to_vec(),
-            }),
+            },
+            tuning,
         )
         .unwrap()
     }
@@ -218,6 +232,365 @@ mod tests {
             .map(|id| open(directory.path(), id, witnesses, tuning))
             .collect();
         (directory, peers)
+    }
+
+    fn dynamic_group(
+        bootstrap: &[u64],
+        spare_witness: bool,
+        tuning: PeerTuning,
+    ) -> (tempfile::TempDir, Vec<DurablePeer>) {
+        let directory = tempfile::tempdir().unwrap();
+        let peers = (1..=4)
+            .map(|id| {
+                open_role(
+                    directory.path(),
+                    id,
+                    bootstrap,
+                    bootstrap.contains(&id) || (id == 4 && spare_witness),
+                    tuning,
+                )
+            })
+            .collect();
+        (directory, peers)
+    }
+
+    fn add_witness(peers: &mut [DurablePeer], state: &mut State) {
+        peers[0]
+            .propose_membership_auto(MembershipChange::AddWitness(4))
+            .unwrap();
+        drive(peers, state, None);
+        ticks(peers, state, 0, None, 25);
+        for peer in peers {
+            assert_eq!(
+                peer.membership().voters,
+                vec![1, 2, 3, 4],
+                "peer {}",
+                peer.node_id()
+            );
+            assert!(peer.membership().outgoing_voters.is_empty());
+            assert!(peer.witness_node(4));
+        }
+    }
+
+    #[test]
+    fn dynamic_witness_addition_uses_public_roles_and_explicit_joint_consensus() {
+        let (_directory, mut peers) = dynamic_group(&[], true, PeerTuning::default());
+        let mut state = State::default();
+        elect(&mut peers, &mut state);
+        assert!(peers[0].witness_commit.is_none());
+        peers[0]
+            .propose_membership(MembershipChange::AddWitness(4))
+            .unwrap();
+        drive(&mut peers, &mut state, None);
+        assert_eq!(peers[0].membership().outgoing_voters, vec![1, 2, 3]);
+        assert_eq!(peers[0].membership().witnesses, vec![4]);
+        peers[0]
+            .propose_membership(MembershipChange::LeaveJoint)
+            .unwrap();
+        drive(&mut peers, &mut state, None);
+        peers[0]
+            .propose(b"ordinary-after-joining".to_vec())
+            .unwrap();
+        drive(&mut peers, &mut state, None);
+        let command = peers[0]
+            .propose_with_options(
+                PeerProposalOptions {
+                    durable_command: true,
+                    ..Default::default()
+                },
+                b"joined-command".to_vec(),
+            )
+            .unwrap();
+        drive(&mut peers, &mut state, None);
+        assert_eq!(state.applied[&4], vec![b"joined-command".to_vec()]);
+        assert_eq!(peers[3].applied_index(), command.index);
+        let bytes = std::fs::read(&peers[3].options.wal_path).unwrap();
+        assert!(!bytes
+            .windows(b"ordinary-after-joining".len())
+            .any(|part| part == b"ordinary-after-joining"));
+        assert!(peers[3].campaign().is_err());
+        assert!(peers[0].transfer_leadership(4).is_err());
+    }
+
+    #[test]
+    fn dynamic_witnesses_restore_every_checkpoint_format_and_survive_all_peer_restart() {
+        for form in 0..3 {
+            let tuning = PeerTuning {
+                max_checkpoint_sends: (form != 0).then_some(1),
+                ..Default::default()
+            };
+            let (directory, mut peers) = dynamic_group(&[3], true, tuning);
+            let mut state = State::default();
+            elect(&mut peers, &mut state);
+            peers[0].propose(b"before-witness-join".to_vec()).unwrap();
+            drive(&mut peers, &mut state, None);
+            let image = vec![
+                6;
+                if form == 1 {
+                    INLINE_CHECKPOINT_BYTES + 19
+                } else {
+                    65536
+                }
+            ];
+            if form == 2 {
+                peers[0]
+                    .checkpoint_from_reader(&mut std::io::Cursor::new(&image), image.len() as u64)
+                    .unwrap();
+            } else {
+                peers[0].checkpoint(image.clone()).unwrap();
+            }
+            peers[0]
+                .propose_membership_auto(MembershipChange::AddWitness(4))
+                .unwrap();
+            drive(&mut peers, &mut state, None);
+            assert!(peers[0].membership_checkpoint_needed());
+            if form == 2 {
+                peers[0]
+                    .checkpoint_from_reader(&mut std::io::Cursor::new(&image), image.len() as u64)
+                    .unwrap();
+            } else {
+                peers[0].checkpoint(image.clone()).unwrap();
+            }
+            ticks(&mut peers, &mut state, 0, None, 25);
+            assert_eq!(state.restored[&4], vec![image]);
+            let command = peers[0]
+                .propose_with_options(
+                    PeerProposalOptions {
+                        durable_command: true,
+                        ..Default::default()
+                    },
+                    b"dynamic-command".to_vec(),
+                )
+                .unwrap();
+            drive(&mut peers, &mut state, None);
+            drop(peers);
+            let mut peers: Vec<_> = (1..=4)
+                .map(|id| open_role(directory.path(), id, &[3], id >= 3, tuning))
+                .collect();
+            let mut state = State::default();
+            drive(&mut peers, &mut state, None);
+            for peer in &peers {
+                assert_eq!(peer.membership().witnesses, vec![3, 4]);
+                assert_eq!(peer.membership().voters, vec![1, 2, 3, 4]);
+                assert!(peer.membership().outgoing_voters.is_empty());
+                assert_eq!(peer.applied_index(), command.index);
+            }
+            assert_eq!(state.applied[&4], vec![b"dynamic-command".to_vec()]);
+        }
+    }
+
+    #[test]
+    fn removed_witness_roles_survive_flushed_compaction_and_can_rejoin_only_as_witnesses() {
+        let tuning = PeerTuning::default();
+        let (directory, mut peers) = dynamic_group(&[3], true, tuning);
+        let mut state = State::default();
+        elect(&mut peers, &mut state);
+        add_witness(&mut peers, &mut state);
+        peers[0]
+            .propose_membership_auto(MembershipChange::Remove(4))
+            .unwrap();
+        drive(&mut peers, &mut state, None);
+        ticks(&mut peers, &mut state, 0, None, 25);
+        for peer in &mut peers[..3] {
+            let floor = peer.applied_index();
+            peer.set_flushed_index(floor).unwrap();
+            peer.trim_log_to(floor).unwrap();
+        }
+        drop(peers.remove(0));
+        peers.insert(0, open_role(directory.path(), 1, &[3], false, tuning));
+        drive(&mut peers, &mut state, None);
+        peers[0].force_campaign().unwrap();
+        drive(&mut peers, &mut state, None);
+        assert!(peers[0].is_leader());
+        assert_eq!(peers[0].membership().witnesses, vec![3]);
+        assert!(peers[0]
+            .propose_membership(MembershipChange::AddLearner(4))
+            .is_err());
+        assert!(peers[0]
+            .propose_membership(MembershipChange::AddLearnerAuto(4))
+            .is_err());
+        peers[0].checkpoint(b"rejoin-image".to_vec()).unwrap();
+        peers[0]
+            .propose_membership_auto(MembershipChange::AddWitness(4))
+            .unwrap();
+        drive(&mut peers, &mut state, None);
+        assert!(peers[0].membership_checkpoint_needed());
+        peers[0].checkpoint(b"rejoin-image".to_vec()).unwrap();
+        ticks(&mut peers, &mut state, 0, None, 25);
+        for peer in &peers {
+            assert_eq!(peer.membership().witnesses, vec![3, 4]);
+        }
+        assert!(peers[0]
+            .propose_membership(MembershipChange::Remove(1))
+            .is_ok());
+    }
+
+    #[test]
+    fn retired_data_roles_cannot_be_reinterpreted_after_restart_and_trim() {
+        let tuning = PeerTuning::default();
+        let (directory, mut peers) = dynamic_group(&[3], false, tuning);
+        let mut state = State::default();
+        elect(&mut peers, &mut state);
+        peers[0]
+            .propose_membership(MembershipChange::AddLearnerAuto(4))
+            .unwrap();
+        drive(&mut peers, &mut state, None);
+        ticks(&mut peers, &mut state, 0, None, 25);
+        peers[0]
+            .propose_membership_auto(MembershipChange::Remove(4))
+            .unwrap();
+        drive(&mut peers, &mut state, None);
+        ticks(&mut peers, &mut state, 0, None, 25);
+        let floor = peers[0].applied_index();
+        peers[0].set_flushed_index(floor).unwrap();
+        peers[0].trim_log_to(floor).unwrap();
+        drop(peers.remove(0));
+        peers.insert(0, open_role(directory.path(), 1, &[3], false, tuning));
+        drive(&mut peers, &mut state, None);
+        peers[0].force_campaign().unwrap();
+        drive(&mut peers, &mut state, None);
+        let before = peers[0].raw.raft.raft_log.last_index();
+        assert!(peers[0]
+            .propose_membership(MembershipChange::AddWitness(4))
+            .is_err());
+        assert_eq!(peers[0].raw.raft.raft_log.last_index(), before);
+    }
+
+    #[test]
+    fn uncommitted_witness_addition_does_not_change_roles_after_leader_replacement() {
+        let (_directory, mut peers) = dynamic_group(&[3], true, PeerTuning::default());
+        let mut state = State::default();
+        elect(&mut peers, &mut state);
+        peers[0]
+            .propose_membership_auto(MembershipChange::AddWitness(4))
+            .unwrap();
+        drive(&mut peers, &mut state, Some(1));
+        assert!(!peers[0].witness_node(4));
+        peers[1].force_campaign().unwrap();
+        drive(&mut peers, &mut state, Some(1));
+        ticks(&mut peers, &mut state, 1, Some(1), 25);
+        drive(&mut peers, &mut state, None);
+        for peer in &peers {
+            assert!(!peer.witness_node(4));
+            assert_eq!(peer.membership().voters, vec![1, 2, 3]);
+            assert_eq!(peer.membership().witnesses, vec![3]);
+        }
+    }
+
+    #[test]
+    fn automatic_witness_receipts_complete_only_after_committed_joint_exit() {
+        let tuning = PeerTuning {
+            max_pending_proposal_receipts: Some(4),
+            max_inflight_apply_tasks: Some(2),
+            ..Default::default()
+        };
+        let (_directory, mut peers) = dynamic_group(&[3], true, tuning);
+        let mut state = State::default();
+        elect(&mut peers, &mut state);
+        let receipt = peers[0]
+            .propose_membership_auto_tracked(MembershipChange::AddWitness(4), None)
+            .unwrap();
+        assert_eq!(receipt.status(), PeerProposalStatus::Pending);
+        drive(&mut peers, &mut state, None);
+        ticks(&mut peers, &mut state, 0, None, 25);
+        assert_eq!(
+            peers[0].poll_proposal(&receipt).unwrap(),
+            PeerProposalStatus::Applied
+        );
+        assert!(peers[0].membership().outgoing_voters.is_empty());
+        assert_eq!(peers[0].membership().witnesses, vec![3, 4]);
+    }
+
+    #[test]
+    fn snapshots_cannot_forget_or_reassign_retired_replica_roles_before_advancing_term() {
+        let (_directory, mut peers) = dynamic_group(&[3], true, PeerTuning::default());
+        let mut state = State::default();
+        elect(&mut peers, &mut state);
+        add_witness(&mut peers, &mut state);
+        peers[0]
+            .propose_membership_auto(MembershipChange::Remove(4))
+            .unwrap();
+        drive(&mut peers, &mut state, None);
+        ticks(&mut peers, &mut state, 0, None, 25);
+        let term = peers[0].term();
+        let length = peers[0].journal.length;
+        let conf = peers[0].store.initial_state().unwrap().conf_state;
+        for reassign in [false, true] {
+            let mut history = peers[0].roles.as_ref().unwrap().as_ref().clone();
+            history.witnesses.remove(&4);
+            if reassign {
+                history.data.insert(4);
+            }
+            let policy = membership_roles::encode(&BTreeSet::new(), Some(&history));
+            membership_roles::decode(
+                &policy,
+                &conf,
+                &peers[0].store.permitted,
+                &peers[0].store.witness_identity,
+            )
+            .unwrap();
+            let message = Message {
+                from: 2,
+                to: 1,
+                term: term + 1,
+                msg_type: MessageType::MsgSnapshot as i32,
+                context: policy,
+                snapshot: Some(Snapshot {
+                    data: b"replacement-image".to_vec(),
+                    metadata: Some(SnapshotMetadata {
+                        index: peers[0].commit_index() + 1,
+                        term,
+                        conf_state: Some(conf.clone()),
+                    }),
+                }),
+                ..Default::default()
+            };
+            let packet = peers[1].encode_witness_message(&message).unwrap();
+            assert!(peers[0].step(&packet).is_err());
+            assert_eq!(peers[0].term(), term);
+            assert_eq!(peers[0].journal.length, length);
+            assert!(!peers[0].failed);
+        }
+    }
+
+    #[test]
+    fn staged_images_keep_capture_time_roles_and_replay_later_witness_additions() {
+        let (directory, mut peers) = dynamic_group(&[3], true, PeerTuning::default());
+        let mut state = State::default();
+        elect(&mut peers, &mut state);
+        peers[0].propose(b"before-role-capture".to_vec()).unwrap();
+        drive(&mut peers, &mut state, None);
+        let capture = peers[0].prepare_checkpoint().unwrap();
+        let image = b"frozen-role-image";
+        add_witness(&mut peers, &mut state);
+        peers[0]
+            .propose_with_options(
+                PeerProposalOptions {
+                    durable_command: true,
+                    ..Default::default()
+                },
+                b"captured-role-command".to_vec(),
+            )
+            .unwrap();
+        drive(&mut peers, &mut state, None);
+        let expected = peers[0].membership();
+        let prepared = capture
+            .capture(&mut image.as_slice(), image.len() as u64)
+            .unwrap();
+        assert!(peers[0].install_checkpoint(&prepared).unwrap());
+        assert_eq!(peers[0].membership(), expected);
+        assert!(peers[0].membership_checkpoint_needed());
+        drop(prepared);
+        drop(peers.remove(0));
+        peers.insert(
+            0,
+            open_role(directory.path(), 1, &[3], false, PeerTuning::default()),
+        );
+        state.applied.insert(1, Vec::new());
+        drive(&mut peers, &mut state, None);
+        assert_eq!(peers[0].membership(), expected);
+        assert_eq!(state.restored[&1], vec![image.to_vec()]);
+        assert_eq!(state.applied[&1], vec![b"captured-role-command".to_vec()]);
     }
 
     fn drive(peers: &mut [DurablePeer], state: &mut State, blocked: Option<u64>) {

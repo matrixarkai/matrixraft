@@ -21,6 +21,8 @@ pub(super) struct Identity {
     encoded: Vec<u8>,
     record: RoleRecord,
     wire_bootstrap: Vec<u8>,
+    node_id: u64,
+    bootstrap_voters: Vec<u64>,
 }
 
 impl Identity {
@@ -66,6 +68,8 @@ impl Identity {
             encoded,
             record,
             wire_bootstrap,
+            node_id: options.node_id,
+            bootstrap_voters: options.voters.clone(),
         })))
     }
 
@@ -77,6 +81,12 @@ impl Identity {
     }
     pub(super) fn bootstrap_witnesses(&self) -> &[u64] {
         &self.record.bootstrap_witnesses
+    }
+    pub(super) fn node_id(&self) -> u64 {
+        self.node_id
+    }
+    pub(super) fn bootstrap_voters(&self) -> &[u64] {
+        &self.bootstrap_voters
     }
     pub(super) fn wire_bootstrap(&self) -> &[u8] {
         &self.wire_bootstrap
