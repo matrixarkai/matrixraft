@@ -101,6 +101,8 @@ pub(super) struct LogIndex {
     scanned: u64,
     /// Set when a record could not be indexed; readers then scan as before.
     unusable: bool,
+    /// The first record that overwrites an earlier entry range. Earlier prefixes stay ordered.
+    first_overwrite_record: Option<usize>,
 }
 
 impl LogIndex {
@@ -118,6 +120,57 @@ impl LogIndex {
             }
         }
         segments.push(Segment { start, end, offset });
+    }
+
+    fn append_records(&mut self, records: Vec<RecordMeta>) {
+        let base = self.records.len();
+        let mut previous_end = self.records.last().map(|record| record.end);
+        for (position, record) in records.iter().enumerate() {
+            if self.first_overwrite_record.is_none()
+                && previous_end.is_some_and(|end| record.start <= end)
+            {
+                self.first_overwrite_record = Some(base + position);
+            }
+            Self::apply(&mut self.segments, record.start, record.end, record.offset);
+            previous_end = Some(record.end);
+        }
+        self.records.extend(records);
+    }
+
+    fn range_plan(&self, length: u64, low: u64, high: u64) -> Vec<Segment> {
+        if length != self.scanned {
+            let through = self
+                .records
+                .partition_point(|record| record.end_offset <= length);
+            if self
+                .first_overwrite_record
+                .is_none_or(|first| through <= first)
+            {
+                // Before the first overwrite, record ranges are already disjoint and ordered.
+                // Select only the requested range without materializing the captured prefix.
+                let records = &self.records[..through];
+                let from = records.partition_point(|record| record.end < low);
+                let to = records.partition_point(|record| record.start < high);
+                return records[from..to]
+                    .iter()
+                    .map(|record| Segment {
+                        start: record.start,
+                        end: record.end,
+                        offset: record.offset,
+                    })
+                    .collect();
+            }
+        }
+        let rebuilt;
+        let segments = if length == self.scanned {
+            &self.segments
+        } else {
+            rebuilt = Self::segments_through(&self.records, length);
+            &rebuilt
+        };
+        let from = segments.partition_point(|segment| segment.end < low);
+        let to = segments.partition_point(|segment| segment.start < high);
+        segments[from..to].to_vec()
     }
 
     /// The owners of each index as a reader that captured only `length` bytes saw them.
@@ -502,10 +555,7 @@ impl PeerLogReader {
             index.unusable = true;
             return Ok(false);
         }
-        for record in &added {
-            LogIndex::apply(&mut index.segments, record.start, record.end, record.offset);
-        }
-        index.records.extend(added);
+        index.append_records(added);
         index.scanned = self.length;
         Ok(true)
     }
@@ -527,17 +577,7 @@ impl PeerLogReader {
             if index.scanned < self.length && !self.extend_index(&mut index)? {
                 return Ok(None);
             }
-            // A reader that captured less than the index has since seen has its own view.
-            let rebuilt;
-            let segments: &[Segment] = if index.scanned == self.length {
-                &index.segments
-            } else {
-                rebuilt = LogIndex::segments_through(&index.records, self.length);
-                &rebuilt
-            };
-            let from = segments.partition_point(|segment| segment.end < low);
-            let to = segments.partition_point(|segment| segment.start < high);
-            segments[from..to].to_vec()
+            index.range_plan(self.length, low, high)
         };
 
         let identity = Identity {
@@ -1021,4 +1061,9 @@ mod tests {
         file.sync_all().unwrap();
         assert!(reader.entries(1, 2, Some(1)).is_err());
     }
+    include!("peer_captured_reader_tests.rs");
 }
+
+#[cfg(test)]
+#[path = "peer_captured_range_plan_tests.rs"]
+mod captured_range_plan_tests;
